@@ -2194,6 +2194,7 @@ export function App() {
         onCreatePreset={dashboard.createConfigurationPreset}
         onDeletePreset={dashboard.deleteConfigurationPreset}
         onLoadEffectiveConfig={dashboard.loadEffectiveAgentConfig}
+        onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onPreviewOverride={dashboard.previewConfigurationSourceOverride}
         onPreviewPreset={dashboard.previewConfigurationPreset}
         onRefresh={dashboard.loadConfigurationSources}

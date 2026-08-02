@@ -52,6 +52,7 @@ export function TopologyOspfUpdateControls({
   agents,
   ospfUpdatePlans,
   onOpenJobDetails,
+  onOpenPrivilegeUnlock,
   onOpenAdapterDefinitions,
   onOpenConfigurationSources,
   onOpenTunnelPlans,
@@ -65,6 +66,7 @@ export function TopologyOspfUpdateControls({
   agents: AgentView[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   onOpenJobDetails?: (jobId: string) => void;
+  onOpenPrivilegeUnlock: () => void;
   onOpenAdapterDefinitions: () => void;
   onOpenConfigurationSources: () => void;
   onOpenTunnelPlans: () => void;
@@ -498,6 +500,7 @@ export function TopologyOspfUpdateControls({
           <PrivilegeVaultBox
             labelPrefix="OSPF cost"
             lastPayloadHash={null}
+            onOpenUnlock={onOpenPrivilegeUnlock}
             onPrivilegeMaterialChange={setPrivilegeMaterial}
             privilegeMaterial={privilegeMaterial}
             showVaultClear={false}

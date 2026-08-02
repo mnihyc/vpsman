@@ -400,6 +400,9 @@ async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_updat
         .await
         .unwrap();
     assert_eq!(schedule.target_client_ids, vec!["client-a"]);
+    repo.delete_agent("client-a", Some("retired"), &operator)
+        .await
+        .unwrap();
     let state = schedule_test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
 
@@ -440,7 +443,7 @@ async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_updat
     )
     .await
     .unwrap();
-    assert_eq!(retargeted.target_client_ids, vec!["client-a", "client-b"]);
+    assert_eq!(retargeted.target_client_ids, vec!["client-b"]);
 
     let error = crate::routes_schedules::update_schedule_targets(
         State(state),
@@ -469,8 +472,8 @@ async fn schedule_target_update_persists_an_empty_resolution() {
     let headers = crate::test_auth_headers(&state).await;
 
     let Json(updated) = crate::routes_schedules::update_schedule_targets(
-        State(state),
-        headers,
+        State(state.clone()),
+        headers.clone(),
         Path(schedule.id),
         Json(UpdateScheduleTargetsRequest {
             privilege_assertion: None,
@@ -480,6 +483,32 @@ async fn schedule_target_update_persists_an_empty_resolution() {
     .await
     .unwrap();
     assert!(updated.target_client_ids.is_empty());
+    let Json(edited) = crate::routes_schedules::update_schedule(
+        State(state),
+        headers,
+        Path(schedule.id),
+        Json(UpdateScheduleRequest {
+            name: "empty-retarget-renamed".to_string(),
+            operation: updated.operation.clone().unwrap(),
+            selector_expression: updated.selector_expression.clone(),
+            target_client_ids: Vec::new(),
+            expected_selector_expression: updated.selector_expression.clone(),
+            expected_target_client_ids: Vec::new(),
+            cron_expr: updated.cron_expr.clone(),
+            timezone: updated.timezone.clone(),
+            enabled: updated.enabled,
+            catch_up_policy: updated.catch_up_policy.clone(),
+            catch_up_limit: updated.catch_up_limit,
+            retry_delay_secs: updated.retry_delay_secs,
+            max_failures: updated.max_failures,
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited.name, "empty-retarget-renamed");
+    assert!(edited.target_client_ids.is_empty());
     assert!(repo
         .schedule_by_id(schedule.id)
         .await

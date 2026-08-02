@@ -1964,8 +1964,8 @@ function describeScheduleTargetUpdate(
   }
   if (resolution.length === 0) {
     return rows.length === 1
-      ? `${schedule.name}'s saved audit selector currently matches no VPSs.`
-      : "The selected audit selectors have no changed non-empty target snapshots.";
+      ? `${schedule.name}'s saved audit selector currently matches no VPSs; Update targets can freeze that exact empty result.`
+      : "The selected audit selectors resolve to exact empty target snapshots.";
   }
   return rows.length === 1
     ? `${schedule.name}'s saved fixed targets already match its current audit selector resolution.`
@@ -1990,7 +1990,6 @@ function scheduleTargetsNeedUpdate(
   const currentTargetIds = currentScheduleTargetIds(schedule, agents);
   return Boolean(
     currentTargetIds &&
-    currentTargetIds.length > 0 &&
     !sameStringSet(fixedTargetIds(schedule), currentTargetIds),
   );
 }

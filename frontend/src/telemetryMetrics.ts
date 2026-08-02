@@ -5,6 +5,18 @@ export type NetworkObservationMetric = "latency" | "loss" | "throughput";
 export const INTERFACE_RATE_DEFINITION =
   "Interval-average rate from non-negative deltas of cumulative interface byte counters between adjacent telemetry buckets; never an instantaneous line-speed sample.";
 
+export function formatByteCount(value: number): string {
+  if (!Number.isFinite(value)) return "No data";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let scaled = Math.max(0, value);
+  let unit = 0;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;
+}
+
 export function resourceMetricDefinition(metric: DashboardResourceMetric): string {
   switch (metric) {
     case "cpu_load":

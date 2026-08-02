@@ -302,9 +302,10 @@ VPS assignments, and an explicit primary target for each card.
 then retains the lifecycle needed to extend active links or revoke them. Each
 share freezes its VPS and visible-data scope at creation. Its secret URL is shown
 once because the control plane stores only a digest. Public projections use
-persisted random share-specific VPS keys and never expose internal VPS IDs, IPs,
-internal configuration, actions, jobs, terminals, files, backups, audit data, or
-operator identity. Visitor bootstrap/data reads live only below
+persisted random share-specific VPS keys and never expose internal VPS IDs or
+network-address fields, internal configuration, actions, jobs, terminals,
+files, backups, audit data, or operator identity. Operator-entered public labels
+remain verbatim. Visitor bootstrap/data reads live only below
 `/api/v1/public/monitoring-shares`; share management remains authenticated.
 
 See [Telemetry metric definitions](docs/telemetry-metrics.md) for aggregation,

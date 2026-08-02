@@ -338,3 +338,33 @@ Do not conclude when the push succeeds:
   and cleanup outcome in the change review or maintainer handoff.
 - Report a blocker explicitly. Never call a release verified when a required
   live path failed.
+
+## 9. Maintainer Audit Log
+
+### 2026-08-02 — post-v0.2.7 correctness audit
+
+- **Category:** frozen selector integrity. **Decision:** editing a schedule or
+  backup policy without changing its selector preserves its exact reviewed VPS
+  IDs, including an intentionally empty set or an ID later tombstoned. Changing
+  the selector is the only ordinary edit that resolves current visible VPSs.
+- **Category:** authentication evidence. **Decision:** bootstrap and successful
+  login now commit the operator/session, TOTP replay state, throttle cleanup,
+  and success audit together. Password-only issuance rechecks the active
+  operator row, unchanged password hash, and disabled-TOTP state inside that
+  transaction so a concurrent password reset, disable, deletion, or TOTP enable
+  cannot mint a session from stale verification.
+- **Category:** console correctness. **Decision:** async TOTP actions invalidate
+  stale responses when inputs change; monitoring pagination rejects incomplete
+  or duplicate page sequences; detail polling permits only one in-flight read;
+  invalid table searches and custom ranges remain visible; public monitoring
+  keeps bit-rate and byte-count units distinct; common form controls retain
+  stable identifiers.
+- **Category:** deployment documentation. **Decision:** the deployment archive
+  rewrites both shipped runbook links to bundle-local paths, while selector and
+  public-share documentation describe exact-empty maintenance and allowlisted
+  public labels precisely.
+- **Evidence:** focused memory and PostgreSQL authentication/selector tests,
+  `cargo check`, API Clippy with warnings denied, frontend type and contract
+  checks, deterministic deployment-bundle smoke, and Chrome desktop/mobile
+  interaction checks passed. Chrome reported no console issues and scored the
+  touched authenticated page 100 for accessibility and best practices.

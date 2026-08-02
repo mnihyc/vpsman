@@ -1,6 +1,7 @@
 import { ChevronDown, Search } from "lucide-react";
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -25,6 +26,7 @@ type VpsComboboxProps = {
   className?: string;
   disabled?: boolean;
   excludeIds?: string[];
+  inputId?: string;
   onChange: (value: string) => void;
   placeholder?: string;
   value: string;
@@ -37,6 +39,7 @@ export function VpsCombobox({
   className = "",
   disabled = false,
   excludeIds = [],
+  inputId,
   onChange,
   placeholder = "Search VPS name or ID",
   value,
@@ -50,6 +53,9 @@ export function VpsCombobox({
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState(() => displayValue(value, agents));
+  const generatedId = useId().replace(/:/g, "");
+  const editorId = inputId ?? `vps-combobox-${generatedId}`;
+  const listboxId = `${editorId}-options`;
   const options = useMemo(
     () => searchableOptions(agents, excludeIds, value),
     [agents, excludeIds, value],
@@ -248,12 +254,15 @@ export function VpsCombobox({
     >
       <Search size={15} />
       <input
+        aria-controls={listboxId}
         aria-autocomplete="list"
         aria-expanded={open}
         aria-label={ariaLabel}
         autoComplete="off"
         className="vpsComboboxEditor"
         disabled={disabled}
+        id={editorId}
+        name={editorId}
         onClick={() => {
           setFocused(true);
           setOpen(true);
@@ -290,6 +299,7 @@ export function VpsCombobox({
           <div
             aria-label={`${ariaLabel} options`}
             className="vpsComboboxMenu"
+            id={listboxId}
             ref={menuRef}
             role="listbox"
             style={menuStyle}

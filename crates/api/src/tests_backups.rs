@@ -30,7 +30,7 @@ use crate::{
         BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
         CreateBackupRequest, CreateJobRequest, JobHistoryView, JobOutputView, JobTargetView,
         ListQuery, OperatorView, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
-        UploadBackupArtifactRequest,
+        UpdateScheduleTargetsRequest, UploadBackupArtifactRequest,
     },
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
@@ -1020,10 +1020,13 @@ async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged(
             .unwrap()
             .tags = vec!["edge".to_string()];
     }
+    repo.delete_agent("client-a", Some("retired"), &backup_test_operator())
+        .await
+        .unwrap();
 
     let Json(updated) = update_backup_policy(
-        State(state),
-        headers,
+        State(state.clone()),
+        headers.clone(),
         Path(created.schedule_id),
         Json(UpdateBackupPolicyRequest {
             name: "nightly-edge-renamed".to_string(),
@@ -1053,6 +1056,62 @@ async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged(
     .unwrap();
     assert_eq!(updated.name, "nightly-edge-renamed");
     assert_eq!(updated.target_client_ids, vec!["client-a"]);
+
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|agent| agent.id == "client-b")
+            .unwrap()
+            .tags = Vec::new();
+    }
+    let Json(retargeted) = crate::routes_schedules::update_schedule_targets(
+        State(state.clone()),
+        headers.clone(),
+        Path(created.schedule_id),
+        Json(UpdateScheduleTargetsRequest {
+            privilege_assertion: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(retargeted.target_client_ids.is_empty());
+
+    let Json(edited_empty) = update_backup_policy(
+        State(state),
+        headers,
+        Path(created.schedule_id),
+        Json(UpdateBackupPolicyRequest {
+            name: "nightly-edge-empty".to_string(),
+            selector_expression: updated.selector_expression.clone(),
+            target_client_ids: Vec::new(),
+            expected_selector_expression: updated.selector_expression.clone(),
+            expected_target_client_ids: Vec::new(),
+            paths: updated.paths.clone(),
+            include_config: updated.include_config,
+            follow_symlinks: updated.follow_symlinks,
+            missing_path_policy: updated.missing_path_policy,
+            retention_days: updated.retention_days,
+            keep_last: updated.keep_last,
+            rotation_generation: updated.rotation_generation.clone(),
+            cron_expr: updated.cron_expr.clone(),
+            timezone: updated.timezone.clone(),
+            enabled: updated.enabled,
+            catch_up_policy: updated.catch_up_policy.clone(),
+            catch_up_limit: updated.catch_up_limit,
+            retry_delay_secs: updated.retry_delay_secs,
+            max_failures: updated.max_failures,
+            confirmed: true,
+            privilege_assertion: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited_empty.name, "nightly-edge-empty");
+    assert!(edited_empty.target_client_ids.is_empty());
 }
 
 #[tokio::test]

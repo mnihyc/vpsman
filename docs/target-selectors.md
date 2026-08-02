@@ -27,8 +27,9 @@ the run and the remaining available targets still materialize. If tags, display
 names, or other selector inputs later drift, the operator can choose
 **Update targets** from the schedule table Actions menu or row context menu.
 The action supports one or many selected schedules. It resolves each saved
-audit selector on the backend, includes only changed non-empty snapshots in the
-privilege confirmation, and then saves those replacement snapshots.
+audit selector on the backend, includes every changed exact snapshot in the
+privilege confirmation (including a reviewed empty result), and then saves
+those replacement snapshots.
 
 This keeps human review as the authority for broad scope: changing tags never
 silently changes a saved job, schedule, Ping assignment, or monitoring share.
@@ -62,7 +63,9 @@ edited. That preview is for orientation only. Direct VPS choices and selector
 matches contribute to one deduplicated union, and the nearby count/list must
 show that complete local union. **Review** asks the backend to resolve the
 request again and freezes the exact IDs used by the confirmation and mutation.
-An invalid expression or empty union cannot be reviewed.
+An invalid expression cannot be reviewed. Creation workflows that require at
+least one target also reject an empty union; explicit **Update targets**
+maintenance may freeze an exact empty resolution after review.
 
 ## Fixed Target Snapshots
 
@@ -73,7 +76,8 @@ tag or alias change never silently changes the VPSs affected by the saved
 record.
 
 For schedules, **Update targets** is a deliberate table action for records
-whose saved audit selector currently resolves to a different non-empty VPS set.
+whose saved audit selector currently resolves to a different VPS set, including
+an exact empty set.
 The action asks the backend to resolve each selected record's selector, rejects
 no-op records whose fixed target list already matches, and replaces only the
 saved target snapshots after privilege confirmation. CLI

@@ -26,7 +26,10 @@ import type {
   TelemetryRollupRecord,
   TrafficAccountingRecord,
 } from "../types";
-import { INTERFACE_RATE_DEFINITION } from "../telemetryMetrics";
+import {
+  formatByteCount as formatBytes,
+  INTERFACE_RATE_DEFINITION,
+} from "../telemetryMetrics";
 import { useHistoryEntryState } from "../historyEntryState";
 import {
   OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
@@ -102,6 +105,7 @@ export function FleetMonitorPanel({
   onOpenSharedViews,
 }: FleetMonitorPanelProps) {
   const historySlot = embedded ? "home.fleet-monitor" : "fleet.monitor";
+  const controlIdPrefix = embedded ? "home-fleet-monitor" : "fleet-monitor";
   const [density, setDensity] = usePersistentMonitorCardDensity(
     historySlot,
     OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
@@ -164,15 +168,37 @@ export function FleetMonitorPanel({
       try {
         let offset = 0;
         const loaded: MonitoringCardView[] = [];
+        const loadedIds = new Set<string>();
         for (;;) {
           const page = await apiGet<MonitoringCardsPageView>(
             `/api/v1/monitoring/cards?limit=1000&offset=${offset}`,
             apiToken,
           );
           if (!active) return;
+          if (page.offset !== offset) {
+            throw new Error("Monitoring card pagination returned the wrong offset");
+          }
+          if (page.items.some((item) => loadedIds.has(item.client.id))) {
+            throw new Error("Monitoring card pagination returned a duplicate VPS");
+          }
+          page.items.forEach((item) => loadedIds.add(item.client.id));
           loaded.push(...page.items);
-          if (page.next_offset === null) break;
-          if (page.next_offset <= offset) {
+          if (loaded.length > page.total) {
+            throw new Error("Monitoring card pagination exceeded its reported total");
+          }
+          if (page.next_offset === null) {
+            if (loaded.length !== page.total) {
+              throw new Error(
+                "Monitoring card pagination ended before every VPS was returned",
+              );
+            }
+            break;
+          }
+          if (
+            page.next_offset !== offset + page.items.length ||
+            page.next_offset > page.total ||
+            page.items.length === 0
+          ) {
             throw new Error("Monitoring card pagination did not advance");
           }
           offset = page.next_offset;
@@ -437,6 +463,8 @@ export function FleetMonitorPanel({
         <span>Sort</span>
         <select
           aria-label={`${title} sort`}
+          id={`${controlIdPrefix}-sort`}
+          name={`${controlIdPrefix}-sort`}
           onChange={(event) =>
             setSortMode(event.target.value as FleetMonitorSort)
           }
@@ -589,6 +617,8 @@ export function FleetMonitorPanel({
             <span className="srOnly">Search VPS cards</span>
             <input
               aria-label="Search VPS cards"
+              id={`${controlIdPrefix}-search`}
+              name={`${controlIdPrefix}-search`}
               onChange={(event) => setSearchQuery(event.target.value)}
               placeholder="Search name, ID, or tag"
               type="search"
@@ -599,6 +629,8 @@ export function FleetMonitorPanel({
             <span>Status</span>
             <select
               aria-label="Filter VPS cards by status"
+              id={`${controlIdPrefix}-status`}
+              name={`${controlIdPrefix}-status`}
               onChange={(event) =>
                 setStatusFilter(event.target.value as FleetMonitorStatusFilter)
               }
@@ -614,6 +646,8 @@ export function FleetMonitorPanel({
             <span>Tag</span>
             <select
               aria-label="Filter VPS cards by tag"
+              id={`${controlIdPrefix}-tag`}
+              name={`${controlIdPrefix}-tag`}
               onChange={(event) => setTagFilter(event.target.value)}
               value={effectiveTagFilter}
             >
@@ -629,6 +663,8 @@ export function FleetMonitorPanel({
             <span>Provider</span>
             <select
               aria-label="Filter VPS cards by provider"
+              id={`${controlIdPrefix}-provider`}
+              name={`${controlIdPrefix}-provider`}
               onChange={(event) => setProviderFilter(event.target.value)}
               value={effectiveProviderFilter}
             >
@@ -2263,17 +2299,6 @@ function formatCapacity(used: number | null, total: number | null | undefined) {
     return "capacity unavailable";
   }
   return `${formatBytes(used)} / ${formatBytes(total)}`;
-}
-
-function formatBytes(value: number) {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let scaled = Math.max(0, value);
-  let unit = 0;
-  while (scaled >= 1024 && unit < units.length - 1) {
-    scaled /= 1024;
-    unit += 1;
-  }
-  return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;
 }
 
 function formatTrafficUsage(traffic: TrafficAccountingRecord) {

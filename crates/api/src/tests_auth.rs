@@ -135,6 +135,54 @@ async fn bootstrap_status_route_reports_first_operator_requirement() {
 }
 
 #[tokio::test]
+async fn bootstrap_route_links_initial_session_to_request_origin() {
+    let state = memory_test_state();
+    let peer = "203.0.113.39:44321"
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    let response = crate::routes::build_router(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/bootstrap")
+                .header("content-type", "application/json")
+                .header("user-agent", "bootstrap-audit-browser")
+                .extension(axum::extract::ConnectInfo(peer))
+                .body(Body::from(
+                    serde_json::json!({
+                        "username": "admin",
+                        "password": "admin-password-123"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let session_id = payload["session_id"].as_str().unwrap();
+    let event = state
+        .repo
+        .list_operator_auth_events(&OperatorAuthEventQuery {
+            limit: None,
+            operator_id: None,
+            username: None,
+            result: None,
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|event| event.session_id.map(|id| id.to_string()) == Some(session_id.to_string()))
+        .expect("bootstrap session auth event");
+
+    assert_eq!(event.result, "success");
+    assert_eq!(event.remote_ip.as_deref(), Some("203.0.113.39"));
+    assert_eq!(event.user_agent.as_deref(), Some("bootstrap-audit-browser"));
+}
+
+#[tokio::test]
 async fn refresh_operator_session_rotates_refresh_token_once() {
     let repo = Repository::Memory(MemoryState::default());
     let auth = repo

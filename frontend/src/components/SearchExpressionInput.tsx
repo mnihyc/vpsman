@@ -44,6 +44,7 @@ type SearchExpressionInputProps = {
   onChange: (value: string) => void;
   placeholder: string;
   showMatchCount?: boolean;
+  showVerificationMessage?: boolean;
   suggestions?: string[];
   value: string;
   verification?: "checking" | "invalid" | "neutral" | "valid";
@@ -63,6 +64,7 @@ export function SearchExpressionInput({
   onChange,
   placeholder,
   showMatchCount = false,
+  showVerificationMessage = false,
   suggestions,
   value,
   verification = "neutral",
@@ -80,8 +82,9 @@ export function SearchExpressionInput({
   const [focused, setFocused] = useState(false);
   const [caretIndex, setCaretIndex] = useState(value.length);
   const generatedId = useId().replace(/:/g, "");
-  const autocompleteId = `${inputId ?? `search-expression-${generatedId}`}-suggestions`;
-  const metaId = `${inputId ?? `search-expression-${generatedId}`}-status`;
+  const editorId = inputId ?? `search-expression-${generatedId}`;
+  const autocompleteId = `${editorId}-suggestions`;
+  const metaId = `${editorId}-status`;
   const parsed = parseSearchExpression(value);
   const displayTokens = useMemo(() => tokenizeForDisplay(value), [value]);
   const hasTokens = displayTokens.some((token) => token.kind === "term");
@@ -108,7 +111,10 @@ export function SearchExpressionInput({
   const metaText = verificationMessage ?? matchSummary;
   const metaTitle =
     metaDescription ?? verificationMessage ?? matchTitle ?? matchSummary;
-  const showVisibleMeta = Boolean(showMatchCount && agents);
+  const showVisibleMeta = Boolean(
+    (showMatchCount && agents) ||
+      (showVerificationMessage && verificationMessage),
+  );
   const showMeta = showVisibleMeta || Boolean(verificationMessage);
   const autocompleteVisible =
     !disabled &&
@@ -477,7 +483,8 @@ export function SearchExpressionInput({
           autoCorrect="off"
           className="searchExpressionEditor"
           disabled={disabled}
-          id={inputId}
+          id={editorId}
+          name={editorId}
           onBlur={() =>
             window.setTimeout(() => {
               if (document.activeElement !== editorRef.current) {

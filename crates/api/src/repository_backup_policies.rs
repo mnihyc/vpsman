@@ -15,7 +15,8 @@ use crate::{
         apply_schedule_update_memory, backup_policy_schedule_by_id_postgres,
         backup_policy_schedule_by_id_postgres_in_tx, create_schedule_record_postgres_in_tx,
         ensure_schedule_snapshot, record_memory_schedule_audit,
-        update_schedule_record_postgres_in_tx, ScheduleCreateInput, ScheduleSnapshotExpectation,
+        schedule_update_preserves_target_snapshot, update_schedule_record_postgres_in_tx,
+        ScheduleCreateInput, ScheduleSnapshotExpectation,
     },
     unix_now,
 };
@@ -148,12 +149,15 @@ impl Repository {
         let (schedule, metadata) = match self {
             Self::Memory(memory) => {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                crate::repository_key_lifecycle::require_visible_memory_clients(
-                    memory,
-                    &schedule_request.target_client_ids,
-                    "schedule_fixed_targets_not_found",
-                )
-                .await?;
+                if !schedule_update_preserves_target_snapshot(&schedule_request, Some(expectation))
+                {
+                    crate::repository_key_lifecycle::require_visible_memory_clients(
+                        memory,
+                        &schedule_request.target_client_ids,
+                        "schedule_fixed_targets_not_found",
+                    )
+                    .await?;
+                }
                 let mut schedules = memory.schedules.write().await;
                 let Some(schedule) = schedules.iter_mut().find(|schedule| {
                     schedule.id == schedule_id

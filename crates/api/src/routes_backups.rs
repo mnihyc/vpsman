@@ -24,7 +24,7 @@ use crate::{
     error::ApiError,
     job_request::{
         fixed_target_selection, job_command_type_label, normalized_target_client_ids,
-        validate_file_path,
+        normalized_target_client_ids_allow_empty, validate_file_path,
     },
     model::{
         BackupArtifactHandoffRequest, BackupArtifactHandoffView, BackupArtifactUploadChunkRequest,
@@ -33,7 +33,7 @@ use crate::{
         BackupPolicyPruneResponse, BackupPolicyView, BackupRequestStatus, BackupRequestView,
         BulkResolveRequest, CreateBackupPolicyRequest, CreateBackupRequest, CreateScheduleRequest,
         ListQuery, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
-        UploadBackupArtifactRequest, WsEvent,
+        UpdateScheduleRequest, UploadBackupArtifactRequest, WsEvent,
     },
     privilege::{
         verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput,
@@ -45,6 +45,7 @@ use crate::{
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     routes_schedules::{
         map_schedule_snapshot_error, require_selector_target_snapshot, validate_schedule_request,
+        validate_update_schedule_request,
     },
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
     selector_expression::id_selector_expression,
@@ -61,6 +62,12 @@ const BACKUP_ARCHIVE_MANIFEST_PATH: &str = "vpsman-backup/manifest.json";
 const MAX_BACKUP_ARCHIVE_MANIFEST_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BODY_BYTES: usize = 24 * 1024 * 1024;
 pub(crate) const MAX_BACKUP_ARTIFACT_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum BackupPolicyTargetResolutionMode {
+    PreserveFrozenTargets,
+    RequireLiveTargets,
+}
 const RETENTION_DAY_SECS: u64 = 86_400;
 
 pub(crate) async fn list_backup_requests(
@@ -122,6 +129,7 @@ pub(crate) async fn create_backup_policy(
         request.privilege_assertion.clone(),
         "backup_policy.create",
         None,
+        BackupPolicyTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
     Ok((
@@ -142,14 +150,15 @@ pub(crate) async fn update_backup_policy(
     if !operator_has_scope(&operator.operator.scopes, "schedules:write") {
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
-    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    request.target_client_ids =
+        normalized_target_client_ids_allow_empty(&request.target_client_ids)?;
     request.expected_target_client_ids =
-        normalized_target_client_ids(&request.expected_target_client_ids)?;
+        normalized_target_client_ids_allow_empty(&request.expected_target_client_ids)?;
     let expectation = ScheduleSnapshotExpectation {
         selector_expression: request.expected_selector_expression.clone(),
         target_client_ids: request.expected_target_client_ids.clone(),
     };
-    let request = CreateBackupPolicyRequest::from(request);
+    let mut request = CreateBackupPolicyRequest::from(request);
     validate_update_backup_policy_request(&request)?;
     let current = state
         .repo
@@ -157,10 +166,13 @@ pub(crate) async fn update_backup_policy(
         .await?
         .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
     require_backup_policy_snapshot(&current, &expectation)?;
-    if request.selector_expression.trim() == expectation.selector_expression.trim() {
-        if request.target_client_ids != expectation.target_client_ids {
+    let selector_unchanged =
+        request.selector_expression.trim() == expectation.selector_expression.trim();
+    if selector_unchanged {
+        if !same_target_client_ids(&request.target_client_ids, &expectation.target_client_ids) {
             return Err(ApiError::conflict("backup_policy_target_snapshot_stale"));
         }
+        request.target_client_ids = current.target_client_ids.clone();
     } else {
         require_selector_target_snapshot(
             &state,
@@ -176,6 +188,11 @@ pub(crate) async fn update_backup_policy(
         request.privilege_assertion.clone(),
         "backup_policy.update",
         Some(schedule_id),
+        if selector_unchanged {
+            BackupPolicyTargetResolutionMode::PreserveFrozenTargets
+        } else {
+            BackupPolicyTargetResolutionMode::RequireLiveTargets
+        },
     )
     .await?;
     let updated = state
@@ -211,9 +228,16 @@ async fn verify_backup_policy_privilege(
     assertion: Option<PrivilegeAssertion>,
     action: &'static str,
     schedule_id: Option<uuid::Uuid>,
+    target_resolution_mode: BackupPolicyTargetResolutionMode,
 ) -> Result<(), ApiError> {
-    let resolved_targets =
-        resolved_backup_policy_targets(state, &request.target_client_ids).await?;
+    let resolved_targets = match target_resolution_mode {
+        BackupPolicyTargetResolutionMode::PreserveFrozenTargets => {
+            normalized_target_client_ids_allow_empty(&request.target_client_ids)?
+        }
+        BackupPolicyTargetResolutionMode::RequireLiveTargets => {
+            resolved_backup_policy_targets(state, &request.target_client_ids).await?
+        }
+    };
     let operation = backup_policy_command(request);
     let operation_payload = encode_json(&operation).map_err(|error| {
         ApiError::from(anyhow!("failed to encode backup policy command: {error}"))
@@ -246,7 +270,10 @@ async fn resolved_backup_policy_targets(
     state: &AppState,
     target_client_ids: &[String],
 ) -> Result<Vec<String>, ApiError> {
-    let target_client_ids = normalized_target_client_ids(target_client_ids)?;
+    let target_client_ids = normalized_target_client_ids_allow_empty(target_client_ids)?;
+    if target_client_ids.is_empty() {
+        return Ok(target_client_ids);
+    }
     let resolved = state
         .repo
         .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
@@ -263,6 +290,16 @@ async fn resolved_backup_policy_targets(
         return Err(ApiError::conflict("backup_policy_fixed_targets_not_found"));
     }
     Ok(target_client_ids)
+}
+
+fn same_target_client_ids(left: &[String], right: &[String]) -> bool {
+    let mut left = left.to_vec();
+    left.sort();
+    left.dedup();
+    let mut right = right.to_vec();
+    right.sort();
+    right.dedup();
+    left == right
 }
 
 pub(crate) async fn prune_backup_policies(
@@ -1261,6 +1298,13 @@ pub(crate) fn validate_create_backup_request(
 pub(crate) fn validate_create_backup_policy_request(
     request: &CreateBackupPolicyRequest,
 ) -> Result<(), ApiError> {
+    validate_backup_policy_request(request, false)
+}
+
+fn validate_backup_policy_request(
+    request: &CreateBackupPolicyRequest,
+    allow_empty_targets: bool,
+) -> Result<(), ApiError> {
     if !request.confirmed {
         return Err(ApiError::conflict("backup_policy_confirmation_required"));
     }
@@ -1284,7 +1328,28 @@ pub(crate) fn validate_create_backup_policy_request(
         privilege_assertion: None,
         confirmed: true,
     };
-    validate_schedule_request(&schedule_request)?;
+    if allow_empty_targets {
+        let update_request = UpdateScheduleRequest {
+            name: schedule_request.name,
+            operation: schedule_request.operation,
+            selector_expression: schedule_request.selector_expression.clone(),
+            target_client_ids: schedule_request.target_client_ids.clone(),
+            expected_selector_expression: schedule_request.selector_expression,
+            expected_target_client_ids: schedule_request.target_client_ids,
+            cron_expr: schedule_request.cron_expr,
+            timezone: schedule_request.timezone,
+            enabled: schedule_request.enabled,
+            catch_up_policy: schedule_request.catch_up_policy,
+            catch_up_limit: schedule_request.catch_up_limit,
+            retry_delay_secs: schedule_request.retry_delay_secs,
+            max_failures: schedule_request.max_failures,
+            privilege_assertion: None,
+            confirmed: true,
+        };
+        validate_update_schedule_request(&update_request)?;
+    } else {
+        validate_schedule_request(&schedule_request)?;
+    }
     let retention_days = request.retention_days.unwrap_or(30);
     if !(1..=3650).contains(&retention_days) {
         return Err(ApiError::bad_request(
@@ -1314,7 +1379,7 @@ pub(crate) fn validate_update_backup_policy_request(
     if request.keep_last.is_none() {
         return Err(ApiError::bad_request("backup_policy_keep_last_required"));
     }
-    validate_create_backup_policy_request(request)
+    validate_backup_policy_request(request, true)
 }
 
 pub(crate) fn validate_backup_artifact_metadata_request(

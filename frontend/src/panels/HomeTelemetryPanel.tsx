@@ -217,6 +217,8 @@ export function HomeTelemetryPanel({
               <span>Refresh</span>
               <select
                 aria-label="Home refresh interval"
+                id="home-refresh-interval"
+                name="home-refresh-interval"
                 onChange={(event) =>
                   onPreferencesChange({
                     refreshIntervalSecs: Number(event.target.value) as DashboardRefreshIntervalSecs,
@@ -258,6 +260,8 @@ export function HomeTelemetryPanel({
             <span>Group by</span>
             <select
               aria-label="Home group by"
+              id="home-group-by"
+              name="home-group-by"
               onChange={(event) => onPreferencesChange({ groupBy: event.target.value as DashboardPreferences["groupBy"] })}
               value={preferences.groupBy}
             >
@@ -272,6 +276,8 @@ export function HomeTelemetryPanel({
             <span>Points</span>
             <select
               aria-label="Home chart point density"
+              id="home-chart-point-density"
+              name="home-chart-point-density"
               onChange={(event) =>
                 onPreferencesChange({
                   pointDensity: event.target.value as DashboardPointDensity,
@@ -290,6 +296,8 @@ export function HomeTelemetryPanel({
             <span>Scope</span>
             <select
               aria-label="Home scope kind"
+              id="home-scope-kind"
+              name="home-scope-kind"
               onChange={(event) =>
                 onPreferencesChange({
                   scopeKind: event.target.value as DashboardScopeKind,
@@ -313,6 +321,7 @@ export function HomeTelemetryPanel({
               <VpsCombobox
                 agents={agents}
                 ariaLabel="Home scope value"
+                inputId="home-scope-value"
                 onChange={(value) => onPreferencesChange({ scopeValue: value })}
                 placeholder="Search scoped VPS"
                 value={preferences.scopeValue}
@@ -323,6 +332,8 @@ export function HomeTelemetryPanel({
               <span>Scope value</span>
               <select
                 aria-label="Home scope value"
+                id="home-scope-value"
+                name="home-scope-value"
                 onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
                 value={preferences.scopeValue}
               >
@@ -339,6 +350,8 @@ export function HomeTelemetryPanel({
             <span>Start</span>
             <input
               aria-label="Home start date"
+              id="home-start-date"
+              name="home-start-date"
               onChange={(event) => onPreferencesChange({ startAt: dateTimeLocalToIso(event.target.value) })}
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.startAt)}
@@ -348,6 +361,8 @@ export function HomeTelemetryPanel({
             <span>End</span>
             <input
               aria-label="Home end date"
+              id="home-end-date"
+              name="home-end-date"
               onChange={(event) => onPreferencesChange({ endAt: dateTimeLocalToIso(event.target.value) })}
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.endAt)}

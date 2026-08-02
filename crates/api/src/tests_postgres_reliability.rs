@@ -372,6 +372,121 @@ async fn postgres_schedule_query_without_limit_returns_all_rows() {
 }
 
 #[tokio::test]
+async fn postgres_schedule_edits_preserve_deleted_and_empty_frozen_targets() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "frozen-a", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut create = postgres_shell_schedule_request("frozen-targets", "frozen-a");
+    create.selector_expression = "id:frozen-a".to_string();
+    let schedule = db.repo.create_schedule(create, &operator).await.unwrap();
+    sqlx::query("UPDATE clients SET status = 'deleted', hidden_at = now() WHERE id = 'frozen-a'")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let original_snapshot = crate::repository_schedules::ScheduleSnapshotExpectation {
+        selector_expression: schedule.selector_expression.clone(),
+        target_client_ids: schedule.target_client_ids.clone(),
+    };
+    let preserved = db
+        .repo
+        .update_schedule_record(
+            schedule.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: "frozen-targets-renamed".to_string(),
+                operation: schedule.operation.clone().unwrap(),
+                selector_expression: schedule.selector_expression.clone(),
+                target_client_ids: schedule.target_client_ids.clone(),
+                cron_expr: schedule.cron_expr.clone(),
+                timezone: schedule.timezone.clone(),
+                enabled: schedule.enabled,
+                catch_up_policy: schedule.catch_up_policy.clone(),
+                catch_up_limit: schedule.catch_up_limit,
+                retry_delay_secs: schedule.retry_delay_secs,
+                max_failures: schedule.max_failures,
+            },
+            Some(&original_snapshot),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(preserved.target_client_ids, vec!["frozen-a"]);
+
+    let preserved_snapshot = crate::repository_schedules::ScheduleSnapshotExpectation {
+        selector_expression: preserved.selector_expression.clone(),
+        target_client_ids: preserved.target_client_ids.clone(),
+    };
+    let changed_selector_error = db
+        .repo
+        .update_schedule_record(
+            schedule.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: preserved.name.clone(),
+                operation: preserved.operation.clone().unwrap(),
+                selector_expression: "id:replacement".to_string(),
+                target_client_ids: preserved.target_client_ids.clone(),
+                cron_expr: preserved.cron_expr.clone(),
+                timezone: preserved.timezone.clone(),
+                enabled: preserved.enabled,
+                catch_up_policy: preserved.catch_up_policy.clone(),
+                catch_up_limit: preserved.catch_up_limit,
+                retry_delay_secs: preserved.retry_delay_secs,
+                max_failures: preserved.max_failures,
+            },
+            Some(&preserved_snapshot),
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(changed_selector_error
+        .to_string()
+        .contains("schedule_fixed_targets_not_found"));
+
+    let empty = db
+        .repo
+        .update_schedule_targets(
+            schedule.id,
+            Vec::new(),
+            Some(&preserved_snapshot),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(empty.target_client_ids.is_empty());
+    let empty_snapshot = crate::repository_schedules::ScheduleSnapshotExpectation {
+        selector_expression: empty.selector_expression.clone(),
+        target_client_ids: Vec::new(),
+    };
+    let edited_empty = db
+        .repo
+        .update_schedule_record(
+            schedule.id,
+            crate::repository_schedules::ScheduleCreateInput {
+                name: "frozen-targets-empty".to_string(),
+                operation: empty.operation.clone().unwrap(),
+                selector_expression: empty.selector_expression.clone(),
+                target_client_ids: Vec::new(),
+                cron_expr: empty.cron_expr.clone(),
+                timezone: empty.timezone.clone(),
+                enabled: empty.enabled,
+                catch_up_policy: empty.catch_up_policy.clone(),
+                catch_up_limit: empty.catch_up_limit,
+                retry_delay_secs: empty.retry_delay_secs,
+                max_failures: empty.max_failures,
+            },
+            Some(&empty_snapshot),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(edited_empty.target_client_ids.is_empty());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_internal_dispatch_queries_do_not_silently_omit_after_one_thousand() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -5960,6 +6075,347 @@ async fn postgres_network_operator(repo: &Repository) -> AuthContext {
         operator: auth.operator,
         session_id: None,
     }
+}
+
+#[tokio::test]
+async fn postgres_bootstrap_rolls_back_when_success_evidence_cannot_be_recorded() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    install_rejected_audit_action_trigger(&db.pool).await;
+    set_rejected_audit_action(&db.pool, "operator_auth.login_success").await;
+    let request = BootstrapOperatorRequest {
+        username: "admin".to_string(),
+        password: "admin-password-123".to_string(),
+    };
+    assert!(db
+        .repo
+        .bootstrap_operator_with_auth_event(
+            &request,
+            "203.0.113.40",
+            Some("bootstrap-atomicity-test"),
+        )
+        .await
+        .is_err());
+    let rolled_back = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+        SELECT (SELECT count(*) FROM operators),
+               (SELECT count(*) FROM operator_sessions),
+               (SELECT count(*) FROM audit_logs)
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back, (0, 0, 0));
+
+    sqlx::query("DELETE FROM rejected_test_audit_actions")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let auth = db
+        .repo
+        .bootstrap_operator_with_auth_event(
+            &request,
+            "203.0.113.40",
+            Some("bootstrap-atomicity-test"),
+        )
+        .await
+        .unwrap();
+    let evidence = sqlx::query_as::<_, (Uuid, String, String, String)>(
+        r#"
+        SELECT actor_id,
+               metadata->>'operator_session_id',
+               metadata->>'remote_ip',
+               metadata->>'user_agent'
+        FROM audit_logs
+        WHERE action = 'operator_auth.login_success'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(evidence.0, auth.operator.id);
+    assert_eq!(evidence.1, auth.session_id.to_string());
+    assert_eq!(evidence.2, "203.0.113.40");
+    assert_eq!(evidence.3, "bootstrap-atomicity-test");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_login_rolls_back_session_and_totp_step_with_success_evidence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let password = "admin-password-123";
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let throttle = crate::state::OperatorAuthThrottleConfig {
+        username_failed_attempt_limit: 100,
+        ip_failed_attempt_limit: 100,
+        failed_attempt_window_secs: 300,
+        lockout_secs: 60,
+    };
+    install_rejected_audit_action_trigger(&db.pool).await;
+    set_rejected_audit_action(&db.pool, "operator_auth.login_success").await;
+    let password_login = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: None,
+    };
+    assert!(db
+        .repo
+        .login_operator_with_throttle(
+            &password_login,
+            "203.0.113.41",
+            Some("password-atomicity-test"),
+            &throttle,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+
+    sqlx::query("DELETE FROM rejected_test_audit_actions")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(
+                &password_login,
+                "203.0.113.41",
+                Some("password-atomicity-test"),
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+
+    let actor = AuthContext {
+        operator: auth.operator,
+        session_id: Some(auth.session_id),
+    };
+    let crate::model::TotpSetupOutcome::Created(_) =
+        db.repo.setup_operator_totp(&actor, password).await.unwrap()
+    else {
+        panic!("expected TOTP setup");
+    };
+    let encrypted = db
+        .repo
+        .operator_by_username("admin")
+        .await
+        .unwrap()
+        .unwrap()
+        .encrypted_totp_secret()
+        .unwrap();
+    let secret = crate::auth_totp::decrypt_totp_secret(password, &encrypted).unwrap();
+    let current_step = crate::unix_now() / crate::auth_totp::TOTP_PERIOD_SECS;
+    let confirm_code = crate::auth_totp::totp_code_for_step(&secret, current_step);
+    assert!(matches!(
+        db.repo
+            .confirm_operator_totp(&actor, password, &confirm_code)
+            .await
+            .unwrap(),
+        crate::model::TotpUpdateOutcome::Updated(_)
+    ));
+    let login_step = current_step.saturating_add(1);
+    let login_code = crate::auth_totp::totp_code_for_step(&secret, login_step);
+    let totp_login = LoginRequest {
+        username: "admin".to_string(),
+        password: password.to_string(),
+        totp_code: Some(login_code),
+    };
+
+    set_rejected_audit_action(&db.pool, "operator_auth.login_success").await;
+    assert!(db
+        .repo
+        .login_operator_with_throttle(
+            &totp_login,
+            "203.0.113.42",
+            Some("totp-atomicity-test"),
+            &throttle,
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT totp_last_accepted_step FROM operators WHERE id = $1",
+        )
+        .bind(actor.operator.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        Some(current_step as i64)
+    );
+
+    sqlx::query("DELETE FROM rejected_test_audit_actions")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        db.repo
+            .login_operator_with_throttle(
+                &totp_login,
+                "203.0.113.42",
+                Some("totp-atomicity-test"),
+                &throttle,
+            )
+            .await
+            .unwrap(),
+        crate::repository_auth::OperatorLoginAttempt::Authenticated(_)
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'operator_auth.login_success'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_password_login_rejects_concurrent_operator_credential_change() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let password = "admin-password-123";
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: password.to_string(),
+        })
+        .await
+        .unwrap();
+    let replacement_hash = crate::hash_operator_password("replacement-password-456").unwrap();
+    let mut credential_change = db.pool.begin().await.unwrap();
+    sqlx::query("UPDATE operators SET password_hash = $2 WHERE id = $1")
+        .bind(auth.operator.id)
+        .bind(replacement_hash)
+        .execute(&mut *credential_change)
+        .await
+        .unwrap();
+
+    let login_repo = db.repo.clone();
+    let login = tokio::spawn(async move {
+        login_repo
+            .login_operator_with_throttle(
+                &LoginRequest {
+                    username: "admin".to_string(),
+                    password: password.to_string(),
+                    totp_code: None,
+                },
+                "203.0.113.43",
+                Some("credential-change-race-test"),
+                &crate::state::OperatorAuthThrottleConfig {
+                    username_failed_attempt_limit: 100,
+                    ip_failed_attempt_limit: 100,
+                    failed_attempt_window_secs: 300,
+                    lockout_secs: 60,
+                },
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%NOT totp_enabled%'
+                )
+                "#,
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("password login did not reach the guarded operator row");
+
+    credential_change.commit().await.unwrap();
+    let attempt = tokio::time::timeout(Duration::from_secs(5), login)
+        .await
+        .expect("password login remained blocked")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        attempt,
+        crate::repository_auth::OperatorLoginAttempt::InvalidCredentials
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operator_sessions")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT metadata->>'reason'
+            FROM audit_logs
+            WHERE action = 'operator_auth.login_failure'
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "operator_state_changed"
+    );
+
+    db.cleanup().await;
 }
 
 #[tokio::test]

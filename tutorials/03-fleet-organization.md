@@ -127,9 +127,10 @@ User-Agent evidence. Later polling updates last-accessed evidence without
 creating another event for that visitor.
 
 Public pages reuse the monitoring grid/detail in read-only form. They expose
-only the selected groups and opaque share-specific VPS keys, never IPs, internal
-configuration, actions, jobs, terminals, files, backups, audit data, or operator
-identity.
+only the selected groups and opaque share-specific VPS keys, never internal VPS
+IDs or network-address fields, internal configuration, actions, jobs, terminals,
+files, backups, audit data, or operator identity. Operator-entered public labels
+appear as entered.
 
 ## Tune Fleet Alert Policy
 

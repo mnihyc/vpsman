@@ -452,12 +452,14 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                crate::repository_key_lifecycle::require_visible_memory_clients(
-                    memory,
-                    &request.target_client_ids,
-                    "schedule_fixed_targets_not_found",
-                )
-                .await?;
+                if !schedule_update_preserves_target_snapshot(&request, expectation) {
+                    crate::repository_key_lifecycle::require_visible_memory_clients(
+                        memory,
+                        &request.target_client_ids,
+                        "schedule_fixed_targets_not_found",
+                    )
+                    .await?;
+                }
                 let mut schedules = memory.schedules.write().await;
                 let schedule = schedules
                     .iter_mut()
@@ -994,12 +996,14 @@ pub(crate) async fn update_schedule_record_postgres_in_tx(
     expectation: Option<&ScheduleSnapshotExpectation>,
     operator: &AuthContext,
 ) -> Result<ScheduleView> {
-    crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
-        tx,
-        &request.target_client_ids,
-        "schedule_fixed_targets_not_found",
-    )
-    .await?;
+    if !schedule_update_preserves_target_snapshot(request, expectation) {
+        crate::repository_key_lifecycle::require_visible_postgres_clients_in_tx(
+            tx,
+            &request.target_client_ids,
+            "schedule_fixed_targets_not_found",
+        )
+        .await?;
+    }
     let next_runs = next_cron_runs(&request.cron_expr, 5)?;
     let next_run = next_runs
         .first()
@@ -1177,6 +1181,23 @@ pub(crate) fn ensure_schedule_snapshot(
         "schedule_snapshot_stale"
     );
     Ok(())
+}
+
+pub(crate) fn schedule_update_preserves_target_snapshot(
+    request: &ScheduleCreateInput,
+    expectation: Option<&ScheduleSnapshotExpectation>,
+) -> bool {
+    let Some(expectation) = expectation else {
+        return false;
+    };
+    let mut requested_targets = request.target_client_ids.clone();
+    requested_targets.sort();
+    requested_targets.dedup();
+    let mut expected_targets = expectation.target_client_ids.clone();
+    expected_targets.sort();
+    expected_targets.dedup();
+    request.selector_expression.trim() == expectation.selector_expression.trim()
+        && requested_targets == expected_targets
 }
 
 pub(crate) async fn record_memory_schedule_audit(

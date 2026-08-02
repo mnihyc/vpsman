@@ -39,13 +39,26 @@ pub(crate) async fn bootstrap_status(
 
 pub(crate) async fn bootstrap_operator(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(request): Json<BootstrapOperatorRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_operator_credentials(&request.username, &request.password)?;
     if state.repo.operator_count().await? > 0 {
         return Err(ApiError::conflict("operator_already_bootstrapped"));
     }
-    match state.repo.bootstrap_operator(&request).await {
+    let remote_ip = state.operator_client_ip(peer, &headers);
+    match state
+        .repo
+        .bootstrap_operator_with_auth_event(
+            &request,
+            &remote_ip,
+            headers
+                .get(USER_AGENT)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await
+    {
         Ok(response) => Ok(Json(response)),
         Err(error) if error.to_string() == "operator_already_bootstrapped" => {
             Err(ApiError::conflict("operator_already_bootstrapped"))

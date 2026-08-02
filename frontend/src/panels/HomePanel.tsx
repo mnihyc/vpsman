@@ -396,6 +396,7 @@ export function HomePanel({
               <VpsCombobox
                 agents={agents}
                 ariaLabel="Home quick action target"
+                inputId="home-quick-action-target"
                 onChange={setQuickTargetId}
                 placeholder="Select VPS"
                 value={quickTarget?.id ?? ""}

@@ -11,7 +11,7 @@ use crate::{
     error::ApiError,
     job_request::{
         fixed_target_selection, job_command_type_label, normalized_target_client_ids,
-        validate_job_command,
+        normalized_target_client_ids_allow_empty, validate_job_command,
     },
     model::{
         BulkResolveRequest, CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest,
@@ -31,6 +31,7 @@ use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
+    PreserveFrozenTargets,
     RequireLiveTargets,
 }
 
@@ -111,19 +112,23 @@ pub(crate) async fn update_schedule(
         .await?;
     validate_update_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
-    request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
+    request.target_client_ids =
+        normalized_target_client_ids_allow_empty(&request.target_client_ids)?;
     request.expected_target_client_ids =
-        normalized_target_client_ids(&request.expected_target_client_ids)?;
+        normalized_target_client_ids_allow_empty(&request.expected_target_client_ids)?;
     let expectation = ScheduleSnapshotExpectation {
         selector_expression: request.expected_selector_expression.clone(),
         target_client_ids: request.expected_target_client_ids.clone(),
     };
     let current = state.repo.schedule_by_id(schedule_id).await?;
     require_schedule_snapshot(&current, &expectation)?;
-    if request.selector_expression.trim() == expectation.selector_expression.trim() {
-        if request.target_client_ids != expectation.target_client_ids {
+    let selector_unchanged =
+        request.selector_expression.trim() == expectation.selector_expression.trim();
+    if selector_unchanged {
+        if !same_target_client_ids(&request.target_client_ids, &expectation.target_client_ids) {
             return Err(ApiError::conflict("schedule_target_snapshot_stale"));
         }
+        request.target_client_ids = current.target_client_ids.clone();
     } else {
         require_selector_target_snapshot(
             &state,
@@ -141,7 +146,11 @@ pub(crate) async fn update_schedule(
         None,
         false,
         request.privilege_assertion.clone(),
-        ScheduleTargetResolutionMode::RequireLiveTargets,
+        if selector_unchanged {
+            ScheduleTargetResolutionMode::PreserveFrozenTargets
+        } else {
+            ScheduleTargetResolutionMode::RequireLiveTargets
+        },
     )
     .await?;
     Ok(Json(
@@ -395,16 +404,19 @@ fn require_schedule_confirmed(confirmed: bool) -> Result<(), ApiError> {
 }
 
 pub(crate) fn validate_schedule_request(request: &CreateScheduleRequest) -> Result<(), ApiError> {
-    validate_schedule_definition(ScheduleDefinitionRef::from_create(request))
+    validate_schedule_definition(ScheduleDefinitionRef::from_create(request), false)
 }
 
 pub(crate) fn validate_update_schedule_request(
     request: &UpdateScheduleRequest,
 ) -> Result<(), ApiError> {
-    validate_schedule_definition(ScheduleDefinitionRef::from_update(request))
+    validate_schedule_definition(ScheduleDefinitionRef::from_update(request), true)
 }
 
-fn validate_schedule_definition(request: ScheduleDefinitionRef<'_>) -> Result<(), ApiError> {
+fn validate_schedule_definition(
+    request: ScheduleDefinitionRef<'_>,
+    allow_empty_targets: bool,
+) -> Result<(), ApiError> {
     if request.name.trim().is_empty() {
         return Err(ApiError::bad_request("schedule_name_required"));
     }
@@ -420,7 +432,11 @@ fn validate_schedule_definition(request: ScheduleDefinitionRef<'_>) -> Result<()
     if next_cron_runs(request.cron_expr, 1).is_err() {
         return Err(ApiError::bad_request("schedule_cron_invalid"));
     }
-    normalized_target_client_ids(request.target_client_ids)?;
+    if allow_empty_targets {
+        normalized_target_client_ids_allow_empty(request.target_client_ids)?;
+    } else {
+        normalized_target_client_ids(request.target_client_ids)?;
+    }
     if !request.selector_expression.trim().is_empty() {
         parse_selector_expression(request.selector_expression)
             .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
@@ -485,6 +501,9 @@ async fn verify_schedule_privilege_for_definition(
     target_resolution_mode: ScheduleTargetResolutionMode,
 ) -> Result<(), ApiError> {
     let resolved_targets = match target_resolution_mode {
+        ScheduleTargetResolutionMode::PreserveFrozenTargets => {
+            normalized_target_client_ids_allow_empty(request.target_client_ids)?
+        }
         ScheduleTargetResolutionMode::RequireLiveTargets => {
             resolved_schedule_targets(state, request.target_client_ids).await?
         }
@@ -591,7 +610,10 @@ async fn resolved_schedule_targets(
     state: &AppState,
     target_client_ids: &[String],
 ) -> Result<Vec<String>, ApiError> {
-    let target_client_ids = normalized_target_client_ids(target_client_ids)?;
+    let target_client_ids = normalized_target_client_ids_allow_empty(target_client_ids)?;
+    if target_client_ids.is_empty() {
+        return Ok(target_client_ids);
+    }
     let resolved = state
         .repo
         .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
@@ -633,7 +655,7 @@ pub(crate) async fn require_selector_target_snapshot(
         .collect::<Vec<_>>();
     resolved.sort();
     resolved.dedup();
-    let mut submitted = normalized_target_client_ids(target_client_ids)?;
+    let mut submitted = normalized_target_client_ids_allow_empty(target_client_ids)?;
     submitted.sort();
     if resolved != submitted {
         return Err(ApiError::conflict(stale_code));
@@ -723,6 +745,16 @@ pub(crate) fn require_schedule_snapshot(
         return Err(ApiError::conflict("schedule_snapshot_stale"));
     }
     Ok(())
+}
+
+fn same_target_client_ids(left: &[String], right: &[String]) -> bool {
+    let mut left = left.to_vec();
+    left.sort();
+    left.dedup();
+    let mut right = right.to_vec();
+    right.sort();
+    right.dedup();
+    left == right
 }
 
 pub(crate) fn map_schedule_snapshot_error(error: anyhow::Error) -> ApiError {

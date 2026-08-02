@@ -101,15 +101,18 @@ with its share ID, visitor ID, source IP, bounded User-Agent, frozen target coun
 and visibility. Subsequent polling updates last-accessed evidence without
 creating another audit event for that visitor.
 
-Public projections always include only display name and health. Depending on
+Public projections always include display name and health. Depending on
 the immutable visibility selection, they may also include allowlisted
 provider/region/country context whose value is not an IP literal, resources,
 network rate, authoritative traffic, general Ping, and detail history. They use
 a persisted random 256-bit VPS key generated independently for each target in
 each share. The key is stable for that share's lifetime and is never derived
 from the URL-secret digest or predictable internal VPS ID. Public projections
-never expose real VPS IDs, IP addresses, internal configuration, actions, jobs,
-terminals, files, backups, audit data, or operator identity.
+never expose real VPS IDs, network-address fields, internal configuration,
+actions, jobs, terminals, files, backups, audit data, or operator identity.
+Operator-controlled display names, share names, and Ping target names are
+included verbatim; operators must keep sensitive addresses out of labels
+intended for public sharing.
 
 ## Practical Defaults
 

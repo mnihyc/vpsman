@@ -113,6 +113,7 @@ export function ConfigurationSourcesPanel({
   onCreatePreset,
   onDeletePreset,
   onLoadEffectiveConfig,
+  onOpenPrivilegeUnlock,
   onPreviewOverride,
   onPreviewPreset,
   onRefresh,
@@ -139,6 +140,7 @@ export function ConfigurationSourcesPanel({
   onLoadEffectiveConfig: (
     clientId: string,
   ) => Promise<EffectiveAgentConfigResponse>;
+  onOpenPrivilegeUnlock: () => void;
   onPreviewOverride: (
     request: ConfigurationSourceOverrideRequest,
   ) => Promise<ConfigurationSourceOverridePreview>;
@@ -1230,6 +1232,7 @@ export function ConfigurationSourcesPanel({
           <PrivilegeVaultBox
             labelPrefix="Configuration sources"
             lastPayloadHash={confirmationPreviewHash}
+            onOpenUnlock={onOpenPrivilegeUnlock}
             onPrivilegeMaterialChange={setPrivilegeMaterial}
             privilegeMaterial={privilegeMaterial}
             usePrivilegeLabel="Unlock configuration apply"

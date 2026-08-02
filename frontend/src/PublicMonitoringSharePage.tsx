@@ -44,6 +44,7 @@ import type {
 } from "./types";
 import { formatCompactTime, formatFullTime, timestampMillis } from "./utils";
 import { agentStatusPresentation } from "./agentDisplayState";
+import { formatByteCount as formatBytes } from "./telemetryMetrics";
 
 type PublicMonitoringSharePageProps = {
   initialClientKey?: string | null;
@@ -162,6 +163,7 @@ export function PublicMonitoringSharePage({
 
       let offset = 0;
       let combined: PublicMonitoringCard[] = [];
+      const loadedKeys = new Set<string>();
       for (;;) {
         const params = new URLSearchParams({
           limit: "1000",
@@ -174,13 +176,36 @@ export function PublicMonitoringSharePage({
           bootstrap.visitor_id,
         );
         if (!active) return;
+        if (page.offset !== offset) {
+          throw new Error(
+            "The shared view returned the wrong pagination offset.",
+          );
+        }
+        if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
+          throw new Error(
+            "The shared view returned the same VPS more than once.",
+          );
+        }
+        page.cards.forEach((card) => loadedKeys.add(card.client_key));
         setShare(page.share);
         setTotal(page.total);
         combined = [...combined, ...page.cards];
         setCards(combined);
-        if (page.next_offset === null) break;
+        if (combined.length > page.total) {
+          throw new Error(
+            "The shared view returned more cards than its reported total.",
+          );
+        }
+        if (page.next_offset === null) {
+          if (combined.length !== page.total) {
+            throw new Error(
+              "The shared view ended before every shared VPS was returned.",
+            );
+          }
+          break;
+        }
         if (
-          page.next_offset <= offset ||
+          page.next_offset !== offset + page.cards.length ||
           page.next_offset > page.total ||
           page.cards.length === 0
         ) {
@@ -222,6 +247,7 @@ export function PublicMonitoringSharePage({
       try {
         let offset = 0;
         let combined: PublicMonitoringCard[] = [];
+        const loadedKeys = new Set<string>();
         let latestShare = share;
         let latestTotal = total;
         for (;;) {
@@ -236,12 +262,35 @@ export function PublicMonitoringSharePage({
             visitorId,
           );
           if (!active) return;
+          if (page.offset !== offset) {
+            throw new Error(
+              "The shared view returned the wrong pagination offset; the previous complete card set remains visible.",
+            );
+          }
+          if (page.cards.some((card) => loadedKeys.has(card.client_key))) {
+            throw new Error(
+              "The shared view returned the same VPS more than once; the previous complete card set remains visible.",
+            );
+          }
+          page.cards.forEach((card) => loadedKeys.add(card.client_key));
           latestShare = page.share;
           latestTotal = page.total;
           combined = [...combined, ...page.cards];
-          if (page.next_offset === null) break;
+          if (combined.length > page.total) {
+            throw new Error(
+              "The shared view exceeded its reported total; the previous complete card set remains visible.",
+            );
+          }
+          if (page.next_offset === null) {
+            if (combined.length !== page.total) {
+              throw new Error(
+                "The shared view ended early; the previous complete card set remains visible.",
+              );
+            }
+            break;
+          }
           if (
-            page.next_offset <= offset ||
+            page.next_offset !== offset + page.cards.length ||
             page.next_offset > page.total ||
             page.cards.length === 0
           ) {
@@ -277,6 +326,7 @@ export function PublicMonitoringSharePage({
       return;
     }
     let active = true;
+    let inFlight = false;
     const controller = new AbortController();
     setDetail(null);
     setDetailError(null);
@@ -293,6 +343,8 @@ export function PublicMonitoringSharePage({
       params.set("end_unix", String(customBounds.endUnix));
     }
     const loadDetail = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await publicShareJson<PublicMonitoringData>(
           publicDataPath(shareId, params),
@@ -311,6 +363,7 @@ export function PublicMonitoringSharePage({
           setDetailError(errorMessage(reason));
         }
       } finally {
+        inFlight = false;
         if (active) setDetailLoading(false);
       }
     };
@@ -502,7 +555,9 @@ export function PublicMonitoringSharePage({
                   id="public-monitoring-search"
                   name="public-monitoring-search"
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Name or tag"
+                  placeholder={
+                    share.visibility.identity_context ? "Name or tag" : "Name"
+                  }
                   type="search"
                   value={search}
                 />
@@ -658,8 +713,14 @@ export function PublicMonitoringSharePage({
           loading={detailLoading}
           onApplyCustom={applyCustomRange}
           onClose={closeDetail}
-          onCustomEndChange={setCustomEnd}
-          onCustomStartChange={setCustomStart}
+          onCustomEndChange={(value) => {
+            setCustomError(null);
+            setCustomEnd(value);
+          }}
+          onCustomStartChange={(value) => {
+            setCustomError(null);
+            setCustomStart(value);
+          }}
           onWindowChange={setWindow}
           visibility={share.visibility}
           window={window}
@@ -798,6 +859,7 @@ function PublicMonitoringCardView({
             icon={<Activity size={15} />}
             label="CPU"
             percent={cpuPercent}
+            showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
             value={formatPercent(cpuPercent)}
           />
@@ -809,6 +871,7 @@ function PublicMonitoringCardView({
             icon={<Gauge size={15} />}
             label="RAM"
             percent={memoryUsed}
+            showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
             value={formatPercent(memoryUsed)}
           />
@@ -820,6 +883,7 @@ function PublicMonitoringCardView({
             icon={<Server size={15} />}
             label="Disk"
             percent={diskUsed}
+            showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
             value={formatPercent(diskUsed)}
           />
@@ -832,6 +896,7 @@ function PublicMonitoringCardView({
             icon={<Gauge size={15} />}
             label="Load"
             percent={loadPressure}
+            showCaption={density === "comfortable"}
             sparkline={
               density === "comfortable" ? (
                 <MiniSparkline
@@ -934,6 +999,7 @@ function PublicMetric({
   icon,
   label,
   percent,
+  showCaption,
   sparkline,
   stale = false,
   value,
@@ -942,6 +1008,7 @@ function PublicMetric({
   icon: ReactNode;
   label: string;
   percent: number | null;
+  showCaption: boolean;
   sparkline?: ReactNode;
   stale?: boolean;
   value: string;
@@ -953,7 +1020,7 @@ function PublicMetric({
       meterCaption={caption}
       meterMax={100}
       meterValue={percent}
-      showCaption
+      showCaption={showCaption}
       sparkline={sparkline}
       stale={stale}
       value={value}
@@ -1189,6 +1256,8 @@ function PublicMonitoringDetailPanel({
           <label>
             <span>Start</span>
             <input
+              id="public-monitoring-custom-start"
+              name="public-monitoring-custom-start"
               onChange={(event) => onCustomStartChange(event.target.value)}
               type="datetime-local"
               value={customStart}
@@ -1197,6 +1266,8 @@ function PublicMonitoringDetailPanel({
           <label>
             <span>End</span>
             <input
+              id="public-monitoring-custom-end"
+              name="public-monitoring-custom-end"
               onChange={(event) => onCustomEndChange(event.target.value)}
               type="datetime-local"
               value={customEnd}
@@ -2176,19 +2247,12 @@ function publicConnectionTitle(
 
 function formatRate(value: number | null | undefined): string {
   const finite = finiteNumber(value);
-  return finite === null ? "No data" : `${formatBytes(finite)}/s`;
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value)) return "No data";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  let scaled = Math.max(0, value);
-  let unit = 0;
-  while (scaled >= 1024 && unit < units.length - 1) {
-    scaled /= 1024;
-    unit += 1;
-  }
-  return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;
+  if (finite === null) return "No data";
+  if (finite >= 1_000_000_000)
+    return `${(finite / 1_000_000_000).toFixed(1)} Gbps`;
+  if (finite >= 1_000_000) return `${(finite / 1_000_000).toFixed(1)} Mbps`;
+  if (finite >= 1_000) return `${(finite / 1_000).toFixed(1)} Kbps`;
+  return `${Math.max(0, Math.round(finite))} bps`;
 }
 
 function formatPercent(value: number | null): string {

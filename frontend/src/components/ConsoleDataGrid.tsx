@@ -158,6 +158,7 @@ export function ConsoleDataGrid<T>({
   toolbarActions?: ReactNode;
 }) {
   const singularItemLabel = singularizeItemLabel(itemLabel);
+  const controlIdPrefix = gridControlId(storageKey);
   const [preferences] = useState(() => readGridPreferences(storageKey));
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(
     preferences.columnSizing ?? {},
@@ -197,10 +198,11 @@ export function ConsoleDataGrid<T>({
     );
   const searchFieldsForRow = (row: T): SearchFields =>
     searchFieldsForSearchValues(searchValuesForRow(row));
-  const filteredRows = useMemo(() => {
-    return filterBySearchExpression(rows, globalFilter, searchFieldsForRow)
-      .items;
+  const searchResult = useMemo(() => {
+    return filterBySearchExpression(rows, globalFilter, searchFieldsForRow);
   }, [columns, globalFilter, rows]);
+  const filteredRows = searchResult.items;
+  const searchError = searchResult.error;
   const gridSearchSuggestions = useMemo(
     () =>
       buildParseableSearchValueSuggestions(
@@ -228,6 +230,8 @@ export function ConsoleDataGrid<T>({
                 <input
                   aria-label={`Select all ${title}`}
                   checked={table.getIsAllPageRowsSelected()}
+                  id={`${controlIdPrefix}-select-all`}
+                  name={`${controlIdPrefix}-select-all`}
                   onChange={(event) => {
                     table.getRowModel().rows.forEach((row) => {
                       row.toggleSelected(event.currentTarget.checked);
@@ -245,6 +249,8 @@ export function ConsoleDataGrid<T>({
                 <input
                   aria-label={`Select ${title} row ${getRowId(row.original)}`}
                   checked={row.getIsSelected()}
+                  id={`${controlIdPrefix}-select-${gridControlId(getRowId(row.original))}`}
+                  name={`${controlIdPrefix}-selection`}
                   onClick={(event) => event.stopPropagation()}
                   onChange={row.getToggleSelectedHandler()}
                   type="checkbox"
@@ -318,7 +324,7 @@ export function ConsoleDataGrid<T>({
         ),
       })),
     ],
-    [columns, hasExpandedRows, selectable, title],
+    [columns, controlIdPrefix, hasExpandedRows, selectable, title],
   );
   const defaultColumnOrder = useMemo(
     () =>
@@ -601,6 +607,8 @@ export function ConsoleDataGrid<T>({
             <input
               aria-label={`Select ${title} row ${rowId}`}
               checked={row.getIsSelected()}
+              id={`${controlIdPrefix}-select-${gridControlId(rowId)}`}
+              name={`${controlIdPrefix}-selection`}
               onClick={(event) => event.stopPropagation()}
               onChange={row.getToggleSelectedHandler()}
               type="checkbox"
@@ -748,6 +756,22 @@ export function ConsoleDataGrid<T>({
   }
 
   function renderEmptyContent() {
+    if (searchError) {
+      return (
+        <div className="emptyState compactEmpty">
+          <strong>Invalid table search</strong>
+          <span>{searchError}</span>
+          <button
+            className="secondaryAction compactAction"
+            onClick={() => setGlobalFilter("")}
+            type="button"
+          >
+            <X size={14} />
+            <span>Clear search</span>
+          </button>
+        </div>
+      );
+    }
     if (rows.length > 0 && globalFilter.trim()) {
       return (
         <div className="emptyState compactEmpty">
@@ -803,10 +827,16 @@ export function ConsoleDataGrid<T>({
         <SearchExpressionInput
           ariaLabel={`${title} search`}
           className="gridSearch compact"
+          inputId={`${controlIdPrefix}-search`}
           onChange={setGlobalFilter}
           placeholder={searchPlaceholder}
+          showVerificationMessage
           suggestions={gridSearchSuggestions}
           value={globalFilter}
+          verification={searchError ? "invalid" : "neutral"}
+          verificationMessage={
+            searchError ? `Invalid search: ${searchError}` : undefined
+          }
         />
         <div className="gridToolbarActions">
           {toolbarActions}
@@ -956,10 +986,15 @@ export function ConsoleDataGrid<T>({
             </DropdownMenu.Portal>
           </DropdownMenu.Root>
           <span className="gridPagination">
-            <label className="gridPageSize">
+            <label
+              className="gridPageSize"
+              htmlFor={`${controlIdPrefix}-page-size`}
+            >
               <span>Rows</span>
               <select
                 aria-label={`${title} page size`}
+                id={`${controlIdPrefix}-page-size`}
+                name={`${controlIdPrefix}-page-size`}
                 onChange={(event) => setPageSize(Number(event.target.value))}
                 value={pageSize}
               >
@@ -1364,6 +1399,10 @@ function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
 }
 
 const STRUCTURAL_COLUMN_ORDER = ["__select", "__expand"] as const;
+
+function gridControlId(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "grid";
+}
 
 export function reconcileColumnOrder(
   current: string[],

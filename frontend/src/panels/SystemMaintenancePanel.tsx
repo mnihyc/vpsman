@@ -438,9 +438,9 @@ function StaleSelectorMaintenancePanel({
         pingPreview: pingPreview
           ? { ...pingPreview, changes: pingChanges }
           : null,
-        pingTargetIds: pingChanges.map((change) => change.target_id),
+        pingTargetIds,
         schedules: scheduleUpdates,
-        selectedCount: selectedRows.length,
+        selectedCount: selected.length,
       });
       setFeedback(null);
     } catch (cause) {

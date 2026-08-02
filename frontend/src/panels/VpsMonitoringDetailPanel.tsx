@@ -22,6 +22,7 @@ import type {
 } from "../types";
 import { formatTime, timestampMillis } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
+import { formatByteCount as formatBytes } from "../telemetryMetrics";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -136,7 +137,10 @@ export function VpsMonitoringDetailPanel({
       };
     }
 
+    let inFlight = false;
     const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
       try {
         const response = await apiGet<ClientMonitoringResponse>(
           `/api/v1/clients/${encodeURIComponent(clientId)}/monitoring?${query.path}`,
@@ -149,6 +153,7 @@ export function VpsMonitoringDetailPanel({
         if (!active) return;
         setError(errorMessage(cause));
       } finally {
+        inFlight = false;
         if (active) setLoading(false);
       }
     };
@@ -235,8 +240,13 @@ export function VpsMonitoringDetailPanel({
             <span>Start</span>
             <input
               aria-label="Custom monitoring start"
+              id="vps-monitoring-custom-start"
               max={customEnd || undefined}
-              onChange={(event) => setCustomStart(event.target.value)}
+              name="vps-monitoring-custom-start"
+              onChange={(event) => {
+                setCustomError(null);
+                setCustomStart(event.target.value);
+              }}
               type="datetime-local"
               value={customStart}
             />
@@ -245,8 +255,13 @@ export function VpsMonitoringDetailPanel({
             <span>End</span>
             <input
               aria-label="Custom monitoring end"
+              id="vps-monitoring-custom-end"
               min={customStart || undefined}
-              onChange={(event) => setCustomEnd(event.target.value)}
+              name="vps-monitoring-custom-end"
+              onChange={(event) => {
+                setCustomError(null);
+                setCustomEnd(event.target.value);
+              }}
               type="datetime-local"
               value={customEnd}
             />
@@ -1118,7 +1133,9 @@ function pingStatusTone(
   if (["ok", "up", "success", "reachable"].includes(normalized)) return "ok";
   if (["degraded", "partial", "loss"].includes(normalized)) return "warning";
   if (
-    ["down", "failed", "failure", "timeout", "unreachable"].includes(normalized)
+    ["down", "error", "failed", "failure", "timeout", "unreachable"].includes(
+      normalized,
+    )
   )
     return "critical";
   if (["checking", "probing"].includes(normalized)) return "info";
@@ -1174,16 +1191,6 @@ function formatBitsPerSecond(value: number | null): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} Mbps`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)} Kbps`;
   return `${Math.round(value)} bps`;
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value)) return "No data";
-  if (value >= 1_000_000_000_000)
-    return `${(value / 1_000_000_000_000).toFixed(1)} TB`;
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)} GB`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} MB`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} KB`;
-  return `${Math.max(0, Math.round(value))} B`;
 }
 
 function formatBytesNullable(value: number | null): string {

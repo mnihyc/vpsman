@@ -988,22 +988,32 @@ export function AccessPanel({
     if (!totpPassword || !totpCode) {
       return;
     }
+    const generation = totpRequestGenerationRef.current + 1;
+    totpRequestGenerationRef.current = generation;
     setTotpPending(true);
     setTotpError(null);
     try {
       await onDisableTotp(totpPassword, totpCode);
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
       setTotpPassword("");
       setTotpCode("");
       setTotpSetup(null);
       setPendingConfirmation(null);
     } catch (actionError) {
+      if (totpRequestGenerationRef.current !== generation) {
+        return;
+      }
       setTotpError(
         actionError instanceof Error
           ? actionError.message
           : "TOTP disable failed",
       );
     } finally {
-      setTotpPending(false);
+      if (totpRequestGenerationRef.current === generation) {
+        setTotpPending(false);
+      }
     }
   }
 
@@ -1648,9 +1658,17 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
-                        onChange={(event) =>
-                          setTotpPassword(event.target.value)
-                        }
+                        disabled={totpPending}
+                        id="totp-disable-password"
+                        name="totp_disable_password"
+                        onChange={(event) => {
+                          const nextPassword = event.target.value;
+                          if (nextPassword !== totpPassword) {
+                            totpRequestGenerationRef.current += 1;
+                            setTotpError(null);
+                          }
+                          setTotpPassword(nextPassword);
+                        }}
                         type="password"
                         value={totpPassword}
                       />
@@ -1660,8 +1678,18 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP code"
                         autoComplete="one-time-code"
+                        disabled={totpPending}
+                        id="totp-disable-code"
                         inputMode="numeric"
-                        onChange={(event) => setTotpCode(event.target.value)}
+                        name="totp_disable_code"
+                        onChange={(event) => {
+                          const nextCode = event.target.value;
+                          if (nextCode !== totpCode) {
+                            totpRequestGenerationRef.current += 1;
+                            setTotpError(null);
+                          }
+                          setTotpCode(nextCode);
+                        }}
                         value={totpCode}
                       />
                     </label>
@@ -1730,6 +1758,9 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
+                        disabled={totpPending}
+                        id="totp-setup-password"
+                        name="totp_setup_password"
                         onChange={(event) => {
                           const nextPassword = event.target.value;
                           if (nextPassword !== totpPassword) {
@@ -1771,9 +1802,18 @@ export function AccessPanel({
                       <input
                         aria-label="TOTP code"
                         autoComplete="one-time-code"
-                        disabled={!totpSetup}
+                        disabled={totpPending || !totpSetup}
+                        id="totp-setup-code"
                         inputMode="numeric"
-                        onChange={(event) => setTotpCode(event.target.value)}
+                        name="totp_setup_code"
+                        onChange={(event) => {
+                          const nextCode = event.target.value;
+                          if (nextCode !== totpCode) {
+                            totpRequestGenerationRef.current += 1;
+                            setTotpError(null);
+                          }
+                          setTotpCode(nextCode);
+                        }}
                         value={totpCode}
                       />
                     </label>
@@ -2109,6 +2149,8 @@ export function AccessPanel({
                   aria-invalid={Boolean(identityClientIdError)}
                   aria-label="Agent identity client ID"
                   disabled={!canManageOperators || identityPending}
+                  id="agent-identity-client-id"
+                  name="agent_identity_client_id"
                   readOnly={identityMode === "rotate"}
                   onChange={(event) => {
                     setIdentityClientId(event.target.value);
@@ -2133,6 +2175,8 @@ export function AccessPanel({
                 <textarea
                   aria-label="Agent identity public key hex"
                   disabled={!canManageOperators || identityPending}
+                  id="agent-identity-public-key"
+                  name="agent_identity_public_key"
                   onChange={(event) => {
                     const value = event.target.value;
                     setIdentityPublicKeyHex(value);
@@ -2201,6 +2245,8 @@ export function AccessPanel({
                     identityPending ||
                     identityMode === "rotate"
                   }
+                  id="agent-identity-display-name"
+                  name="agent_identity_display_name"
                   onChange={(event) => {
                     setIdentityDisplayName(event.target.value);
                     clearIdentityReview();
@@ -2220,6 +2266,8 @@ export function AccessPanel({
                     identityPending ||
                     identityMode === "rotate"
                   }
+                  id="agent-identity-tags"
+                  name="agent_identity_tags"
                   onChange={(event) => {
                     setIdentityTags(event.target.value);
                     clearIdentityReview();
@@ -2329,6 +2377,8 @@ export function AccessPanel({
             <input
               aria-label="VPS identity revoke reason"
               disabled={!canManageOperators || revokePending}
+              id="vps-identity-revoke-reason"
+              name="vps_identity_revoke_reason"
               onChange={(event) => {
                 setRevokeReason(event.target.value);
                 clearRevokeReview();

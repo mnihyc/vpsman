@@ -763,11 +763,6 @@ export function ConsoleShell({
         <header className="topbar" ref={topbarRef}>
           <div className="scopeSelectorGroup">
             <button
-              aria-label={
-                fleetCoreEvidenceAvailable
-                  ? `Edit fleet scope: ${scopeName}. ${filteredAgentCount} of ${summary.total} resources shown`
-                  : `Edit fleet scope: ${scopeName}. Fleet inventory unavailable`
-              }
               className="scopeSelector"
               onClick={openFleetScopeEditor}
               title="Edit fleet scope in search"
@@ -782,6 +777,7 @@ export function ConsoleShell({
                     : "Inventory unavailable"}
                 </small>
               </span>
+              <span className="srOnly">Edit fleet scope</span>
             </button>
             <button
               aria-label="Clear fleet scope"

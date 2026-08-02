@@ -65,6 +65,16 @@ impl CreateJobRequest {
 }
 
 pub(crate) fn normalized_target_client_ids(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    let ids = normalized_target_client_ids_allow_empty(raw)?;
+    if ids.is_empty() {
+        return Err(ApiError::bad_request("fixed_targets_required"));
+    }
+    Ok(ids)
+}
+
+pub(crate) fn normalized_target_client_ids_allow_empty(
+    raw: &[String],
+) -> Result<Vec<String>, ApiError> {
     let mut ids = Vec::new();
     for value in raw {
         let id = value.trim();
@@ -77,9 +87,6 @@ pub(crate) fn normalized_target_client_ids(raw: &[String]) -> Result<Vec<String>
         if !ids.iter().any(|stored| stored == id) {
             ids.push(id.to_string());
         }
-    }
-    if ids.is_empty() {
-        return Err(ApiError::bad_request("fixed_targets_required"));
     }
     if ids.len() > 500 {
         return Err(ApiError::bad_request("too_many_fixed_targets"));

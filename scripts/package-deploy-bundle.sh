@@ -62,9 +62,10 @@ install -m 0644 "$repo_root/deploy/nginx.conf" "$bundle_root/nginx.conf"
 install -m 0755 "$repo_root/deploy/update.sh" "$bundle_root/update.sh"
 install -m 0644 "$repo_root/deploy/README.md" "$bundle_root/README.md"
 # deploy/README.md lives one directory below repo docs but becomes the bundle
-# root README, so adjust its one repository-relative runbook link.
+# root README, so adjust its repository-relative runbook links.
 sed -i \
-  's#](../docs/production-deployment.md)#](docs/production-deployment.md)#' \
+  -e 's#](../docs/production-deployment.md)#](docs/production-deployment.md)#' \
+  -e 's#](../docs/migration-compatibility.md)#](docs/migration-compatibility.md)#' \
   "$bundle_root/README.md"
 install -m 0644 \
   "$repo_root/deploy/AGENT_GATEWAY_INSTALL.md" \

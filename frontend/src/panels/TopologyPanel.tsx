@@ -322,6 +322,7 @@ export function TopologyPanel({
       <TopologyOspfUpdateControls
         agents={agents}
         onOpenJobDetails={onOpenJobDetails}
+        onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onOpenAdapterDefinitions={() =>
           onOpenAdapterDefinitions("routing_cost")
         }
