@@ -604,7 +604,7 @@ async function expectLiveSystemDashboardTelemetry(
 
 async function expectLiveFleetTelemetry(detail: Locator) {
   await expect(detail.locator(".metric", { hasText: "Traffic" })).toContainText(
-    /\d+(?:\.\d+)?\s*(?:bps|Kbps|Mbps|Gbps|B|KiB|MiB|GiB)/i,
+    /\d+(?:\.\d+)?\s*(?:B\/s|KB\/s|MB\/s|GB\/s|B|KiB|MiB|GiB)/i,
     {
       timeout: 30_000,
     },

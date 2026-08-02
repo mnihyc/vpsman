@@ -44,7 +44,10 @@ import type {
 } from "./types";
 import { formatCompactTime, formatFullTime, timestampMillis } from "./utils";
 import { agentStatusPresentation } from "./agentDisplayState";
-import { formatByteCount as formatBytes } from "./telemetryMetrics";
+import {
+  formatByteCount as formatBytes,
+  formatByteRateFromBitsPerSecond,
+} from "./telemetryMetrics";
 
 type PublicMonitoringSharePageProps = {
   initialClientKey?: string | null;
@@ -617,10 +620,12 @@ export function PublicMonitoringSharePage({
               ) : null}
               {fleetSnapshot.network ? (
                 <span>
-                  <small>Realtime bandwidth</small>
-                  <strong>↓ {formatRate(fleetSnapshot.network.rxBps)}</strong>
+                  <small>Realtime speed</small>
+                  <strong>
+                    ↓ {formatByteRateFromBitsPerSecond(fleetSnapshot.network.rxBps)}
+                  </strong>
                   <em>
-                    ↑ {formatRate(fleetSnapshot.network.txBps)} ·{" "}
+                    ↑ {formatByteRateFromBitsPerSecond(fleetSnapshot.network.txBps)} ·{" "}
                     {fleetSnapshot.network.freshCount} fresh
                     {cardsComplete ? "" : " · partial"}
                   </em>
@@ -924,7 +929,7 @@ function PublicMonitoringCardView({
               <MiniSparkline label="RX activity" tone="rx" values={rxHistory} />
             }
             stale={Boolean(networkProblem)}
-            value={formatRate(card.network?.rx_bps)}
+            value={formatByteRateFromBitsPerSecond(card.network?.rx_bps)}
           />
           <PublicFact
             icon={<Network size={13} />}
@@ -933,7 +938,7 @@ function PublicMonitoringCardView({
               <MiniSparkline label="TX activity" tone="tx" values={txHistory} />
             }
             stale={Boolean(networkProblem)}
-            value={formatRate(card.network?.tx_bps)}
+            value={formatByteRateFromBitsPerSecond(card.network?.tx_bps)}
           />
           {density === "comfortable" ? (
             <small className="publicMonitoringFreshness">
@@ -1465,6 +1470,7 @@ function PublicMonitoringDetailPanel({
                 lines={[
                   {
                     color: consolePalette.chart.blue,
+                    exportLabel: "RX (bps)",
                     label: "RX",
                     values: networkTimeline.records.map(
                       (point) => point?.rx_bps ?? null,
@@ -1472,6 +1478,7 @@ function PublicMonitoringDetailPanel({
                   },
                   {
                     color: consolePalette.chart.green,
+                    exportLabel: "TX (bps)",
                     label: "TX",
                     values: networkTimeline.records.map(
                       (point) => point?.tx_bps ?? null,
@@ -1479,7 +1486,7 @@ function PublicMonitoringDetailPanel({
                   },
                 ]}
                 times={networkTimeline.times}
-                valueFormatter={formatRate}
+                valueFormatter={formatByteRateFromBitsPerSecond}
                 wide
               />
             ) : null}
@@ -2243,16 +2250,6 @@ function publicConnectionTitle(
 ) {
   const freshness = publicFreshnessProblem(observedAt, "Connection telemetry");
   return `${protocol} entries in the agent's Linux network-namespace socket tables; TCP includes every state and listeners. ${freshness ?? "Current telemetry"}.`;
-}
-
-function formatRate(value: number | null | undefined): string {
-  const finite = finiteNumber(value);
-  if (finite === null) return "No data";
-  if (finite >= 1_000_000_000)
-    return `${(finite / 1_000_000_000).toFixed(1)} Gbps`;
-  if (finite >= 1_000_000) return `${(finite / 1_000_000).toFixed(1)} Mbps`;
-  if (finite >= 1_000) return `${(finite / 1_000).toFixed(1)} Kbps`;
-  return `${Math.max(0, Math.round(finite))} bps`;
 }
 
 function formatPercent(value: number | null): string {

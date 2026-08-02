@@ -158,6 +158,11 @@ Every update must keep these boundaries explicit:
 - Keep CPU utilization optional and derived from valid `/proc/stat` deltas;
   never substitute load. Live interface activity and configured authoritative
   traffic accounting are different metrics and must remain labeled separately.
+  Store interface rates as bits per second, but present live RX/TX activity as
+  decimal bytes per second (`KB/s`, `MB/s`, `GB/s`). Keep declared port speed,
+  tunnel bandwidth, rate limits, and speed-test throughput in bit-rate units
+  (`Kbps`, `Mbps`, `Gbps`). Use separate, explicitly named formatters so these
+  presentation meanings cannot drift together.
   Keep traffic history diagnostic: RX and TX are initially visible, Total is
   legend-selectable, and selector direction affects quota accounting rather
   than diagnostic-series visibility. A configured date boundary restarts both
@@ -357,8 +362,8 @@ Do not conclude when the push succeeds:
   stale responses when inputs change; monitoring pagination rejects incomplete
   or duplicate page sequences; detail polling permits only one in-flight read;
   invalid table searches and custom ranges remain visible; public monitoring
-  keeps bit-rate and byte-count units distinct; common form controls retain
-  stable identifiers.
+  keeps live transfer-rate presentation, capacity bit rates, and byte-count
+  totals distinct; common form controls retain stable identifiers.
 - **Category:** deployment documentation. **Decision:** the deployment archive
   rewrites both shipped runbook links to bundle-local paths, while selector and
   public-share documentation describe exact-empty maintenance and allowlisted

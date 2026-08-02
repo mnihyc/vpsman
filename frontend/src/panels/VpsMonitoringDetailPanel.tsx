@@ -22,7 +22,10 @@ import type {
 } from "../types";
 import { formatTime, timestampMillis } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
-import { formatByteCount as formatBytes } from "../telemetryMetrics";
+import {
+  formatByteCount as formatBytes,
+  formatByteRateFromBitsPerSecond,
+} from "../telemetryMetrics";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -431,7 +434,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
           emptyLabel="Network rate history is unavailable for this range"
           exportFileName={`${safeFilePart(data.client.id)}-network-${data.range.window}`}
           title="Network RX / TX"
-          valueFormatter={formatBitsPerSecond}
+          valueFormatter={formatByteRateFromBitsPerSecond}
         />
         <MonitoringChart
           className="wideWidget"
@@ -847,11 +850,13 @@ function networkChart(
     lines: [
       {
         color: consolePalette.chart.blue,
+        exportLabel: "RX rate (bps)",
         label: "RX rate",
         values: timeline.epochs.map((epoch) => buckets.get(epoch)?.rx ?? null),
       },
       {
         color: consolePalette.chart.green,
+        exportLabel: "TX rate (bps)",
         label: "TX rate",
         values: timeline.epochs.map((epoch) => buckets.get(epoch)?.tx ?? null),
       },
@@ -1182,15 +1187,6 @@ function formatMilliseconds(value: number | null): string {
 
 function formatLoss(value: number | null): string {
   return value === null ? "loss unavailable" : `${formatPercent(value)} loss`;
-}
-
-function formatBitsPerSecond(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return "No data";
-  if (value >= 1_000_000_000)
-    return `${(value / 1_000_000_000).toFixed(1)} Gbps`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} Mbps`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} Kbps`;
-  return `${Math.round(value)} bps`;
 }
 
 function formatBytesNullable(value: number | null): string {

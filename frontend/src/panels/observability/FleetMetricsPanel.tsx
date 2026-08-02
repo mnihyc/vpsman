@@ -24,7 +24,10 @@ import type {
   DashboardScopeKind,
   DashboardWindow,
 } from "../../types";
-import { resourceMetricDefinition } from "../../telemetryMetrics";
+import {
+  formatByteRateFromBitsPerSecond,
+  resourceMetricDefinition,
+} from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
 
 type FleetMetricsPanelProps = {
@@ -484,7 +487,7 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
         {cluster.kind === "date"
           ? `${cluster.total} network samples, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} running jobs${boundedSuffix}`
           : `${cluster.online}/${cluster.total} online, ${cluster.offline} offline, ${cluster.stale} stale, ${cluster.revoked} access revoked, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
-        , {formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
+        , {formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
       </small>
     </div>
   );
@@ -746,17 +749,4 @@ function formatDuration(valueMs: number): string {
   const days = Math.floor(hours / 24);
   const remainingHours = hours % 24;
   return remainingHours ? `${days}d ${remainingHours}h` : `${days}d`;
-}
-
-function formatBitsPerSecond(value: number): string {
-  if (value >= 1_000_000_000) {
-    return `${(value / 1_000_000_000).toFixed(1)} Gbps`;
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)} Mbps`;
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(1)} Kbps`;
-  }
-  return `${Math.round(value)} bps`;
 }

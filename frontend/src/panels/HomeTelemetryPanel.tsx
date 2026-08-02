@@ -40,6 +40,7 @@ import type {
   DashboardWindow,
 } from "../types";
 import {
+  formatByteRateFromBitsPerSecond,
   INTERFACE_RATE_DEFINITION,
   resourceMetricDefinition,
 } from "../telemetryMetrics";
@@ -173,8 +174,18 @@ export function HomeTelemetryPanel({
   const networkSpeedChart = useMemo(
     () => ({
       lines: [
-        { color: consolePalette.chart.blue, label: "Avg inbound rate", values: (network?.points ?? []).map((point) => point.rx_bps) },
-        { color: consolePalette.chart.green, label: "Avg outbound rate", values: (network?.points ?? []).map((point) => point.tx_bps) },
+        {
+          color: consolePalette.chart.blue,
+          exportLabel: "Avg inbound rate (bps)",
+          label: "Avg inbound rate",
+          values: (network?.points ?? []).map((point) => point.rx_bps),
+        },
+        {
+          color: consolePalette.chart.green,
+          exportLabel: "Avg outbound rate (bps)",
+          label: "Avg outbound rate",
+          values: (network?.points ?? []).map((point) => point.tx_bps),
+        },
       ],
       times: (network?.points ?? []).map((point) => point.bucket_start),
     }),
@@ -490,7 +501,7 @@ export function HomeTelemetryPanel({
               value={`${operations?.backup_completed ?? 0}/${(operations?.backup_completed ?? 0) + (operations?.backup_pending ?? 0)}`}
             />
             <HomeMetricCard
-              detail={`${formatBitsPerSecond(network?.rx_bps ?? 0)} in / ${formatBitsPerSecond(network?.tx_bps ?? 0)} out`}
+              detail={`${formatByteRateFromBitsPerSecond(network?.rx_bps)} in / ${formatByteRateFromBitsPerSecond(network?.tx_bps)} out`}
               icon={<Network size={19} />}
               label="Network activity"
               onClick={() =>
@@ -498,15 +509,17 @@ export function HomeTelemetryPanel({
                   description: "Latest observed per-interface receive and transmit rate totals.",
                   drilldown: { label: "Inspect network evidence", query: null, subpage: "evidence", view: "Network" },
                   metrics: [
-                    { label: "Inbound", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
-                    { label: "Outbound", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
+                    { label: "Inbound", tone: "info", value: formatByteRateFromBitsPerSecond(network?.rx_bps) },
+                    { label: "Outbound", tone: "info", value: formatByteRateFromBitsPerSecond(network?.tx_bps) },
                     { label: "Top clients", value: String(network?.top_clients.length ?? 0) },
                   ],
                   title: "Network activity",
                 })
               }
               tone="info"
-              value={formatBitsPerSecond((network?.rx_bps ?? 0) + (network?.tx_bps ?? 0))}
+              value={formatByteRateFromBitsPerSecond(
+                network ? network.rx_bps + network.tx_bps : null,
+              )}
             />
           </div>
         </section>
@@ -671,9 +684,9 @@ export function HomeTelemetryPanel({
                           description: `Aggregated receive and transmit rate history for the selected time range. ${INTERFACE_RATE_DEFINITION}`,
                           drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
                           metrics: [
-                            { label: "Inbound avg", tone: "info", value: formatBitsPerSecond(network?.rx_bps ?? 0) },
-                            { label: "Outbound avg", tone: "info", value: formatBitsPerSecond(network?.tx_bps ?? 0) },
-                            { label: "Peak bucket", value: formatBitsPerSecond(networkPeak) },
+                            { label: "Inbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(network?.rx_bps) },
+                            { label: "Outbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(network?.tx_bps) },
+                            { label: "Peak bucket", value: formatByteRateFromBitsPerSecond(networkPeak) },
                           ],
                           title: "Network rate",
                         })
@@ -688,7 +701,7 @@ export function HomeTelemetryPanel({
                     emptyLabel="No network rate samples for this time gap"
                     lines={networkSpeedChart.lines}
                     times={networkSpeedChart.times}
-                    valueFormatter={(value) => formatBitsPerSecond(value ?? 0)}
+                    valueFormatter={formatByteRateFromBitsPerSecond}
                   />
                 </div>
                 <div className="dashboardTopClients">
@@ -701,8 +714,8 @@ export function HomeTelemetryPanel({
                       description: `${client.interfaces.length} observed interface${client.interfaces.length === 1 ? "" : "s"}.`,
                       drilldown: client.drilldown,
                       metrics: [
-                        { label: "Inbound avg", tone: "info", value: formatBitsPerSecond(client.rx_bps) },
-                        { label: "Outbound avg", tone: "info", value: formatBitsPerSecond(client.tx_bps) },
+                        { label: "Inbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(client.rx_bps) },
+                        { label: "Outbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(client.tx_bps) },
                         { label: "Interfaces", value: client.interfaces.join(", ") || "No interfaces" },
                       ],
                       title: client.label,
@@ -711,7 +724,7 @@ export function HomeTelemetryPanel({
                         <strong>{client.label}</strong>
                         <small>{client.interfaces.join(", ") || client.client_id}</small>
                       </span>
-                      <b>{formatBitsPerSecond(client.rx_bps + client.tx_bps)}</b>
+                      <b>{formatByteRateFromBitsPerSecond(client.rx_bps + client.tx_bps)}</b>
                     </button>
                   ))}
                 </div>
@@ -978,7 +991,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
       { label: "Pending backups", tone: cluster.stale ? "info" : "neutral", value: String(cluster.stale) },
       { label: "Alerts", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
       { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-      { label: "Avg network rate", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+      { label: "Avg network rate", tone: "info", value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
     ];
   }
   return [
@@ -988,7 +1001,7 @@ function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetri
     { label: "Stale", tone: cluster.stale ? "warning" : "ok", value: String(cluster.stale) },
     { label: "Warnings", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
     { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-    { label: "Avg network rate", tone: "info", value: formatBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+    { label: "Avg network rate", tone: "info", value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
   ];
 }
 
@@ -1068,19 +1081,6 @@ function resourceMetricTitle(metric: DashboardResourceMetric): string {
 
 function resourcePeakLabel(metric: DashboardResourceMetric): string {
   return metric === "disk_free" ? "Lowest" : "Peak";
-}
-
-function formatBitsPerSecond(value: number): string {
-  if (value >= 1_000_000_000) {
-    return `${(value / 1_000_000_000).toFixed(1)} Gbps`;
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)} Mbps`;
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(1)} Kbps`;
-  }
-  return `${Math.round(value)} bps`;
 }
 
 function sortTrafficClients(clients: DashboardTrafficClientRecord[], sort: DashboardTrafficSort): DashboardTrafficClientRecord[] {

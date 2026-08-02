@@ -77,6 +77,7 @@ import {
 } from "../searchExpression";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { scrollIntoViewWithMotion } from "../motion";
+import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
 import {
   addressFamilyLabel,
   latencyStatusLabel,
@@ -3284,7 +3285,7 @@ function FleetSelectionStatsTable({
                   {rates
                     .map(
                       (rate) =>
-                        `${rate.interface}: ${formatBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
+                        `${rate.interface}: ${formatByteRateFromBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
                     )
                     .join("; ") || "no rate rollup"}
                 </span>
@@ -8969,7 +8970,7 @@ function formatNetworkRateSummary(
   }
   const rx = rates.reduce((total, rate) => total + rate.rx_bps_avg, 0);
   const tx = rates.reduce((total, rate) => total + rate.tx_bps_avg, 0);
-  return `RX ${formatBitsPerSecond(rx)} / TX ${formatBitsPerSecond(tx)}`;
+  return `RX ${formatByteRateFromBitsPerSecond(rx)} / TX ${formatByteRateFromBitsPerSecond(tx)}`;
 }
 
 function formatSignalTraffic(
@@ -8981,7 +8982,7 @@ function formatSignalTraffic(
       (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
       0,
     );
-    return formatBitsPerSecond(totalBps);
+    return formatByteRateFromBitsPerSecond(totalBps);
   }
   if (
     rollup &&
@@ -9033,17 +9034,6 @@ function formatTunnelCapability(
   return capabilities.can_attempt_privileged_ops
     ? "Unprivileged best-effort, root operations may be ineffective"
     : "Observation only";
-}
-
-function formatBitsPerSecond(value: number) {
-  const units = ["bps", "Kbps", "Mbps", "Gbps", "Tbps"];
-  let next = Math.max(0, value);
-  let unit = 0;
-  while (next >= 1000 && unit < units.length - 1) {
-    next /= 1000;
-    unit += 1;
-  }
-  return `${next >= 10 || unit === 0 ? Math.round(next) : next.toFixed(1)} ${units[unit]}`;
 }
 
 function formatBytes(value: number) {
@@ -9548,7 +9538,7 @@ function NetworkRateList({
                 />
                 <TelemetryStack
                   detail={rateByteDetail(rate)}
-                  main={`RX ${formatBitsPerSecond(rate.rx_bps_avg)} / TX ${formatBitsPerSecond(rate.tx_bps_avg)}`}
+                  main={`RX ${formatByteRateFromBitsPerSecond(rate.rx_bps_avg)} / TX ${formatByteRateFromBitsPerSecond(rate.tx_bps_avg)}`}
                 />
                 <TelemetryStack
                   detail={`updated ${formatCompactTime(rate.updated_at)}`}

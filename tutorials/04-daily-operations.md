@@ -178,9 +178,12 @@ manual pruning, especially for object-backed domains such as job outputs and
 backup artifacts:
 
 Dashboard network rates are interval averages derived from cumulative interface
-counters, not instantaneous samples. Active tunnel throughput is a separate
-bounded-test average. See [Telemetry metric definitions](../docs/telemetry-metrics.md)
-before comparing chart rates, traffic totals, or test throughput.
+counters, not instantaneous samples. The console presents these RX/TX transfer
+rates in decimal `KB/s`, `MB/s`, or `GB/s`; declared bandwidth and active tunnel
+speed-test throughput remain bit rates in `Mbps` or `Gbps`. Active tunnel
+throughput is a separate bounded-test average. See
+[Telemetry metric definitions](../docs/telemetry-metrics.md) before comparing
+chart rates, traffic totals, or test throughput.
 
 ```sh
 cargo run -p vpsctl -- history-retention

@@ -3,7 +3,32 @@ import type { DashboardResourceMetric } from "./types";
 export type NetworkObservationMetric = "latency" | "loss" | "throughput";
 
 export const INTERFACE_RATE_DEFINITION =
-  "Interval-average rate from non-negative deltas of cumulative interface byte counters between adjacent telemetry buckets; never an instantaneous line-speed sample.";
+  "Interval-average rate from non-negative deltas of cumulative interface byte counters between adjacent telemetry buckets; stored as bits per second and displayed as decimal bytes per second, never as an instantaneous line-speed sample.";
+
+export function formatByteRateFromBitsPerSecond(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "No data";
+  }
+  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"];
+  let scaled = Math.max(0, value) / 8;
+  let unit = 0;
+  while (scaled >= 1_000 && unit < units.length - 1) {
+    scaled /= 1_000;
+    unit += 1;
+  }
+  if (scaled === 0) {
+    return `0 ${units[unit]}`;
+  }
+  const display =
+    unit === 0
+      ? scaled >= 10
+        ? Math.round(scaled).toString()
+        : scaled.toFixed(1)
+      : scaled.toFixed(1);
+  return `${display} ${units[unit]}`;
+}
 
 export function formatByteCount(value: number): string {
   if (!Number.isFinite(value)) return "No data";

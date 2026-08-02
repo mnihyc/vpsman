@@ -28,6 +28,7 @@ import type {
 } from "../types";
 import {
   formatByteCount as formatBytes,
+  formatByteRateFromBitsPerSecond,
   INTERFACE_RATE_DEFINITION,
 } from "../telemetryMetrics";
 import { useHistoryEntryState } from "../historyEntryState";
@@ -601,7 +602,7 @@ export function FleetMonitorPanel({
             <em title={locationSummary}>{locationSummary}</em>
           </span>
           <span>
-            <small>Realtime bandwidth</small>
+            <small>Realtime speed</small>
             <strong title={rxSummary}>{rxSummary}</strong>
             <em title={txSummary}>{txSummary}</em>
           </span>
@@ -2384,7 +2385,7 @@ function formatLoad(value: number | null) {
 }
 
 function formatRateOrUnavailable(value: number | null) {
-  return value === null ? "n/a" : formatRate(value);
+  return value === null ? "n/a" : formatByteRateFromBitsPerSecond(value);
 }
 
 function networkMetricTitle(
@@ -2415,17 +2416,6 @@ function latestTimestamp(values: Array<string | null | undefined>) {
     .filter((value) => Number.isFinite(value))
     .sort((left, right) => right - left)[0];
   return latest === undefined ? null : new Date(latest).toISOString();
-}
-
-function formatRate(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 bps";
-  }
-  if (value >= 1_000_000_000)
-    return `${(value / 1_000_000_000).toFixed(1)} Gbps`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} Mbps`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} Kbps`;
-  return `${Math.round(value)} bps`;
 }
 
 function isActiveJobStatus(status: string) {

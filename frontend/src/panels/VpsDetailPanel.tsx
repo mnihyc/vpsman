@@ -43,6 +43,7 @@ import type {
   TelemetryTunnelRecord,
   VpsRuleValueRecord,
 } from "../types";
+import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
 import {
   dispatchFailureReason,
   displayNameOrUnnamed,
@@ -1083,11 +1084,19 @@ function NetworkTab({
         <VpsFact label="Selected traffic" value={trafficSelectorLabel(trafficRules)} />
         <VpsFact
           label="Latest avg RX"
-          value={latestRate ? formatBytesPerSecond(latestRate.rx_bps_avg) : "No rate"}
+          value={
+            latestRate
+              ? formatByteRateFromBitsPerSecond(latestRate.rx_bps_avg)
+              : "No rate"
+          }
         />
         <VpsFact
           label="Latest avg TX"
-          value={latestRate ? formatBytesPerSecond(latestRate.tx_bps_avg) : "No rate"}
+          value={
+            latestRate
+              ? formatByteRateFromBitsPerSecond(latestRate.tx_bps_avg)
+              : "No rate"
+          }
         />
         <VpsFact
           label="Cycle Total"
@@ -1924,19 +1933,6 @@ function newestNetworkRate(rates: TelemetryNetworkRateRecord[]) {
       .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0] ??
     null
   );
-}
-
-function formatBytesPerSecond(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B/s";
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MiB/s`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB/s`;
-  }
-  return `${Math.round(value)} B/s`;
 }
 
 function trafficSelectorLabel(rules: VpsRuleValueRecord[]) {

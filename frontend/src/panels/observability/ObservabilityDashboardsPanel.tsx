@@ -35,7 +35,10 @@ import type {
   DashboardSummaryRecord,
   DashboardWindow,
 } from "../../types";
-import { INTERFACE_RATE_DEFINITION } from "../../telemetryMetrics";
+import {
+  formatByteRateFromBitsPerSecond,
+  INTERFACE_RATE_DEFINITION,
+} from "../../telemetryMetrics";
 import { formatCompactTime } from "../../utils";
 import { replaceHistoryEntry } from "../../historyEntryState";
 import { agentStatusPresentation } from "../../agentDisplayState";
@@ -767,11 +770,13 @@ function NetworkDashboard({
   const rateLines: TimeSeriesChartLine[] = [
     {
       color: consolePalette.chart.blue,
+      exportLabel: "Avg inbound rate (bps)",
       label: "Avg inbound rate",
       values: network.points.map((point) => point.rx_bps),
     },
     {
       color: consolePalette.chart.green,
+      exportLabel: "Avg outbound rate (bps)",
       label: "Avg outbound rate",
       values: network.points.map((point) => point.tx_bps),
     },
@@ -808,12 +813,12 @@ function NetworkDashboard({
       <MetricTile
         detail="Latest coherent interval average"
         label="Avg RX rate"
-        value={formatBps(network.rx_bps)}
+        value={formatByteRateFromBitsPerSecond(network.rx_bps)}
       />
       <MetricTile
         detail="Latest coherent interval average"
         label="Avg TX rate"
-        value={formatBps(network.tx_bps)}
+        value={formatByteRateFromBitsPerSecond(network.tx_bps)}
       />
       <MetricTile
         detail="Top rate rows"
@@ -831,7 +836,7 @@ function NetworkDashboard({
       >
         <WidgetHeader
           title="Network rate chart"
-          detail="Interval-average ingress and egress bps over time"
+          detail="Interval-average ingress and egress transfer rate over time"
         />
         <p
           className="observabilityMetricDefinition"
@@ -845,7 +850,7 @@ function NetworkDashboard({
           emptyLabel="No network rate points"
           lines={rateLines}
           times={network.points.map((point) => point.bucket_start)}
-          valueFormatter={(value) => formatBps(value)}
+          valueFormatter={formatByteRateFromBitsPerSecond}
         />
       </div>
       <div
@@ -879,8 +884,8 @@ function NetworkDashboard({
               {countPhrase(client.interfaces.length, "interface")}
             </ConsoleStatusBadge>
             <strong>{client.label || client.client_id || "Unnamed VPS"}</strong>
-            <span>{formatBps(client.rx_bps)} in</span>
-            <small>{formatBps(client.tx_bps)} out</small>
+            <span>{formatByteRateFromBitsPerSecond(client.rx_bps)} in</span>
+            <small>{formatByteRateFromBitsPerSecond(client.tx_bps)} out</small>
           </div>
         ))}
         {!network.top_clients.length ? (
@@ -955,8 +960,12 @@ function GroupDashboard({
               </dd>
             </div>
             <div>
-              <dt>Traffic</dt>
-              <dd>{formatBps(cluster.rx_bps + cluster.tx_bps)}</dd>
+              <dt>Network rate</dt>
+              <dd>
+                {formatByteRateFromBitsPerSecond(
+                  cluster.rx_bps + cluster.tx_bps,
+                )}
+              </dd>
             </div>
           </dl>
           <i
@@ -1447,16 +1456,6 @@ function thresholdLabel(series: DashboardResourceSeriesRecord): string {
   if (tone === "warning") return "warning";
   if (tone === "neutral") return "missing";
   return "ok";
-}
-
-function formatBps(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value))
-    return "No data";
-  if (value >= 1_000_000_000)
-    return `${(value / 1_000_000_000).toFixed(1)} Gbps`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} Mbps`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} Kbps`;
-  return `${Math.round(value)} bps`;
 }
 
 function formatBytes(value: number | null | undefined): string {

@@ -2807,7 +2807,16 @@ function formatTransferBytes(value: number): string {
 }
 
 function formatTransferRate(value: number): string {
-  return value > 0 ? `${value} KiB/s cap` : "no rate cap";
+  if (value <= 0) {
+    return "no rate cap";
+  }
+  if (value >= 1_000) {
+    const mbps = value / 1_000;
+    return `${mbps.toLocaleString(undefined, {
+      maximumFractionDigits: mbps < 10 ? 1 : 0,
+    })} Mbps cap`;
+  }
+  return `${value.toLocaleString()} Kbps cap`;
 }
 
 function fixedModeBoundaryCopy(mode: DispatchMode): {

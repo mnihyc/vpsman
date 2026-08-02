@@ -80,6 +80,13 @@ rate_bps = (current_counter - previous_counter) * 8
            / elapsed_seconds
 ```
 
+Storage, API fields, and raw CSV values keep this `bps` bit-rate contract.
+Operator-facing live RX/TX values and chart labels convert it by eight and use
+decimal transfer-rate units (`B/s`, `KB/s`, `MB/s`, `GB/s`). Declared port
+speed, tunnel bandwidth, shaping/rate limits, and bounded speed-test throughput
+remain capacity measurements in `bps`, `Kbps`, `Mbps`, or `Gbps`; they must not
+use the live-transfer formatter.
+
 The query includes one pre-window counter as a baseline when available. A
 counter reset or wrap invalidates that interval instead of inventing zero
 activity; the reset point is retained as the next interval's baseline. The

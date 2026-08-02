@@ -249,6 +249,9 @@ test("public cards remain static when detail history is not shared", async ({
     name: /Shared edge · Online shared monitoring card/,
   });
   await expect(card).toBeVisible();
+  await expect(card.getByText("128.0 KB/s", { exact: true })).toBeVisible();
+  await expect(card.getByText("64.0 KB/s", { exact: true })).toBeVisible();
+  await expect(card).not.toContainText("Mbps");
   await expect(card).not.toHaveAttribute("tabindex");
   await expect(
     page.getByRole("link", {

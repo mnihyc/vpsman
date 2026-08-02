@@ -14,6 +14,7 @@ import "uplot/dist/uPlot.min.css";
 
 export type TimeSeriesChartLine = {
   color: string;
+  exportLabel?: string;
   initiallyHidden?: boolean;
   label: string;
   values: Array<number | null>;
@@ -329,7 +330,10 @@ export function TimeSeriesChart({
   function exportVisibleCsv() {
     if (!exportFileName) return;
     const rows = [
-      ["timestamp", ...visibleLines.map((line) => line.label)],
+      [
+        "timestamp",
+        ...visibleLines.map((line) => line.exportLabel ?? line.label),
+      ],
       ...unixTimes.map((unixTime, index) => [
         new Date(unixTime * 1000).toISOString(),
         ...visibleLines.map((line) => line.values[index] ?? ""),

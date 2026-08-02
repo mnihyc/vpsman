@@ -6390,10 +6390,10 @@ test("keeps each expanded VPS network evidence scoped to that VPS", async ({
     .locator(".timeline")
     .filter({ hasText: /^Network rate/ });
 
-  await expect(edgeRate).toContainText("RX 19 Mbps / TX 18 Mbps");
-  await expect(coreRate).toContainText("RX 4.1 Mbps / TX 3.6 Mbps");
-  await expect(edgeRate).not.toContainText("RX 4.1 Mbps");
-  await expect(coreRate).not.toContainText("RX 19 Mbps");
+  await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
+  await expect(coreRate).toContainText("RX 514.2 KB/s / TX 454.7 KB/s");
+  await expect(edgeRate).not.toContainText("RX 514.2 KB/s");
+  await expect(coreRate).not.toContainText("RX 2.4 MB/s");
 });
 
 test("shows grouped execution summaries for job output details", async ({
