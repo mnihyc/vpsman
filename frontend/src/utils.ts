@@ -245,6 +245,9 @@ export function clientIdSuffix(
   if (!trimmed) {
     return null;
   }
+  if (/^v-[1-9][0-9]*$/.test(trimmed)) {
+    return trimmed;
+  }
   const normalized = trimmed.replace(/[^A-Za-z0-9]/g, "");
   const source = normalized || trimmed;
   return source.slice(-4) || null;
