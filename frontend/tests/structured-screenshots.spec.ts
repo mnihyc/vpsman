@@ -149,7 +149,7 @@ const allViews: ScreenshotEntry[] = [
     id: "06-fleet-bulk-groups",
     requiredText: [
       "Bulk group mutation",
-      "Server resolution runs before confirmation",
+      "Preview works now; unlock only when applying.",
     ],
   },
   {
@@ -1035,12 +1035,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Maintenance",
     heading: "System maintenance",
     id: "57-system-maintenance",
-    requiredText: [
-      "Preview gate",
-      "Artifact types",
-      "Delete artifacts",
-      "Maintenance jobs",
-    ],
+    requiredText: ["Stale frozen selectors", "Saved selector", "Frozen targets"],
   },
   {
     view: "System",

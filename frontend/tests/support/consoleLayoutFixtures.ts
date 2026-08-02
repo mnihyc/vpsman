@@ -5493,7 +5493,11 @@ export async function installConsoleApiMock(
         if (pathname === "/api/v1/auth/totp/setup" && method === "POST") {
           const body = asFixtureRecord(await readJsonBody(input, init)) ?? {};
           requests.totpSetups.push(body);
-          if (String(body.password ?? "") !== "valid-password-123") {
+          const password = String(body.password ?? "");
+          if (password.length < 12) {
+            return jsonResponse({ error: "password_too_short" }, 400);
+          }
+          if (password !== "valid-password-123") {
             return jsonResponse(
               {
                 error: "invalid_totp_credentials",

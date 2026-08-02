@@ -1210,7 +1210,7 @@ export function VpsMonitorCard({
               >
                 {telemetryState.label}
               </span>
-              <span>{agent.stale_reason ?? signals.statusText}</span>
+              {agent.stale_reason ? <span>{agent.stale_reason}</span> : null}
             </div>
           ) : null}
           {signals.alertTone !== "neutral" ||

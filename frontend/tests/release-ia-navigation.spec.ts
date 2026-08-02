@@ -7,6 +7,7 @@ import {
 } from "./support/consoleLayoutFixtures";
 import {
   activate,
+  activateSystemMaintenanceSubpanel,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -871,10 +872,14 @@ test("release IA reaches every configured page and subpage", async ({
       await expect(header.getByLabel("Page operational context")).toContainText(
         subpage.label,
       );
-      const isResourceDetailRoute =
-        view === "Fleet" && subpage.id === "instance_detail";
-      if (isResourceDetailRoute) {
+      const ownsFleetSummary =
+        view === "Fleet" &&
+        (subpage.id === "instance_detail" || subpage.id === "monitor");
+      if (ownsFleetSummary) {
         await expect(header.getByLabel("Fleet status summary")).toHaveCount(0);
+        if (subpage.id === "monitor") {
+          await expect(page.getByLabel("VPS cards fleet summary")).toBeVisible();
+        }
       } else {
         await expect(header.getByLabel("Fleet status summary")).toBeVisible();
       }
@@ -988,8 +993,9 @@ test("release pages use operational page headers", async ({ page }) => {
 
   await openConsoleSubpage(page, "Fleet", "Monitor");
   const fleetMonitorHeader = page.locator(".consoleHeader");
-  await expect(fleetMonitorHeader.locator(".quickStats")).toBeVisible();
+  await expect(fleetMonitorHeader.locator(".quickStats")).toHaveCount(0);
   await expect(fleetMonitorHeader.locator(".fleetStatusStrip")).toHaveCount(0);
+  await expect(page.getByLabel("VPS cards fleet summary")).toBeVisible();
 });
 
 test("remote operations owns terminal, files, transfers, processes, services, storage, and bulk files", async ({
@@ -2284,9 +2290,12 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   ).toBeVisible();
   const groupRegistryGrid = page.getByLabel("Group registry data grid");
   await activate(
-    groupRegistryGrid.getByRole("button", { name: "Create group" }),
+    groupRegistryGrid.getByRole("button", {
+      name: "Create group",
+      exact: true,
+    }),
   );
-  const createGroupDrawer = page.getByLabel("Create group");
+  const createGroupDrawer = page.getByLabel("Create group", { exact: true });
   await expect(createGroupDrawer.getByLabel("Group name")).toHaveAttribute(
     "placeholder",
     "role:edge or maintenance",
@@ -2296,7 +2305,10 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     createGroupDrawer.getByText("Use one group name; commas are not accepted."),
   ).toBeVisible();
   await expect(
-    createGroupDrawer.getByRole("button", { name: "Create group" }),
+    createGroupDrawer.getByRole("button", {
+      name: "Create group",
+      exact: true,
+    }),
   ).toBeDisabled();
   await activate(
     createGroupDrawer.getByRole("button", { name: "Close Create group" }),
@@ -2693,13 +2705,17 @@ test("VPS detail sections stay scoped to their resource history entry", async ({
   await waitForConsoleShell(page);
 
   const detail = page.getByLabel("Canonical VPS detail");
-  const detailSection = detail.getByLabel("VPS detail section");
-  const resourcesTab = detail.getByRole("tab", {
-    name: "Resources",
-    exact: true,
-  });
+  const detailSection = detail
+    .locator(".detailTabSelect:visible")
+    .getByLabel("VPS detail section");
+  const resourcesTab = detail
+    .locator(".detailTabs:visible")
+    .getByRole("tab", {
+      name: "Resources",
+      exact: true,
+    });
   await expect(detailSection.or(resourcesTab)).toBeVisible();
-  const usesSectionSelector = await detailSection.isVisible();
+  const usesSectionSelector = (await detailSection.count()) === 1;
   if (usesSectionSelector) {
     await detailSection.selectOption("Resources");
     await expect(detailSection).toHaveValue("Resources");
@@ -7647,6 +7663,7 @@ test("system maintenance owns artifact cleanup and maintenance job records", asy
   }
 
   await openConsoleSubpage(page, "System", "Maintenance");
+  await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
 
   await expect(
     page.getByRole("heading", { level: 1, name: "System maintenance" }),
@@ -7694,6 +7711,8 @@ test("system maintenance owns artifact cleanup and maintenance job records", asy
   ).toContainText("1 representative");
   await activate(page.getByRole("button", { name: "Close confirmation" }));
 
+  await activateSystemMaintenanceSubpanel(page, "Maintenance jobs");
+
   const maintenanceJobs = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Maintenance jobs" }),
   });
@@ -7717,6 +7736,7 @@ test("system maintenance presents an empty cleanup preview as a neutral no-op", 
   });
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "System", "Maintenance");
+  await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
 
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
@@ -7980,9 +8000,27 @@ async function expectHomeOverviewToFit(page: Page, label: string) {
         const elementOverflow =
           element.scrollWidth > element.clientWidth + 1 &&
           style.overflowX !== "visible";
+        let parent = element.parentElement;
+        let insideFittingHorizontalScroller = false;
+        while (parent) {
+          const parentStyle = window.getComputedStyle(parent);
+          const parentRect = parent.getBoundingClientRect();
+          if (
+            ["auto", "scroll"].includes(parentStyle.overflowX) &&
+            parent.scrollWidth > parent.clientWidth + 1 &&
+            parentRect.left >= -1 &&
+            parentRect.right <= document.documentElement.clientWidth + 1
+          ) {
+            insideFittingHorizontalScroller = true;
+            break;
+          }
+          if (parent === workspace) break;
+          parent = parent.parentElement;
+        }
         const pageOverflow =
-          rect.right > document.documentElement.clientWidth + 1 ||
-          rect.left < -1;
+          !insideFittingHorizontalScroller &&
+          (rect.right > document.documentElement.clientWidth + 1 ||
+            rect.left < -1);
         return elementOverflow || pageOverflow
           ? {
               className:

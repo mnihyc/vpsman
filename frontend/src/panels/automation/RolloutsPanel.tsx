@@ -646,7 +646,9 @@ export function RolloutsPanel({
         }
         tone={reviewAction?.kind === "abort" ? "danger" : "warning"}
       >
-        {reviewAction && feedback?.jobId === reviewAction.rollout.job_id ? (
+        {reviewAction &&
+        feedback?.jobId === reviewAction.rollout.job_id &&
+        feedback.tone !== "danger" ? (
           <ActionFeedback
             className="rolloutReviewFeedback"
             message={feedback.message}

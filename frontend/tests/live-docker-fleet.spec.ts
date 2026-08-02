@@ -1,7 +1,11 @@
 import path from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { activate, openConsoleSubpage } from "./support/consoleNavigation";
+import {
+  activate,
+  activateSystemMaintenanceSubpanel,
+  openConsoleSubpage,
+} from "./support/consoleNavigation";
 
 test.skip(
   !process.env.VPSMAN_DOCKER_FLEET_UI_SMOKE,
@@ -1076,6 +1080,7 @@ async function exerciseAlertNotificationChannels(
 
 async function exerciseServerJobsCleanup(page: Page, projectName: string) {
   await openLiveConsoleSubpage(page, "System", "Maintenance");
+  await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });
@@ -1121,6 +1126,8 @@ async function exerciseServerJobsCleanup(page: Page, projectName: string) {
     .getByLabel("Type DELETE to confirm artifact deletion")
     .fill("DELETE");
   await prompt.getByRole("button", { name: "Delete artifacts" }).click();
+
+  await activateSystemMaintenanceSubpanel(page, "Maintenance jobs");
 
   const serverJobsPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Maintenance jobs" }),
@@ -1443,6 +1450,9 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
 
   for (const entry of subpages) {
     await openLiveConsoleSubpage(page, entry.view, entry.subpage);
+    if (entry.view === "System" && entry.subpage === "Maintenance") {
+      await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
+    }
     await expectMainMarker(page, entry.marker);
     if (entry.view === "Network" && entry.subpage === "Graph") {
       const graphPanel = page.locator(".topologyGraphPanel");

@@ -222,6 +222,18 @@ export async function openConsoleSubpage(
   throw new Error(`Workspace route did not become ready: ${viewDisplayLabel} / ${subpageLabel}`);
 }
 
+export async function activateSystemMaintenanceSubpanel(
+  page: Page,
+  label: "Artifact cleanup" | "Maintenance jobs" | "Stale selectors",
+) {
+  const navigation = page.getByRole("navigation", {
+    name: "System maintenance subpanels",
+  });
+  const button = navigation.getByRole("button", { name: label, exact: true });
+  await activate(button);
+  await expect(button).toHaveClass(/\bactive\b/);
+}
+
 async function recoverWorkspaceRouteError(page: Page, attempt: number) {
   if (attempt >= 2) {
     return false;

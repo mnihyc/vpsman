@@ -2367,9 +2367,11 @@ test("keeps console layout usable on desktop and mobile widths", async ({
         ),
       )
       .toBe("16px");
-    await expect(
-      page.getByRole("button", { name: /Edit fleet scope: All VPS resources/ }),
-    ).toBeVisible();
+    const fleetScopeEditor = page.getByRole("button", {
+      name: /Edit fleet scope/,
+    });
+    await expect(fleetScopeEditor).toBeVisible();
+    await expect(fleetScopeEditor).toContainText("All VPS resources");
     await expect(
       page.getByRole("button", { name: "Clear fleet scope" }),
     ).toBeDisabled();
@@ -6420,12 +6422,15 @@ test("shows grouped execution summaries for job output details", async ({
   await expect(page.getByText("Grouped outcomes")).toBeVisible();
   await expect(page.getByText("Target result details")).toBeVisible();
   const groupedOutcomesGrid = page.getByLabel("Grouped outcomes data grid");
-  await expect(groupedOutcomesGrid.locator(".gridCounts")).not.toContainText(
-    "selected",
+  await expect(groupedOutcomesGrid.locator(".gridCounts")).toContainText(
+    "0 selected",
   );
   await expect(
     groupedOutcomesGrid.locator('.gridHeaderGroup input[type="checkbox"]'),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
+  await selectGridRow(page, "Grouped outcomes", "g1");
+  await runGridAction(page, "Grouped outcomes", "Show targets");
+  await expect(page.getByText("Targets in g1", { exact: true })).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Binary", exact: true }),
   ).toHaveClass(/selected/);

@@ -1031,12 +1031,15 @@ test("reports group creation beside the registry action", async ({
   await activate(
     page
       .getByLabel("Group registry data grid")
-      .getByRole("button", { name: "Create group" }),
+      .getByRole("button", { name: "Create group", exact: true }),
   );
-  const createGroupDrawer = page.getByLabel("Create group");
+  const createGroupDrawer = page.getByLabel("Create group", { exact: true });
   await createGroupDrawer.getByLabel("Group name").fill("simulation:created");
   await activate(
-    createGroupDrawer.getByRole("button", { name: "Create group" }),
+    createGroupDrawer.getByRole("button", {
+      name: "Create group",
+      exact: true,
+    }),
   );
   await expect(
     page.getByText("Created group simulation:created"),

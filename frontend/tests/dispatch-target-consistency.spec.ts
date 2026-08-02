@@ -5,6 +5,7 @@ import {
   tunnelPlans,
 } from "./support/consoleLayoutFixtures";
 import {
+  activateSystemMaintenanceSubpanel,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
 } from "./support/consoleNavigation";
@@ -643,6 +644,7 @@ test("artifact cleanup async preview ignores stale expression edits", async ({
   await installConsoleApiMock(page);
   await page.goto("/");
   await openConsoleSubpage(page, "System", "Maintenance");
+  await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
 
   const cleanupPanel = page.locator(".fleetPanel", {
     has: page.getByRole("heading", { name: "Artifact cleanup" }),

@@ -5,6 +5,7 @@ import { backupId, installConsoleApiMock,
 } from "./support/consoleLayoutFixtures";
 import {
   activate,
+  activateSystemMaintenanceSubpanel,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -162,6 +163,7 @@ async function captureArtifactDeletionPrompt(
   manifest: Array<Record<string, unknown>>,
 ) {
   await openConsoleSubpage(page, "System", "Maintenance");
+  await activateSystemMaintenanceSubpanel(page, "Artifact cleanup");
   const cleanupPanel = page.locator(".fleetPanel").filter({
     has: page.getByRole("heading", { name: "Artifact cleanup" }),
   });

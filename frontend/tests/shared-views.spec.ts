@@ -454,8 +454,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   await expect(connectionsChart.getByText("2/2 series")).toBeVisible();
 
   const range = detail.getByRole("group", { name: "History range" });
-  await expect(range.getByRole("button")).toHaveCount(11);
-  for (const label of [
+  await expect(range.getByRole("button")).toHaveText([
     "15m",
     "1h",
     "8h",
@@ -467,11 +466,13 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     "1y",
     "All",
     "Custom",
-  ]) {
-    await expect(
-      range.getByRole("button", { name: label, exact: true }),
-    ).toBeVisible();
-  }
+  ]);
+  await expect(
+    range.getByRole("button", {
+      name: "Realtime, last 15 minutes",
+      exact: true,
+    }),
+  ).toHaveText("15m");
 
   await page.setViewportSize({ height: 844, width: 320 });
   await expect
