@@ -705,7 +705,14 @@ async fn authoritative_traffic_history_preserves_counter_reset_gaps() {
             client_id: "v-1".to_string(),
             key: crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_SELECTORS.to_string(),
             value_raw: "eth0+rx".to_string(),
-            value_json: serde_json::json!({"selectors": [{"interface": "eth0"}]}),
+            value_json: serde_json::json!({
+                "selectors": [{
+                    "source": "host",
+                    "interface": "eth0",
+                    "direction": "rx",
+                    "canonical": "eth0+rx"
+                }]
+            }),
             parsed_display: "eth0".to_string(),
             state: "ok".to_string(),
             validation_errors: Vec::new(),

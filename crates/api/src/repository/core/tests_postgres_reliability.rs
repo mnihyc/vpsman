@@ -2336,7 +2336,14 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         "#,
     )
     .bind(client_id)
-    .bind(serde_json::json!({"selectors": [{"interface": "eth0"}]}))
+    .bind(serde_json::json!({
+        "selectors": [{
+            "source": "host",
+            "interface": "eth0",
+            "direction": "total",
+            "canonical": "eth0"
+        }]
+    }))
     .execute(&db.pool)
     .await
     .unwrap();
