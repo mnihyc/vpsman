@@ -5048,9 +5048,9 @@ export async function installConsoleApiMock(
                       bucket_start: "2026-06-05T20:35:00Z",
                       client_id: client.id,
                       interface: "eth0",
-                      rx_bps_avg: 0,
-                      rx_bytes_avg: 0,
-                      rx_bytes_delta: 0,
+                      rx_bps_avg: 19_200_000 * networkScale,
+                      rx_bytes_avg: 71_303_168,
+                      rx_bytes_delta: 480_000 * networkScale,
                       sample_count: 1,
                       tx_bps_avg: 18_400_000 * networkScale,
                       tx_bytes_avg: 68_157_440,
@@ -5061,8 +5061,11 @@ export async function installConsoleApiMock(
                 : [],
             network_history:
               client.id === "agent-sfo-01"
-                ? [9_200_000, 13_800_000, 18_400_000].map(
-                    (txBps, index) => ({
+                ? [
+                    [9_600_000, 9_200_000],
+                    [14_400_000, 13_800_000],
+                    [19_200_000, 18_400_000],
+                  ].map(([rxBps, txBps], index) => ({
                       bucket_secs: 60,
                       bucket_start: [
                         "2026-06-05T20:33:00Z",
@@ -5071,9 +5074,9 @@ export async function installConsoleApiMock(
                       ][index],
                       client_id: client.id,
                       interface: "eth0",
-                      rx_bps_avg: 0,
-                      rx_bytes_avg: 0,
-                      rx_bytes_delta: 0,
+                      rx_bps_avg: rxBps * networkScale,
+                      rx_bytes_avg: 71_303_168,
+                      rx_bytes_delta: 240_000 * (index + 1) * networkScale,
                       sample_count: 1,
                       tx_bps_avg: txBps * networkScale,
                       tx_bytes_avg: 68_157_440,

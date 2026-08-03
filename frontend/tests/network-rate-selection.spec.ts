@@ -38,26 +38,38 @@ test("live-rate selection follows an explicit traffic-selector reference", () =>
   const resolution = resolveNetworkRateInterfaces(rules);
   const selected = selectedNetworkRates(rates, rules);
 
-  expect(resolution.directions.get("eth0")).toBe(0b01);
-  expect(resolution.directions.get("eth1")).toBe(0b10);
-  expect(resolution.directions.has("wg0")).toBe(false);
+  expect(resolution.interfaces.has("eth0")).toBe(true);
+  expect(resolution.interfaces.has("eth1")).toBe(true);
+  expect(resolution.interfaces.has("wg0")).toBe(false);
   expect(selected.map((rate) => rate.interface)).toEqual(["eth0", "eth1"]);
-  expect(selected[0].tx_bps_avg).toBe(0);
-  expect(selected[1].rx_bps_avg).toBe(0);
+  expect(selected[0].tx_bps_avg).toBe(16_000);
+  expect(selected[1].rx_bps_avg).toBe(32_000);
   expect(rates).toEqual(before);
   expect(networkRateSelectionLabel(rules)).toContain(
     "referenced from traffic.selectors",
   );
 });
 
-test("a missing live-rate rule selects every reported interface", () => {
-  expect(resolveNetworkRateInterfaces([])).toMatchObject({
-    mode: "all",
-    source: "network.rate.interfaces",
+test("a missing live-rate rule follows traffic selectors by default", () => {
+  const rules = [
+    rule("traffic.selectors", {
+      selectors: [selector("eth0", "rx")],
+    }),
+  ];
+  expect(resolveNetworkRateInterfaces(rules)).toMatchObject({
+    mode: "exact",
+    source: "traffic.selectors",
     valid: true,
   });
-  expect(selectedNetworkRates(rates, [])).toEqual(rates);
-  expect(networkRateSelectionLabel([])).toBe("All reported interfaces");
+  const selected = selectedNetworkRates(rates, rules);
+  expect(selected.map((rate) => rate.interface)).toEqual(["eth0"]);
+  expect(selected[0].tx_bps_avg).toBe(16_000);
+  expect(networkRateSelectionLabel(rules)).toContain(
+    "referenced from traffic.selectors",
+  );
+
+  expect(selectedNetworkRates(rates, [])).toEqual([]);
+  expect(networkRateSelectionLabel([])).toBe("Traffic interfaces unavailable");
 });
 
 test("live-rate reference object, rather than display syntax, controls inheritance", () => {
@@ -78,7 +90,7 @@ test("live-rate reference object, rather than display syntax, controls inheritan
   const selected = selectedNetworkRates(rates, rules);
   expect(selected.map((rate) => rate.interface)).toEqual(["eth0"]);
   expect(selected[0].rx_bps_avg).toBe(8_000);
-  expect(selected[0].tx_bps_avg).toBe(0);
+  expect(selected[0].tx_bps_avg).toBe(16_000);
 
   rules[0].value_json = {
     mode: "reference",
@@ -97,7 +109,7 @@ test("live-rate reference object, rather than display syntax, controls inheritan
   );
 });
 
-test("live-rate selection distinguishes explicit all from exact selectors", () => {
+test("live-rate selection filters interfaces but keeps RX and TX", () => {
   const all = [
     rule("network.rate.interfaces", { mode: "all" }, "[]"),
   ];
@@ -118,9 +130,9 @@ test("live-rate selection distinguishes explicit all from exact selectors", () =
   expect(selected.map((rate) => rate.interface)).toEqual(["eth0", "eth1"]);
   expect(selected[0].rx_bps_avg).toBe(8_000);
   expect(selected[0].tx_bps_avg).toBe(16_000);
-  expect(selected[1].rx_bps_avg).toBe(0);
+  expect(selected[1].rx_bps_avg).toBe(32_000);
   expect(selected[1].tx_bps_avg).toBe(64_000);
-  expect(networkRateSelectionLabel(exact)).toBe("eth0, eth1+tx");
+  expect(networkRateSelectionLabel(exact)).toBe("eth0, eth1");
 
   exact[0].value_json = {
     mode: "exact",

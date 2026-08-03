@@ -147,6 +147,8 @@ const VPS_RULE_KEYS = [
   "traffic.selectors",
 ] as const;
 const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX = "[traffic.selectors]";
+const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER =
+  `Default when unset: ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX}`;
 const RUNTIME_CONFIG_QUEUED_STALE_MS = 60 * 60 * 1000;
 
 type BulkConfigApplySnapshot = {
@@ -3435,11 +3437,11 @@ const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
     placeholder: "1.5 Gbps",
   },
   {
-    help: `Existing traffic-selector syntax for aggregate live rates and charts. An absent rule, clearing this typed field, or entering [] selects every reported interface and direction. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store a live reference to traffic.selectors, or override with selectors such as eth0,eth1+tx. Unsetting the rule restores All interfaces.`,
+    help: `Existing traffic-selector syntax for aggregate live rates and charts. By default, an absent or unset rule follows traffic.selectors. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store that reference explicitly, clear a previously edited value or enter [] to select every reported interface, or override with interface selectors such as eth0,eth1. A +rx or +tx suffix is accepted but ignored here: live speed always keeps separate RX and TX values for every selected interface. Direction suffixes remain meaningful to traffic accounting only.`,
     inputMode: "text",
     key: "network.rate.interfaces",
     label: "Live rate interfaces",
-    placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX,
+    placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
   },
   {
     help: "Day of month in UTC when the traffic accounting cycle resets.",

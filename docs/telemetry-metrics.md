@@ -95,27 +95,28 @@ explicit chart gap.
 
 Config > Rules scopes aggregate live rate through `network.rate.interfaces`:
 
-- An absent value, empty input, or `[]` selects every reported interface in
-  both directions. Unsetting the rule returns to this All behavior.
-- The explicit input syntax `[traffic.selectors]` is normalized on save into a
-  stored reference object and resolves the current per-VPS rule at query time,
-  including each selector's RX/TX direction; it is not copied into a fixed
-  selector list.
+- An absent or unset value defaults to a live reference to the current per-VPS
+  `traffic.selectors` rule, using its selected host interfaces.
+- The explicit input syntax `[traffic.selectors]` stores that same typed
+  reference object; it is not copied into a fixed selector list.
+- Empty input or `[]` explicitly selects every reported interface.
 - Any other value uses the existing interface/direction selector grammar. For
-  example, `eth0,eth1+tx` includes both directions for `eth0` and only TX for
-  `eth1`.
+  example, `eth0,eth1+tx` selects `eth0` and `eth1`. Live-rate scope ignores
+  `+rx` and `+tx` suffixes and retains both separately reported speed
+  directions for every selected interface. Those suffixes remain meaningful
+  only to authoritative traffic accounting.
 
 This scope controls aggregate rate values on VPS cards, charts, the dashboard,
 and public monitoring views. It does not filter agent collection or retained
 per-interface evidence: raw interface diagnostics, APIs, and CSV remain
 complete.
 
-Fleet chart points sum the selected interface/direction rates for each logical
-interval, then average those fleet totals when several intervals share one
-displayed chart step. Monitoring-card current values accept only selected rows
-within 180 seconds of the card snapshot; historical curves retain older rows
-and their gaps. When all interfaces are selected, virtual, bridge, and tunnel
-interfaces can represent overlapping traffic, so the sum is operational
+Fleet chart points sum both direction rates for the selected interfaces in each
+logical interval, then average those fleet totals when several intervals share
+one displayed chart step. Monitoring-card current values accept only selected
+rows within 180 seconds of the card snapshot; historical curves retain older
+rows and their gaps. When all interfaces are selected, virtual, bridge, and
+tunnel interfaces can represent overlapping traffic, so the sum is operational
 activity rather than guaranteed unique wire volume.
 
 ## Authoritative Traffic Accounting

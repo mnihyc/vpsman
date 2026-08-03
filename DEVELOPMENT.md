@@ -163,13 +163,15 @@ Every update must keep these boundaries explicit:
   tunnel bandwidth, rate limits, and speed-test throughput in bit-rate units
   (`Kbps`, `Mbps`, `Gbps`). Use separate, explicitly named formatters so these
   presentation meanings cannot drift together.
-  Scope aggregate live rate with `network.rate.interfaces`: an absent value,
-  empty input, or `[]` selects all collected interfaces and both directions.
-  The explicit input syntax `[traffic.selectors]` is normalized on save into a
-  stored rule-reference object, which resolves each VPS's current
-  `traffic.selectors` at query time. Unsetting restores All. Other explicit
-  values use the existing interface/direction grammar and preserve direction
-  (for example, `eth0,eth1+tx`). Apply this scope consistently to
+  Scope aggregate live rate with `network.rate.interfaces`: an absent or unset
+  rule defaults to a live reference to each VPS's current `traffic.selectors`.
+  The explicit input syntax `[traffic.selectors]` stores that same typed
+  rule-reference object. Empty input or `[]` explicitly selects all collected
+  interfaces. Other explicit values reuse the existing selector grammar, but
+  live-rate scope is interface-only: any `+rx` or `+tx` suffix is ignored and
+  both separately reported directions remain present for each selected
+  interface. Direction suffixes continue to control traffic accounting only.
+  Apply this scope consistently to
   cards, charts, the dashboard, and public monitoring views. Never use it to
   filter collection or raw per-interface diagnostics.
   Keep traffic history diagnostic: RX and TX are initially visible, Total is

@@ -3443,25 +3443,7 @@ fn project_network_rate_selection(
     selection: &NetworkRateInterfaceSelection,
 ) -> Vec<TelemetryNetworkRateView> {
     rows.into_iter()
-        .filter_map(|mut row| {
-            let directions = selection.direction_mask(&row.client_id, &row.interface);
-            if directions == 0 {
-                return None;
-            }
-            if directions & 0b01 == 0 {
-                row.rx_bytes_avg = 0;
-                row.rx_bytes_last = 0;
-                row.rx_bytes_delta = 0;
-                row.rx_bps_avg = 0.0;
-            }
-            if directions & 0b10 == 0 {
-                row.tx_bytes_avg = 0;
-                row.tx_bytes_last = 0;
-                row.tx_bytes_delta = 0;
-                row.tx_bps_avg = 0.0;
-            }
-            Some(row)
-        })
+        .filter(|row| selection.allows(&row.client_id, &row.interface))
         .collect()
 }
 

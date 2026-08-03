@@ -123,7 +123,7 @@ fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
 }
 
 #[test]
-fn live_rate_selector_is_all_unless_an_explicit_reference_or_override_exists() {
+fn live_rate_selector_defaults_to_reference_unless_all_or_exact_is_explicit() {
     let client_ids = vec![
         "v-1".to_string(),
         "v-2".to_string(),
@@ -131,6 +131,7 @@ fn live_rate_selector_is_all_unless_an_explicit_reference_or_override_exists() {
         "v-4".to_string(),
         "v-6".to_string(),
         "v-7".to_string(),
+        "v-8".to_string(),
     ];
     let mut stored_reference =
         parsed_rule_for("v-4", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");
@@ -160,19 +161,22 @@ fn live_rate_selector_is_all_unless_an_explicit_reference_or_override_exists() {
             VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
             "[traffic.selectors]",
         ),
+        parsed_rule_for("v-7", VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth7+rx"),
     ];
 
     let selected = resolve_network_rate_interface_selection(&client_ids, &rules).unwrap();
-    assert_eq!(selected.direction_mask("v-1", "eth0"), 0b01);
-    assert_eq!(selected.direction_mask("v-1", "eth1"), 0b10);
-    assert_eq!(selected.direction_mask("v-1", "wg0"), 0);
-    assert_eq!(selected.direction_mask("v-2", "anything"), 0b11);
-    assert_eq!(selected.direction_mask("v-3", "eth0"), 0);
-    assert_eq!(selected.direction_mask("v-3", "eth9"), 0b10);
-    assert_eq!(selected.direction_mask("v-4", "eth9"), 0);
-    assert_eq!(selected.direction_mask("v-4", "eth4"), 0b01);
-    assert_eq!(selected.direction_mask("v-6", "wg0"), 0);
-    assert_eq!(selected.direction_mask("v-7", "anything"), 0b11);
+    assert!(selected.allows("v-1", "eth0"));
+    assert!(selected.allows("v-1", "eth1"));
+    assert!(!selected.allows("v-1", "wg0"));
+    assert!(selected.allows("v-2", "anything"));
+    assert!(!selected.allows("v-3", "eth0"));
+    assert!(selected.allows("v-3", "eth9"));
+    assert!(!selected.allows("v-4", "eth9"));
+    assert!(selected.allows("v-4", "eth4"));
+    assert!(!selected.allows("v-6", "wg0"));
+    assert!(selected.allows("v-7", "eth7"));
+    assert!(!selected.allows("v-7", "anything"));
+    assert!(!selected.allows("v-8", "anything"));
 
     let mut changed_rules = rules.clone();
     changed_rules
@@ -183,8 +187,8 @@ fn live_rate_selector_is_all_unless_an_explicit_reference_or_override_exists() {
         "eth7+tx",
     ));
     let changed = resolve_network_rate_interface_selection(&client_ids, &changed_rules).unwrap();
-    assert_eq!(changed.direction_mask("v-1", "eth0"), 0);
-    assert_eq!(changed.direction_mask("v-1", "eth7"), 0b10);
+    assert!(!changed.allows("v-1", "eth0"));
+    assert!(changed.allows("v-1", "eth7"));
 
     let mut invalid_reference =
         parsed_rule_for("v-5", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");

@@ -4,7 +4,7 @@ import type {
 } from "./types";
 
 export type NetworkRateInterfaceResolution = {
-  directions: Map<string, number>;
+  interfaces: Set<string>;
   mode: "all" | "exact";
   source: "network.rate.interfaces" | "traffic.selectors";
   valid: boolean;
@@ -19,36 +19,31 @@ export function resolveNetworkRateInterfaces(
   const rateValue = jsonObject(rateRule?.value_json);
   if (rateRule && rateRule.state !== "ok") {
     return {
-      directions: new Map(),
+      interfaces: new Set(),
       mode: "exact",
       source: "network.rate.interfaces",
       valid: false,
     };
   }
   if (!rateRule) {
-    return {
-      directions: new Map(),
-      mode: "all",
-      source: "network.rate.interfaces",
-      valid: true,
-    };
+    return resolveTrafficSelectorReference(rules);
   }
   const mode = typeof rateValue?.mode === "string" ? rateValue.mode : null;
   if (mode === "all") {
     return {
-      directions: new Map(),
+      interfaces: new Set(),
       mode: "all",
       source: "network.rate.interfaces",
       valid: true,
     };
   }
   if (mode === "exact") {
-    const directions = selectorDirections(rateValue?.selectors, "reject", false);
+    const interfaces = selectorInterfaces(rateValue?.selectors, "reject", false);
     return {
-      directions: directions ?? new Map(),
+      interfaces: interfaces ?? new Set(),
       mode: "exact",
       source: "network.rate.interfaces",
-      valid: directions !== null,
+      valid: interfaces !== null,
     };
   }
   if (
@@ -56,7 +51,7 @@ export function resolveNetworkRateInterfaces(
     jsonObject(rateValue?.reference)?.rule !== "traffic.selectors"
   ) {
     return {
-      directions: new Map(),
+      interfaces: new Set(),
       mode: "exact",
       source: "network.rate.interfaces",
       valid: false,
@@ -72,21 +67,21 @@ function resolveTrafficSelectorReference(
   const trafficRule = rules.find((rule) => rule.key === "traffic.selectors");
   if (trafficRule && trafficRule.state !== "ok") {
     return {
-      directions: new Map(),
+      interfaces: new Set(),
       mode: "exact",
       source: "traffic.selectors",
       valid: false,
     };
   }
   const trafficValue = jsonObject(trafficRule?.value_json);
-  const directions = trafficRule
-    ? selectorDirections(trafficValue?.selectors, "ignore", true)
-    : new Map<string, number>();
+  const interfaces = trafficRule
+    ? selectorInterfaces(trafficValue?.selectors, "ignore", true)
+    : new Set<string>();
   return {
-    directions: directions ?? new Map(),
+    interfaces: interfaces ?? new Set(),
     mode: "exact",
     source: "traffic.selectors",
-    valid: directions !== null,
+    valid: interfaces !== null,
   };
 }
 
@@ -97,21 +92,7 @@ export function selectedNetworkRates(
   const resolution = resolveNetworkRateInterfaces(rules);
   if (!resolution.valid) return [];
   if (resolution.mode === "all") return rates;
-  return rates.flatMap((rate) => {
-    const directions = resolution.directions.get(rate.interface) ?? 0;
-    if (directions === 0) return [];
-    return [
-      {
-        ...rate,
-        rx_bytes_avg: directions & 0b01 ? rate.rx_bytes_avg : 0,
-        rx_bytes_delta: directions & 0b01 ? rate.rx_bytes_delta : 0,
-        rx_bps_avg: directions & 0b01 ? rate.rx_bps_avg : 0,
-        tx_bytes_avg: directions & 0b10 ? rate.tx_bytes_avg : 0,
-        tx_bytes_delta: directions & 0b10 ? rate.tx_bytes_delta : 0,
-        tx_bps_avg: directions & 0b10 ? rate.tx_bps_avg : 0,
-      },
-    ];
-  });
+  return rates.filter((rate) => resolution.interfaces.has(rate.interface));
 }
 
 export function networkRateSelectionLabel(
@@ -120,25 +101,25 @@ export function networkRateSelectionLabel(
   const resolution = resolveNetworkRateInterfaces(rules);
   if (!resolution.valid) return "Live-rate interface rule unavailable";
   if (resolution.mode === "all") return "All reported interfaces";
-  if (resolution.directions.size === 0) {
+  if (resolution.interfaces.size === 0) {
     return resolution.source === "traffic.selectors"
       ? "Traffic interfaces unavailable"
       : "No live-rate interfaces selected";
   }
-  const names = Array.from(resolution.directions, ([name, directions]) =>
-    directions === 0b01 ? `${name}+rx` : directions === 0b10 ? `${name}+tx` : name,
-  ).sort((left, right) => left.localeCompare(right));
+  const names = Array.from(resolution.interfaces).sort((left, right) =>
+    left.localeCompare(right),
+  );
   return resolution.source === "traffic.selectors"
     ? `${names.join(", ")} · referenced from traffic.selectors`
     : names.join(", ");
 }
 
-function selectorDirections(
+function selectorInterfaces(
   value: unknown,
   nonHostBehavior: "ignore" | "reject",
   allowDirectionOverlap: boolean,
-): Map<string, number> | null {
-  const directions = new Map<string, number>();
+): Set<string> | null {
+  const interfaces = new Set<string>();
   const claimedDirections = new Map<string, number>();
   const seen = new Set<string>();
   if (!Array.isArray(value) || value.length > 16) return null;
@@ -176,12 +157,9 @@ function selectorDirections(
       if (nonHostBehavior === "reject") return null;
       continue;
     }
-    directions.set(
-      interfaceName,
-      (directions.get(interfaceName) ?? 0) | mask,
-    );
+    interfaces.add(interfaceName);
   }
-  return directions;
+  return interfaces;
 }
 
 function jsonObject(value: unknown): Record<string, unknown> | null {

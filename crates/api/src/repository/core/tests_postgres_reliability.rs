@@ -2870,7 +2870,7 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     let mut rate_selection = NetworkRateInterfaceSelection::default();
     rate_selection.select_exact(
         "rate-selection-telemetry".to_string(),
-        std::collections::BTreeMap::from([("eth0".to_string(), 0b10_u8)]),
+        std::collections::BTreeSet::from(["eth0".to_string()]),
     );
     for selected in [
         db.repo
@@ -2901,8 +2901,8 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     ] {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].interface, "eth0");
-        assert_eq!(selected[0].rx_bytes_delta, 0);
-        assert_eq!(selected[0].rx_bps_avg, 0.0);
+        assert_eq!(selected[0].rx_bytes_delta, 60);
+        assert!(selected[0].rx_bps_avg > 0.0);
         assert_eq!(selected[0].tx_bytes_delta, 120);
         assert!(selected[0].tx_bps_avg > 0.0);
     }

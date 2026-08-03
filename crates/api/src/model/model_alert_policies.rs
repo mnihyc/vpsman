@@ -17,7 +17,7 @@ pub(crate) const VPS_RULE_KEY_NETWORK_RATE_INTERFACES: &str = "network.rate.inte
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NetworkRateInterfaceSelection {
     all_clients: BTreeSet<String>,
-    exact_by_client: BTreeMap<String, BTreeMap<String, u8>>,
+    exact_by_client: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl NetworkRateInterfaceSelection {
@@ -34,24 +34,18 @@ impl NetworkRateInterfaceSelection {
         self.all_clients.insert(client_id);
     }
 
-    pub(crate) fn select_exact(&mut self, client_id: String, interfaces: BTreeMap<String, u8>) {
+    pub(crate) fn select_exact(&mut self, client_id: String, interfaces: BTreeSet<String>) {
         self.all_clients.remove(&client_id);
         self.exact_by_client.insert(client_id, interfaces);
     }
 
     pub(crate) fn allows(&self, client_id: &str, interface: &str) -> bool {
-        self.direction_mask(client_id, interface) != 0
-    }
-
-    pub(crate) fn direction_mask(&self, client_id: &str, interface: &str) -> u8 {
         if self.all_clients.contains(client_id) {
-            return 0b11;
+            return true;
         }
         self.exact_by_client
             .get(client_id)
-            .and_then(|interfaces| interfaces.get(interface))
-            .copied()
-            .unwrap_or_default()
+            .is_some_and(|interfaces| interfaces.contains(interface))
     }
 
     pub(crate) fn client_ids(&self) -> Vec<String> {
@@ -66,7 +60,7 @@ impl NetworkRateInterfaceSelection {
         let mut selected_clients = Vec::new();
         let mut selected_interfaces = Vec::new();
         for (client_id, interfaces) in &self.exact_by_client {
-            for interface in interfaces.keys() {
+            for interface in interfaces {
                 selected_clients.push(client_id.clone());
                 selected_interfaces.push(interface.clone());
             }
@@ -79,7 +73,7 @@ impl NetworkRateInterfaceSelection {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.all_clients.is_empty() && self.exact_by_client.values().all(BTreeMap::is_empty)
+        self.all_clients.is_empty() && self.exact_by_client.values().all(BTreeSet::is_empty)
     }
 }
 

@@ -176,7 +176,7 @@ fn adaptive_network_fragmentation_matches_uncompacted_minutes() {
 }
 
 #[tokio::test]
-async fn aggregate_rate_selection_filters_interfaces_and_preserves_directions() {
+async fn aggregate_rate_selection_filters_interfaces_and_keeps_both_directions() {
     let repo = Repository::Memory(crate::repository::MemoryState::default());
     let Repository::Memory(memory) = &repo else {
         unreachable!()
@@ -191,7 +191,7 @@ async fn aggregate_rate_selection_filters_interfaces_and_preserves_directions() 
     let mut selection = NetworkRateInterfaceSelection::default();
     selection.select_exact(
         "v-1".to_string(),
-        std::collections::BTreeMap::from([("eth0".to_string(), 0b10)]),
+        std::collections::BTreeSet::from(["eth0".to_string()]),
     );
 
     let selected = repo
@@ -207,8 +207,8 @@ async fn aggregate_rate_selection_filters_interfaces_and_preserves_directions() 
         .unwrap();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].interface, "eth0");
-    assert_eq!(selected[0].rx_bytes_delta, 0);
-    assert_eq!(selected[0].rx_bps_avg, 0.0);
+    assert_eq!(selected[0].rx_bytes_delta, 60);
+    assert!(selected[0].rx_bps_avg > 0.0);
     assert_eq!(selected[0].tx_bytes_delta, 120);
     assert!(selected[0].tx_bps_avg > 0.0);
 

@@ -3733,23 +3733,26 @@ fn resolve_network_rate_interface_selection(
         let rate_rule = client_rules
             .and_then(|rules| rules.get(VPS_RULE_KEY_NETWORK_RATE_INTERFACES))
             .copied();
-        let spec = rate_rule.map_or(Ok(NetworkRateSelectorSpec::All), |rule| {
-            parse_stored_network_rate_selector_spec(&rule.value_json)
-        })?;
+        let spec = rate_rule.map_or(
+            Ok(NetworkRateSelectorSpec::Reference(
+                NetworkRateSelectorReference::TrafficSelectors,
+            )),
+            |rule| parse_stored_network_rate_selector_spec(&rule.value_json),
+        )?;
         match spec {
             NetworkRateSelectorSpec::All => selection.select_all(client_id.clone()),
             NetworkRateSelectorSpec::Exact(selectors) => {
-                selection.select_exact(client_id.clone(), host_rate_direction_masks(&selectors))
+                selection.select_exact(client_id.clone(), host_rate_interfaces(&selectors))
             }
             NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors) => {
                 let inherited = match client_rules
                     .and_then(|rules| rules.get(VPS_RULE_KEY_TRAFFIC_SELECTORS))
                 {
-                    Some(rule) => host_rate_direction_masks(&parse_stored_traffic_selector_list(
+                    Some(rule) => host_rate_interfaces(&parse_stored_traffic_selector_list(
                         &rule.value_json,
                         true,
                     )?),
-                    None => BTreeMap::new(),
+                    None => BTreeSet::new(),
                 };
                 selection.select_exact(client_id.clone(), inherited);
             }
@@ -3767,14 +3770,13 @@ fn traffic_selector_json(selector: &TrafficSelector) -> Value {
     })
 }
 
-fn host_rate_direction_masks(selectors: &[TrafficSelector]) -> BTreeMap<String, u8> {
-    let mut selected = BTreeMap::new();
+fn host_rate_interfaces(selectors: &[TrafficSelector]) -> BTreeSet<String> {
+    let mut selected = BTreeSet::new();
     for selector in selectors
         .iter()
         .filter(|selector| selector.source == "host")
     {
-        *selected.entry(selector.interface.clone()).or_default() |=
-            traffic_selector_direction_mask(selector);
+        selected.insert(selector.interface.clone());
     }
     selected
 }

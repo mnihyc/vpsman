@@ -6392,7 +6392,7 @@ test("keeps each expanded VPS network evidence scoped to that VPS", async ({
     .locator(".timeline")
     .filter({ hasText: /^Network rate/ });
 
-  await expect(edgeRate).toContainText("RX 0 B/s / TX 2.3 MB/s");
+  await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
   await expect(coreRate).toContainText("Awaiting selected rate");
   await expect(edgeDetail.locator(".networkInterfaceList")).toContainText(
     "eth0",
