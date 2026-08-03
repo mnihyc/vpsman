@@ -51,6 +51,7 @@ fn vps_rule_billing_and_port_speed_errors_are_bad_requests() {
         "port_speed_unit_invalid",
         "port_speed_value_invalid",
         "port_speed_value_too_large",
+        "network_rate_selector_source_invalid",
     ] {
         let error = vps_rules_error(anyhow::anyhow!(code));
         assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST, "{code}");

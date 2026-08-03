@@ -23,6 +23,7 @@ use crate::{
         DashboardWindowOptionView, FleetAlertQuery, FleetAlertView, JobHistoryView,
         OperatorPreferences, TelemetryNetworkRateView, TelemetryRollupView,
     },
+    model_alert_policies::NetworkRateInterfaceSelection,
     state::AppState,
     unix_now,
     util::timestamp_in_optional_bounds,
@@ -417,12 +418,16 @@ async fn build_dashboard_overview(
         &scoped_client_id_list,
     )
     .await?;
+    let network_rate_selection = state
+        .repo
+        .network_rate_interface_selection_for_clients(&scoped_client_id_list)
+        .await?;
     let network_rates = load_dashboard_network_rates(
         state,
         &telemetry_range,
         chart_step_secs,
         chart_points,
-        &scoped_client_id_list,
+        &network_rate_selection,
     )
     .await?;
     let mut running_jobs = state
@@ -865,30 +870,30 @@ async fn load_dashboard_network_rates(
     range: &DashboardRange,
     chart_step_secs: u64,
     chart_points: u32,
-    client_ids: &[String],
+    selection: &NetworkRateInterfaceSelection,
 ) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
     if dashboard_uses_raw_samples(range) {
         return Ok(state
             .repo
-            .list_dashboard_raw_telemetry_network_rates(
+            .list_dashboard_raw_telemetry_network_rates_selected(
                 i64::from(chart_points),
                 range.start_unix,
                 range.end_unix,
                 chart_step_secs as i32,
-                client_ids,
+                selection,
             )
             .await?);
     }
     let bounded_range = telemetry_query_bounds(range);
     Ok(state
         .repo
-        .list_dashboard_telemetry_network_rates(
+        .list_dashboard_telemetry_network_rates_selected(
             i64::from(chart_points),
             bounded_range.0,
             bounded_range.1,
             None,
             chart_step_secs as i32,
-            client_ids,
+            selection,
         )
         .await?)
 }

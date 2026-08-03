@@ -345,6 +345,10 @@ async fn dashboard_overview_aggregates_memory_state() {
                 1_000_000_000,
             ),
         ]);
+        memory.vps_rule_values.write().await.extend([
+            dashboard_test_rate_rule("edge-a", "eth0"),
+            dashboard_test_rate_rule("edge-b", "eth0"),
+        ]);
         memory.jobs.write().await.push(JobHistoryView {
             id: job_id,
             actor_id: None,
@@ -875,6 +879,11 @@ async fn dashboard_overview_supports_all_window_with_available_data_start() {
             dashboard_test_rate("edge-a", "eth0", &older, 1000, 2000),
             dashboard_test_rate("edge-a", "eth0", &newer, 3000, 4000),
         ]);
+        memory
+            .vps_rule_values
+            .write()
+            .await
+            .push(dashboard_test_rate_rule("edge-a", "eth0"));
     }
 
     let state = dashboard_test_state(repo);
@@ -1215,6 +1224,33 @@ fn dashboard_test_rate(
         rx_bps_avg: 0.0,
         tx_bps_avg: 0.0,
         updated_at: observed_at.to_string(),
+    }
+}
+
+fn dashboard_test_rate_rule(
+    client_id: &str,
+    interface: &str,
+) -> crate::model_alert_policies::VpsRuleValueRecord {
+    crate::model_alert_policies::VpsRuleValueRecord {
+        client_id: client_id.to_string(),
+        key: crate::model_alert_policies::VPS_RULE_KEY_NETWORK_RATE_INTERFACES.to_string(),
+        value_raw: interface.to_string(),
+        value_json: json!({
+            "mode": "exact",
+            "selectors": [{
+                "canonical": interface,
+                "direction": "total",
+                "interface": interface,
+                "source": "host",
+            }],
+        }),
+        parsed_display: format!("1 live-rate selector ({interface})"),
+        state: "ok".to_string(),
+        validation_errors: Vec::new(),
+        source_kind: "test".to_string(),
+        source_id: None,
+        updated_by: None,
+        updated_at: "test".to_string(),
     }
 }
 

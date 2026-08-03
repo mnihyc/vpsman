@@ -176,6 +176,55 @@ fn adaptive_network_fragmentation_matches_uncompacted_minutes() {
 }
 
 #[tokio::test]
+async fn aggregate_rate_selection_filters_interfaces_and_preserves_directions() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    memory.telemetry_network_rates.write().await.extend([
+        network_rate_with_counter("v-1", "eth0", 0, 60, 1_000, 2_000),
+        network_rate_with_counter("v-1", "eth0", 60, 60, 1_060, 2_120),
+        network_rate_with_counter("v-1", "lo", 0, 60, 3_000, 4_000),
+        network_rate_with_counter("v-1", "lo", 60, 60, 3_600, 4_700),
+    ]);
+
+    let mut selection = NetworkRateInterfaceSelection::default();
+    selection.select_exact(
+        "v-1".to_string(),
+        std::collections::BTreeMap::from([("eth0".to_string(), 0b10)]),
+    );
+
+    let selected = repo
+        .list_dashboard_telemetry_network_rates_selected(
+            10,
+            Some(60),
+            Some(60),
+            Some(60),
+            60,
+            &selection,
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].interface, "eth0");
+    assert_eq!(selected[0].rx_bytes_delta, 0);
+    assert_eq!(selected[0].rx_bps_avg, 0.0);
+    assert_eq!(selected[0].tx_bytes_delta, 120);
+    assert!(selected[0].tx_bps_avg > 0.0);
+
+    let raw = repo
+        .list_telemetry_network_rates(10, Some("v-1"), None, Some(60), false)
+        .await
+        .unwrap();
+    assert_eq!(
+        raw.iter()
+            .map(|rate| rate.interface.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["eth0", "lo"])
+    );
+}
+
+#[tokio::test]
 async fn network_counter_resets_are_gaps_and_advance_the_memory_baseline() {
     let repo = Repository::Memory(crate::repository::MemoryState::default());
     let Repository::Memory(memory) = &repo else {

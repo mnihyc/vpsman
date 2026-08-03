@@ -6,14 +6,17 @@ use serde_json::json;
 use super::{
     aggregate_memory_traffic_counter_usage, aggregate_memory_traffic_history,
     claim_traffic_selector_directions, derive_cycle_usage, next_policy_rule_state,
-    parse_billing_cycle, parse_billing_price, parse_byte_size,
-    parse_persisted_traffic_selector_list, parse_port_speed, parse_traffic_selector,
-    parse_traffic_selector_list, parse_vps_rule_value, policy_identifier_value,
-    policy_state_is_alert_eligible, policy_webhook_repair_is_recent, traffic_accounting_for_client,
-    validate_billing_rule_group, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
+    parse_billing_cycle, parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
+    parse_persisted_traffic_selector_list, parse_port_speed,
+    parse_stored_network_rate_selector_spec, parse_traffic_selector, parse_traffic_selector_list,
+    parse_vps_rule_value, policy_identifier_value, policy_state_is_alert_eligible,
+    policy_webhook_repair_is_recent, resolve_network_rate_interface_selection,
+    traffic_accounting_for_client, validate_billing_rule_group, NetworkRateSelectorReference,
+    NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
     TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
-    TrafficStreamRequest, VpsRuleValueRecord, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
-    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    TrafficStreamRequest, VpsRuleValueRecord, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+    VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
 
 #[test]
@@ -76,6 +79,123 @@ fn port_speed_is_display_only_but_strictly_normalized() {
     assert_eq!(gbps.raw, "1.5 Gbps");
     assert_eq!(gbps.json["bps"], 1_500_000_000_i64);
     assert!(parse_port_speed("fast").is_err());
+}
+
+#[test]
+fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
+    for all in ["", "[]"] {
+        let parsed = parse_network_rate_interfaces(all).unwrap();
+        assert_eq!(parsed.raw, "[]");
+        assert_eq!(parsed.json["mode"], "all");
+    }
+
+    let referenced = parse_network_rate_interfaces("[traffic.selectors]").unwrap();
+    assert_eq!(referenced.raw, "[traffic.selectors]");
+    assert_eq!(referenced.json["mode"], "reference");
+    assert_eq!(referenced.json["reference"]["rule"], "traffic.selectors");
+    assert!(matches!(
+        parse_stored_network_rate_selector_spec(&referenced.json).unwrap(),
+        NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors)
+    ));
+    let singular = parse_network_rate_interfaces("[traffic.selector]").unwrap();
+    assert_eq!(singular.json["mode"], "exact");
+
+    let exact = parse_network_rate_interfaces("host:eth0, eth1+tx").unwrap();
+    assert_eq!(exact.raw, "eth0,eth1+tx");
+    assert_eq!(exact.json["mode"], "exact");
+    assert_eq!(exact.json["selectors"][0]["direction"], "total");
+    assert_eq!(exact.json["selectors"][1]["direction"], "tx");
+
+    assert_eq!(
+        parse_network_rate_interfaces("tunnel:wg0")
+            .unwrap_err()
+            .to_string(),
+        "network_rate_selector_source_invalid"
+    );
+    assert!(parse_network_rate_interfaces("eth0,eth0+tx")
+        .unwrap_err()
+        .to_string()
+        .contains("traffic_selector_direction_overlap"));
+
+    let mut inconsistent = exact.json;
+    inconsistent["selectors"][0]["source"] = json!("tunnel");
+    assert!(parse_stored_network_rate_selector_spec(&inconsistent).is_err());
+}
+
+#[test]
+fn live_rate_selector_is_all_unless_an_explicit_reference_or_override_exists() {
+    let client_ids = vec![
+        "v-1".to_string(),
+        "v-2".to_string(),
+        "v-3".to_string(),
+        "v-4".to_string(),
+        "v-6".to_string(),
+        "v-7".to_string(),
+    ];
+    let mut stored_reference =
+        parsed_rule_for("v-4", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");
+    stored_reference.value_json = json!({
+        "mode": "reference",
+        "reference": {"rule": "traffic.selectors"},
+    });
+    let rules = vec![
+        parsed_rule_for(
+            "v-1",
+            VPS_RULE_KEY_TRAFFIC_SELECTORS,
+            "eth0+rx,eth1+tx,tunnel:wg0",
+        ),
+        parsed_rule_for(
+            "v-1",
+            VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+            "[traffic.selectors]",
+        ),
+        parsed_rule_for("v-2", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "[]"),
+        parsed_rule_for("v-3", VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth0"),
+        parsed_rule_for("v-3", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx"),
+        parsed_rule_for("v-4", VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth4+rx"),
+        stored_reference,
+        parsed_rule_for("v-6", VPS_RULE_KEY_TRAFFIC_SELECTORS, "tunnel:wg0"),
+        parsed_rule_for(
+            "v-6",
+            VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+            "[traffic.selectors]",
+        ),
+    ];
+
+    let selected = resolve_network_rate_interface_selection(&client_ids, &rules).unwrap();
+    assert_eq!(selected.direction_mask("v-1", "eth0"), 0b01);
+    assert_eq!(selected.direction_mask("v-1", "eth1"), 0b10);
+    assert_eq!(selected.direction_mask("v-1", "wg0"), 0);
+    assert_eq!(selected.direction_mask("v-2", "anything"), 0b11);
+    assert_eq!(selected.direction_mask("v-3", "eth0"), 0);
+    assert_eq!(selected.direction_mask("v-3", "eth9"), 0b10);
+    assert_eq!(selected.direction_mask("v-4", "eth9"), 0);
+    assert_eq!(selected.direction_mask("v-4", "eth4"), 0b01);
+    assert_eq!(selected.direction_mask("v-6", "wg0"), 0);
+    assert_eq!(selected.direction_mask("v-7", "anything"), 0b11);
+
+    let mut changed_rules = rules.clone();
+    changed_rules
+        .retain(|rule| !(rule.client_id == "v-1" && rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS));
+    changed_rules.push(parsed_rule_for(
+        "v-1",
+        VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        "eth7+tx",
+    ));
+    let changed = resolve_network_rate_interface_selection(&client_ids, &changed_rules).unwrap();
+    assert_eq!(changed.direction_mask("v-1", "eth0"), 0);
+    assert_eq!(changed.direction_mask("v-1", "eth7"), 0b10);
+
+    let mut invalid_reference =
+        parsed_rule_for("v-5", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");
+    invalid_reference.value_json = json!({
+        "mode": "reference",
+        "reference": {"rule": "billing.price"},
+    });
+    assert!(
+        resolve_network_rate_interface_selection(&["v-5".to_string()], &[invalid_reference])
+            .is_err()
+    );
 }
 
 #[test]
@@ -416,6 +536,13 @@ fn rule(key: &str, value_raw: &str, value_json: serde_json::Value) -> VpsRuleVal
         updated_by: None,
         updated_at: "test".to_string(),
     }
+}
+
+fn parsed_rule_for(client_id: &str, key: &str, value: &str) -> VpsRuleValueRecord {
+    let parsed = parse_vps_rule_value(key, value).unwrap();
+    let mut record = rule(key, &parsed.raw, parsed.json);
+    record.client_id = client_id.to_string();
+    record
 }
 
 fn usage(interface: &str, last_sample_unix: i64) -> TrafficCounterStreamUsage {

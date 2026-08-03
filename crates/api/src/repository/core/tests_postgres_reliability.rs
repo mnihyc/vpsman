@@ -36,8 +36,8 @@ use crate::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
     },
     model_alert_policies::{
-        CreateFleetAlertPolicyRequest, PolicyAlertQuery, PolicyDryRunRequest, PolicyRuleRequest,
-        VpsRuleQuery,
+        CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
+        PolicyDryRunRequest, PolicyRuleRequest, VpsRuleQuery,
     },
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
@@ -2561,6 +2561,7 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         ("reset-telemetry", 55_u8),
         ("raw-reset-telemetry", 56_u8),
         ("intra-reset-telemetry", 57_u8),
+        ("rate-selection-telemetry", 58_u8),
     ] {
         sqlx::query(
             r#"
@@ -2811,6 +2812,118 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         .iter()
         .all(|rate| rate.client_id == "selected-telemetry"));
     assert!(!latest_scoped.is_empty());
+
+    for (interface, observed, rx, tx) in [
+        ("eth0", previous, 100_i64, 200_i64),
+        ("eth0", current, 160_i64, 320_i64),
+        ("lo", previous, 1_000_i64, 2_000_i64),
+        ("lo", current, 1_600_i64, 3_200_i64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_network_rates (
+                client_id, interface, bucket_start, bucket_secs,
+                sample_count, rx_bytes_avg, tx_bytes_avg,
+                rx_bytes_last, tx_bytes_last, rx_counter_epoch, tx_counter_epoch
+            )
+            VALUES (
+                'rate-selection-telemetry', $1, to_timestamp($2::double precision),
+                60, 1, $3, $4, $3, $4, 0, 0
+            )
+            "#,
+        )
+        .bind(interface)
+        .bind(observed as f64)
+        .bind(rx)
+        .bind(tx)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    for (observed, eth0_rx, eth0_tx, lo_rx, lo_tx) in [
+        (previous, 100_u64, 200_u64, 1_000_u64, 2_000_u64),
+        (current, 160_u64, 320_u64, 1_600_u64, 3_200_u64),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_samples (
+                id, client_id, observed_at, cpu_load_1,
+                memory_total_bytes, memory_available_bytes, payload
+            ) VALUES (
+                $1, 'rate-selection-telemetry', to_timestamp($2::double precision),
+                0, 0, 0, $3
+            )
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(observed as f64)
+        .bind(serde_json::json!({
+            "networks": [
+                {"interface": "eth0", "rx_bytes": eth0_rx, "tx_bytes": eth0_tx},
+                {"interface": "lo", "rx_bytes": lo_rx, "tx_bytes": lo_tx},
+            ]
+        }))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let mut rate_selection = NetworkRateInterfaceSelection::default();
+    rate_selection.select_exact(
+        "rate-selection-telemetry".to_string(),
+        std::collections::BTreeMap::from([("eth0".to_string(), 0b10_u8)]),
+    );
+    for selected in [
+        db.repo
+            .list_dashboard_telemetry_network_rates_selected(
+                10,
+                Some(current),
+                Some(current),
+                Some(60),
+                60,
+                &rate_selection,
+            )
+            .await
+            .unwrap(),
+        db.repo
+            .list_dashboard_raw_telemetry_network_rates_selected(
+                10,
+                current,
+                current,
+                60,
+                &rate_selection,
+            )
+            .await
+            .unwrap(),
+        db.repo
+            .list_latest_telemetry_network_rates_for_selection(&rate_selection)
+            .await
+            .unwrap(),
+    ] {
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].interface, "eth0");
+        assert_eq!(selected[0].rx_bytes_delta, 0);
+        assert_eq!(selected[0].rx_bps_avg, 0.0);
+        assert_eq!(selected[0].tx_bytes_delta, 120);
+        assert!(selected[0].tx_bps_avg > 0.0);
+    }
+    let raw_all = db
+        .repo
+        .list_dashboard_raw_telemetry_network_rates(
+            10,
+            current,
+            current,
+            60,
+            &["rate-selection-telemetry".to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_all
+            .iter()
+            .map(|row| row.interface.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["eth0", "lo"])
+    );
 
     let reset_previous = current.saturating_sub(120);
     let reset_at = current.saturating_sub(60);

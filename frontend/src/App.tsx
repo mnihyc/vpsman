@@ -2829,7 +2829,6 @@ export function App() {
                 .length,
               dashboard.summary.running_jobs,
             )}
-            telemetryNetworkRates={dashboard.telemetryNetworkRates}
             telemetryRollups={dashboard.telemetryRollups}
             title="VPS cards"
             onOpenVpsDetail={releaseRoutes.openVpsDetail}

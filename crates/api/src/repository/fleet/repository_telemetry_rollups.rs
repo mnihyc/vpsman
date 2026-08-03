@@ -10,6 +10,7 @@ use crate::{
         TelemetryNetworkRateView, TelemetryRollupView, TelemetrySampleView,
         TelemetryTunnelAdapterHealthView, TelemetryTunnelView, TunnelPlanView,
     },
+    model_alert_policies::NetworkRateInterfaceSelection,
     repository::Repository,
     util::compare_timestamps_desc,
 };
@@ -461,6 +462,7 @@ impl Repository {
         Ok(rows)
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_dashboard_raw_telemetry_network_rates(
         &self,
         points_per_series: i64,
@@ -469,6 +471,30 @@ impl Repository {
         step_secs: i32,
         client_ids: &[String],
     ) -> Result<Vec<TelemetryNetworkRateView>> {
+        let selection = NetworkRateInterfaceSelection::all(client_ids);
+        self.list_dashboard_raw_telemetry_network_rates_selected(
+            points_per_series,
+            start_unix,
+            end_unix,
+            step_secs,
+            &selection,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_dashboard_raw_telemetry_network_rates_selected(
+        &self,
+        points_per_series: i64,
+        start_unix: u64,
+        end_unix: u64,
+        step_secs: i32,
+        selection: &NetworkRateInterfaceSelection,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        if selection.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client_ids = selection.client_ids();
+        let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
         let points_per_series = points_per_series.clamp(2, 1_440) as usize;
         let step_secs = normalized_dashboard_step_secs(step_secs);
         // Include one maximum telemetry interval before the visible range so
@@ -496,7 +522,16 @@ impl Repository {
                             ELSE '[]'::jsonb
                         END
                     ) AS network
-                    WHERE sample.client_id = ANY($1::TEXT[])
+                    WHERE (
+                            sample.client_id = ANY($1::TEXT[])
+                            OR EXISTS (
+                                SELECT 1
+                                FROM UNNEST($8::TEXT[], $9::TEXT[])
+                                    AS selected(client_id, interface)
+                                WHERE selected.client_id = sample.client_id
+                                  AND selected.interface = network ->> 'interface'
+                            )
+                      )
                       AND sample.observed_at >= to_timestamp($2)
                       AND sample.observed_at <= to_timestamp($3)
                       AND length(network ->> 'interface') BETWEEN 1 AND 128
@@ -687,22 +722,25 @@ impl Repository {
                 ORDER BY chart_epoch, client_id, interface
                 "#,
             )
-            .bind(client_ids)
+            .bind(&all_client_ids)
             .bind(query_start as i64)
             .bind(end_unix as i64)
             .bind(step_secs)
             .bind(start_unix as i64)
             .bind(points_per_series as i64)
             .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
+            .bind(&exact_client_ids)
+            .bind(&exact_interfaces)
             .fetch_all(pool)
             .await?;
-            return rows
+            let rows = rows
                 .into_iter()
                 .map(telemetry_network_rate_from_row)
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(project_network_rate_selection(rows, selection));
         }
         let samples = self
-            .list_raw_telemetry_samples_for_clients(client_ids, query_start, end_unix, usize::MAX)
+            .list_raw_telemetry_samples_for_clients(&client_ids, query_start, end_unix, usize::MAX)
             .await?;
         let mut counters = Vec::new();
         for sample in samples {
@@ -714,6 +752,9 @@ impl Repository {
                     )
                 })?;
             for network in metrics.networks {
+                if !selection.allows(&sample.client_id, &network.interface) {
+                    continue;
+                }
                 if network.interface.is_empty() || network.interface.len() > 64 {
                     continue;
                 }
@@ -747,7 +788,7 @@ impl Repository {
             points_per_series,
             DASHBOARD_TELEMETRY_RESULT_LIMIT,
         );
-        Ok(rows)
+        Ok(project_network_rate_selection(rows, selection))
     }
 
     async fn list_raw_telemetry_samples_for_clients(
@@ -1542,6 +1583,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_dashboard_telemetry_network_rates(
         &self,
         points_per_series: i64,
@@ -1551,9 +1593,31 @@ impl Repository {
         step_secs: i32,
         client_ids: &[String],
     ) -> Result<Vec<TelemetryNetworkRateView>> {
-        if client_ids.is_empty() {
+        let selection = NetworkRateInterfaceSelection::all(client_ids);
+        self.list_dashboard_telemetry_network_rates_selected(
+            points_per_series,
+            start_unix,
+            end_unix,
+            bucket_secs,
+            step_secs,
+            &selection,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_dashboard_telemetry_network_rates_selected(
+        &self,
+        points_per_series: i64,
+        start_unix: Option<u64>,
+        end_unix: Option<u64>,
+        bucket_secs: Option<i32>,
+        step_secs: i32,
+        selection: &NetworkRateInterfaceSelection,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        if selection.is_empty() {
             return Ok(Vec::new());
         }
+        let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
         let step_secs = normalized_dashboard_step_secs(step_secs);
         let points_per_series = points_per_series.clamp(2, 1_440) as usize;
         match self {
@@ -1564,7 +1628,7 @@ impl Repository {
                     .await
                     .iter()
                     .filter(|rate| {
-                        client_ids.contains(&rate.client_id)
+                        selection.allows(&rate.client_id, &rate.interface)
                             && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
                             && end_unix.is_none_or(|end| {
                                 parse_timestamp_unix(&rate.bucket_start)
@@ -1581,7 +1645,7 @@ impl Repository {
                     points_per_series,
                     DASHBOARD_TELEMETRY_RESULT_LIMIT,
                 );
-                Ok(rows)
+                Ok(project_network_rate_selection(rows, selection))
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
@@ -1608,7 +1672,16 @@ impl Repository {
                             AND ($2::BIGINT IS NULL OR bucket_start
                                 + make_interval(secs => bucket_secs - 60) >= to_timestamp($2))
                             AND ($3::BIGINT IS NULL OR bucket_start <= to_timestamp($3))
-                            AND client_id = ANY($6::TEXT[])
+                            AND (
+                                client_id = ANY($6::TEXT[])
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM UNNEST($8::TEXT[], $9::TEXT[])
+                                        AS selected(client_id, interface)
+                                    WHERE selected.client_id = telemetry_network_rates.client_id
+                                      AND selected.interface = telemetry_network_rates.interface
+                                )
+                            )
                     ), physical AS (
                         SELECT
                             candidates.*,
@@ -1859,14 +1932,18 @@ impl Repository {
                 .bind(end_unix.map(|value| value as i64))
                 .bind(step_secs)
                 .bind(points_per_series as i64)
-                .bind(client_ids)
+                .bind(&all_client_ids)
                 .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
+                .bind(&exact_client_ids)
+                .bind(&exact_interfaces)
                 .fetch_all(pool)
                 .await?;
 
-                rows.into_iter()
+                let rows = rows
+                    .into_iter()
                     .map(telemetry_network_rate_from_row)
-                    .collect()
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(project_network_rate_selection(rows, selection))
             }
         }
     }
@@ -2017,10 +2094,12 @@ impl Repository {
             None,
             interface,
             bucket_secs,
+            None,
         )
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_latest_telemetry_network_rates_for_clients(
         &self,
         client_ids: &[String],
@@ -2028,8 +2107,36 @@ impl Repository {
         if client_ids.is_empty() {
             return Ok(Vec::new());
         }
-        self.list_latest_telemetry_network_rates_matching(None, None, Some(client_ids), None, None)
-            .await
+        self.list_latest_telemetry_network_rates_matching(
+            None,
+            None,
+            Some(client_ids),
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_latest_telemetry_network_rates_for_selection(
+        &self,
+        selection: &NetworkRateInterfaceSelection,
+    ) -> Result<Vec<TelemetryNetworkRateView>> {
+        if selection.is_empty() {
+            return Ok(Vec::new());
+        }
+        let client_ids = selection.client_ids();
+        let rows = self
+            .list_latest_telemetry_network_rates_matching(
+                None,
+                None,
+                Some(&client_ids),
+                None,
+                None,
+                Some(selection),
+            )
+            .await?;
+        Ok(project_network_rate_selection(rows, selection))
     }
 
     async fn list_latest_telemetry_network_rates_matching(
@@ -2039,6 +2146,7 @@ impl Repository {
         client_ids: Option<&[String]>,
         interface: Option<&str>,
         bucket_secs: Option<i32>,
+        selection: Option<&NetworkRateInterfaceSelection>,
     ) -> Result<Vec<TelemetryNetworkRateView>> {
         let selected_client_ids = client_ids.map(|client_ids| {
             client_ids
@@ -2046,6 +2154,10 @@ impl Repository {
                 .map(String::as_str)
                 .collect::<HashSet<_>>()
         });
+        let unrestricted_selection = selection.is_none();
+        let (all_client_ids, exact_client_ids, exact_interfaces) = selection
+            .map(NetworkRateInterfaceSelection::query_parts)
+            .unwrap_or_default();
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
@@ -2059,6 +2171,9 @@ impl Repository {
                             && client_id.is_none_or(|client_id| rate.client_id == client_id)
                             && selected_client_ids.as_ref().is_none_or(|client_ids| {
                                 client_ids.contains(rate.client_id.as_str())
+                            })
+                            && selection.is_none_or(|selection| {
+                                selection.allows(&rate.client_id, &rate.interface)
                             })
                             && interface.is_none_or(|interface| rate.interface == interface)
                             && bucket_secs.is_none_or(|bucket_secs| rate.bucket_secs == bucket_secs)
@@ -2136,6 +2251,17 @@ impl Repository {
                             AND ($2::TEXT[] IS NULL OR client_id = ANY($2))
                             AND ($3::TEXT IS NULL OR interface = $3)
                             AND ($4::INTEGER IS NULL OR bucket_secs = $4)
+                            AND (
+                                $6::BOOLEAN
+                                OR client_id = ANY($7::TEXT[])
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM UNNEST($8::TEXT[], $9::TEXT[])
+                                        AS selected(client_id, interface)
+                                    WHERE selected.client_id = telemetry_network_rates.client_id
+                                      AND selected.interface = telemetry_network_rates.interface
+                                )
+                            )
                         ORDER BY
                             client_id,
                             interface,
@@ -2217,6 +2343,10 @@ impl Repository {
                 .bind(interface)
                 .bind(bucket_secs)
                 .bind(result_limit.map(|limit| limit as i64))
+                .bind(unrestricted_selection)
+                .bind(&all_client_ids)
+                .bind(&exact_client_ids)
+                .bind(&exact_interfaces)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -3306,6 +3436,33 @@ fn telemetry_network_rate_from_row(row: sqlx::postgres::PgRow) -> Result<Telemet
         tx_bps_avg: row.try_get("tx_bps_avg")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn project_network_rate_selection(
+    rows: Vec<TelemetryNetworkRateView>,
+    selection: &NetworkRateInterfaceSelection,
+) -> Vec<TelemetryNetworkRateView> {
+    rows.into_iter()
+        .filter_map(|mut row| {
+            let directions = selection.direction_mask(&row.client_id, &row.interface);
+            if directions == 0 {
+                return None;
+            }
+            if directions & 0b01 == 0 {
+                row.rx_bytes_avg = 0;
+                row.rx_bytes_last = 0;
+                row.rx_bytes_delta = 0;
+                row.rx_bps_avg = 0.0;
+            }
+            if directions & 0b10 == 0 {
+                row.tx_bytes_avg = 0;
+                row.tx_bytes_last = 0;
+                row.tx_bytes_delta = 0;
+                row.tx_bps_avg = 0.0;
+            }
+            Some(row)
+        })
+        .collect()
 }
 
 fn timestamp_in_bounds(value: &str, start_unix: Option<u64>, end_unix: Option<u64>) -> bool {

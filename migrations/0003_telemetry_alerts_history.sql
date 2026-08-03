@@ -325,7 +325,8 @@ CREATE TABLE vps_rule_values (
         'traffic.selectors',
         'billing.price',
         'billing.cycle',
-        'network.port_speed'
+        'network.port_speed',
+        'network.rate.interfaces'
     )),
     CHECK (length(value_raw) BETWEEN 1 AND 4096),
     CHECK (jsonb_typeof(value_json) = 'object')

@@ -79,6 +79,11 @@ import { usePanelDisplaySettings } from "../panelDisplay";
 import { scrollIntoViewWithMotion } from "../motion";
 import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
 import {
+  resolveNetworkRateInterfaces,
+  selectedNetworkRates,
+  type NetworkRateInterfaceResolution,
+} from "../networkRateSelection";
+import {
   addressFamilyLabel,
   latencyStatusLabel,
   mutationPolicyLabel,
@@ -481,6 +486,26 @@ export function FleetWorkspace({
     }
     return map;
   }, [vpsRuleValues]);
+  const selectedLatestNetworkRates = useMemo(() => {
+    const selected = new Map<string, TelemetryNetworkRateRecord[]>();
+    for (const [clientId, rates] of latestNetworkRates) {
+      selected.set(
+        clientId,
+        selectedNetworkRates(rates, vpsRulesByClient.get(clientId) ?? []),
+      );
+    }
+    return selected;
+  }, [latestNetworkRates, vpsRulesByClient]);
+  const networkRateSelectionsByClient = useMemo(() => {
+    const selected = new Map<string, NetworkRateInterfaceResolution>();
+    for (const agent of agents) {
+      selected.set(
+        agent.id,
+        resolveNetworkRateInterfaces(vpsRulesByClient.get(agent.id) ?? []),
+      );
+    }
+    return selected;
+  }, [agents, vpsRulesByClient]);
   const policyAlertsByClient = useMemo(() => {
     const map = new Map<string, PolicyAlertRecord[]>();
     for (const alert of policyAlerts) {
@@ -1207,8 +1232,10 @@ export function FleetWorkspace({
             <FleetSelectionPanel
               agents={rows}
               allTags={tags}
-              latestNetworkRates={latestNetworkRates}
+              allNetworkRates={latestNetworkRates}
+              latestNetworkRates={selectedLatestNetworkRates}
               latestRollups={latestRollups}
+              networkRateSelections={networkRateSelectionsByClient}
               mutateTagsForAgents={mutateTagsForAgents}
               onOpenFileBrowser={openFileBrowserWorkflow}
               onOpenUpdateCheck={openUpdateCheckWorkflow}
@@ -1671,6 +1698,11 @@ function FleetInstanceDetail({
   const configPreviewSummary = configPreview
     ? `${configPreview.sources.length} effective configuration sources`
     : "Load redacted runtime config view for this VPS.";
+  const aggregateNetworkRates = selectedNetworkRates(
+    latestNetworkRates,
+    vpsRuleValues,
+  );
+  const networkRateSelection = resolveNetworkRateInterfaces(vpsRuleValues);
 
   useEffect(() => {
     void runPanelAction(
@@ -1965,10 +1997,11 @@ function FleetInstanceDetail({
           label="Traffic"
           value={
             !latestRollup &&
-            latestNetworkRates.length === 0 &&
+            networkRateSelection.valid &&
+            aggregateNetworkRates.length === 0 &&
             (telemetryRollupsTruncated || telemetryNetworkRatesTruncated)
               ? "Unknown in loaded telemetry pages"
-              : formatSignalTraffic(latestRollup, latestNetworkRates)
+              : formatSignalTraffic(aggregateNetworkRates, networkRateSelection)
           }
           tone="blue"
         />
@@ -1976,10 +2009,10 @@ function FleetInstanceDetail({
           label="Samples"
           value={
             !latestRollup &&
-            latestNetworkRates.length === 0 &&
+            aggregateNetworkRates.length === 0 &&
             (telemetryRollupsTruncated || telemetryNetworkRatesTruncated)
               ? "Unknown in loaded telemetry pages"
-              : formatSignalSamples(latestRollup, latestNetworkRates)
+              : formatSignalSamples(latestRollup, aggregateNetworkRates)
           }
           tone="green"
         />
@@ -2124,10 +2157,14 @@ function FleetInstanceDetail({
               icon={<Network size={18} />}
               label="Network rate"
               value={
-                latestNetworkRates.length === 0 &&
+                networkRateSelection.valid &&
+                aggregateNetworkRates.length === 0 &&
                 telemetryNetworkRatesTruncated
                   ? "Unknown in loaded network-rate page; more may exist"
-                  : formatNetworkRateSummary(latestNetworkRates, latestRollup)
+                  : formatNetworkRateSummary(
+                      aggregateNetworkRates,
+                      networkRateSelection,
+                    )
               }
             />
             <DetailLine
@@ -2992,8 +3029,10 @@ function TrafficRulesDetail({
 function FleetSelectionPanel({
   agents,
   allTags,
+  allNetworkRates,
   latestNetworkRates,
   latestRollups,
+  networkRateSelections,
   mutateTagsForAgents,
   onOpenFileBrowser,
   onOpenUpdateCheck,
@@ -3006,8 +3045,10 @@ function FleetSelectionPanel({
 }: {
   agents: AgentView[];
   allTags: TagView[];
+  allNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
   latestNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
   latestRollups: Map<string, TelemetryRollupRecord>;
+  networkRateSelections: Map<string, NetworkRateInterfaceResolution>;
   mutateTagsForAgents: (
     rows: AgentView[],
     action: "add" | "remove",
@@ -3211,9 +3252,11 @@ function FleetSelectionPanel({
       </div>
       <FleetSelectionStatsTable
         agents={agents}
+        allNetworkRates={allNetworkRates}
         latestNetworkRates={latestNetworkRates}
         latestRollups={latestRollups}
         mode={selectionStatsMode}
+        networkRateSelections={networkRateSelections}
         tagDisplayOrder={tagDisplayOrder}
         tagVisibilityOverrides={tagVisibilityOverrides}
         vpsNameDisplayMode={vpsNameDisplayMode}
@@ -3224,17 +3267,21 @@ function FleetSelectionPanel({
 
 function FleetSelectionStatsTable({
   agents,
+  allNetworkRates,
   latestNetworkRates,
   latestRollups,
   mode,
+  networkRateSelections,
   tagDisplayOrder,
   tagVisibilityOverrides,
   vpsNameDisplayMode,
 }: {
   agents: AgentView[];
+  allNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
   latestNetworkRates: Map<string, TelemetryNetworkRateRecord[]>;
   latestRollups: Map<string, TelemetryRollupRecord>;
   mode: FleetSelectionStatsMode;
+  networkRateSelections: Map<string, NetworkRateInterfaceResolution>;
   tagDisplayOrder: TagDisplayOrder;
   tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
@@ -3272,6 +3319,7 @@ function FleetSelectionStatsTable({
           </div>
           {rows.map((agent) => {
             const rates = latestNetworkRates.get(agent.id) ?? [];
+            const allRates = allNetworkRates.get(agent.id) ?? [];
             const rollup = latestRollups.get(agent.id) ?? null;
             return (
               <div className="fleetSelectionStatsRow" key={agent.id} role="row">
@@ -3279,10 +3327,13 @@ function FleetSelectionStatsTable({
                   {formatVpsName(agent, vpsNameDisplayMode)}
                 </span>
                 <span role="cell">
-                  {formatNetworkRateSummary(rates, rollup)}
+                  {formatNetworkRateSummary(
+                    rates,
+                    networkRateSelections.get(agent.id),
+                  )}
                 </span>
                 <span role="cell">
-                  {rates
+                  {allRates
                     .map(
                       (rate) =>
                         `${rate.interface}: ${formatByteRateFromBitsPerSecond(rate.rx_bps_avg + rate.tx_bps_avg)}`,
@@ -3421,7 +3472,12 @@ function FleetSelectionStatsTable({
               <span role="cell">{formatLoad(rollup?.cpu_load_1_avg)}</span>
               <span role="cell">{formatMemoryUsed(rollup)}</span>
               <span role="cell">{formatDiskFree(rollup)}</span>
-              <span role="cell">{formatNetworkRateSummary(rates, rollup)}</span>
+              <span role="cell">
+                {formatNetworkRateSummary(
+                  rates,
+                  networkRateSelections.get(agent.id),
+                )}
+              </span>
               <span role="cell">{formatRollupSamples(rollup)}</span>
             </div>
           );
@@ -8960,13 +9016,13 @@ function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
 
 function formatNetworkRateSummary(
   rates: TelemetryNetworkRateRecord[],
-  rollup: TelemetryRollupRecord | null | undefined,
+  selection: NetworkRateInterfaceResolution | undefined,
 ) {
+  if (selection && !selection.valid) {
+    return "Live-rate interface rule unavailable";
+  }
   if (rates.length === 0) {
-    return rollup &&
-      (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
-      ? "Rate rollup pending; counters active"
-      : "Awaiting rate rollup";
+    return "Awaiting selected rate";
   }
   const rx = rates.reduce((total, rate) => total + rate.rx_bps_avg, 0);
   const tx = rates.reduce((total, rate) => total + rate.tx_bps_avg, 0);
@@ -8974,9 +9030,10 @@ function formatNetworkRateSummary(
 }
 
 function formatSignalTraffic(
-  rollup: TelemetryRollupRecord | null | undefined,
   rates: TelemetryNetworkRateRecord[],
+  selection: NetworkRateInterfaceResolution,
 ) {
+  if (!selection.valid) return "Live-rate rule unavailable";
   if (rates.length > 0) {
     const totalBps = rates.reduce(
       (total, rate) => total + rate.rx_bps_avg + rate.tx_bps_avg,
@@ -8984,15 +9041,7 @@ function formatSignalTraffic(
     );
     return formatByteRateFromBitsPerSecond(totalBps);
   }
-  if (
-    rollup &&
-    (rollup.network_rx_bytes_max > 0 || rollup.network_tx_bytes_max > 0)
-  ) {
-    return formatBytes(
-      rollup.network_rx_bytes_max + rollup.network_tx_bytes_max,
-    );
-  }
-  return "Awaiting rate rollup";
+  return "Awaiting selected rate";
 }
 
 function formatSignalSamples(

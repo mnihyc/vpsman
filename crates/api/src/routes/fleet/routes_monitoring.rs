@@ -46,6 +46,7 @@ use crate::{
     },
     selector_expression::parse_selector_expression,
     state::AppState,
+    util::parse_timestamp_unix,
 };
 
 const SHARE_TOKEN_HEADER: &str = "x-vpsman-share-token";
@@ -55,6 +56,7 @@ const MIN_SHARE_EXPIRY_SECS: u64 = 60;
 const MAX_SHARE_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
 const MAX_MONITORING_SELECTOR_BYTES: usize = 4_096;
 const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
+const CURRENT_NETWORK_RATE_MAX_AGE_SECS: u64 = 180;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct MonitoringCardsQuery {
@@ -779,6 +781,10 @@ async fn monitoring_cards_for_agents(
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<Vec<_>>();
+    let network_rate_selection = state
+        .repo
+        .network_rate_interface_selection_for_clients(&client_ids)
+        .await?;
     let resources = state
         .repo
         .list_latest_telemetry_rollups_for_clients(&client_ids, None)
@@ -802,15 +808,23 @@ async fn monitoring_cards_for_agents(
     let mut network = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
     for row in state
         .repo
-        .list_latest_telemetry_network_rates_for_clients(&client_ids)
+        .list_latest_telemetry_network_rates_for_selection(&network_rate_selection)
         .await?
+        .into_iter()
+        .filter(|row| network_rate_is_current(row, history_end))
     {
         network.entry(row.client_id.clone()).or_default().push(row);
     }
     let mut network_history = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
     for row in state
         .repo
-        .list_dashboard_raw_telemetry_network_rates(16, history_start, history_end, 60, &client_ids)
+        .list_dashboard_raw_telemetry_network_rates_selected(
+            16,
+            history_start,
+            history_end,
+            60,
+            &network_rate_selection,
+        )
         .await?
     {
         network_history
@@ -977,6 +991,10 @@ async fn client_monitoring_view(
     query: &ClientMonitoringQuery,
 ) -> Result<ClientMonitoringView, ApiError> {
     let client_ids = vec![client_id.to_string()];
+    let network_rate_selection = state
+        .repo
+        .network_rate_interface_selection_for_clients(&client_ids)
+        .await?;
     let client = state
         .repo
         .list_agents_for_client_ids(&client_ids)
@@ -1012,24 +1030,24 @@ async fn client_monitoring_view(
     let network = if range.source == "raw" {
         state
             .repo
-            .list_dashboard_raw_telemetry_network_rates(
+            .list_dashboard_raw_telemetry_network_rates_selected(
                 range.points,
                 range.start_unix,
                 range.end_unix,
                 range.step_secs,
-                &client_ids,
+                &network_rate_selection,
             )
             .await?
     } else {
         state
             .repo
-            .list_dashboard_telemetry_network_rates(
+            .list_dashboard_telemetry_network_rates_selected(
                 range.points,
                 Some(range.start_unix),
                 Some(range.end_unix),
                 None,
                 range.step_secs,
-                &client_ids,
+                &network_rate_selection,
             )
             .await?
     };
@@ -1369,6 +1387,17 @@ fn public_network_metric(rows: &[TelemetryNetworkRateView]) -> PublicNetworkMetr
         tx_bps: (!rows.is_empty()).then(|| rows.iter().map(|row| row.tx_bps_avg).sum()),
         observed_at: rows.iter().map(|row| row.updated_at.clone()).max(),
     }
+}
+
+fn network_rate_is_current(row: &TelemetryNetworkRateView, now_unix: u64) -> bool {
+    parse_timestamp_unix(&row.bucket_start)
+        .map(|bucket_start| {
+            let effective_at = bucket_start.saturating_add(
+                u64::try_from(row.bucket_secs.saturating_sub(60)).unwrap_or_default(),
+            );
+            now_unix.abs_diff(effective_at) <= CURRENT_NETWORK_RATE_MAX_AGE_SECS
+        })
+        .unwrap_or(false)
 }
 
 fn public_network_points(rows: Vec<TelemetryNetworkRateView>) -> Vec<PublicNetworkPointView> {

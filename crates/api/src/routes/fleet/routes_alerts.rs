@@ -800,6 +800,7 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
         "traffic_selector_duplicate",
         "traffic_selector_direction_overlap",
         "traffic_selector_too_many_items",
+        "network_rate_selector_source_invalid",
         "byte_size_empty",
         "byte_size_number_invalid",
         "byte_size_unit_invalid",

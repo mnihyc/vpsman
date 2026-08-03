@@ -2259,7 +2259,7 @@ test("fleet telemetry refresh keeps successful domains current when one domain f
   await openConsoleSubpage(page, "Fleet", "Monitor");
   const networkValue = page
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
-    .locator(".vpsMonitorFlowFact", { hasText: "Network RX" })
+    .locator(".vpsMonitorFlowFact", { hasText: "Network TX" })
     .locator("strong");
   await expect(networkValue).toBeVisible();
   await expect(

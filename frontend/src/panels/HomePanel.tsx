@@ -638,7 +638,6 @@ export function HomePanel({
             fleetAlerts: recordBounds.fleetAlerts,
           }}
           runningJobCount={runningJobs}
-          telemetryNetworkRates={telemetryNetworkRates}
           telemetryRollups={telemetryRollups}
           title="Fleet scan"
           toolbarAction={

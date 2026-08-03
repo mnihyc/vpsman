@@ -139,12 +139,14 @@ const VPS_RULE_KEYS = [
   "billing.price",
   "billing.cycle",
   "network.port_speed",
+  "network.rate.interfaces",
   "traffic.reset_day",
   "traffic.quota.total",
   "traffic.quota.rx",
   "traffic.quota.tx",
   "traffic.selectors",
 ] as const;
+const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX = "[traffic.selectors]";
 const RUNTIME_CONFIG_QUEUED_STALE_MS = 60 * 60 * 1000;
 
 type BulkConfigApplySnapshot = {
@@ -3433,6 +3435,13 @@ const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
     placeholder: "1.5 Gbps",
   },
   {
+    help: `Existing traffic-selector syntax for aggregate live rates and charts. An absent rule, clearing this typed field, or entering [] selects every reported interface and direction. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store a live reference to traffic.selectors, or override with selectors such as eth0,eth1+tx. Unsetting the rule restores All interfaces.`,
+    inputMode: "text",
+    key: "network.rate.interfaces",
+    label: "Live rate interfaces",
+    placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX,
+  },
+  {
     help: "Day of month in UTC when the traffic accounting cycle resets.",
     inputMode: "numeric",
     key: "traffic.reset_day",
@@ -3511,8 +3520,8 @@ function parseVpsRuleTextValues(text: string): Record<string, string> {
       continue;
     }
     const value = line.slice(equals + 1).trim();
-    if (value) {
-      values[key] = value;
+    if (value || key === "network.rate.interfaces") {
+      values[key] = value || "[]";
     }
   }
   return values;
@@ -3532,6 +3541,10 @@ function updateVpsRuleTextValue(
 ): string {
   const values = parseVpsRuleTextValues(text);
   const trimmed = value.trim();
+  if (key === "network.rate.interfaces" && !trimmed) {
+    values[key] = "[]";
+    return serializeVpsRuleTextValues(values);
+  }
   if (trimmed) {
     values[key] = trimmed;
   } else {
@@ -3628,6 +3641,22 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   port_speed_value_invalid:
     "Port speed must be a positive number with at most three decimal places.",
   port_speed_value_too_large: "Port speed is larger than the supported range.",
+  network_rate_selector_source_invalid:
+    "Live-rate selectors use host interfaces only; remove the tunnel: prefix.",
+  traffic_selector_empty: "Enter at least one interface selector.",
+  traffic_selector_empty_item:
+    "Remove the empty selector entry between commas.",
+  traffic_selector_source_invalid:
+    "Selector source must be host or tunnel.",
+  traffic_selector_interface_required: "Each selector needs an interface name.",
+  traffic_selector_interface_invalid:
+    "Use an exact interface name without spaces or wildcards.",
+  traffic_selector_direction_invalid:
+    "Selector direction must be rx, tx, or total.",
+  traffic_selector_duplicate: "Remove the duplicate selector.",
+  traffic_selector_direction_overlap:
+    "Do not select the same interface direction more than once.",
+  traffic_selector_too_many_items: "Use no more than 16 selectors.",
   traffic_reset_day_invalid: "Traffic reset day must be between 1 and 31.",
   byte_size_empty: "Enter a traffic quota or use -1 for unlimited.",
   byte_size_number_invalid: "Traffic quota must start with a valid number.",
@@ -3673,6 +3702,13 @@ function normalizeVpsRuleValue(key: string, value: string | null): string {
   }
   if (key === "traffic.selectors") {
     return normalizeSelectorRuleValue(text);
+  }
+  if (key === "network.rate.interfaces") {
+    if (text === "[]") return "network-rate:all";
+    if (text === NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX) {
+      return "network-rate:reference:traffic.selectors";
+    }
+    return `network-rate:${normalizeSelectorRuleValue(text)}`;
   }
   return normalizeGenericRuleValue(text);
 }
@@ -4174,13 +4210,13 @@ function VpsRulesPanel({
       if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
         throw new Error(`Unsupported VPS rule key: ${key}`);
       }
-      if (!value) {
+      if (!value && key !== "network.rate.interfaces") {
         throw new Error(`VPS rule ${key} cannot be empty; use explicit unset`);
       }
       if (Object.prototype.hasOwnProperty.call(values, key)) {
         throw new Error(`Duplicate VPS rule key: ${key}`);
       }
-      values[key] = value;
+      values[key] = value || "[]";
     }
     if (Object.keys(values).length === 0) {
       throw new Error("Add at least one VPS rule value to set");
@@ -4575,8 +4611,8 @@ function VpsRulesPanel({
                   <div>
                     <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
                     <span title={CONFIG_HELP.ruleSetValues}>
-                      Typed fields for billing, quota, reset day, and traffic
-                      interfaces
+                      Typed fields for billing, live rate, quota, reset day,
+                      and traffic interfaces
                     </span>
                   </div>
                 </div>

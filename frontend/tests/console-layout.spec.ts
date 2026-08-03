@@ -1514,7 +1514,7 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(edgeDetail).toContainText("eth0+tx,ens3");
   await expect(edgeDetail).toContainText("Selected traffic");
   await expect(edgeDetail).toContainText("Latest avg RX");
-  await expect(edgeDetail).toContainText("Cycle Total");
+  await expect(edgeDetail).toContainText("Latest interval");
   const policyDetail = page
     .locator(".vpsDetailBlock", { hasText: "Matched policies" })
     .first();
@@ -6392,10 +6392,20 @@ test("keeps each expanded VPS network evidence scoped to that VPS", async ({
     .locator(".timeline")
     .filter({ hasText: /^Network rate/ });
 
-  await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
-  await expect(coreRate).toContainText("RX 514.2 KB/s / TX 454.7 KB/s");
-  await expect(edgeRate).not.toContainText("RX 514.2 KB/s");
-  await expect(coreRate).not.toContainText("RX 2.4 MB/s");
+  await expect(edgeRate).toContainText("RX 0 B/s / TX 2.3 MB/s");
+  await expect(coreRate).toContainText("Awaiting selected rate");
+  await expect(edgeDetail.locator(".networkInterfaceList")).toContainText(
+    "eth0",
+  );
+  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
+    "eth0",
+  );
+  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
+    "tunab",
+  );
+  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
+    "ovpn42",
+  );
 });
 
 test("shows grouped execution summaries for job output details", async ({

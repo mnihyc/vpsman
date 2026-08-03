@@ -13,15 +13,17 @@ use crate::{
         TelemetrySampleView,
     },
     model_alert_policies::{
-        CreateFleetAlertPolicyRequest, PolicyAlertQuery, PolicyAlertRecord, PolicyDryRunRequest,
-        PolicyDryRunResponse, PolicyDryRunRulePreview, PolicyGroupRecord, PolicyRuleRecord,
-        PolicyRuleRequest, PolicyRuleStateRecord, TrafficAccountingQuery, TrafficAccountingRecord,
-        TrafficAccountingSelectorBreakdown, TrafficCounterSampleRecord, VpsRuleChangePreview,
-        VpsRuleQuery, VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
-        VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE,
-        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
-        VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
+        PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse, PolicyDryRunRulePreview,
+        PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord,
+        TrafficAccountingQuery, TrafficAccountingRecord, TrafficAccountingSelectorBreakdown,
+        TrafficCounterSampleRecord, VpsRuleChangePreview, VpsRuleQuery, VpsRuleValueRecord,
+        VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest,
+        VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE,
+        VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
@@ -45,6 +47,7 @@ const MAX_VPS_RULE_VALUE_BYTES: usize = 4096;
 const MAX_TRAFFIC_SELECTOR_ITEMS: usize = 16;
 const MAX_TRAFFIC_INTERFACE_BYTES: usize = 128;
 const MAX_BILLING_PRICE_WHOLE_DIGITS: usize = 9;
+const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX: &str = "[traffic.selectors]";
 const TRAFFIC_SAMPLE_STALE_SECS: i64 = 900;
 const POLICY_WEBHOOK_REPAIR_WINDOW_SECS: i64 = 3600;
 static POLICY_EVALUATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -64,6 +67,18 @@ struct TrafficSelector {
     interface: String,
     direction: String,
     canonical: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NetworkRateSelectorSpec {
+    All,
+    Exact(Vec<TrafficSelector>),
+    Reference(NetworkRateSelectorReference),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NetworkRateSelectorReference {
+    TrafficSelectors,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -283,6 +298,22 @@ impl Repository {
                 rows.into_iter().map(vps_rule_from_row).collect()
             }
         }
+    }
+
+    pub(crate) async fn network_rate_interface_selection_for_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<NetworkRateInterfaceSelection> {
+        let rules = self
+            .list_vps_rules_for_clients(
+                client_ids,
+                &[
+                    VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+                    VPS_RULE_KEY_TRAFFIC_SELECTORS,
+                ],
+            )
+            .await?;
+        resolve_network_rate_interface_selection(client_ids, &rules)
     }
 
     pub(crate) async fn dry_run_vps_rules(
@@ -3487,6 +3518,7 @@ fn normalize_vps_rule_key(key: &str) -> Result<String> {
                 | VPS_RULE_KEY_BILLING_PRICE
                 | VPS_RULE_KEY_BILLING_CYCLE
                 | VPS_RULE_KEY_NETWORK_PORT_SPEED
+                | VPS_RULE_KEY_NETWORK_RATE_INTERFACES
         ),
         "vps_rules_key_unsupported"
     );
@@ -3508,7 +3540,10 @@ fn parse_vps_rule_value_with_legacy_selector_support(
 ) -> Result<ParsedRuleValue> {
     let key = normalize_vps_rule_key(key)?;
     let raw = value.trim();
-    anyhow::ensure!(!raw.is_empty(), "vps_rules_empty_value_invalid");
+    anyhow::ensure!(
+        !raw.is_empty() || key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        "vps_rules_empty_value_invalid"
+    );
     anyhow::ensure!(
         raw.len() <= MAX_VPS_RULE_VALUE_BYTES,
         "vps_rules_value_too_long"
@@ -3551,23 +3586,197 @@ fn parse_vps_rule_value_with_legacy_selector_support(
                     .collect::<Vec<_>>()
                     .join(","),
                 json: json!({
-                    "selectors": selectors.iter().map(|selector| {
-                        json!({
-                            "source": selector.source,
-                            "interface": selector.interface,
-                            "direction": selector.direction,
-                            "canonical": selector.canonical,
-                        })
-                    }).collect::<Vec<_>>()
+                    "selectors": selectors.iter().map(traffic_selector_json).collect::<Vec<_>>()
                 }),
                 display: format!("{} selectors", selectors.len()),
             })
         }
+        VPS_RULE_KEY_NETWORK_RATE_INTERFACES => parse_network_rate_interfaces(raw),
         VPS_RULE_KEY_BILLING_PRICE => parse_billing_price(raw),
         VPS_RULE_KEY_BILLING_CYCLE => parse_billing_cycle(raw),
         VPS_RULE_KEY_NETWORK_PORT_SPEED => parse_port_speed(raw),
         _ => unreachable!("normalize_vps_rule_key rejects unsupported keys"),
     }
+}
+
+fn parse_network_rate_interfaces(raw: &str) -> Result<ParsedRuleValue> {
+    let spec = parse_network_rate_selector_input(raw)?;
+    Ok(network_rate_selector_rule_value(spec))
+}
+
+fn network_rate_selector_rule_value(spec: NetworkRateSelectorSpec) -> ParsedRuleValue {
+    match spec {
+        NetworkRateSelectorSpec::All => ParsedRuleValue {
+            raw: "[]".to_string(),
+            json: json!({"mode": "all"}),
+            display: "All reported interfaces".to_string(),
+        },
+        NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors) => {
+            ParsedRuleValue {
+                raw: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX.to_string(),
+                json: json!({
+                    "mode": "reference",
+                    "reference": {"rule": VPS_RULE_KEY_TRAFFIC_SELECTORS},
+                }),
+                display: "Traffic selectors (referenced)".to_string(),
+            }
+        }
+        NetworkRateSelectorSpec::Exact(selectors) => ParsedRuleValue {
+            raw: selectors
+                .iter()
+                .map(|selector| selector.canonical.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            json: json!({
+                "mode": "exact",
+                "selectors": selectors.iter().map(traffic_selector_json).collect::<Vec<_>>()
+            }),
+            display: format!("{} live-rate selectors", selectors.len()),
+        },
+    }
+}
+
+fn parse_network_rate_selector_input(raw: &str) -> Result<NetworkRateSelectorSpec> {
+    if raw == NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX {
+        return Ok(NetworkRateSelectorSpec::Reference(
+            NetworkRateSelectorReference::TrafficSelectors,
+        ));
+    }
+    if raw.is_empty() || raw == "[]" {
+        return Ok(NetworkRateSelectorSpec::All);
+    }
+
+    let selectors = parse_traffic_selector_list(raw)?;
+    anyhow::ensure!(
+        selectors.iter().all(|selector| selector.source == "host"),
+        "network_rate_selector_source_invalid"
+    );
+    Ok(NetworkRateSelectorSpec::Exact(selectors))
+}
+
+fn parse_stored_network_rate_selector_spec(value: &Value) -> Result<NetworkRateSelectorSpec> {
+    let mode = value
+        .get("mode")
+        .and_then(Value::as_str)
+        .context("network_rate_selector_storage_invalid")?;
+    match mode {
+        "all" => Ok(NetworkRateSelectorSpec::All),
+        "exact" => {
+            let selectors = parse_stored_traffic_selector_list(value, false)?;
+            anyhow::ensure!(
+                selectors.iter().all(|selector| selector.source == "host"),
+                "network_rate_selector_storage_invalid"
+            );
+            Ok(NetworkRateSelectorSpec::Exact(selectors))
+        }
+        "reference" => {
+            anyhow::ensure!(
+                value
+                    .get("reference")
+                    .and_then(|reference| reference.get("rule"))
+                    .and_then(Value::as_str)
+                    == Some(VPS_RULE_KEY_TRAFFIC_SELECTORS),
+                "network_rate_selector_storage_invalid"
+            );
+            Ok(NetworkRateSelectorSpec::Reference(
+                NetworkRateSelectorReference::TrafficSelectors,
+            ))
+        }
+        _ => anyhow::bail!("network_rate_selector_storage_invalid"),
+    }
+}
+
+fn parse_stored_traffic_selector_list(
+    value: &Value,
+    allow_direction_overlap: bool,
+) -> Result<Vec<TrafficSelector>> {
+    let stored = value
+        .get("selectors")
+        .and_then(Value::as_array)
+        .context("traffic_selector_storage_invalid")?;
+    let mut canonical = Vec::with_capacity(stored.len());
+    for item in stored {
+        let stored_source = item.get("source").and_then(Value::as_str);
+        let stored_interface = item.get("interface").and_then(Value::as_str);
+        let stored_direction = item.get("direction").and_then(Value::as_str);
+        let stored_canonical = item.get("canonical").and_then(Value::as_str);
+        let parsed =
+            parse_traffic_selector(stored_canonical.context("traffic_selector_storage_invalid")?)?;
+        anyhow::ensure!(
+            stored_source == Some(parsed.source.as_str())
+                && stored_interface == Some(parsed.interface.as_str())
+                && stored_direction == Some(parsed.direction.as_str()),
+            "traffic_selector_storage_invalid"
+        );
+        canonical.push(parsed.canonical);
+    }
+    parse_traffic_selector_list_with_options(&canonical.join(","), allow_direction_overlap)
+}
+
+fn resolve_network_rate_interface_selection(
+    client_ids: &[String],
+    rules: &[VpsRuleValueRecord],
+) -> Result<NetworkRateInterfaceSelection> {
+    let rules_by_client = rules.iter().fold(
+        HashMap::<&str, HashMap<&str, &VpsRuleValueRecord>>::new(),
+        |mut by_client, rule| {
+            by_client
+                .entry(rule.client_id.as_str())
+                .or_default()
+                .insert(rule.key.as_str(), rule);
+            by_client
+        },
+    );
+    let mut selection = NetworkRateInterfaceSelection::default();
+    for client_id in client_ids {
+        let client_rules = rules_by_client.get(client_id.as_str());
+        let rate_rule = client_rules
+            .and_then(|rules| rules.get(VPS_RULE_KEY_NETWORK_RATE_INTERFACES))
+            .copied();
+        let spec = rate_rule.map_or(Ok(NetworkRateSelectorSpec::All), |rule| {
+            parse_stored_network_rate_selector_spec(&rule.value_json)
+        })?;
+        match spec {
+            NetworkRateSelectorSpec::All => selection.select_all(client_id.clone()),
+            NetworkRateSelectorSpec::Exact(selectors) => {
+                selection.select_exact(client_id.clone(), host_rate_direction_masks(&selectors))
+            }
+            NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors) => {
+                let inherited = match client_rules
+                    .and_then(|rules| rules.get(VPS_RULE_KEY_TRAFFIC_SELECTORS))
+                {
+                    Some(rule) => host_rate_direction_masks(&parse_stored_traffic_selector_list(
+                        &rule.value_json,
+                        true,
+                    )?),
+                    None => BTreeMap::new(),
+                };
+                selection.select_exact(client_id.clone(), inherited);
+            }
+        }
+    }
+    Ok(selection)
+}
+
+fn traffic_selector_json(selector: &TrafficSelector) -> Value {
+    json!({
+        "source": selector.source,
+        "interface": selector.interface,
+        "direction": selector.direction,
+        "canonical": selector.canonical,
+    })
+}
+
+fn host_rate_direction_masks(selectors: &[TrafficSelector]) -> BTreeMap<String, u8> {
+    let mut selected = BTreeMap::new();
+    for selector in selectors
+        .iter()
+        .filter(|selector| selector.source == "host")
+    {
+        *selected.entry(selector.interface.clone()).or_default() |=
+            traffic_selector_direction_mask(selector);
+    }
+    selected
 }
 
 #[derive(Clone, Debug)]
@@ -5506,15 +5715,31 @@ fn selector_hash(selectors: &[String]) -> String {
 fn vps_rule_from_row(row: sqlx::postgres::PgRow) -> Result<VpsRuleValueRecord> {
     let key: String = row.try_get("key")?;
     let raw: String = row.try_get("value_raw")?;
-    let parsed = parse_persisted_vps_rule_value(&key, &raw)?;
+    let stored_json = row.try_get::<SqlJson<Value>, _>("value_json")?.0;
+    let parsed = if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
+        let parsed = network_rate_selector_rule_value(parse_stored_network_rate_selector_spec(
+            &stored_json,
+        )?);
+        anyhow::ensure!(
+            parsed.json == stored_json,
+            "network_rate_selector_storage_invalid"
+        );
+        parsed
+    } else {
+        let parsed = parse_persisted_vps_rule_value(&key, &raw)?;
+        if key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
+            anyhow::ensure!(
+                parsed.json == stored_json,
+                "traffic_selector_storage_invalid"
+            );
+        }
+        parsed
+    };
     Ok(VpsRuleValueRecord {
         client_id: row.try_get("client_id")?,
         key,
         value_raw: parsed.raw,
-        value_json: row
-            .try_get::<SqlJson<Value>, _>("value_json")
-            .map(|value| value.0)
-            .unwrap_or(parsed.json),
+        value_json: stored_json,
         parsed_display: parsed.display,
         state: "ok".to_string(),
         validation_errors: Vec::new(),

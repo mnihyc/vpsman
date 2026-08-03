@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -12,6 +12,76 @@ pub(crate) const VPS_RULE_KEY_TRAFFIC_SELECTORS: &str = "traffic.selectors";
 pub(crate) const VPS_RULE_KEY_BILLING_PRICE: &str = "billing.price";
 pub(crate) const VPS_RULE_KEY_BILLING_CYCLE: &str = "billing.cycle";
 pub(crate) const VPS_RULE_KEY_NETWORK_PORT_SPEED: &str = "network.port_speed";
+pub(crate) const VPS_RULE_KEY_NETWORK_RATE_INTERFACES: &str = "network.rate.interfaces";
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NetworkRateInterfaceSelection {
+    all_clients: BTreeSet<String>,
+    exact_by_client: BTreeMap<String, BTreeMap<String, u8>>,
+}
+
+impl NetworkRateInterfaceSelection {
+    #[cfg(test)]
+    pub(crate) fn all(client_ids: &[String]) -> Self {
+        Self {
+            all_clients: client_ids.iter().cloned().collect(),
+            exact_by_client: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn select_all(&mut self, client_id: String) {
+        self.exact_by_client.remove(&client_id);
+        self.all_clients.insert(client_id);
+    }
+
+    pub(crate) fn select_exact(&mut self, client_id: String, interfaces: BTreeMap<String, u8>) {
+        self.all_clients.remove(&client_id);
+        self.exact_by_client.insert(client_id, interfaces);
+    }
+
+    pub(crate) fn allows(&self, client_id: &str, interface: &str) -> bool {
+        self.direction_mask(client_id, interface) != 0
+    }
+
+    pub(crate) fn direction_mask(&self, client_id: &str, interface: &str) -> u8 {
+        if self.all_clients.contains(client_id) {
+            return 0b11;
+        }
+        self.exact_by_client
+            .get(client_id)
+            .and_then(|interfaces| interfaces.get(interface))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn client_ids(&self) -> Vec<String> {
+        self.all_clients
+            .iter()
+            .chain(self.exact_by_client.keys())
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn query_parts(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut selected_clients = Vec::new();
+        let mut selected_interfaces = Vec::new();
+        for (client_id, interfaces) in &self.exact_by_client {
+            for interface in interfaces.keys() {
+                selected_clients.push(client_id.clone());
+                selected_interfaces.push(interface.clone());
+            }
+        }
+        (
+            self.all_clients.iter().cloned().collect(),
+            selected_clients,
+            selected_interfaces,
+        )
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.all_clients.is_empty() && self.exact_by_client.values().all(BTreeMap::is_empty)
+    }
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct VpsRuleValueRecord {

@@ -93,12 +93,30 @@ activity; the reset point is retained as the next interval's baseline. The
 first point without a baseline is likewise omitted, so both cases appear as an
 explicit chart gap.
 
-Fleet chart points sum interface rates for each logical interval, then average
-those fleet totals when several intervals share one displayed chart step. The
-current fleet/VPS value sums only the latest coherent interface rows; rows more
-than 180 seconds behind that VPS's newest interface sample are excluded.
-Virtual, bridge, and tunnel interfaces can represent overlapping traffic, so
-this sum is operational activity rather than guaranteed unique wire volume.
+Config > Rules scopes aggregate live rate through `network.rate.interfaces`:
+
+- An absent value, empty input, or `[]` selects every reported interface in
+  both directions. Unsetting the rule returns to this All behavior.
+- The explicit input syntax `[traffic.selectors]` is normalized on save into a
+  stored reference object and resolves the current per-VPS rule at query time,
+  including each selector's RX/TX direction; it is not copied into a fixed
+  selector list.
+- Any other value uses the existing interface/direction selector grammar. For
+  example, `eth0,eth1+tx` includes both directions for `eth0` and only TX for
+  `eth1`.
+
+This scope controls aggregate rate values on VPS cards, charts, the dashboard,
+and public monitoring views. It does not filter agent collection or retained
+per-interface evidence: raw interface diagnostics, APIs, and CSV remain
+complete.
+
+Fleet chart points sum the selected interface/direction rates for each logical
+interval, then average those fleet totals when several intervals share one
+displayed chart step. Monitoring-card current values accept only selected rows
+within 180 seconds of the card snapshot; historical curves retain older rows
+and their gaps. When all interfaces are selected, virtual, bridge, and tunnel
+interfaces can represent overlapping traffic, so the sum is operational
+activity rather than guaranteed unique wire volume.
 
 ## Authoritative Traffic Accounting
 

@@ -45,6 +45,10 @@ import type {
 } from "../types";
 import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
 import {
+  networkRateSelectionLabel,
+  selectedNetworkRates,
+} from "../networkRateSelection";
+import {
   dispatchFailureReason,
   displayNameOrUnnamed,
   formatCompactTime,
@@ -1023,9 +1027,25 @@ function NetworkTab({
   onOpenNetwork: () => void;
   onOpenNetworkEvidence: () => void;
 }) {
-  const latestRate = newestNetworkRate(related.networkRates);
-  const trafficRules = related.vpsRules.filter((rule) =>
-    rule.key.startsWith("traffic."),
+  const aggregateRates = selectedNetworkRates(
+    related.networkRates,
+    related.vpsRules,
+  );
+  const aggregateRx = aggregateRates.reduce(
+    (total, rate) => total + rate.rx_bps_avg,
+    0,
+  );
+  const aggregateTx = aggregateRates.reduce(
+    (total, rate) => total + rate.tx_bps_avg,
+    0,
+  );
+  const aggregateDelta = aggregateRates.reduce(
+    (total, rate) => total + rate.rx_bytes_delta + rate.tx_bytes_delta,
+    0,
+  );
+  const trafficRules = related.vpsRules.filter(
+    (rule) =>
+      rule.key.startsWith("traffic.") || rule.key === "network.rate.interfaces",
   );
   const trafficPolicyAlerts = related.policyAlerts.filter((alert) =>
     `${alert.category} ${alert.title} ${alert.detail} ${JSON.stringify(alert.payload)}`
@@ -1083,26 +1103,30 @@ function NetworkTab({
         </button>
         <VpsFact label="Selected traffic" value={trafficSelectorLabel(trafficRules)} />
         <VpsFact
+          label="Live rate interfaces"
+          value={networkRateSelectionLabel(related.vpsRules)}
+        />
+        <VpsFact
           label="Latest avg RX"
           value={
-            latestRate
-              ? formatByteRateFromBitsPerSecond(latestRate.rx_bps_avg)
+            aggregateRates.length
+              ? formatByteRateFromBitsPerSecond(aggregateRx)
               : "No rate"
           }
         />
         <VpsFact
           label="Latest avg TX"
           value={
-            latestRate
-              ? formatByteRateFromBitsPerSecond(latestRate.tx_bps_avg)
+            aggregateRates.length
+              ? formatByteRateFromBitsPerSecond(aggregateTx)
               : "No rate"
           }
         />
         <VpsFact
-          label="Cycle Total"
+          label="Latest interval"
           value={
-            latestRate
-              ? formatBytes(latestRate.rx_bytes_delta + latestRate.tx_bytes_delta)
+            aggregateRates.length
+              ? formatBytes(aggregateDelta)
               : "No sample"
           }
         />
@@ -1924,15 +1948,6 @@ function networkObservationLabel(kind: string): string {
     speed_test: "Speed test",
   };
   return labels[kind] ?? readableDetailToken(kind);
-}
-
-function newestNetworkRate(rates: TelemetryNetworkRateRecord[]) {
-  return (
-    rates
-      .slice()
-      .sort((left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at))[0] ??
-    null
-  );
 }
 
 function trafficSelectorLabel(rules: VpsRuleValueRecord[]) {

@@ -55,7 +55,6 @@ type FleetMonitorPanelProps = {
   maxCards?: number;
   recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
-  telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   title?: string;
   toolbarAction?: ReactNode;
@@ -98,7 +97,6 @@ export function FleetMonitorPanel({
   maxCards,
   recordBounds,
   runningJobCount,
-  telemetryNetworkRates,
   telemetryRollups,
   title = "Fleet monitor",
   toolbarAction,
@@ -286,18 +284,16 @@ export function FleetMonitorPanel({
       card.resources ? [card.resources] : [],
     ),
   ]);
-  const rates = latestRatesByClient([
-    ...telemetryNetworkRates,
-    ...monitoringCards.flatMap((card) => card.network),
-  ]);
+  const rates = latestRatesByClient(
+    monitoringCards.flatMap((card) => card.network),
+  );
   const rollupHistory = historyRollupsByClient([
     ...telemetryRollups,
     ...monitoringCards.flatMap((card) => card.resource_history),
   ]);
-  const rateHistory = historyRatesByClient([
-    ...telemetryNetworkRates,
-    ...monitoringCards.flatMap((card) => card.network_history),
-  ]);
+  const rateHistory = historyRatesByClient(
+    monitoringCards.flatMap((card) => card.network_history),
+  );
   const trafficByClient = new Map(
     monitoringCards.map((card) => [card.client.id, card.traffic]),
   );

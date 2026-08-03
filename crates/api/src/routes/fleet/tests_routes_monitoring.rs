@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{monitoring_range, ClientMonitoringQuery};
+use super::{monitoring_range, network_rate_is_current, ClientMonitoringQuery};
 use axum::{
     body::Body,
     extract::ConnectInfo,
@@ -16,7 +16,7 @@ use crate::{
         PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
         PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
         PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
-        PublicTrafficHistoryPointView, PublicTrafficMetricView,
+        PublicTrafficHistoryPointView, PublicTrafficMetricView, TelemetryNetworkRateView,
     },
     repository::{MemoryState, Repository},
     state::{AppState, DispatcherRuntimeConfig},
@@ -143,6 +143,33 @@ async fn fifteen_minutes_is_always_raw_without_a_legacy_alias() {
     assert!(monitoring_range(&state, &clients, &query("R"))
         .await
         .is_err());
+}
+
+#[test]
+fn current_card_rates_reject_stale_and_future_interface_rows() {
+    let rate = |bucket_start: &str| TelemetryNetworkRateView {
+        client_id: "v-1".to_string(),
+        interface: "eth0".to_string(),
+        bucket_start: bucket_start.to_string(),
+        bucket_secs: 60,
+        sample_count: 1,
+        rx_bytes_avg: 1,
+        tx_bytes_avg: 2,
+        rx_bytes_last: 1,
+        tx_bytes_last: 2,
+        rx_counter_epoch: 0,
+        tx_counter_epoch: 0,
+        rx_bytes_delta: 1,
+        tx_bytes_delta: 2,
+        rx_bps_avg: 8.0,
+        tx_bps_avg: 16.0,
+        updated_at: bucket_start.to_string(),
+    };
+
+    assert!(network_rate_is_current(&rate("1000"), 1_180));
+    assert!(!network_rate_is_current(&rate("1000"), 1_181));
+    assert!(!network_rate_is_current(&rate("1361"), 1_180));
+    assert!(!network_rate_is_current(&rate("invalid"), 1_180));
 }
 
 #[test]

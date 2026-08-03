@@ -1360,7 +1360,22 @@ const vpsRuleValues = [
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: "fixture-admin",
     validation_errors: [],
-    value_json: ["host:eth0+tx", "host:ens3+total"],
+    value_json: {
+      selectors: [
+        {
+          canonical: "eth0+tx",
+          direction: "tx",
+          interface: "eth0",
+          source: "host",
+        },
+        {
+          canonical: "ens3",
+          direction: "total",
+          interface: "ens3",
+          source: "host",
+        },
+      ],
+    },
     value_raw: "eth0+tx,ens3",
   },
 ];
@@ -3545,6 +3560,7 @@ export async function installConsoleApiMock(
         })),
       }));
       let telemetryNetworkRateRequestCount = 0;
+      let monitoringCardsRequestCount = 0;
       const mutableHostPackageUpdatePlans = hostPackageUpdatePlansFixture.map(
         (plan) => ({
           ...plan,
@@ -5001,6 +5017,14 @@ export async function installConsoleApiMock(
           const params = new URL(url, window.location.href).searchParams;
           const offset = Math.max(0, Number(params.get("offset") ?? "0"));
           const limit = Math.max(1, Number(params.get("limit") ?? "1000"));
+          const networkScale =
+            telemetryNetworkRateScalesFixture[
+              Math.min(
+                monitoringCardsRequestCount,
+                telemetryNetworkRateScalesFixture.length - 1,
+              )
+            ] ?? 1;
+          monitoringCardsRequestCount += 1;
           const items = visibleAgents().map((client) => ({
             billing:
               client.id === "agent-sfo-01"
@@ -5016,8 +5040,52 @@ export async function installConsoleApiMock(
                   }
                 : null,
             client,
-            network: [],
-            network_history: [],
+            network:
+              client.id === "agent-sfo-01"
+                ? [
+                    {
+                      bucket_secs: 60,
+                      bucket_start: "2026-06-05T20:35:00Z",
+                      client_id: client.id,
+                      interface: "eth0",
+                      rx_bps_avg: 0,
+                      rx_bytes_avg: 0,
+                      rx_bytes_delta: 0,
+                      sample_count: 1,
+                      tx_bps_avg: 18_400_000 * networkScale,
+                      tx_bytes_avg: 68_157_440,
+                      tx_bytes_delta: 458_752 * networkScale,
+                      updated_at: "2026-06-05T20:35:00Z",
+                    },
+                  ]
+                : [],
+            network_history:
+              client.id === "agent-sfo-01"
+                ? [9_200_000, 13_800_000, 18_400_000].map(
+                    (txBps, index) => ({
+                      bucket_secs: 60,
+                      bucket_start: [
+                        "2026-06-05T20:33:00Z",
+                        "2026-06-05T20:34:00Z",
+                        "2026-06-05T20:35:00Z",
+                      ][index],
+                      client_id: client.id,
+                      interface: "eth0",
+                      rx_bps_avg: 0,
+                      rx_bytes_avg: 0,
+                      rx_bytes_delta: 0,
+                      sample_count: 1,
+                      tx_bps_avg: txBps * networkScale,
+                      tx_bytes_avg: 68_157_440,
+                      tx_bytes_delta: 230_000 * (index + 1) * networkScale,
+                      updated_at: [
+                        "2026-06-05T20:33:00Z",
+                        "2026-06-05T20:34:00Z",
+                        "2026-06-05T20:35:00Z",
+                      ][index],
+                    }),
+                  )
+                : [],
             port_speed:
               client.id === "agent-sfo-01"
                 ? { bps: 1_500_000_000, display: "1.5 Gbps" }
