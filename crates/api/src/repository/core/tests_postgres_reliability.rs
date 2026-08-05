@@ -2501,7 +2501,7 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
     let share = crate::model_monitoring::MonitoringShareRecord {
         id: Uuid::new_v4(),
         name: "Traffic evidence".to_string(),
-        token_digest: payload_hash(b"traffic-share"),
+        token_secret: payload_hash(b"traffic-share"),
         selector_expression: "*".to_string(),
         targets: vec![crate::model_monitoring::MonitoringShareTargetRecord {
             client_id: client_id.to_string(),

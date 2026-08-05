@@ -6,6 +6,7 @@ import {
 } from "../agentDisplayState";
 import { apiGet } from "../api";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { CountryFlag } from "../components/CountryFlag";
 import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
@@ -37,6 +38,7 @@ import {
   usePersistentMonitorCardDensity,
   type MonitorCardDensity,
 } from "../monitorCardDensity";
+import { countryTagValue } from "../tagDisplay";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import { displayNameOrUnnamed, formatTime, timestampMillis } from "../utils";
 
@@ -55,6 +57,7 @@ type FleetMonitorPanelProps = {
   maxCards?: number;
   recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
+  showCountryFlags: boolean;
   telemetryRollups: TelemetryRollupRecord[];
   title?: string;
   toolbarAction?: ReactNode;
@@ -97,6 +100,7 @@ export function FleetMonitorPanel({
   maxCards,
   recordBounds,
   runningJobCount,
+  showCountryFlags,
   telemetryRollups,
   title = "Fleet monitor",
   toolbarAction,
@@ -742,6 +746,7 @@ export function FleetMonitorPanel({
                     trafficByClient,
                     primaryPingByClient,
                   )}
+                  showCountryFlags={showCountryFlags}
                   traffic={monitoringCard?.traffic ?? null}
                 />
               );
@@ -774,6 +779,7 @@ export type VpsMonitorCardProps = {
   rollupHistory: TelemetryRollupRecord[];
   rollup: TelemetryRollupRecord | null;
   signals: VpsMonitorCardSignal;
+  showCountryFlags: boolean;
   statusCategory: Exclude<FleetMonitorStatusFilter, "all">;
   traffic: TrafficAccountingRecord | null;
 };
@@ -832,13 +838,15 @@ export function VpsMonitorCard({
   rollupHistory,
   rollup,
   signals,
+  showCountryFlags,
   statusCategory,
   traffic,
 }: VpsMonitorCardProps) {
   const displayState = agentDisplayState(agent);
   const provider = tagValue(agent.tags, "provider") ?? "provider unset";
+  const country = countryTagValue(agent.tags);
   const region =
-    tagValue(agent.tags, "country") ??
+    country ??
     tagValue(agent.tags, "region") ??
     "region unset";
   const currentRates = coherentNetworkRates(rates);
@@ -977,8 +985,14 @@ export function VpsMonitorCard({
           ? "No contact"
           : effectiveStatusLabel}
       </span>
-      <strong title={displayNameOrUnnamed(agent.display_name)}>
-        {displayNameOrUnnamed(agent.display_name)}
+      <strong
+        className="vpsMonitorCardName"
+        title={displayNameOrUnnamed(agent.display_name)}
+      >
+        {showCountryFlags && country ? (
+          <CountryFlag country={country} decorative fallback="none" />
+        ) : null}
+        <span>{displayNameOrUnnamed(agent.display_name)}</span>
       </strong>
       <small title={`${provider} / ${region}`}>
         {provider} / {region}
@@ -1956,7 +1970,7 @@ function providerSortValue(agent: AgentView) {
 
 function regionSortValue(agent: AgentView) {
   return (
-    tagValue(agent.tags, "country") ??
+    countryTagValue(agent.tags) ??
     tagValue(agent.tags, "region") ??
     "region unset"
   );
@@ -2083,7 +2097,7 @@ function monitorFleetSnapshot(
   let trafficCount = 0;
   for (const agent of agents) {
     const location =
-      tagValue(agent.tags, "country") ?? tagValue(agent.tags, "region");
+      countryTagValue(agent.tags) ?? tagValue(agent.tags, "region");
     if (location) locations.add(location);
     else unspecifiedLocations += 1;
     const currentRates = coherentNetworkRates(rates.get(agent.id) ?? []);

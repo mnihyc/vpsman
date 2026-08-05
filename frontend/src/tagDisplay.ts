@@ -57,7 +57,13 @@ export function defaultFleetTagVisible(tag: string): boolean {
 }
 
 export function isCountryTag(tag: string): boolean {
-  return /^country[:=_-][a-z0-9_-]{2,32}$/i.test(tag);
+  return /^country:[a-z0-9_-]{2,32}$/i.test(tag);
+}
+
+export function countryTagValue(tags: string[]): string | null {
+  const tag = tags.find(isCountryTag);
+  const value = tag?.slice("country:".length).trim();
+  return value ? value.toUpperCase() : null;
 }
 
 export function isProviderTag(tag: string): boolean {

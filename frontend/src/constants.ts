@@ -336,7 +336,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "shared_views",
       label: "Shared views",
-      description: "Create, extend, revoke, and inspect public monitoring views",
+      description: "Create, update targets, copy links, extend, revoke, and inspect public monitoring views",
     },
     {
       id: "alerts",

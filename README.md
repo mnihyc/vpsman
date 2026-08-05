@@ -276,8 +276,9 @@ ordinary tags. Resolver-only selectors such as `id:<client_id>` and
 Jobs and schedules execute fixed, reviewed target snapshots. Selector text is
 kept as audit context, but the submitted API payload contains the concrete VPS
 IDs that were reviewed. **System > Maintenance > Stale selectors** consolidates
-deliberate target refresh for mutable Schedule and Ping snapshots; shared views
-and approval evidence remain immutable.
+deliberate target refresh for mutable Schedule and Ping snapshots. Shared-view
+targets are also mutable only through their dedicated reviewed **Update
+targets** action; visibility and approval evidence remain immutable.
 
 Read more in [docs/target-selectors.md](docs/target-selectors.md).
 
@@ -299,9 +300,10 @@ stored as a longer lossless span. There is no competing hourly history.
 **Observability > Ping targets** manages reusable ICMP/TCP definitions, frozen
 VPS assignments, and an explicit primary target for each card.
 **Observability > Shared views** creates expiring public read-only projections,
-then retains the lifecycle needed to extend active links or revoke them. Each
-share freezes its VPS and visible-data scope at creation. Its secret URL is shown
-once because the control plane stores only a digest. Public projections use
+then retains the lifecycle needed to update frozen targets, copy the URL, extend
+active links, or revoke them. Each share freezes its VPS and visible-data scope
+at creation; only an explicit reviewed target update re-resolves its saved
+selector, while visibility remains immutable. Public projections use
 persisted random share-specific VPS keys and never expose internal VPS IDs or
 network-address fields, internal configuration, actions, jobs, terminals,
 files, backups, audit data, or operator identity. Operator-entered public labels

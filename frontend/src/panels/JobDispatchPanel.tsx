@@ -6,7 +6,7 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { LockKeyhole, Play, ShieldCheck } from "lucide-react";
+import { Play, ShieldCheck } from "lucide-react";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
@@ -16,7 +16,6 @@ import {
 } from "../bulkJobProgress";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
-import { PrivilegeLockPrompt } from "../components/PrivilegeLockPrompt";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -81,13 +80,11 @@ import type {
   AgentView,
   BulkResolveResponse,
   CommandTemplateRecord,
-  CreateJobApprovalRequest,
   CreateJobRequest,
   CreateJobResponse,
   DeleteCommandTemplateRequest,
   FileExistingPolicy,
   JobHistoryRecord,
-  JobApprovalRecord,
   JobOperation,
   JobOutputRecord,
   JobRolloutPolicy,
@@ -315,7 +312,6 @@ export function JobDispatchPanel({
   surface = "jobs",
   onDispatchPresetApplied,
   onCreateJob,
-  onCreateJobApproval,
   onDownloadFileTransferSource,
   onDownloadOutputChunk,
   onOpenJobsDispatch,
@@ -326,7 +322,6 @@ export function JobDispatchPanel({
   onLoadTargets,
   onOpenJobDetails,
   onOpenPrivilegeUnlock,
-  onApprovalRequested,
   onResolveTargets,
   onDeleteCommandTemplate,
   onUpsertCommandTemplate,
@@ -343,9 +338,6 @@ export function JobDispatchPanel({
   surface?: "jobs" | "terminal";
   onDispatchPresetApplied?: () => void;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreateJobApproval?: (
-    request: CreateJobApprovalRequest,
-  ) => Promise<JobApprovalRecord>;
   onDownloadFileTransferSource: (downloadPath: string) => Promise<Blob>;
   onDownloadOutputChunk: (
     jobId: string,
@@ -360,7 +352,6 @@ export function JobDispatchPanel({
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onApprovalRequested?: (approval: JobApprovalRecord) => void;
   onResolveTargets: (
     selection: JobTargetSelection,
   ) => Promise<BulkResolveResponse>;
@@ -672,14 +663,8 @@ export function JobDispatchPanel({
     );
   const [actionError, setActionError] = useState<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
-  const [lockPromptOpen, setLockPromptOpen] = useState(false);
-  const [lockPending, setLockPending] = useState(false);
   const [dispatchConfirmation, setDispatchConfirmation] =
     useState<DispatchConfirmationSnapshot | null>(null);
-  const [dispatchReviewIntent, setDispatchReviewIntent] = useState<
-    "dispatch" | "approval"
-  >("dispatch");
-  const [approvalRequestReason, setApprovalRequestReason] = useState("");
   const [selectorVerification, setSelectorVerification] = useState<
     "checking" | "invalid" | "neutral" | "valid"
   >("neutral");
@@ -1091,12 +1076,6 @@ export function JobDispatchPanel({
     mode,
     supervisorAction,
   );
-  const approvalRequestSupported = Boolean(
-    !terminalSurface &&
-    onCreateJobApproval &&
-    mode !== "file_transfer_upload" &&
-    mode !== "file_transfer_download",
-  );
   const impactTargets = preview?.targets ?? expressionTargets;
   const rolloutUnavailableReason = rolloutUnsupportedReason(
     terminalSurface,
@@ -1155,13 +1134,7 @@ export function JobDispatchPanel({
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
   const dispatchConfirmationItems = [
     { label: "Operation", value: dispatchConfirmationOperationLabel },
-    {
-      label: "Submission",
-      value:
-        dispatchReviewIntent === "approval"
-          ? "Approval queue; no execution until approved"
-          : "Dispatch immediately after confirmation",
-    },
+    { label: "Submission", value: "Dispatch immediately after confirmation" },
     ...transferReviewItems(activeDispatchConfirmation),
     ...operationReviewItems(
       activeDispatchConfirmation?.kind === "job"
@@ -1209,22 +1182,6 @@ export function JobDispatchPanel({
   const dispatchFeedbackTone =
     actionError || selectorVerificationError ? "danger" : "progress";
 
-  async function lockPrivilege() {
-    setLockPending(true);
-    setActionError(null);
-    try {
-      await setPrivilegeMaterial(null);
-      setLockPromptOpen(false);
-      clearDispatchReview();
-    } catch (error) {
-      setActionError(
-        error instanceof Error ? error.message : "Privilege lock failed",
-      );
-    } finally {
-      setLockPending(false);
-    }
-  }
-
   function clearExecutionResults() {
     setDispatchProgress(null);
     setLastDispatchProgress(null);
@@ -1237,22 +1194,16 @@ export function JobDispatchPanel({
     invalidateReviewGeneration();
     setDispatchPromptOpen(false);
     setDispatchConfirmation(null);
-    setDispatchReviewIntent("dispatch");
-    setApprovalRequestReason("");
     setReviewStatus(null);
   }
 
   async function submitJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await prepareJobReview("dispatch");
+    await prepareJobReview();
   }
 
-  async function prepareJobReview(intent: "dispatch" | "approval") {
+  async function prepareJobReview() {
     setActionError(null);
-    if (intent === "approval" && !approvalRequestSupported) {
-      setActionError("This operation must be dispatched directly");
-      return;
-    }
     if (!privilegeMaterial) {
       setActionError("Privilege unlock is locked");
       return;
@@ -1268,11 +1219,7 @@ export function JobDispatchPanel({
     blurActiveElement();
     const reviewGeneration = captureReviewGeneration();
     const selection = targetSelection();
-    setReviewStatus(
-      intent === "approval"
-        ? "Preparing approval request"
-        : "Preparing dispatch confirmation",
-    );
+    setReviewStatus("Preparing dispatch confirmation");
     try {
       await runPanelAction(setPending, setActionError, async () => {
         await waitForReviewRender();
@@ -1291,8 +1238,6 @@ export function JobDispatchPanel({
         }
         setPreview(resolved);
         setDispatchConfirmation(snapshot);
-        setDispatchReviewIntent(intent);
-        setApprovalRequestReason("");
         setDispatchPromptOpen(true);
       });
     } finally {
@@ -1831,29 +1776,6 @@ export function JobDispatchPanel({
     });
   }
 
-  async function requestJobApproval() {
-    clearExecutionResults();
-    await runPanelAction(setPending, setActionError, async () => {
-      if (!onCreateJobApproval) {
-        throw new Error("Approval requests are unavailable");
-      }
-      const confirmed = dispatchConfirmation;
-      if (confirmed?.kind !== "job" || !confirmed.targets.length) {
-        throw new Error(
-          "Confirmed job snapshot is missing; review the targets again",
-        );
-      }
-      const approval = await onCreateJobApproval({
-        job: jobRequestFromConfirmation(confirmed, true),
-        reason: approvalRequestReason.trim() || null,
-      });
-      setDispatchPromptOpen(false);
-      setDispatchConfirmation(null);
-      setApprovalRequestReason("");
-      onApprovalRequested?.(approval);
-    });
-  }
-
   async function trackDispatchProgress(
     job: CreateJobResponse,
     targets: AgentView[],
@@ -1903,20 +1825,6 @@ export function JobDispatchPanel({
             {terminalSurface ? "Terminal review composer" : "Dispatch command"}
           </h2>
           <span>{dispatchHeaderStatus}</span>
-        </div>
-        <div className="headerActionStack">
-          {privilegeMaterial ? (
-            <button
-              className="secondaryAction"
-              onClick={() => setLockPromptOpen(true)}
-              type="button"
-            >
-              <LockKeyhole size={17} />
-              Lock
-            </button>
-          ) : (
-            <ShieldCheck size={20} />
-          )}
         </div>
       </div>
 
@@ -2396,55 +2304,17 @@ export function JobDispatchPanel({
         </details>
 
         <ConfirmationPrompt
-          confirmLabel={
-            dispatchReviewIntent === "approval"
-              ? "Request approval"
-              : "Dispatch job"
-          }
-          detail={
-            dispatchReviewIntent === "approval"
-              ? `Queues ${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)} for review. Nothing runs until a pending request is approved.`
-              : `${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)}.`
-          }
+          confirmLabel="Dispatch job"
+          detail={`${dispatchConfirmationOperationLabel} on ${vpsCountLabel(dispatchConfirmationTargets.length)}.`}
           error={actionError}
           items={dispatchConfirmationItems}
           onCancel={clearDispatchReview}
-          onConfirm={() =>
-            void (dispatchReviewIntent === "approval"
-              ? requestJobApproval()
-              : dispatchJobNow())
-          }
+          onConfirm={() => void dispatchJobNow()}
           open={dispatchPromptOpen}
           pending={pending}
-          title={
-            dispatchReviewIntent === "approval"
-              ? "Confirm approval request"
-              : "Confirm job dispatch"
-          }
-          tone={
-            dispatchReviewIntent === "dispatch" &&
-            dispatchConfirmationDestructive
-              ? "danger"
-              : "normal"
-          }
-        >
-          {dispatchReviewIntent === "approval" ? (
-            <label className="confirmationTypedInput">
-              <span>Request reason (optional)</span>
-              <textarea
-                aria-label="Approval request reason"
-                disabled={pending}
-                maxLength={1024}
-                onChange={(event) =>
-                  setApprovalRequestReason(event.target.value)
-                }
-                placeholder="Maintenance window, incident, or change reference"
-                rows={3}
-                value={approvalRequestReason}
-              />
-            </label>
-          ) : null}
-        </ConfirmationPrompt>
+          title="Confirm job dispatch"
+          tone={dispatchConfirmationDestructive ? "danger" : "normal"}
+        />
 
         {!dispatchPromptOpen && visibleDispatchProgress && (
           <ExecutionResultPanel
@@ -2482,18 +2352,6 @@ export function JobDispatchPanel({
         )}
         {!dispatchPromptOpen && (
           <div className="dispatchActions">
-            {approvalRequestSupported ? (
-              <button
-                className="secondaryAction"
-                disabled={pending || !operationReady || !privilegeMaterial}
-                onClick={() => void prepareJobReview("approval")}
-                title="Queue the frozen job request for approval without dispatching it"
-                type="button"
-              >
-                <ShieldCheck size={17} />
-                Request approval
-              </button>
-            ) : null}
             <button
               className="primaryAction"
               disabled={pending || !operationReady || !privilegeMaterial}
@@ -2542,13 +2400,6 @@ export function JobDispatchPanel({
           privilegeMaterial={privilegeMaterial}
         />
       )}
-      <PrivilegeLockPrompt
-        error={actionError}
-        onCancel={() => setLockPromptOpen(false)}
-        onConfirm={() => void lockPrivilege()}
-        open={lockPromptOpen}
-        pending={lockPending}
-      />
     </section>
   );
 }

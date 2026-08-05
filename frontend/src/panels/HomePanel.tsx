@@ -72,6 +72,7 @@ type HomePanelProps = {
     jobs: boolean;
   };
   schedules: ScheduleRecord[];
+  showCountryFlags: boolean;
   summary: FleetSummary;
   systemDashboard: SystemDashboardRecord | null;
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
@@ -145,6 +146,7 @@ export function HomePanel({
   jobsEvidenceAvailable,
   recordBounds,
   schedules,
+  showCountryFlags,
   scopeFiltered,
   summary,
   systemDashboard,
@@ -638,6 +640,7 @@ export function HomePanel({
             fleetAlerts: recordBounds.fleetAlerts,
           }}
           runningJobCount={runningJobs}
+          showCountryFlags={showCountryFlags}
           telemetryRollups={telemetryRollups}
           title="Fleet scan"
           toolbarAction={

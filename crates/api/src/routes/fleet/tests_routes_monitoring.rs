@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use super::{monitoring_range, network_rate_is_current, ClientMonitoringQuery};
+use super::{
+    enrich_monitoring_share_target_evidence, monitoring_range, network_rate_is_current,
+    ClientMonitoringQuery,
+};
 use axum::{
     body::Body,
     extract::ConnectInfo,
@@ -12,11 +15,12 @@ use tower::ServiceExt;
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        MonitoringShareVisibilityView, PublicMonitoringCardView, PublicMonitoringDataView,
-        PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
-        PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
-        PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
-        PublicTrafficHistoryPointView, PublicTrafficMetricView, TelemetryNetworkRateView,
+        AgentView, MonitoringShareView, MonitoringShareVisibilityView, PublicMonitoringCardView,
+        PublicMonitoringDataView, PublicMonitoringDetailView, PublicMonitoringRangeView,
+        PublicMonitoringShareBootstrapView, PublicMonitoringShareView, PublicNetworkMetricView,
+        PublicNetworkPointView, PublicPingMetricView, PublicPingPointView, PublicPortSpeedView,
+        PublicResourceMetricView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
+        TelemetryNetworkRateView,
     },
     repository::{MemoryState, Repository},
     state::{AppState, DispatcherRuntimeConfig},
@@ -41,6 +45,81 @@ fn router_test_state() -> AppState {
 }
 
 #[tokio::test]
+async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
+    let state = router_test_state();
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!()
+    };
+    memory.agents.write().await.push(AgentView {
+        id: "v-1".to_string(),
+        display_name: "v-1".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    });
+    let mut shares = vec![MonitoringShareView {
+        id: uuid::Uuid::new_v4(),
+        name: "Status".to_string(),
+        selector_expression: "*".to_string(),
+        target_count: 1,
+        target_client_ids: vec!["v-1".to_string()],
+        target_update_available: false,
+        visibility: MonitoringShareVisibilityView {
+            identity_context: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        status: "active".to_string(),
+        expires_at: crate::unix_now().saturating_add(3_600).to_string(),
+        revoked_at: None,
+        created_by: Some("operator".to_string()),
+        created_at: crate::unix_now().to_string(),
+        updated_at: crate::unix_now().to_string(),
+        visitor_count: 0,
+        first_visited_at: None,
+        last_visited_at: None,
+    }];
+
+    enrich_monitoring_share_target_evidence(&state, &mut shares)
+        .await
+        .unwrap();
+    assert!(!shares[0].target_update_available);
+    memory.agents.write().await.push(AgentView {
+        id: "v-2".to_string(),
+        display_name: "v-2".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    });
+    enrich_monitoring_share_target_evidence(&state, &mut shares)
+        .await
+        .unwrap();
+    assert!(shares[0].target_update_available);
+    let json = serde_json::to_value(&shares[0]).unwrap();
+    assert_eq!(json["target_client_ids"], serde_json::json!(["v-1"]));
+    assert_eq!(json["target_update_available"], true);
+}
+
+#[tokio::test]
 async fn monitoring_share_routes_are_registered_at_their_public_and_operator_paths() {
     let router = crate::routes::build_router(router_test_state());
 
@@ -60,8 +139,18 @@ async fn monitoring_share_routes_are_registered_at_their_public_and_operator_pat
         ),
         (
             "POST",
+            "/api/v1/monitoring-shares/update-targets",
+            Body::from(r#"{"share_ids":[]}"#),
+        ),
+        (
+            "POST",
             "/api/v1/monitoring-shares/revoke",
             Body::from(r#"{"share_ids":[]}"#),
+        ),
+        (
+            "GET",
+            "/api/v1/monitoring-shares/00000000-0000-4000-8000-000000000001/url",
+            Body::empty(),
         ),
     ] {
         let response = router

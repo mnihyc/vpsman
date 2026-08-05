@@ -19,7 +19,6 @@ import {
   DatabaseBackup,
   Eye,
   FileCog,
-  Flag,
   FolderOpen,
   Gauge,
   LockKeyhole,
@@ -50,6 +49,7 @@ import {
 } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { CountryBadge } from "../components/CountryFlag";
 import { ConsoleDetailPanel } from "../components/ConsoleDetailPanel";
 import {
   ConsoleDataGrid,
@@ -95,8 +95,8 @@ import {
 import {
   buildTagDisplayOrder,
   compareTagsByDisplayOrder,
+  countryTagValue,
   displayFleetTags as displayTags,
-  isCountryTag,
   isProviderTag,
   sortTagsByDisplayOrder,
   type TagDisplayOrder,
@@ -271,6 +271,7 @@ export function FleetWorkspace({
   onCreateJob,
   onBulkMutateTags,
   onNavigatePanel,
+  onRegisterVps,
   onOpenJobDispatchPreset,
   onLoadEffectiveAgentConfig,
   onLoadConfigurationSources,
@@ -331,6 +332,7 @@ export function FleetWorkspace({
     subpage: string,
     targetClientId?: string,
   ) => void;
+  onRegisterVps?: () => void;
   onOpenJobDispatchPreset: (preset: JobDispatchPresetInput) => void;
   onLoadEffectiveAgentConfig: (
     clientId: string,
@@ -1227,6 +1229,7 @@ export function FleetWorkspace({
               ? () => onNavigatePanel("Fleet", "monitor")
               : undefined
           }
+          onRegisterVps={onRegisterVps}
           onSelectionChange={handleFleetSelectionChange}
           renderSelectionPanel={(rows) => (
             <FleetSelectionPanel
@@ -1391,6 +1394,7 @@ function FleetInstancesPanel({
   onCancelDelete,
   onConfirmDelete,
   onOpenMonitor,
+  onRegisterVps,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -1411,6 +1415,7 @@ function FleetInstancesPanel({
   onCancelDelete: () => void;
   onConfirmDelete: () => void;
   onOpenMonitor?: () => void;
+  onRegisterVps?: () => void;
   onSelectionChange: (rows: AgentView[]) => void;
   renderExpandedRow: (row: AgentView) => ReactNode;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
@@ -1520,22 +1525,33 @@ function FleetInstancesPanel({
         storageKey="vpsman.grid.fleet.instances.v2"
         title="VPS instance records"
         toolbarActions={
-          <div
-            aria-label="Fleet instance view mode"
-            className="segmented fleetViewSwitch"
-            role="group"
-          >
-            <button aria-pressed={true} className="selected" type="button">
-              Table
-            </button>
+          <>
             <button
-              disabled={!onOpenMonitor}
-              onClick={() => onOpenMonitor?.()}
+              className="primaryAction compactAction"
+              disabled={!onRegisterVps}
+              onClick={() => onRegisterVps?.()}
               type="button"
             >
-              Cards
+              <Plus size={15} />
+              Register VPS
             </button>
-          </div>
+            <div
+              aria-label="Fleet instance view mode"
+              className="segmented fleetViewSwitch"
+              role="group"
+            >
+              <button aria-pressed={true} className="selected" type="button">
+                Table
+              </button>
+              <button
+                disabled={!onOpenMonitor}
+                onClick={() => onOpenMonitor?.()}
+                type="button"
+              >
+                Cards
+              </button>
+            </div>
+          </>
         }
       />
       <ConfirmationPrompt
@@ -3487,26 +3503,6 @@ function FleetSelectionStatsTable({
   );
 }
 
-function CountryBadge({
-  country,
-  showFlag,
-}: {
-  country: string | null;
-  showFlag: boolean;
-}) {
-  if (!country) return <span className="countryBadge">unset</span>;
-  const normalized = country.toUpperCase();
-  const hasCountryCode = /^[A-Z]{2}$/.test(normalized);
-  return (
-    <span className="countryBadge" title={normalized}>
-      {showFlag && hasCountryCode && (
-        <Flag aria-hidden="true" className="countryFlag" size={14} />
-      )}
-      <span>{normalized}</span>
-    </span>
-  );
-}
-
 function writeLocalString(key: string, value: string) {
   if (typeof window === "undefined") return;
   try {
@@ -3701,12 +3697,7 @@ function agentNamesById(
 }
 
 function countryFromTags(tags: string[]): string | null {
-  const countryTag = tags.find(isCountryTag);
-  if (!countryTag) {
-    return null;
-  }
-  const [, code] = countryTag.split(/[:=_-]/, 2);
-  return code ? code.toUpperCase() : null;
+  return countryTagValue(tags);
 }
 
 function providerFromTags(tags: string[]): string | null {
@@ -4265,6 +4256,7 @@ export function FleetAlertPolicyManager({
   const [dryRunPending, setDryRunPending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
+  const policyWorkflowBusy = savePending || deletePending;
   const statusFeedbackRef = useRef<HTMLDivElement | null>(null);
   const {
     captureReviewGeneration: capturePolicyReviewGeneration,
@@ -4458,6 +4450,12 @@ export function FleetAlertPolicyManager({
       }
       return;
     }
+    invalidatePolicyReviewGeneration();
+    setDryRunPending(false);
+    setDryRunPreview(null);
+    setSaveSnapshot(null);
+    setDeleteRows(null);
+    setDeleteError(null);
     const focused = policies.find((policy) => policy.id === policyFocusId);
     if (!focused) {
       updateEditorOpen(false);
@@ -4509,6 +4507,27 @@ export function FleetAlertPolicyManager({
     onEditorOpenChange?.(focusedEditor && open);
   }
 
+  function enterPolicyWorkflow(
+    surface: "editor" | "details" | "table",
+  ) {
+    invalidatePolicyReviewGeneration();
+    setDryRunPending(false);
+    setDryRunPreview(null);
+    setSaveSnapshot(null);
+    setDeleteRows(null);
+    setDeleteError(null);
+    setStatus(null);
+    if (surface !== "editor") {
+      updateEditorOpen(false);
+    }
+    if (surface !== "details") {
+      setDetailPolicyId(null);
+      if (policyFocusId || detailPolicyId) {
+        onPolicyFocusChange?.(null);
+      }
+    }
+  }
+
   function resetForm() {
     setEditingId(null);
     setName("");
@@ -4522,19 +4541,15 @@ export function FleetAlertPolicyManager({
   }
 
   function createPolicy() {
+    if (policyWorkflowBusy) return;
+    enterPolicyWorkflow("editor");
     resetForm();
-    setDetailPolicyId(null);
-    if (policyFocusId) {
-      onPolicyFocusChange?.(null);
-    }
     updateEditorOpen(true);
   }
 
   function editPolicy(policy: FleetAlertPolicyRecord) {
-    setDetailPolicyId(null);
-    if (policyFocusId) {
-      onPolicyFocusChange?.(null);
-    }
+    if (policyWorkflowBusy) return;
+    enterPolicyWorkflow("editor");
     setEditingId(policy.id);
     setName(policy.name);
     setSelectorExpression(policy.selector_expression);
@@ -4552,15 +4567,22 @@ export function FleetAlertPolicyManager({
   }
 
   function openPolicyDetails(policy: FleetAlertPolicyRecord) {
-    updateEditorOpen(false);
+    if (policyWorkflowBusy) return;
+    enterPolicyWorkflow("details");
     setDetailPolicyId(policy.id);
     onPolicyFocusChange?.(policy.id);
     setPolicyStatus("viewing " + policy.name, "info");
   }
 
   function closePolicyDetails() {
+    if (policyWorkflowBusy) return;
     setDetailPolicyId(null);
     onPolicyFocusChange?.(null);
+  }
+
+  function closePolicyEditor() {
+    if (policyWorkflowBusy) return;
+    enterPolicyWorkflow("table");
   }
 
   function updateRuleDraft(localId: string, patch: Partial<PolicyRuleDraft>) {
@@ -4673,7 +4695,8 @@ export function FleetAlertPolicyManager({
   }
 
   function requestDeletePolicies(rows: FleetAlertPolicyRecord[]) {
-    setDeleteError(null);
+    if (policyWorkflowBusy || rows.length === 0) return;
+    enterPolicyWorkflow("table");
     setDeleteRows(rows);
   }
 
@@ -4714,7 +4737,8 @@ export function FleetAlertPolicyManager({
     rows: FleetAlertPolicyRecord[],
     nextEnabled: boolean,
   ) {
-    if (rows.length === 0) return;
+    if (policyWorkflowBusy || rows.length === 0) return;
+    enterPolicyWorkflow("table");
     if (!beginSaveMutation()) {
       return;
     }
@@ -4759,7 +4783,7 @@ export function FleetAlertPolicyManager({
           rows[0]?.name,
           "Opens policy group details below the table.",
         ),
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) => policyWorkflowBusy || rows.length !== 1,
       icon: <Eye size={14} />,
       onSelect: (rows) => rows[0] && openPolicyDetails(rows[0]),
     },
@@ -4772,7 +4796,7 @@ export function FleetAlertPolicyManager({
           rows[0]?.name,
           "Opens the policy group editor below the table.",
         ),
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) => policyWorkflowBusy || rows.length !== 1,
       icon: <Pencil size={14} />,
       onSelect: (rows) => rows[0] && editPolicy(rows[0]),
     },
@@ -4783,7 +4807,8 @@ export function FleetAlertPolicyManager({
         rows.filter((policy) => !policy.enabled).length +
         " disabled selected policy groups.",
       disabled: (rows) =>
-        savePending || rows.filter((policy) => !policy.enabled).length === 0,
+        policyWorkflowBusy ||
+        rows.filter((policy) => !policy.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -4798,7 +4823,8 @@ export function FleetAlertPolicyManager({
         rows.filter((policy) => policy.enabled).length +
         " enabled selected policy groups.",
       disabled: (rows) =>
-        savePending || rows.filter((policy) => policy.enabled).length === 0,
+        policyWorkflowBusy ||
+        rows.filter((policy) => policy.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -4812,7 +4838,7 @@ export function FleetAlertPolicyManager({
         "Delete " +
         rows.length +
         " selected policy groups. Issued alerts remain in alert history.",
-      disabled: (rows) => savePending || rows.length === 0,
+      disabled: (rows) => policyWorkflowBusy || rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeletePolicies,
       tone: "danger",
@@ -4823,6 +4849,41 @@ export function FleetAlertPolicyManager({
     ? policies.find((candidate) => candidate.id === detailPolicyId)
     : null;
   const showPolicyList = !focusedEditor || !editorOpen;
+  const policySaveReviewPrompt = (
+    <ConfirmationPrompt
+      confirmLabel={saveSnapshot?.title ?? "Save policy"}
+      detail="Saves the reviewed policy group and all rule rows with the dry-run preview hash."
+      items={[
+        { label: "Policy", value: saveSnapshot?.request.name ?? "-" },
+        {
+          label: "Selector",
+          value: saveSnapshot?.request.selector_expression ?? "-",
+        },
+        {
+          label: "Matched VPS",
+          value: saveSnapshot
+            ? String(saveSnapshot.preview.matched_vps_count)
+            : "-",
+        },
+        {
+          label: "Rules",
+          value: saveSnapshot
+            ? policyRequestRulesSummary(saveSnapshot.request)
+            : "-",
+        },
+        {
+          label: "Preview hash",
+          value: saveSnapshot?.request.preview_hash ?? "-",
+        },
+      ]}
+      onCancel={() => setSaveSnapshot(null)}
+      onConfirm={() => void submit()}
+      open={saveSnapshot !== null}
+      pending={savePending}
+      error={saveSnapshot && statusTone === "danger" ? status : null}
+      title="Confirm alert policy save"
+    />
+  );
 
   return (
     <div
@@ -4872,6 +4933,7 @@ export function FleetAlertPolicyManager({
             toolbarActions={
               <button
                 className="primaryAction compactAction"
+                disabled={policyWorkflowBusy}
                 onClick={createPolicy}
                 type="button"
               >
@@ -4977,6 +5039,7 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="secondaryAction"
+                    disabled={policyWorkflowBusy}
                     type="button"
                     onClick={createPolicy}
                   >
@@ -4990,7 +5053,8 @@ export function FleetAlertPolicyManager({
                 ? "Preview exactly which VPSs match, then save this policy group with the reviewed activation state."
                 : "Edit the selector expression, preview matched VPSs, then confirm the exact policy payload."
             }
-            onClose={() => updateEditorOpen(false)}
+            onClose={closePolicyEditor}
+            reviewPrompt={policySaveReviewPrompt}
             title={editingId ? "Edit alert policy" : "Create alert policy"}
           >
             {focusedEditor ? (
@@ -5203,39 +5267,6 @@ export function FleetAlertPolicyManager({
           </ConsoleDetailPanel>
         ) : null}
       </div>
-      <ConfirmationPrompt
-        confirmLabel={saveSnapshot?.title ?? "Save policy"}
-        detail="Saves the reviewed policy group and all rule rows with the dry-run preview hash."
-        items={[
-          { label: "Policy", value: saveSnapshot?.request.name ?? "-" },
-          {
-            label: "Selector",
-            value: saveSnapshot?.request.selector_expression ?? "-",
-          },
-          {
-            label: "Matched VPS",
-            value: saveSnapshot
-              ? String(saveSnapshot.preview.matched_vps_count)
-              : "-",
-          },
-          {
-            label: "Rules",
-            value: saveSnapshot
-              ? policyRequestRulesSummary(saveSnapshot.request)
-              : "-",
-          },
-          {
-            label: "Preview hash",
-            value: saveSnapshot?.request.preview_hash ?? "-",
-          },
-        ]}
-        onCancel={() => setSaveSnapshot(null)}
-        onConfirm={() => void submit()}
-        open={saveSnapshot !== null}
-        pending={savePending}
-        error={saveSnapshot && statusTone === "danger" ? status : null}
-        title="Confirm alert policy save"
-      />
       <ConfirmationPrompt
         confirmLabel="Delete alert policies"
         detail="Deletes selected policy groups. Issued policy alerts remain available in Fleet alerts."
@@ -5691,6 +5722,9 @@ export function FleetAlertNotificationManager({
   >(null);
   const [deletePending, setDeletePending] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [enableRows, setEnableRows] = useState<
+    FleetAlertNotificationChannelRecord[] | null
+  >(null);
   const [saveSnapshot, setSaveSnapshot] = useState<{
     request: FleetAlertNotificationChannelRequest;
     title: string;
@@ -5717,6 +5751,7 @@ export function FleetAlertNotificationManager({
   const [queueSnapshot, setQueueSnapshot] =
     useState<AlertDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
+  const channelWorkflowBusy = savePending || deletePending || queuePending;
   const hasEnabledChannels = channels.some(
     (channel) => channel.enabled && !channel.configuration_error,
   );
@@ -5729,6 +5764,13 @@ export function FleetAlertNotificationManager({
     () => csvValues(operatorStates),
     [operatorStates],
   );
+  const channelDraftValidation = notificationChannelDraftValidationMessage({
+    cooldownSecs,
+    name,
+    scopeKind,
+    scopeValue,
+    target,
+  });
 
   const channelColumns = useMemo<
     ConsoleDataGridColumn<FleetAlertNotificationChannelRecord>[]
@@ -5895,13 +5937,33 @@ export function FleetAlertNotificationManager({
     setStatusTone(tone);
   }
 
+  function enterChannelWorkflow(
+    surface: "editor" | "details" | "table" | "queue",
+  ) {
+    setSaveSnapshot(null);
+    setEnableRows(null);
+    setDeleteRows(null);
+    setDeleteError(null);
+    setQueueConfirmation(null);
+    setQueueSnapshot(null);
+    setStatus(null);
+    if (surface !== "editor") {
+      setEditorOpen(false);
+    }
+    if (surface !== "details") {
+      setDetailChannelId(null);
+    }
+  }
+
   function createChannel() {
+    if (channelWorkflowBusy) return;
+    enterChannelWorkflow("editor");
     resetForm();
-    setDetailChannelId(null);
     setEditorOpen(true);
   }
 
   function editChannel(channel: FleetAlertNotificationChannelRecord) {
+    if (channelWorkflowBusy) return;
     if (channel.configuration_error) {
       setChannelStatus(
         "Stored channel filters are invalid. Delete this channel and create a reviewed replacement.",
@@ -5909,7 +5971,7 @@ export function FleetAlertNotificationManager({
       );
       return;
     }
-    setDetailChannelId(null);
+    enterChannelWorkflow("editor");
     setEditingId(channel.id);
     setName(channel.name);
     setScopeKind(channel.scope_kind);
@@ -5924,12 +5986,20 @@ export function FleetAlertNotificationManager({
     setCooldownSecs(String(channel.cooldown_secs));
     setEnabled(channel.enabled);
     setNotes(channel.notes ?? "");
+    setSaveSnapshot(null);
     setChannelStatus(`editing ${channel.name}`, "info");
     setEditorOpen(true);
   }
 
-  function openChannelDetails(channel: FleetAlertNotificationChannelRecord) {
+  function closeChannelEditor() {
+    if (savePending) return;
+    setSaveSnapshot(null);
     setEditorOpen(false);
+  }
+
+  function openChannelDetails(channel: FleetAlertNotificationChannelRecord) {
+    if (channelWorkflowBusy) return;
+    enterChannelWorkflow("details");
     setDetailChannelId(channel.id);
     setChannelStatus(`viewing ${channel.name}`, "info");
   }
@@ -5971,12 +6041,8 @@ export function FleetAlertNotificationManager({
   }
 
   function reviewSubmit() {
-    if (!name.trim()) {
-      setChannelStatus("Enter a channel name before review", "warning");
-      return;
-    }
-    if (!target.trim()) {
-      setChannelStatus("Enter a delivery target before review", "warning");
+    if (channelDraftValidation) {
+      setChannelStatus(channelDraftValidation, "danger");
       return;
     }
     setSaveSnapshot({
@@ -6029,6 +6095,8 @@ export function FleetAlertNotificationManager({
   }
 
   function requestDeleteChannels(rows: FleetAlertNotificationChannelRecord[]) {
+    if (channelWorkflowBusy) return;
+    enterChannelWorkflow("table");
     setDeleteError(null);
     setDeleteRows(rows);
   }
@@ -6068,10 +6136,10 @@ export function FleetAlertNotificationManager({
   async function setChannelsEnabled(
     rows: FleetAlertNotificationChannelRecord[],
     nextEnabled: boolean,
-  ) {
-    if (rows.length === 0) return;
+  ): Promise<boolean> {
+    if (rows.length === 0) return false;
     if (!beginSaveMutation()) {
-      return;
+      return false;
     }
     setChannelStatus(
       nextEnabled ? "enabling channels" : "disabling channels",
@@ -6085,18 +6153,37 @@ export function FleetAlertNotificationManager({
         `${nextEnabled ? "Enabled" : "Disabled"} ${resourceCount(rows.length, "notification channel")}`,
         "success",
       );
+      return true;
     } catch (error) {
       setChannelStatus(
         error instanceof Error ? error.message : "channel update failed",
         "danger",
       );
+      return false;
     } finally {
       finishSaveMutation();
     }
   }
 
+  function requestEnableChannels(
+    rows: FleetAlertNotificationChannelRecord[],
+  ) {
+    if (channelWorkflowBusy) return;
+    const disabledRows = rows.filter((channel) => !channel.enabled);
+    if (disabledRows.length === 0) return;
+    enterChannelWorkflow("table");
+    setEnableRows(disabledRows);
+  }
+
+  async function confirmEnableChannels() {
+    const rows = enableRows ?? [];
+    if (await setChannelsEnabled(rows, true)) {
+      setEnableRows(null);
+    }
+  }
+
   async function dispatch(dryRun: boolean, openConfirmation = false) {
-    if (queuePending) {
+    if (channelWorkflowBusy) {
       return;
     }
     if (!hasEnabledChannels) {
@@ -6106,6 +6193,7 @@ export function FleetAlertNotificationManager({
       );
       return;
     }
+    enterChannelWorkflow("queue");
     setChannelStatus(
       dryRun ? "matching alerts" : "queueing alert notifications",
       "progress",
@@ -6158,7 +6246,7 @@ export function FleetAlertNotificationManager({
   }
 
   async function process(dryRun: boolean, openConfirmation = false) {
-    if (queuePending) {
+    if (channelWorkflowBusy) {
       return;
     }
     if (!hasQueuedDeliveries) {
@@ -6168,6 +6256,7 @@ export function FleetAlertNotificationManager({
       );
       return;
     }
+    enterChannelWorkflow("queue");
     setChannelStatus(
       dryRun ? "previewing notification queue" : "delivering notifications",
       "progress",
@@ -6269,7 +6358,7 @@ export function FleetAlertNotificationManager({
             rows[0]?.name,
             "Opens read-only channel details below the table.",
           ),
-        disabled: (rows) => rows.length !== 1,
+        disabled: (rows) => channelWorkflowBusy || rows.length !== 1,
         icon: <Eye size={14} />,
         onSelect: (rows) => rows[0] && openChannelDetails(rows[0]),
       },
@@ -6283,7 +6372,9 @@ export function FleetAlertNotificationManager({
             "Opens the channel editor below the table.",
           ),
         disabled: (rows) =>
-          rows.length !== 1 || Boolean(rows[0]?.configuration_error),
+          channelWorkflowBusy ||
+          rows.length !== 1 ||
+          Boolean(rows[0]?.configuration_error),
         icon: <Pencil size={14} />,
         onSelect: (rows) => rows[0] && editChannel(rows[0]),
       },
@@ -6292,36 +6383,34 @@ export function FleetAlertNotificationManager({
         description: (rows) =>
           `Enable ${rows.filter((channel) => !channel.enabled).length} disabled selected notification channel records.`,
         disabled: (rows) =>
-          savePending ||
+          channelWorkflowBusy ||
           rows.some((channel) => Boolean(channel.configuration_error)) ||
           rows.filter((channel) => !channel.enabled).length === 0,
         icon: <Power size={14} />,
-        onSelect: (rows) =>
-          void setChannelsEnabled(
-            rows.filter((channel) => !channel.enabled),
-            true,
-          ),
+        onSelect: requestEnableChannels,
       },
       {
         label: "Disable",
         description: (rows) =>
           `Disable ${rows.filter((channel) => channel.enabled).length} enabled selected notification channel records.`,
         disabled: (rows) =>
-          savePending ||
+          channelWorkflowBusy ||
           rows.some((channel) => Boolean(channel.configuration_error)) ||
           rows.filter((channel) => channel.enabled).length === 0,
         icon: <PowerOff size={14} />,
-        onSelect: (rows) =>
+        onSelect: (rows) => {
+          enterChannelWorkflow("table");
           void setChannelsEnabled(
             rows.filter((channel) => channel.enabled),
             false,
-          ),
+          );
+        },
       },
       {
         label: "Review deletion",
         description: (rows) =>
           `Delete ${rows.length} selected notification channel records. Retained delivery history is not removed.`,
-        disabled: (rows) => savePending || rows.length === 0,
+        disabled: (rows) => channelWorkflowBusy || rows.length === 0,
         icon: <Trash2 size={14} />,
         onSelect: requestDeleteChannels,
         tone: "danger",
@@ -6330,6 +6419,59 @@ export function FleetAlertNotificationManager({
   const detailChannel = detailChannelId
     ? (channels.find((channel) => channel.id === detailChannelId) ?? null)
     : null;
+  const notificationSaveReviewPrompt = (
+    <ConfirmationPrompt
+      confirmLabel={saveSnapshot?.title ?? "Save channel"}
+      detail="Saves the reviewed notification channel request exactly as shown."
+      items={[
+        { label: "Channel", value: saveSnapshot?.request.name ?? "-" },
+        {
+          label: "Scope",
+          value: saveSnapshot
+            ? scopeSummary(
+                saveSnapshot.request.scope_kind,
+                saveSnapshot.request.scope_value,
+              )
+            : "-",
+        },
+        {
+          label: "Severity",
+          value: saveSnapshot?.request.min_severity ?? "-",
+        },
+        {
+          label: "Categories",
+          value: saveSnapshot?.request.categories?.join(", ") || "all",
+        },
+        {
+          label: "Operator states",
+          value: saveSnapshot?.request.operator_states?.join(", ") || "all",
+        },
+        {
+          label: "State",
+          value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+        },
+        {
+          label: "Delivery",
+          value: saveSnapshot
+              ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
+              : "-",
+        },
+        {
+          label: "Cooldown",
+          value: saveSnapshot
+            ? `${saveSnapshot.request.cooldown_secs ?? 300} seconds`
+            : "-",
+        },
+        { label: "Notes", value: saveSnapshot?.request.notes || "None" },
+      ]}
+      onCancel={() => setSaveSnapshot(null)}
+      onConfirm={() => void submit()}
+      open={saveSnapshot !== null}
+      pending={savePending}
+      error={saveSnapshot && statusTone === "danger" ? status : null}
+      title="Confirm notification channel save"
+    />
+  );
 
   return (
     <div className="consoleCrudPanel">
@@ -6362,6 +6504,7 @@ export function FleetAlertNotificationManager({
           toolbarActions={
             <button
               className="primaryAction compactAction"
+              disabled={channelWorkflowBusy}
               onClick={createChannel}
               type="button"
             >
@@ -6410,32 +6553,23 @@ export function FleetAlertNotificationManager({
               <>
                 <button
                   className="primaryAction"
-                  disabled={savePending || !name.trim() || !target.trim()}
+                  disabled={savePending || channelDraftValidation !== null}
                   title={
-                    !name.trim()
-                      ? "Enter a channel name"
-                      : !target.trim()
-                        ? "Enter a delivery target"
-                        : editingId
-                          ? "Review the channel update"
-                          : "Review the new channel"
+                    channelDraftValidation ??
+                    (editingId
+                      ? "Review the channel update"
+                      : "Review the new channel")
                   }
                   type="button"
                   onClick={reviewSubmit}
                 >
                   {editingId ? "Review update" : "Review create"}
                 </button>
-                <button
-                  className="secondaryAction"
-                  type="button"
-                  onClick={createChannel}
-                >
-                  New channel
-                </button>
               </>
             }
             description="Routes alert deliveries through explicit saved records."
-            onClose={() => setEditorOpen(false)}
+            onClose={closeChannelEditor}
+            reviewPrompt={notificationSaveReviewPrompt}
             title={
               editingId
                 ? "Edit notification channel"
@@ -6511,7 +6645,9 @@ export function FleetAlertNotificationManager({
                     onChange={(event) => setEnabled(event.target.checked)}
                     type="checkbox"
                   />
-                  <span>Route matching alerts</span>
+                  <span>
+                    {editingId ? "Channel enabled" : "Enable after saving"}
+                  </span>
                 </label>
               </ConsoleField>
               <ConsoleField
@@ -6521,6 +6657,7 @@ export function FleetAlertNotificationManager({
               >
                 <input
                   aria-label="Alert categories"
+                  placeholder="resource, network, backup"
                   value={categories}
                   onChange={(event) => setCategories(event.target.value)}
                 />
@@ -6533,6 +6670,7 @@ export function FleetAlertNotificationManager({
               >
                 <input
                   aria-label="Operator states"
+                  placeholder="open, acknowledged, muted, escalated"
                   value={operatorStates}
                   onChange={(event) => setOperatorStates(event.target.value)}
                 />
@@ -6553,7 +6691,7 @@ export function FleetAlertNotificationManager({
               <ConsoleField
                 label="Delivery target"
                 className="fieldWide"
-                hint="Delivery is sent by the vpsman server. Use HTTPS unless the receiver is deliberately local to that server."
+                hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
               >
                 <input
                   aria-label="Delivery target"
@@ -6562,12 +6700,27 @@ export function FleetAlertNotificationManager({
                   onChange={(event) => setTarget(event.target.value)}
                 />
               </ConsoleField>
-              <ConsoleField label="Cooldown seconds">
+              <ConsoleField
+                label="Cooldown seconds"
+                hint="Minimum time between automatic deliveries for this channel; enter a whole number from 0 to 2592000."
+              >
                 <input
                   aria-label="Notification cooldown seconds"
+                  max={2592000}
+                  min={0}
+                  type="number"
                   value={cooldownSecs}
                   onChange={(event) => setCooldownSecs(event.target.value)}
                 />
+              </ConsoleField>
+              <ConsoleField
+                label="Outbound message format"
+                className="fieldFull"
+                hint="Notification channels send this fixed structured JSON envelope. Use Event webhooks when a custom rendered message is required."
+              >
+                <pre className="monoValue notificationPayloadExample">
+                  {ALERT_NOTIFICATION_PAYLOAD_EXAMPLE}
+                </pre>
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
                 <textarea
@@ -6594,7 +6747,7 @@ export function FleetAlertNotificationManager({
         <div className="consoleOperationsActions">
           <button
             className="secondaryAction"
-            disabled={queuePending || !hasEnabledChannels}
+            disabled={channelWorkflowBusy || !hasEnabledChannels}
             title={
               hasEnabledChannels
                 ? "Preview active alerts matched by enabled notification channels"
@@ -6607,7 +6760,7 @@ export function FleetAlertNotificationManager({
           </button>
           <button
             className="secondaryAction"
-            disabled={queuePending || !hasEnabledChannels}
+            disabled={channelWorkflowBusy || !hasEnabledChannels}
             title={
               hasEnabledChannels
                 ? "Review matching alerts before queueing notification deliveries"
@@ -6622,7 +6775,7 @@ export function FleetAlertNotificationManager({
             <>
               <button
                 className="secondaryAction"
-                disabled={queuePending || !hasQueuedDeliveries}
+                disabled={channelWorkflowBusy || !hasQueuedDeliveries}
                 title={
                   hasQueuedDeliveries
                     ? "Preview queued notification deliveries"
@@ -6637,7 +6790,7 @@ export function FleetAlertNotificationManager({
           ) : (
             <button
               className="secondaryAction"
-              disabled={queuePending}
+              disabled={channelWorkflowBusy}
               type="button"
               onClick={onOpenDeliveries}
             >
@@ -6646,7 +6799,7 @@ export function FleetAlertNotificationManager({
           )}
           <button
             className="primaryAction"
-            disabled={queuePending || !hasQueuedDeliveries}
+            disabled={channelWorkflowBusy || !hasQueuedDeliveries}
             title={
               hasQueuedDeliveries
                 ? "Review queued notification deliveries before sending"
@@ -6697,36 +6850,30 @@ export function FleetAlertNotificationManager({
         tone={queueConfirmation === "process" ? "danger" : "normal"}
       />
       <ConfirmationPrompt
-        confirmLabel={saveSnapshot?.title ?? "Save channel"}
-        detail="Saves the reviewed notification channel request exactly as shown."
+        confirmLabel="Enable notification channels"
+        detail="Enabling starts matching future alerts and can send requests to the configured external targets. Disabling remains immediate."
         items={[
-          { label: "Channel", value: saveSnapshot?.request.name ?? "-" },
           {
-            label: "Scope",
-            value: saveSnapshot
-              ? scopeSummary(
-                  saveSnapshot.request.scope_kind,
-                  saveSnapshot.request.scope_value,
-                )
-              : "-",
+            label: "Channels",
+            value: selectedRecordSummary(
+              enableRows,
+              "channel",
+              "channels",
+              (row) => row.name,
+              (row) => row.id,
+            ),
           },
           {
-            label: "Severity",
-            value: saveSnapshot?.request.min_severity ?? "-",
-          },
-          {
-            label: "Delivery",
-            value: saveSnapshot
-              ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
-              : "-",
+            label: "Targets",
+            value: enableRows?.map((row) => row.target).join(", ") ?? "-",
           },
         ]}
-        onCancel={() => setSaveSnapshot(null)}
-        onConfirm={() => void submit()}
-        open={saveSnapshot !== null}
+        onCancel={() => setEnableRows(null)}
+        onConfirm={() => void confirmEnableChannels()}
+        open={enableRows !== null}
         pending={savePending}
-        error={saveSnapshot && statusTone === "danger" ? status : null}
-        title="Confirm notification channel save"
+        error={enableRows && statusTone === "danger" ? status : null}
+        title="Confirm notification enable"
       />
       <ConfirmationPrompt
         confirmLabel="Delete channels"
@@ -6910,6 +7057,93 @@ export function NotificationDeliveryHistoryGrid({
   );
 }
 
+const ALERT_NOTIFICATION_PAYLOAD_EXAMPLE = `{
+  "schema": "vpsman.fleet_alert.webhook_delivery.v1",
+  "delivery": {
+    "id": "...",
+    "channel_id": "...",
+    "channel_name": "Production alerts",
+    "alert_id": "...",
+    "alert_severity": "critical",
+    "alert_category": "resource",
+    "dedupe_key": "fleet-alert-notification:...",
+    "attempt": 1,
+    "created_at": "2026-08-05T00:00:00Z"
+  },
+  "payload": {
+    "schema": "vpsman.fleet_alert.notification.v1",
+    "channel": {
+      "id": "...",
+      "name": "Production alerts",
+      "scope_kind": "global",
+      "scope_value": null,
+      "delivery_kind": "webhook",
+      "target": "https://alerts.example.net/vpsman"
+    },
+    "alert": {
+      "id": "...",
+      "severity": "critical",
+      "category": "resource",
+      "target_kind": "agent",
+      "target_id": "v-1",
+      "client_id": "v-1",
+      "title": "CPU load critical",
+      "detail": "...",
+      "status": "firing",
+      "evidence": {},
+      "observed_at": "2026-08-05T00:00:00Z",
+      "operator_state": "open",
+      "muted_until_unix": null,
+      "escalation_level": 0,
+      "state_reason": null,
+      "state_actor_id": null,
+      "state_updated_at": null
+    }
+  }
+}`;
+
+const DEFAULT_WEBHOOK_BODY_TEMPLATE =
+  "[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}";
+
+function notificationChannelDraftValidationMessage({
+  cooldownSecs,
+  name,
+  scopeKind,
+  scopeValue,
+  target,
+}: {
+  cooldownSecs: string;
+  name: string;
+  scopeKind: string;
+  scopeValue: string;
+  target: string;
+}): string | null {
+  if (!name.trim()) return "Channel name is required";
+  if (name.trim().length > 128) return "Channel name is too long";
+  if (scopeKind !== "global" && !scopeValue.trim()) {
+    return "Scope value is required for this scope kind";
+  }
+  if (!target.trim()) return "Delivery target URL is required";
+  try {
+    const parsed = new URL(target.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "Delivery target URL must use HTTP or HTTPS";
+    }
+  } catch {
+    return "Delivery target URL is invalid";
+  }
+  const cooldown = Number(cooldownSecs);
+  if (
+    !cooldownSecs.trim() ||
+    !Number.isInteger(cooldown) ||
+    cooldown < 0 ||
+    cooldown > 2_592_000
+  ) {
+    return "Cooldown must be a whole number from 0 to 2592000 seconds";
+  }
+  return null;
+}
+
 function webhookRuleDraftValidationMessage({
   bodyTemplate,
   cooldownSecs,
@@ -7011,7 +7245,9 @@ export function WebhookRuleManager({
   const [enabled, setEnabled] = useState(false);
   const [expression, setExpression] = useState("");
   const [target, setTarget] = useState("");
-  const [bodyTemplate, setBodyTemplate] = useState("");
+  const [bodyTemplate, setBodyTemplate] = useState(
+    DEFAULT_WEBHOOK_BODY_TEMPLATE,
+  );
   const [signingSecret, setSigningSecret] = useState("");
   const [clearSigningSecret, setClearSigningSecret] = useState(false);
   const [cooldownSecs, setCooldownSecs] = useState("300");
@@ -7031,6 +7267,7 @@ export function WebhookRuleManager({
   const [queueSnapshot, setQueueSnapshot] =
     useState<WebhookDeliveryQueueSnapshot | null>(null);
   const [queuePending, setQueuePending] = useState(false);
+  const webhookWorkflowBusy = savePending || deletePending || queuePending;
   const hasEnabledRules = rules.some((rule) => rule.enabled);
   const hasFailedDeliveries = deliveries.some((delivery) =>
     ["failed", "permanently_failed"].includes(delivery.status),
@@ -7160,7 +7397,7 @@ export function WebhookRuleManager({
     setEnabled(false);
     setExpression("");
     setTarget("");
-    setBodyTemplate("");
+    setBodyTemplate(DEFAULT_WEBHOOK_BODY_TEMPLATE);
     setSigningSecret("");
     setClearSigningSecret(false);
     setCooldownSecs("300");
@@ -7178,19 +7415,43 @@ export function WebhookRuleManager({
     setStatusScope(scope);
   }
 
+  function enterWebhookWorkflow(
+    surface: "editor" | "details" | "table" | "queue",
+  ) {
+    setSaveSnapshot(null);
+    setEnableRows(null);
+    setDeleteRows(null);
+    setDeleteError(null);
+    setQueueConfirmation(null);
+    setQueueSnapshot(null);
+    setStatus(null);
+    if (surface !== "editor") {
+      updateEditorOpen(false);
+    }
+    if (surface !== "details") {
+      setDetailRuleId(null);
+    }
+  }
+
   function updateEditorOpen(open: boolean) {
+    if (!open && savePending) return;
+    if (!open) {
+      setSaveSnapshot(null);
+    }
     setEditorOpen(open);
     onEditorOpenChange?.(focusedEditorMode && open);
   }
 
   function createRule() {
+    if (webhookWorkflowBusy) return;
+    enterWebhookWorkflow("editor");
     resetForm();
-    setDetailRuleId(null);
     updateEditorOpen(true);
   }
 
   function editRule(rule: WebhookRuleRecord) {
-    setDetailRuleId(null);
+    if (webhookWorkflowBusy) return;
+    enterWebhookWorkflow("editor");
     setEditorTestPreview(null);
     setEditingId(rule.id);
     setName(rule.name);
@@ -7207,7 +7468,8 @@ export function WebhookRuleManager({
   }
 
   function openRuleDetails(rule: WebhookRuleRecord) {
-    updateEditorOpen(false);
+    if (webhookWorkflowBusy) return;
+    enterWebhookWorkflow("details");
     setDetailRuleId(rule.id);
     setWebhookStatus(`viewing ${rule.name}`, "info");
   }
@@ -7303,6 +7565,8 @@ export function WebhookRuleManager({
   }
 
   function requestDeleteRules(rows: WebhookRuleRecord[]) {
+    if (webhookWorkflowBusy) return;
+    enterWebhookWorkflow("table");
     setDeleteError(null);
     setDeleteRows(rows);
   }
@@ -7372,8 +7636,10 @@ export function WebhookRuleManager({
   }
 
   function requestEnableRules(rows: WebhookRuleRecord[]) {
+    if (webhookWorkflowBusy) return;
     const disabledRows = rows.filter((rule) => !rule.enabled);
     if (disabledRows.length === 0) return;
+    enterWebhookWorkflow("table");
     setEnableRows(disabledRows);
   }
 
@@ -7385,13 +7651,15 @@ export function WebhookRuleManager({
   }
 
   async function dryRun(rule?: WebhookRuleRecord) {
-    if (queuePending) {
+    if (webhookWorkflowBusy) {
       return;
     }
     if (!rule && webhookDraftValidation) {
       setWebhookStatus(webhookDraftValidation, "danger");
       return;
     }
+    const shouldOpenDeliveries = Boolean(rule) || !focusedEditorOpen;
+    enterWebhookWorkflow(rule ? "queue" : "editor");
     const request = rule
       ? {
           name: rule.name,
@@ -7424,7 +7692,7 @@ export function WebhookRuleManager({
       }
       onPreviewDryRun(preview);
       onPreviewRows(preview.delivery ? [preview.delivery] : []);
-      if (!focusedEditorOpen) {
+      if (shouldOpenDeliveries) {
         onOpenDeliveries();
       }
       setWebhookStatus(
@@ -7465,7 +7733,7 @@ export function WebhookRuleManager({
     openConfirmation = false,
     rule?: WebhookRuleRecord,
   ) {
-    if (queuePending) {
+    if (webhookWorkflowBusy) {
       return;
     }
     if (!rule && !hasEnabledRules) {
@@ -7476,6 +7744,7 @@ export function WebhookRuleManager({
       );
       return;
     }
+    enterWebhookWorkflow("queue");
     setWebhookStatus(
       dryRunMode
         ? rule
@@ -7550,7 +7819,7 @@ export function WebhookRuleManager({
     openConfirmation = false,
     deliveryStatus: NonNullable<WebhookRuleProcessRequest["status"]> = "queued",
   ) {
-    if (queuePending) {
+    if (webhookWorkflowBusy) {
       return;
     }
     const isRetry = deliveryStatus === "failed";
@@ -7567,6 +7836,7 @@ export function WebhookRuleManager({
       );
       return;
     }
+    enterWebhookWorkflow("queue");
     setWebhookStatus(
       dryRunMode
         ? `previewing ${isRetry ? "failed" : "queued"} webhook deliveries`
@@ -7670,7 +7940,7 @@ export function WebhookRuleManager({
           rows[0]?.name,
           "Opens read-only rule details below the table.",
         ),
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) => webhookWorkflowBusy || rows.length !== 1,
       icon: <Eye size={14} />,
       onSelect: (rows) => rows[0] && openRuleDetails(rows[0]),
     },
@@ -7683,7 +7953,7 @@ export function WebhookRuleManager({
           rows[0]?.name,
           "Opens the rule editor below the table.",
         ),
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) => webhookWorkflowBusy || rows.length !== 1,
       icon: <Pencil size={14} />,
       onSelect: (rows) => rows[0] && editRule(rows[0]),
     },
@@ -7698,7 +7968,7 @@ export function WebhookRuleManager({
             ? "Reviews a rule-scoped test event before queueing event webhook deliveries."
             : "Runs a dry-run with the current preview event.",
         ),
-      disabled: (rows) => rows.length !== 1,
+      disabled: (rows) => webhookWorkflowBusy || rows.length !== 1,
       icon: <Eye size={14} />,
       onSelect: (rows) =>
         rows[0] &&
@@ -7711,7 +7981,8 @@ export function WebhookRuleManager({
       description: (rows) =>
         `Enable ${rows.filter((rule) => !rule.enabled).length} disabled selected webhook rule records.`,
       disabled: (rows) =>
-        savePending || rows.filter((rule) => !rule.enabled).length === 0,
+        webhookWorkflowBusy ||
+        rows.filter((rule) => !rule.enabled).length === 0,
       icon: <Power size={14} />,
       onSelect: requestEnableRules,
     },
@@ -7720,24 +7991,84 @@ export function WebhookRuleManager({
       description: (rows) =>
         `Disable ${rows.filter((rule) => rule.enabled).length} enabled selected webhook rule records.`,
       disabled: (rows) =>
-        savePending || rows.filter((rule) => rule.enabled).length === 0,
+        webhookWorkflowBusy ||
+        rows.filter((rule) => rule.enabled).length === 0,
       icon: <PowerOff size={14} />,
-      onSelect: (rows) =>
+      onSelect: (rows) => {
+        enterWebhookWorkflow("table");
         void setRulesEnabled(
           rows.filter((rule) => rule.enabled),
           false,
-        ),
+        );
+      },
     },
     {
       label: "Review deletion",
       description: (rows) =>
         `Delete ${rows.length} selected webhook rule records. Retained delivery history is not removed.`,
-      disabled: (rows) => savePending || rows.length === 0,
+      disabled: (rows) => webhookWorkflowBusy || rows.length === 0,
       icon: <Trash2 size={14} />,
       onSelect: requestDeleteRules,
       tone: "danger",
     },
   ];
+  const webhookSaveReviewPrompt = (
+    <ConfirmationPrompt
+      confirmLabel={saveSnapshot?.title ?? "Save rule"}
+      detail="Saves the reviewed webhook rule request exactly as shown."
+      items={[
+        { label: "Rule", value: saveSnapshot?.request.name ?? "-" },
+        {
+          label: "Expression",
+          value: saveSnapshot?.request.expression ?? "-",
+        },
+        {
+          label: "Target",
+          value: saveSnapshot?.request.target ?? "-",
+        },
+        {
+          label: "State",
+          value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
+        },
+        {
+          label: "Body template",
+          title: saveSnapshot?.request.body_template || undefined,
+          value: saveSnapshot?.request.body_template || "Default message",
+        },
+        {
+          label: "Cooldown",
+          value: saveSnapshot
+            ? `${saveSnapshot.request.cooldown_secs ?? 300} seconds`
+            : "-",
+        },
+        {
+          label: "Signing",
+          value: saveSnapshot
+            ? saveSnapshot.request.clear_signing_secret
+              ? "clear existing secret"
+              : saveSnapshot.request.signing_secret
+                ? existingSecretConfigured
+                  ? "rotate secret"
+                  : "set secret"
+                : existingSecretConfigured
+                  ? "keep existing secret"
+                  : "not configured"
+            : "-",
+        },
+        { label: "Notes", value: saveSnapshot?.request.notes || "None" },
+      ]}
+      onCancel={() => setSaveSnapshot(null)}
+      onConfirm={() => void submit()}
+      open={saveSnapshot !== null}
+      pending={savePending}
+      error={
+        saveSnapshot && statusScope === "resource" && statusTone === "danger"
+          ? status
+          : null
+      }
+      title="Confirm webhook rule save"
+    />
+  );
 
   return (
     <div className="consoleCrudPanel">
@@ -7768,6 +8099,7 @@ export function WebhookRuleManager({
           toolbarActions={
             <button
               className="primaryAction compactAction"
+              disabled={webhookWorkflowBusy}
               onClick={createRule}
               type="button"
             >
@@ -7789,9 +8121,9 @@ export function WebhookRuleManager({
                     />
                   </div>
                 ) : null}
-                <button
-                  className="secondaryAction"
-                  type="button"
+                  <button
+                    className="secondaryAction"
+                    type="button"
                   onClick={() => {
                     const rule = rules.find(
                       (candidate) => candidate.id === detailRuleId,
@@ -7893,6 +8225,7 @@ export function WebhookRuleManager({
                 {!focusedEditorMode ? (
                   <button
                     className="secondaryAction"
+                    disabled={webhookWorkflowBusy}
                     type="button"
                     onClick={createRule}
                   >
@@ -7907,6 +8240,7 @@ export function WebhookRuleManager({
                 : "Webhook rules are saved expression records with explicit preview and delivery operations."
             }
             onClose={() => updateEditorOpen(false)}
+            reviewPrompt={webhookSaveReviewPrompt}
             title={editingId ? "Edit webhook rule" : "Create webhook rule"}
           >
             <form
@@ -7965,7 +8299,11 @@ export function WebhookRuleManager({
                   value={expression}
                 />
               </ConsoleField>
-              <ConsoleField label="Target URL" className="fieldFull">
+              <ConsoleField
+                label="Target URL"
+                className="fieldFull"
+                hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
+              >
                 <input
                   aria-label="Webhook target"
                   placeholder="https://hooks.example.net/vpsman"
@@ -8033,7 +8371,11 @@ export function WebhookRuleManager({
                   onChange={(event) => setNotes(event.target.value)}
                 />
               </ConsoleField>
-              <ConsoleField label="Body template" className="fieldFull">
+              <ConsoleField
+                label="Body template"
+                className="fieldFull"
+                hint="Renders the message field in the fixed webhook JSON envelope. Available placeholders: {vps.name}, {vps.display_name}, {vps.id}, {vps.status}, {vps.tags}, {event.kind}, {event.id}, {rule.id}, {rule.name}."
+              >
                 <WebhookTemplateEditor
                   value={bodyTemplate}
                   onChange={setBodyTemplate}
@@ -8087,7 +8429,7 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || !hasEnabledRules}
+                  disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
                       ? "Preview enabled rules matched by this test event"
@@ -8100,7 +8442,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending || !hasEnabledRules}
+                  disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
                       ? "Review an event webhook test before queueing it"
@@ -8113,7 +8455,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || !hasFailedDeliveries}
+                  disabled={webhookWorkflowBusy || !hasFailedDeliveries}
                   title={
                     hasFailedDeliveries
                       ? "Review failed event webhook deliveries before retrying"
@@ -8129,7 +8471,7 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || !hasEnabledRules}
+                  disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
                       ? "Preview enabled rules matched by this event"
@@ -8142,7 +8484,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || !hasEnabledRules}
+                  disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
                       ? "Review matching rules before queueing deliveries"
@@ -8155,7 +8497,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
-                  disabled={queuePending || !hasQueuedDeliveries}
+                  disabled={webhookWorkflowBusy || !hasQueuedDeliveries}
                   title={
                     hasQueuedDeliveries
                       ? "Preview queued event webhook deliveries"
@@ -8168,7 +8510,7 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
-                  disabled={queuePending || !hasQueuedDeliveries}
+                  disabled={webhookWorkflowBusy || !hasQueuedDeliveries}
                   title={
                     hasQueuedDeliveries
                       ? "Review queued event webhook deliveries before sending"
@@ -8297,49 +8639,6 @@ export function WebhookRuleManager({
             : null
         }
         title="Confirm webhook enable"
-      />
-      <ConfirmationPrompt
-        confirmLabel={saveSnapshot?.title ?? "Save rule"}
-        detail="Saves the reviewed webhook rule request exactly as shown."
-        items={[
-          { label: "Rule", value: saveSnapshot?.request.name ?? "-" },
-          {
-            label: "Expression",
-            value: saveSnapshot?.request.expression ?? "-",
-          },
-          {
-            label: "Target",
-            value: saveSnapshot?.request.target ?? "-",
-          },
-          {
-            label: "State",
-            value: saveSnapshot?.request.enabled ? "enabled" : "disabled",
-          },
-          {
-            label: "Signing",
-            value: saveSnapshot
-              ? saveSnapshot.request.clear_signing_secret
-                ? "clear existing secret"
-                : saveSnapshot.request.signing_secret
-                  ? existingSecretConfigured
-                    ? "rotate secret"
-                    : "set secret"
-                  : existingSecretConfigured
-                    ? "keep existing secret"
-                    : "not configured"
-              : "-",
-          },
-        ]}
-        onCancel={() => setSaveSnapshot(null)}
-        onConfirm={() => void submit()}
-        open={saveSnapshot !== null}
-        pending={savePending}
-        error={
-          saveSnapshot && statusScope === "resource" && statusTone === "danger"
-            ? status
-            : null
-        }
-        title="Confirm webhook rule save"
       />
       <ConfirmationPrompt
         confirmLabel="Delete webhook rules"

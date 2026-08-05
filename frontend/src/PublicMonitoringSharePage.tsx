@@ -7,6 +7,7 @@ import {
   type TimeSeriesChartLine,
 } from "./components/TimeSeriesChart";
 import { ConsoleStatusBadge } from "./components/ConsoleLayout";
+import { CountryFlag } from "./components/CountryFlag";
 import {
   MonitoringRangeTabs,
   type MonitoringWindow,
@@ -21,6 +22,7 @@ import {
   usePersistentMonitorCardDensity,
   type MonitorCardDensity,
 } from "./monitorCardDensity";
+import { countryTagValue } from "./tagDisplay";
 import {
   MiniSparkline,
   MonitorFact,
@@ -798,6 +800,9 @@ function PublicMonitoringCardView({
     ? publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
     : null;
   const warnings = publicCardWarnings(card, visibility);
+  const country = visibility?.identity_context
+    ? countryTagValue(card.tags ?? [])
+    : null;
   const cardTitle = `${card.display_name || "Unnamed VPS"} · ${statusLabel}`;
   const freshness = publicCardFreshness(card, visibility);
   const freshnessLabel = freshness
@@ -818,8 +823,14 @@ function PublicMonitoringCardView({
         <span aria-hidden="true" />
         {visibleStatusLabel}
       </span>
-      <strong title={card.display_name || "Unnamed VPS"}>
-        {card.display_name || "Unnamed VPS"}
+      <strong
+        className="vpsMonitorCardName"
+        title={card.display_name || "Unnamed VPS"}
+      >
+        {country ? (
+          <CountryFlag country={country} decorative fallback="none" />
+        ) : null}
+        <span>{card.display_name || "Unnamed VPS"}</span>
       </strong>
       <small title={freshnessLabel}>{freshnessLabel}</small>
     </>
@@ -1913,7 +1924,7 @@ function summarizePublicFleet(
   for (const card of cards) {
     if (locations) {
       const location =
-        publicTagValue(card.tags ?? [], "country") ??
+        countryTagValue(card.tags ?? []) ??
         publicTagValue(card.tags ?? [], "region");
       if (location) locations.values.add(location);
       else locations.unspecified += 1;

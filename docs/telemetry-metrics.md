@@ -217,8 +217,8 @@ bandwidth as evidence, not as automatic discovery of link capacity.
   they fall outside the current freshness window.
 - CSV export contains only the visible series and selected retained range.
 
-Shared monitoring views reuse these definitions but expose only the metric
-groups selected when the immutable share was created. They never expose real
+Shared monitoring views reuse these definitions but expose only the immutable
+metric visibility groups selected when the share was created. They never expose real
 VPS IDs, network-address fields, internal configuration, actions, jobs,
 terminals, files, backups, audit data, or operator identity. Operator-entered
 display and Ping target names appear as entered.

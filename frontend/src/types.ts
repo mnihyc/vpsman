@@ -1288,6 +1288,8 @@ export type MonitoringShareView = {
   name: string;
   selector_expression: string;
   target_count: number;
+  target_client_ids: string[];
+  target_update_available: boolean;
   visibility: MonitoringShareVisibilityView;
   status: string;
   expires_at: string;
@@ -1298,6 +1300,10 @@ export type MonitoringShareView = {
   visitor_count: number;
   first_visited_at: string | null;
   last_visited_at: string | null;
+};
+
+export type MonitoringShareUrlResponse = {
+  fragment_path: string;
 };
 
 export type CreateMonitoringShareRequest = {
@@ -1311,7 +1317,6 @@ export type CreateMonitoringShareRequest = {
 
 export type CreateMonitoringShareResponse = {
   share: MonitoringShareView;
-  secret: string;
   fragment_path: string;
 };
 
@@ -1322,6 +1327,27 @@ export type ExtendMonitoringSharesRequest = {
 
 export type RevokeMonitoringSharesRequest = {
   share_ids: string[];
+};
+
+export type BulkUpdateMonitoringShareTargetsRequest = {
+  share_ids: string[];
+  preview_hash?: string;
+  confirmed?: boolean;
+};
+
+export type MonitoringShareTargetChangeView = {
+  share_id: string;
+  share_name: string;
+  selector_expression: string;
+  added_client_ids: string[];
+  removed_client_ids: string[];
+  unchanged_count: number;
+};
+
+export type BulkUpdateMonitoringShareTargetsResponse = {
+  preview_hash: string;
+  applied: boolean;
+  changes: MonitoringShareTargetChangeView[];
 };
 
 export type MonitoringSharesMutationResponse = {

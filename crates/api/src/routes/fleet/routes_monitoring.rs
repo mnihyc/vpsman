@@ -17,12 +17,15 @@ use crate::{
     error::ApiError,
     model::{
         AgentView, BillingPlanView, BulkPingTargetLifecycleRequest,
-        BulkPingTargetLifecycleResponse, BulkResolveRequest, BulkUpdatePingTargetsRequest,
-        BulkUpdatePingTargetsResponse, ClientMonitoringView, CreateMonitoringShareRequest,
-        CreateMonitoringShareResponse, CurrentPingView, DeletePingTargetRequest,
-        DeletePingTargetResponse, ExtendMonitoringSharesRequest, MakePrimaryPingTargetRequest,
-        MonitoringCardView, MonitoringCardsPageView, MonitoringRangeView, MonitoringShareListQuery,
-        MonitoringShareRecord, MonitoringShareTargetRecord, MonitoringShareView,
+        BulkPingTargetLifecycleResponse, BulkResolveRequest,
+        BulkUpdateMonitoringShareTargetsRequest, BulkUpdateMonitoringShareTargetsResponse,
+        BulkUpdatePingTargetsRequest, BulkUpdatePingTargetsResponse, ClientMonitoringView,
+        CreateMonitoringShareRequest, CreateMonitoringShareResponse, CurrentPingView,
+        DeletePingTargetRequest, DeletePingTargetResponse, ExtendMonitoringSharesRequest,
+        MakePrimaryPingTargetRequest, MonitoringCardView, MonitoringCardsPageView,
+        MonitoringRangeView, MonitoringShareListQuery, MonitoringShareRecord,
+        MonitoringShareTargetChangeView, MonitoringShareTargetRecord,
+        MonitoringShareTargetReplacement, MonitoringShareUrlResponse, MonitoringShareView,
         MonitoringShareVisibilityView, MonitoringSharesMutationResponse, PingRollupView,
         PingTargetAssignmentChangeView, PingTargetAssignmentReplacement, PingTargetDetailView,
         PingTargetMutationRequest, PingTargetMutationResponse, PingTargetRecord,
@@ -41,7 +44,7 @@ use crate::{
     repository_monitoring::monitoring_share_status,
     runtime_config::dispatch_runtime_config_for_clients,
     security::{
-        generate_token, token_hash, SCOPE_FLEET_READ, SCOPE_NETWORK_READ, SCOPE_SHARING_READ,
+        generate_token, SCOPE_FLEET_READ, SCOPE_NETWORK_READ, SCOPE_SHARING_READ,
         SCOPE_SHARING_WRITE,
     },
     selector_expression::parse_selector_expression,
@@ -56,6 +59,7 @@ const MIN_SHARE_EXPIRY_SECS: u64 = 60;
 const MAX_SHARE_EXPIRY_SECS: u64 = 365 * 24 * 60 * 60;
 const MAX_MONITORING_SELECTOR_BYTES: usize = 4_096;
 const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
+const MAX_SHARE_TARGETS: usize = 1_000;
 const CURRENT_NETWORK_RATE_MAX_AGE_SECS: u64 = 180;
 
 #[derive(Debug, Deserialize)]
@@ -480,23 +484,23 @@ pub(crate) async fn list_monitoring_shares(
     {
         return Err(ApiError::bad_request("monitoring_share_status_invalid"));
     }
-    Ok(Json(
-        state
-            .repo
-            .list_monitoring_shares(
-                query.status.as_deref(),
-                query.limit.unwrap_or(100),
-                query.offset.unwrap_or(0),
-            )
-            .await?,
-    ))
+    let mut shares = state
+        .repo
+        .list_monitoring_shares(
+            query.status.as_deref(),
+            query.limit.unwrap_or(100),
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+    enrich_monitoring_share_target_evidence(&state, &mut shares).await?;
+    Ok(Json(shares))
 }
 
 pub(crate) async fn create_monitoring_share(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CreateMonitoringShareRequest>,
-) -> Result<(StatusCode, Json<CreateMonitoringShareResponse>), ApiError> {
+) -> Result<Response, ApiError> {
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_SHARING_WRITE)
         .await?;
@@ -517,6 +521,16 @@ pub(crate) async fn create_monitoring_share(
     parse_selector_expression(&selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     let resolved = resolve_selector(&state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
+    if resolved.is_empty() {
+        return Err(ApiError::bad_request(
+            "monitoring_share_target_selection_required",
+        ));
+    }
+    if resolved.len() > MAX_SHARE_TARGETS {
+        return Err(ApiError::bad_request(
+            "monitoring_share_target_count_too_large",
+        ));
+    }
     let submitted = request
         .target_client_ids
         .iter()
@@ -550,7 +564,7 @@ pub(crate) async fn create_monitoring_share(
     let record = MonitoringShareRecord {
         id,
         name,
-        token_digest: token_hash(&secret),
+        token_secret: secret.clone(),
         selector_expression,
         targets: resolved
             .into_iter()
@@ -572,14 +586,18 @@ pub(crate) async fn create_monitoring_share(
         .create_monitoring_share(record, &operator)
         .await
         .map_err(share_repository_error)?;
-    Ok((
+    let mut response = (
         StatusCode::CREATED,
         Json(CreateMonitoringShareResponse {
             share,
             fragment_path: format!("#/share/{id}/{secret}"),
-            secret,
         }),
-    ))
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 pub(crate) async fn extend_monitoring_shares(
@@ -599,6 +617,110 @@ pub(crate) async fn extend_monitoring_shares(
         .await
         .map_err(share_repository_error)?;
     Ok(Json(MonitoringSharesMutationResponse { shares }))
+}
+
+pub(crate) async fn get_monitoring_share_url(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(share_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_SHARING_WRITE)
+        .await?;
+    let token_secret = state
+        .repo
+        .recover_monitoring_share_url(share_id, &operator)
+        .await
+        .map_err(share_repository_error)?;
+    let mut response = Json(MonitoringShareUrlResponse {
+        fragment_path: format!("#/share/{share_id}/{token_secret}"),
+    })
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+pub(crate) async fn bulk_update_monitoring_share_targets(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkUpdateMonitoringShareTargetsRequest>,
+) -> Result<Json<BulkUpdateMonitoringShareTargetsResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_SHARING_WRITE)
+        .await?;
+    let share_ids = request
+        .share_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if share_ids.is_empty() {
+        return Err(ApiError::bad_request("monitoring_share_selection_required"));
+    }
+    if share_ids.len() > 1_000 {
+        return Err(ApiError::bad_request(
+            "monitoring_share_selection_too_large",
+        ));
+    }
+    let mut changes = Vec::with_capacity(share_ids.len());
+    let mut replacements = Vec::with_capacity(share_ids.len());
+    for share_id in &share_ids {
+        let share = state
+            .repo
+            .monitoring_share_record(*share_id)
+            .await?
+            .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
+        if monitoring_share_status(&share, crate::unix_now()) != "active" {
+            return Err(ApiError::conflict("monitoring_share_not_active"));
+        }
+        let resolved =
+            resolve_selector(&state, &share.selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
+        if resolved.len() > MAX_SHARE_TARGETS {
+            return Err(ApiError::bad_request(
+                "monitoring_share_target_count_too_large",
+            ));
+        }
+        let current = share
+            .target_client_ids()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let next = resolved.iter().cloned().collect::<BTreeSet<_>>();
+        changes.push(MonitoringShareTargetChangeView {
+            share_id: *share_id,
+            share_name: share.name.clone(),
+            selector_expression: share.selector_expression.clone(),
+            added_client_ids: next.difference(&current).cloned().collect(),
+            removed_client_ids: current.difference(&next).cloned().collect(),
+            unchanged_count: current.intersection(&next).count(),
+        });
+        replacements.push(MonitoringShareTargetReplacement {
+            expected_share: share,
+            next_client_ids: resolved,
+        });
+    }
+    let preview_hash = monitoring_share_target_preview_hash(&changes)?;
+    if !request.confirmed {
+        return Ok(Json(BulkUpdateMonitoringShareTargetsResponse {
+            preview_hash,
+            applied: false,
+            changes,
+        }));
+    }
+    if request.preview_hash.as_deref() != Some(preview_hash.as_str()) {
+        return Err(ApiError::conflict("monitoring_share_preview_stale"));
+    }
+    state
+        .repo
+        .replace_monitoring_share_targets_bulk(&replacements, &operator)
+        .await
+        .map_err(share_repository_error)?;
+    Ok(Json(BulkUpdateMonitoringShareTargetsResponse {
+        preview_hash,
+        applied: true,
+        changes,
+    }))
 }
 
 pub(crate) async fn revoke_monitoring_shares(
@@ -1601,6 +1723,39 @@ async fn enrich_ping_target_evidence(
     Ok(())
 }
 
+async fn enrich_monitoring_share_target_evidence(
+    state: &AppState,
+    shares: &mut [MonitoringShareView],
+) -> Result<(), ApiError> {
+    let selectors = shares
+        .iter()
+        .filter(|share| share.status == "active")
+        .map(|share| share.selector_expression.clone())
+        .collect::<BTreeSet<_>>();
+    let update_checks = stream::iter(selectors.into_iter().map(|selector_expression| async move {
+        let resolved =
+            resolve_selector(state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
+        Ok::<_, ApiError>((selector_expression, resolved))
+    }))
+    .buffered(8)
+    .collect::<Vec<_>>()
+    .await;
+    let mut resolved_by_selector = HashMap::new();
+    for result in update_checks {
+        let (selector_expression, resolved) = result?;
+        resolved_by_selector.insert(selector_expression, resolved);
+    }
+    for share in shares {
+        share.target_client_ids.sort();
+        share.target_client_ids.dedup();
+        share.target_update_available = share.status == "active"
+            && resolved_by_selector
+                .get(&share.selector_expression)
+                .is_some_and(|resolved| resolved != &share.target_client_ids);
+    }
+    Ok(())
+}
+
 fn ping_target_runtime_sync(
     target: &PingTargetView,
     client_ids: &[String],
@@ -1744,6 +1899,18 @@ fn ping_assignment_preview_hash(
         })
 }
 
+fn monitoring_share_target_preview_hash(
+    changes: &[MonitoringShareTargetChangeView],
+) -> Result<String, ApiError> {
+    serde_json::to_vec(changes)
+        .map(|payload| payload_hash(&payload))
+        .map_err(|error| {
+            ApiError::from(anyhow::anyhow!(
+                "monitoring share preview serialization failed: {error}"
+            ))
+        })
+}
+
 fn monitoring_repository_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
     if message.contains("ping_target_update_stale") {
@@ -1765,15 +1932,20 @@ fn monitoring_repository_error(error: anyhow::Error) -> ApiError {
 
 fn share_repository_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
-    if message.contains("resolution_stale") {
+    if message.contains("preview_stale") {
+        ApiError::conflict("monitoring_share_preview_stale")
+    } else if message.contains("resolution_stale") {
         ApiError::conflict("monitoring_share_resolution_stale")
     } else if message.contains("not_found") {
         ApiError::not_found("monitoring_share_not_found")
     } else if message.contains("not_active") {
         ApiError::conflict("monitoring_share_not_active")
-    } else if message.contains("required")
-        || message.contains("invalid")
-        || message.contains("too_large")
+    } else if message.contains("monitoring_share_selection_required")
+        || message.contains("monitoring_share_selection_invalid")
+        || message.contains("monitoring_share_selection_too_large")
+        || message.contains("monitoring_share_target_count_too_large")
+        || message.contains("monitoring_share_target_client_id_invalid")
+        || message.contains("monitoring_share_public_client_key_invalid")
     {
         ApiError::bad_request_with_message("monitoring_share_invalid", message)
     } else {

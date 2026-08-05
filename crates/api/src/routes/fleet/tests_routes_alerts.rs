@@ -77,3 +77,91 @@ fn fleet_alert_policy_delete_review_regression_maps_stale_and_missing() {
     assert_eq!(missing.status, axum::http::StatusCode::NOT_FOUND);
     assert_eq!(missing.code, "fleet_alert_policy_not_found");
 }
+
+#[test]
+fn notification_channel_rejects_unsafe_targets_and_maps_name_conflicts() {
+    let request = CreateFleetAlertNotificationChannelRequest {
+        id: None,
+        name: "Operations".to_string(),
+        scope_kind: "global".to_string(),
+        scope_value: None,
+        min_severity: Some("warning".to_string()),
+        categories: None,
+        operator_states: None,
+        delivery_kind: "webhook".to_string(),
+        target: "not-a-webhook-url".to_string(),
+        cooldown_secs: Some(300),
+        enabled: Some(true),
+        notes: None,
+        confirmed: true,
+    };
+    let invalid = validate_alert_notification_channel_request(&request)
+        .expect_err("an invalid webhook target must be rejected before persistence");
+    assert_eq!(invalid.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.code, "fleet_alert_notification_target_invalid");
+    assert!(
+        invalid
+            .public_message
+            .as_deref()
+            .is_some_and(|message| message.contains("absolute URL")),
+        "the API should preserve the actionable URL validation reason"
+    );
+
+    let conflict = fleet_alert_notification_channel_error(anyhow::anyhow!(
+        "fleet_alert_notification_channel_name_conflict"
+    ));
+    assert_eq!(conflict.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.code,
+        "fleet_alert_notification_channel_name_conflict"
+    );
+
+    let unexpected = fleet_alert_notification_channel_error(anyhow::anyhow!("storage_unavailable"));
+    assert_eq!(
+        unexpected.status,
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(unexpected.code, "internal_server_error");
+}
+
+#[test]
+fn notification_channel_request_is_strict_and_reports_its_own_scope_domain() {
+    let missing_confirmation: CreateFleetAlertNotificationChannelRequest =
+        serde_json::from_value(serde_json::json!({
+            "name": "Operations",
+            "scope_kind": "global",
+            "delivery_kind": "webhook",
+            "target": "https://hooks.acme.com/vpsman"
+        }))
+        .expect("omitted confirmation must deserialize as false for explicit validation");
+    let confirmation_error = validate_alert_notification_channel_request(&missing_confirmation)
+        .expect_err("unconfirmed writes must reach the reviewed-write validator");
+    assert_eq!(
+        confirmation_error.code,
+        "fleet_alert_notification_channel_confirmation_required"
+    );
+
+    assert!(
+        serde_json::from_value::<CreateFleetAlertNotificationChannelRequest>(serde_json::json!({
+            "name": "Operations",
+            "scope_kind": "global",
+            "delivery_kind": "webhook",
+            "target": "https://hooks.acme.com/vpsman",
+            "confirmed": true,
+            "confimed": true
+        }))
+        .is_err()
+    );
+
+    let invalid_scope = CreateFleetAlertNotificationChannelRequest {
+        scope_kind: "policy-only-value".to_string(),
+        confirmed: true,
+        ..missing_confirmation
+    };
+    let scope_error = validate_alert_notification_channel_request(&invalid_scope)
+        .expect_err("invalid notification scope must use the notification error domain");
+    assert_eq!(
+        scope_error.code,
+        "fleet_alert_notification_scope_kind_invalid"
+    );
+}

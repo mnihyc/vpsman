@@ -10,7 +10,6 @@ import {
   ConsoleShell,
   type CommandPaletteItem,
 } from "./components/ConsoleShell";
-import { PrivilegeLockPrompt } from "./components/PrivilegeLockPrompt";
 import { PrivilegeUnlockDialog } from "./components/PrivilegeUnlockDialog";
 import { AdminRoleBoundary } from "./components/RoleBoundary";
 import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
@@ -622,7 +621,7 @@ function getScopedPageDescription(view: ActiveView, subpage: string): string {
       case "ping_targets":
         return "Reusable Ping definitions, frozen assignments, primary probes, and runtime evidence";
       case "shared_views":
-        return "Persistent public monitoring views, expiry, access evidence, extension, and revocation";
+        return "Persistent public monitoring views, frozen-target updates, copyable links, expiry, and access evidence";
       case "alerts":
         return "Alert policies, active context, channels, and delivery evidence";
       case "webhooks":
@@ -887,7 +886,6 @@ export function App() {
     readStoredPrivilegeGrant(),
   );
   const [privilegeUnlockOpen, setPrivilegeUnlockOpen] = useState(false);
-  const [privilegeLockPromptOpen, setPrivilegeLockPromptOpen] = useState(false);
   const [privilegeRestoreError, setPrivilegeRestoreError] = useState<
     string | null
   >(storedPrivilegeGrant.error);
@@ -991,7 +989,6 @@ export function App() {
     if (!dashboard.apiToken && dashboard.authRequired) {
       clearPrivilegeMaterial();
       setPrivilegeUnlockOpen(false);
-      setPrivilegeLockPromptOpen(false);
     }
   }, [clearPrivilegeMaterial, dashboard.apiToken, dashboard.authRequired]);
   useEffect(() => {
@@ -1002,7 +999,6 @@ export function App() {
     ) {
       clearPrivilegeMaterial();
       setPrivilegeUnlockOpen(false);
-      setPrivilegeLockPromptOpen(false);
     }
   }, [clearPrivilegeMaterial, dashboard.operator, privilegeGrant]);
   useEffect(() => {
@@ -1096,7 +1092,6 @@ export function App() {
       privilegeOperationGenerationRef.current += 1;
       privilegeRestoreInFlightRef.current = null;
       setPrivilegeGrant(null);
-      setPrivilegeLockPromptOpen(false);
       if (event.newValue === null) {
         setStoredPrivilegeGrant({
           clearInvalidRecord: false,
@@ -1509,14 +1504,9 @@ export function App() {
     setPrivilegeUnlockOpen(true);
   }
 
-  function requestPrivilegeLock() {
-    setPrivilegeLockPromptOpen(true);
-  }
-
   function lockPrivilege() {
     clearPrivilegeMaterial();
     setPrivilegeUnlockOpen(false);
-    setPrivilegeLockPromptOpen(false);
     setPrivilegeRestoreError(null);
   }
 
@@ -1833,6 +1823,7 @@ export function App() {
         jobsEvidenceAvailable={homeJobsEvidenceAvailable}
         recordBounds={recordPageBounds}
         schedules={homeScopedRecords.schedules}
+        showCountryFlags={operatorPreferences.show_country_flags}
         scopeFiltered={hasFleetScope}
         summary={visibleSummary}
         systemDashboard={dashboard.systemDashboard}
@@ -1894,6 +1885,10 @@ export function App() {
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
         onNavigatePanel={selectReleaseDestination}
+        onRegisterVps={() => {
+          setAccessIdentityWorkflowIntent("register");
+          selectView("Access", "vps_identities");
+        }}
         onOpenJobDispatchPreset={openJobDispatchPreset}
         onOpenJobDetails={openJobDetails}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
@@ -2313,6 +2308,7 @@ export function App() {
   function renderNetworkMetricsPanel() {
     return (
       <NetworkMetricsPanel
+        agents={dashboard.agents}
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
         onOpenEvidence={() => selectView("Network", "evidence")}
@@ -2365,7 +2361,6 @@ export function App() {
         loading={dashboard.jobsLoading}
         onApproveJobApproval={dashboard.approveJobApproval}
         onCreateJob={dashboard.createJob}
-        onCreateJobApproval={dashboard.createJobApproval}
         onDownloadFileBundle={dashboard.downloadFileDownloadBundle}
         onDownloadOutputChunk={dashboard.downloadJobOutputChunk}
         onDownloadOutputStream={dashboard.downloadJobOutputStream}
@@ -2829,6 +2824,7 @@ export function App() {
                 .length,
               dashboard.summary.running_jobs,
             )}
+            showCountryFlags={operatorPreferences.show_country_flags}
             telemetryRollups={dashboard.telemetryRollups}
             title="VPS cards"
             onOpenVpsDetail={releaseRoutes.openVpsDetail}
@@ -3050,7 +3046,6 @@ export function App() {
           onClearFleetView={fleetViews.clearFleetView}
           onDeleteSavedFleetView={fleetViews.deleteSavedFleetView}
           onFleetQueryChange={fleetViews.setFleetQuery}
-          onLockPrivilege={requestPrivilegeLock}
           onOpenAccessControls={openPrivilegeUnlock}
           onRetryAuthRefresh={() => void dashboard.retryAuthRefresh()}
           onSaveFleetView={fleetViews.saveFleetView}
@@ -3064,11 +3059,6 @@ export function App() {
           summaryScopeLabel={summaryScopeLabel}
           wsState={dashboard.wsState}
         >
-          <PrivilegeLockPrompt
-            onCancel={() => setPrivilegeLockPromptOpen(false)}
-            onConfirm={lockPrivilege}
-            open={privilegeLockPromptOpen}
-          />
           <WorkspaceErrorBoundary
             resetKey={`${activeView}:${activeSubpage}`}
             subpageLabel={pageTitle}

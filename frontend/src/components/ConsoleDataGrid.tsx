@@ -370,9 +370,12 @@ export function ConsoleDataGrid<T>({
       sorting,
     },
   });
-  const gridContentStyle = showMobileCards
-    ? undefined
-    : { minWidth: table.getTotalSize() };
+  const fitDefaultColumns =
+    !showMobileCards && Object.keys(columnSizing).length === 0;
+  const gridContentStyle =
+    showMobileCards || fitDefaultColumns
+      ? undefined
+      : { minWidth: table.getTotalSize() };
   const selectedRows = table
     .getSelectedRowModel()
     .rows.map((row) => row.original);
@@ -1068,6 +1071,7 @@ export function ConsoleDataGrid<T>({
                     {headerGroup.headers.map((header) => (
                       <SortableHeaderCell
                         canDrag={sortableColumnIds.includes(header.column.id)}
+                        fitDefaultColumns={fitDefaultColumns}
                         header={header}
                         key={header.id}
                       />
@@ -1135,7 +1139,10 @@ export function ConsoleDataGrid<T>({
                               className="gridCell"
                               key={cell.id}
                               role="gridcell"
-                              style={gridColumnStyle(cell.column)}
+                              style={gridColumnStyle(
+                                cell.column,
+                                fitDefaultColumns,
+                              )}
                               title={tooltipForCell(cell, row.original)}
                             >
                               {flexRender(
@@ -1304,9 +1311,11 @@ function tooltipFromValue(value: unknown): string | undefined {
 
 function SortableHeaderCell<T>({
   canDrag,
+  fitDefaultColumns,
   header,
 }: {
   canDrag: boolean;
+  fitDefaultColumns: boolean;
   header: Header<T, unknown>;
 }) {
   const {
@@ -1333,7 +1342,7 @@ function SortableHeaderCell<T>({
       ref={setNodeRef}
       role="columnheader"
       style={{
-        ...gridColumnStyle(header.column),
+        ...gridColumnStyle(header.column, fitDefaultColumns),
         transform: CSS.Transform.toString(transform),
         transition,
       }}
@@ -1385,7 +1394,10 @@ function SortableHeaderCell<T>({
   );
 }
 
-function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
+function gridColumnStyle<T>(
+  column: Header<T, unknown>["column"],
+  fitDefaultColumns = false,
+) {
   const size = column.getSize();
   const minSize = column.columnDef.minSize ?? size;
   const maxSize = column.columnDef.maxSize;
@@ -1393,7 +1405,7 @@ function gridColumnStyle<T>(column: Header<T, unknown>["column"]) {
 
   return {
     flex: fixed ? `0 0 ${size}px` : `1 1 ${size}px`,
-    minWidth: minSize,
+    minWidth: fixed || !fitDefaultColumns ? minSize : 0,
     width: size,
   };
 }

@@ -26,7 +26,7 @@ test.beforeEach(async ({ page }) => {
   await installSharedViewApiMock(page);
 });
 
-test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", async ({
+test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", async ({
   page,
 }) => {
   await page.goto("/");
@@ -47,6 +47,13 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
   const activeGridBeforeCreate = page.getByLabel(
     "Active shared views data grid",
   );
+  await expect
+    .poll(() =>
+      activeGridBeforeCreate.evaluate(
+        (grid) => grid.scrollWidth <= grid.clientWidth + 1,
+      ),
+    )
+    .toBe(true);
   await expect(
     activeGridBeforeCreate.getByRole("button", { name: "Refresh" }),
   ).toBeVisible();
@@ -56,6 +63,23 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
   await expect(
     page.getByRole("heading", { name: "Create shared view" }),
   ).toBeVisible();
+  const drawerLayout = await page
+    .locator(".actionDrawer:visible")
+    .evaluate((drawer) => {
+      const body = drawer.querySelector<HTMLElement>(".actionDrawerBody");
+      return {
+        bodyOverflowY: body ? getComputedStyle(body).overflowY : null,
+        drawerMaxHeight: getComputedStyle(drawer).maxHeight,
+        drawerOverflowY: getComputedStyle(drawer).overflowY,
+        drawerPosition: getComputedStyle(drawer).position,
+      };
+    });
+  expect(drawerLayout).toEqual({
+    bodyOverflowY: "visible",
+    drawerMaxHeight: "none",
+    drawerOverflowY: "visible",
+    drawerPosition: "static",
+  });
   await page
     .getByLabel("Shared view display name")
     .fill("Regional customer view");
@@ -77,12 +101,12 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
     .getByRole("button", { name: "Create shared view", exact: true })
     .click();
 
-  const oneTimeUrl = page.getByRole("region", {
-    name: "One-time shared view URL",
+  const sharedViewUrl = page.getByRole("region", {
+    name: "Shared view public URL",
   });
-  await expect(oneTimeUrl).toBeVisible();
-  await expect(oneTimeUrl.locator("pre")).toContainText(
-    `#/share/${createdShareId}/one-time-secret`,
+  await expect(sharedViewUrl).toBeVisible();
+  await expect(sharedViewUrl.locator("pre")).toContainText(
+    `#/share/${createdShareId}/public-url-secret`,
   );
   await expect(
     page
@@ -96,11 +120,11 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
     if (page.url().includes("#/observability/shared-views")) break;
   }
   await waitForConsoleShell(page);
-  await expect(oneTimeUrl).toBeVisible();
+  await expect(sharedViewUrl).toBeVisible();
 
   await page.reload();
   await waitForConsoleShell(page);
-  await expect(oneTimeUrl).toHaveCount(0);
+  await expect(sharedViewUrl).toHaveCount(0);
   await expect(
     page
       .getByLabel("Active shared views data grid")
@@ -108,6 +132,35 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
   ).toBeVisible();
 
   const grid = page.getByLabel("Active shared views data grid");
+  const activeRow = grid
+    .getByRole("row")
+    .filter({ hasText: "Customer status" })
+    .first();
+  await activeRow.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Copy URL", exact: true }).click();
+  await expect(sharedViewUrl.locator("pre")).toContainText(
+    `#/share/${activeShareId}/customer-status-secret`,
+  );
+
+  await activeRow.click({ button: "right" });
+  await page
+    .getByRole("menuitem", { name: "Update targets", exact: true })
+    .click();
+  const targetUpdatePrompt = page.getByRole("region", {
+    name: "Confirm shared-view target update",
+  });
+  await expect(targetUpdatePrompt).toContainText("agent-fra-02");
+  await targetUpdatePrompt
+    .getByRole("button", { name: "Update targets", exact: true })
+    .click();
+  await grid
+    .getByLabel(`Expand Active shared views row ${activeShareId}`)
+    .click();
+  const frozenTargetCount = grid
+    .locator(".gridExpandedRow .consoleInlineDetailGrid > span")
+    .filter({ hasText: "Frozen VPS count" });
+  await expect(frozenTargetCount.locator(":scope > span")).toHaveText("2");
+
   await grid
     .getByLabel(`Select Active shared views row ${activeShareId}`)
     .check();
@@ -117,7 +170,7 @@ test("shared views preserve frozen scope, one-time URL, and bulk lifecycle", asy
   await grid.getByRole("button", { name: "Actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Extend", exact: true }).click();
   await expect(
-    page.getByText("4 total frozen target references"),
+    page.getByText("5 total frozen target references"),
   ).toBeVisible();
   await page.getByRole("button", { name: "Extend views" }).click();
   await expect(page.getByText("Extended 2 shared views.")).toBeVisible();
@@ -262,6 +315,18 @@ test("public cards remain static when detail history is not shared", async ({
   await expect(page).toHaveURL(
     new RegExp(`#/share/${publicShareId}/${publicShareSecret}$`),
   );
+});
+
+test("public monitoring reuses the Unicode country flag renderer", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { identityContext: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  await expect(card.locator(".countryFlagGlyph")).toHaveText("🇺🇸");
 });
 
 test("public monitoring keeps grid and detail history state without exposing hidden resource evidence", async ({
@@ -586,6 +651,8 @@ async function installSharedViewApiMock(page: Page) {
       lastVisitedAt: new Date(now - 30 * 60 * 1_000).toISOString(),
       name: "Customer status",
       status: "active",
+      targetClientIds: ["agent-sfo-01"],
+      targetUpdateAvailable: true,
       visitorCount: 2,
     }),
     shareFixture({
@@ -631,7 +698,8 @@ async function installSharedViewApiMock(page: Page) {
           status: "active",
         });
         created.selector_expression = body.selector_expression ?? "*";
-        created.target_count = body.target_client_ids?.length ?? 0;
+        created.target_client_ids = body.target_client_ids ?? [];
+        created.target_count = created.target_client_ids.length;
         created.visibility = {
           detail_history: Boolean(body.visibility.detail_history),
           identity_context: Boolean(body.visibility.identity_context),
@@ -642,9 +710,74 @@ async function installSharedViewApiMock(page: Page) {
         };
         shares = [created, ...shares];
         await json(route, {
-          fragment_path: `#/share/${createdShareId}/one-time-secret`,
-          secret: "one-time-secret",
+          fragment_path: `#/share/${createdShareId}/public-url-secret`,
           share: created,
+        });
+        return;
+      }
+      if (
+        url.pathname ===
+          `/api/v1/monitoring-shares/${activeShareId}/url` &&
+        method === "GET"
+      ) {
+        await json(route, {
+          fragment_path: `#/share/${activeShareId}/customer-status-secret`,
+        });
+        return;
+      }
+      if (
+        url.pathname === "/api/v1/monitoring-shares/update-targets" &&
+        method === "POST"
+      ) {
+        const body = request.postDataJSON() as {
+          confirmed?: boolean;
+          preview_hash?: string;
+          share_ids: string[];
+        };
+        const selected = new Set(body.share_ids);
+        const changes = shares
+          .filter((share) => selected.has(share.id))
+          .map((share) => ({
+            added_client_ids:
+              share.id === activeShareId ? ["agent-fra-02"] : [],
+            removed_client_ids: [],
+            selector_expression: share.selector_expression,
+            share_id: share.id,
+            share_name: share.name,
+            unchanged_count: share.target_client_ids.length,
+          }));
+        const previewHash = "shared-view-target-preview";
+        if (!body.confirmed) {
+          await json(route, {
+            applied: false,
+            changes,
+            preview_hash: previewHash,
+          });
+          return;
+        }
+        if (body.preview_hash !== previewHash) {
+          await route.fulfill({
+            body: JSON.stringify({ error: "monitoring_share_preview_stale" }),
+            contentType: "application/json",
+            status: 409,
+          });
+          return;
+        }
+        shares = shares.map((share) =>
+          selected.has(share.id) && share.id === activeShareId
+            ? {
+                ...share,
+                target_client_ids: ["agent-sfo-01", "agent-fra-02"],
+                target_count: 2,
+                target_update_available: false,
+                updated_at: new Date().toISOString(),
+              }
+            : share,
+        );
+        await json(route, {
+          applied: true,
+          changes,
+          preview_hash: previewHash,
         });
         return;
       }
@@ -705,7 +838,12 @@ async function installPublicMonitoringApiMock(
   {
     detailAllowed = true,
     edgeCases = false,
-  }: { detailAllowed?: boolean; edgeCases?: boolean } = {},
+    identityContext = false,
+  }: {
+    detailAllowed?: boolean;
+    edgeCases?: boolean;
+    identityContext?: boolean;
+  } = {},
 ) {
   const now = Date.now();
   const observedAt = new Date(now - 10_000).toISOString();
@@ -719,7 +857,7 @@ async function installPublicMonitoringApiMock(
     target_count: 1,
     visibility: {
       detail_history: detailAllowed,
-      identity_context: false,
+      identity_context: identityContext,
       network: true,
       ping: true,
       resources: false,
@@ -779,6 +917,7 @@ async function installPublicMonitoringApiMock(
       },
     ],
     status: "online",
+    tags: identityContext ? ["country:US"] : undefined,
     traffic: {
       configured: true,
       cycle_end: new Date(now + 20 * 24 * 60 * 60 * 1_000).toISOString(),
@@ -908,6 +1047,8 @@ function shareFixture({
   lastVisitedAt = null,
   name,
   status,
+  targetClientIds = ["v-1"],
+  targetUpdateAvailable = false,
   visitorCount = 0,
 }: {
   createdAt: string;
@@ -916,18 +1057,24 @@ function shareFixture({
   lastVisitedAt?: string | null;
   name: string;
   status: MonitoringShareView["status"];
+  targetClientIds?: string[];
+  targetUpdateAvailable?: boolean;
   visitorCount?: number;
 }): MonitoringShareView {
   return {
     created_at: createdAt,
     expires_at: expiresAt,
     id,
+    created_by: "operator",
+    first_visited_at: null,
     last_visited_at: lastVisitedAt,
     name,
     revoked_at: null,
     selector_expression: "*",
     status,
-    target_count: 1,
+    target_client_ids: targetClientIds,
+    target_count: targetClientIds.length,
+    target_update_available: targetUpdateAvailable,
     updated_at: createdAt,
     visibility: {
       detail_history: true,

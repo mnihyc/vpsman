@@ -29,7 +29,7 @@ fn public_share_visitor_audit_uses_canonical_request_ip_key() {
     let share = MonitoringShareRecord {
         id: Uuid::new_v4(),
         name: "Status view".to_string(),
-        token_digest: "digest".to_string(),
+        token_secret: "d".repeat(64),
         selector_expression: "*".to_string(),
         targets: vec![MonitoringShareTargetRecord {
             client_id: "v-1".to_string(),

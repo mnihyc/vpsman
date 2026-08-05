@@ -7,12 +7,14 @@ export function ConsoleDetailPanel({
   children,
   description,
   onClose,
+  reviewPrompt,
   title,
 }: {
   actions?: ReactNode;
   children: ReactNode;
   description?: ReactNode;
   onClose?: () => void;
+  reviewPrompt?: ReactNode;
   title: ReactNode;
 }) {
   const panelRef = useRef<HTMLElement | null>(null);
@@ -54,6 +56,7 @@ export function ConsoleDetailPanel({
       </div>
       {children}
       {actions && <div className="consoleFormActions">{actions}</div>}
+      {reviewPrompt}
     </section>
   );
 }

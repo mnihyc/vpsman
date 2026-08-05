@@ -4357,6 +4357,49 @@ function VpsRulesPanel({
         : current.filter((stored) => stored !== key),
     );
   }
+  const vpsRulesApplyReviewPrompt = (
+    <ConfirmationPrompt
+      confirmLabel={
+        reviewSnapshot
+          ? `Apply ${reviewSnapshot.preview.changed_row_count} ${reviewSnapshot.preview.changed_row_count === 1 ? "change" : "changes"}`
+          : "Apply changes"
+      }
+      detail="Applies the reviewed preview bound to its selector and server-issued preview hash."
+      error={statusTone === "danger" ? status : null}
+      items={[
+        {
+          label: "Selector",
+          value: reviewSnapshot?.selectorExpression ?? "-",
+        },
+        { label: "Operation", value: reviewSnapshot?.operation ?? "-" },
+        {
+          label: "Set keys",
+          value: Object.keys(reviewSnapshot?.values ?? {}).join(", ") || "-",
+        },
+        {
+          label: "Unset keys",
+          value: reviewSnapshot?.keys.join(", ") || "-",
+        },
+        {
+          label: "Matched VPS",
+          value: reviewSnapshot?.preview.matched_vps_count ?? 0,
+        },
+        {
+          label: "Changed rows",
+          value: reviewSnapshot?.preview.changed_row_count ?? 0,
+        },
+        {
+          label: "No-op rows hidden",
+          value: reviewSnapshot?.preview.no_op_row_count ?? 0,
+        },
+      ]}
+      onCancel={() => setReviewPromptOpen(false)}
+      onConfirm={() => void applyReview()}
+      open={reviewPromptOpen && reviewSnapshot !== null}
+      pending={pending}
+      title="Confirm VPS rule write"
+    />
+  );
 
   return (
     <div className="consoleCrudPanel vpsRulesWorkspace">
@@ -4497,21 +4540,6 @@ function VpsRulesPanel({
                   Unset values
                 </button>
               </div>
-              <button
-                className="primaryAction compactAction"
-                disabled={pending}
-                onClick={() => void dryRun(editMode)}
-                title={
-                  pending
-                    ? "Wait for the current VPS rule operation to finish before preview."
-                    : editMode === "upsert"
-                      ? "Preview effective VPS rule value changes before applying them."
-                      : "Preview effective VPS rule removals before applying them."
-                }
-                type="button"
-              >
-                Preview changes
-              </button>
             </div>
           </div>
           {!preview ? (
@@ -4625,7 +4653,11 @@ function VpsRulesPanel({
                   {VPS_RULE_FIELD_DEFINITIONS.map((field) => (
                     <label className="vpsRuleTypedCard" key={field.key}>
                       <span>
-                        <strong>{field.label}</strong>
+                        <ConfigHelpLabel
+                          help={field.help}
+                          label={field.label}
+                          strong
+                        />
                         <small className="monoValue">{field.key}</small>
                       </span>
                       <input
@@ -4645,7 +4677,6 @@ function VpsRulesPanel({
                         title={field.help}
                         value={typedRuleValues[field.key] ?? ""}
                       />
-                      <small>{field.help}</small>
                     </label>
                   ))}
                 </div>
@@ -4687,6 +4718,23 @@ function VpsRulesPanel({
                 </div>
               </section>
             )}
+          </div>
+          <div className="consoleFormActions vpsRulesPreviewActions">
+            <button
+              className="primaryAction compactAction"
+              disabled={pending}
+              onClick={() => void dryRun(editMode)}
+              title={
+                pending
+                  ? "Wait for the current VPS rule operation to finish before preview."
+                  : editMode === "upsert"
+                    ? "Preview effective VPS rule value changes before applying them."
+                    : "Preview effective VPS rule removals before applying them."
+              }
+              type="button"
+            >
+              Preview changes
+            </button>
           </div>
           <section
             className="consoleDetailPanel vpsRulesAlertImpact"
@@ -4746,53 +4794,13 @@ function VpsRulesPanel({
               onRequestApply={() => setReviewPromptOpen(true)}
               pending={pending}
               preview={preview}
+              reviewPrompt={vpsRulesApplyReviewPrompt}
               status={status}
               statusTone={statusTone}
             />
           ) : null}
         </section>
       </div>
-      <ConfirmationPrompt
-        confirmLabel={
-          reviewSnapshot
-            ? `Apply ${reviewSnapshot.preview.changed_row_count} ${reviewSnapshot.preview.changed_row_count === 1 ? "change" : "changes"}`
-            : "Apply changes"
-        }
-        detail="Applies the reviewed preview bound to its selector and server-issued preview hash."
-        error={statusTone === "danger" ? status : null}
-        items={[
-          {
-            label: "Selector",
-            value: reviewSnapshot?.selectorExpression ?? "-",
-          },
-          { label: "Operation", value: reviewSnapshot?.operation ?? "-" },
-          {
-            label: "Set keys",
-            value: Object.keys(reviewSnapshot?.values ?? {}).join(", ") || "-",
-          },
-          {
-            label: "Unset keys",
-            value: reviewSnapshot?.keys.join(", ") || "-",
-          },
-          {
-            label: "Matched VPS",
-            value: reviewSnapshot?.preview.matched_vps_count ?? 0,
-          },
-          {
-            label: "Changed rows",
-            value: reviewSnapshot?.preview.changed_row_count ?? 0,
-          },
-          {
-            label: "No-op rows hidden",
-            value: reviewSnapshot?.preview.no_op_row_count ?? 0,
-          },
-        ]}
-        onCancel={() => setReviewPromptOpen(false)}
-        onConfirm={() => void applyReview()}
-        open={reviewPromptOpen && reviewSnapshot !== null}
-        pending={pending}
-        title="Confirm VPS rule write"
-      />
     </div>
   );
 }
@@ -4886,6 +4894,7 @@ function VpsRulesPreviewTable({
   onRequestApply,
   pending,
   preview,
+  reviewPrompt,
   status,
   statusTone,
 }: {
@@ -4893,6 +4902,7 @@ function VpsRulesPreviewTable({
   onRequestApply: () => void;
   pending: boolean;
   preview: VpsRulesOperatorPreview;
+  reviewPrompt: ReactNode;
   status: string | null;
   statusTone: ActionFeedbackTone;
 }) {
@@ -5025,6 +5035,7 @@ function VpsRulesPreviewTable({
           </button>
         ) : null}
       </div>
+      {reviewPrompt}
     </div>
   );
 }

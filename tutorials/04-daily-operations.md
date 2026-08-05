@@ -47,11 +47,12 @@ the selector's current resolution.
 
 For a fleet-wide check, open **System > Maintenance > Stale selectors**. The
 table compares current visible-fleet resolution with frozen Schedule (including
-backup-policy) and Ping target snapshots. Select records and use **Actions >
-Update targets**, or use **Update all** to review every resolvable stale row.
-Rows marked **Repair required** have invalid selector or schedule data and must
-be corrected in their owning workflow. Shared views and approval records do not
-appear because their frozen scope is immutable evidence.
+backup-policy), Ping-target, and active shared-view snapshots. Select records
+and use **Actions > Update targets**, or use **Update all** to review every
+resolvable stale row. Rows marked **Repair required** have invalid selector or
+schedule data and must be corrected in their owning workflow. Each resource
+keeps its own reviewed write and audit boundary; approval records remain
+immutable evidence.
 
 ## Inspect Jobs And Output
 

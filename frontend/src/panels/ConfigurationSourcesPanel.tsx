@@ -79,6 +79,7 @@ type DrawerState =
 type PendingConfirmation =
   | {
       kind: "override";
+      origin: "editor" | "table";
       request: ConfigurationSourceOverrideRequest;
       preview: ConfigurationSourceOverridePreview;
     }
@@ -364,9 +365,14 @@ export function ConfigurationSourcesPanel({
     setEditorTextDrafts(textDraftsForDefinition(definition));
   }
 
+  function clearEditorConfirmation() {
+    setConfirmation(null);
+  }
+
   function openAssignment(source: ConfigurationSourceView | null = null) {
     assignmentReviewGeneration.current += 1;
     setPending(false);
+    clearEditorConfirmation();
     resetMessages();
     const behavior = source?.behavior ?? "host_metrics";
     setAssignBehavior(behavior);
@@ -385,6 +391,7 @@ export function ConfigurationSourcesPanel({
   function openCreate(behavior: ConfigurationBehavior = "host_metrics") {
     assignmentReviewGeneration.current += 1;
     setPending(false);
+    clearEditorConfirmation();
     resetMessages();
     setEditorBehavior(behavior);
     setEditorName("");
@@ -396,6 +403,7 @@ export function ConfigurationSourcesPanel({
   function openClone(preset: ConfigurationPresetRecord) {
     assignmentReviewGeneration.current += 1;
     setPending(false);
+    clearEditorConfirmation();
     resetMessages();
     setEditorName(`${preset.name} copy`);
     setEditorDescription(preset.description ?? "");
@@ -405,6 +413,7 @@ export function ConfigurationSourcesPanel({
   function openEdit(preset: ConfigurationPresetRecord) {
     assignmentReviewGeneration.current += 1;
     setPending(false);
+    clearEditorConfirmation();
     resetMessages();
     setEditorBehavior(preset.behavior);
     setEditorName(preset.name);
@@ -460,6 +469,7 @@ export function ConfigurationSourcesPanel({
       }
       setConfirmation({
         kind: "override",
+        origin: "editor",
         preview,
         request: {
           ...request,
@@ -515,8 +525,11 @@ export function ConfigurationSourcesPanel({
           privilege_assertion: privilegeAssertion,
         });
         setFeedback(overrideApplyFeedback(response));
+        const closeEditor = confirmation.origin === "editor";
         setConfirmation(null);
-        setDrawer(null);
+        if (closeEditor) {
+          setDrawer(null);
+        }
         return;
       }
       if (confirmation.kind === "preset") {
@@ -555,7 +568,6 @@ export function ConfigurationSourcesPanel({
         tone: "success",
       });
       setConfirmation(null);
-      setDrawer(null);
     });
   }
 
@@ -781,10 +793,7 @@ export function ConfigurationSourcesPanel({
     },
     {
       label: "Reset to system default",
-      onSelect: (rows) => {
-        openAssignment(rows[0]);
-        void reviewOverrideForRow(rows[0], "reset");
-      },
+      onSelect: (rows) => void reviewOverrideForRow(rows[0], "reset"),
       disabled: (rows) =>
         rows.length !== 1 || rows[0].selection_origin !== "explicit_override",
     },
@@ -794,14 +803,14 @@ export function ConfigurationSourcesPanel({
     source: ConfigurationSourceView,
     action: "reset",
   ) {
-    setAssignBehavior(source.behavior);
-    setAssignPresetId(source.effective_preset_id);
-    setDirectTargetIds([source.client_id]);
-    setSelectorExpression("");
     const generation = assignmentReviewGeneration.current + 1;
     assignmentReviewGeneration.current = generation;
+    setDrawer(null);
+    setConfirmation(null);
+    clearEffectiveConfigInspection();
     setPending(true);
     setActionError(null);
+    setFeedback(null);
     try {
       const request: ConfigurationSourceOverrideRequest = {
         action,
@@ -830,6 +839,7 @@ export function ConfigurationSourcesPanel({
       }
       setConfirmation({
         kind: "override",
+        origin: "table",
         request: {
           ...request,
           selector_expression: preview.selector_expression,
@@ -964,6 +974,9 @@ export function ConfigurationSourcesPanel({
       icon: <Trash2 size={14} />,
       tone: "danger",
       onSelect: (rows) => {
+        assignmentReviewGeneration.current += 1;
+        setDrawer(null);
+        clearEffectiveConfigInspection();
         resetMessages();
         setConfirmation({ kind: "delete", preset: rows[0] });
       },
@@ -982,6 +995,55 @@ export function ConfigurationSourcesPanel({
     confirmation?.kind === "override" || confirmation?.kind === "preset"
       ? confirmation.preview.preview_hash
       : null;
+  const pageConfirmationOpen =
+    confirmation?.kind === "delete" ||
+    (confirmation?.kind === "override" && confirmation.origin === "table");
+  const assignmentConfirmationOpen =
+    confirmation?.kind === "override" && confirmation.origin === "editor";
+  const presetConfirmationOpen = confirmation?.kind === "preset";
+  const renderConfirmationPrompt = (open: boolean) => (
+    <ConfirmationPrompt
+      confirmDisabled={confirmationNeedsPrivilege && !privilegeMaterial}
+      confirmLabel={
+        confirmation?.kind === "override"
+          ? confirmation.request.action === "reset"
+            ? "Reset to system default"
+            : "Save selection"
+          : confirmation?.kind === "preset"
+            ? "Update preset"
+            : "Delete preset"
+      }
+      detail={confirmationDetail(confirmation)}
+      error={actionError}
+      items={confirmationItems(confirmation, agentById, vpsNameDisplayMode)}
+      onCancel={() => {
+        setActionError(null);
+        setConfirmation(null);
+      }}
+      onConfirm={() => void confirmAction()}
+      open={open}
+      pending={pending}
+      title={
+        confirmation?.kind === "override"
+          ? "Review effective configuration change"
+          : confirmation?.kind === "preset"
+            ? "Review preset update"
+            : "Delete custom preset"
+      }
+      tone={confirmation?.kind === "delete" ? "danger" : "normal"}
+    >
+      {confirmationNeedsPrivilege && !privilegeMaterial ? (
+        <PrivilegeVaultBox
+          labelPrefix="Configuration sources"
+          lastPayloadHash={confirmationPreviewHash}
+          onOpenUnlock={onOpenPrivilegeUnlock}
+          onPrivilegeMaterialChange={setPrivilegeMaterial}
+          privilegeMaterial={privilegeMaterial}
+          usePrivilegeLabel="Unlock configuration apply"
+        />
+      ) : null}
+    </ConfirmationPrompt>
+  );
   const editorDefinitionPreview = materializeDefinition(
     editorBehavior,
     editorDefinition,
@@ -1198,47 +1260,7 @@ export function ConfigurationSourcesPanel({
         </div>
       </div>
 
-      <ConfirmationPrompt
-        confirmDisabled={confirmationNeedsPrivilege && !privilegeMaterial}
-        confirmLabel={
-          confirmation?.kind === "override"
-            ? confirmation.request.action === "reset"
-              ? "Reset to system default"
-              : "Save selection"
-            : confirmation?.kind === "preset"
-              ? "Update preset"
-              : "Delete preset"
-        }
-        detail={confirmationDetail(confirmation)}
-        error={actionError}
-        items={confirmationItems(confirmation, agentById, vpsNameDisplayMode)}
-        onCancel={() => {
-          setActionError(null);
-          setConfirmation(null);
-        }}
-        onConfirm={() => void confirmAction()}
-        open={confirmation !== null}
-        pending={pending}
-        title={
-          confirmation?.kind === "override"
-            ? "Review effective configuration change"
-            : confirmation?.kind === "preset"
-              ? "Review preset update"
-              : "Delete custom preset"
-        }
-        tone={confirmation?.kind === "delete" ? "danger" : "normal"}
-      >
-        {confirmationNeedsPrivilege && !privilegeMaterial ? (
-          <PrivilegeVaultBox
-            labelPrefix="Configuration sources"
-            lastPayloadHash={confirmationPreviewHash}
-            onOpenUnlock={onOpenPrivilegeUnlock}
-            onPrivilegeMaterialChange={setPrivilegeMaterial}
-            privilegeMaterial={privilegeMaterial}
-            usePrivilegeLabel="Unlock configuration apply"
-          />
-        ) : null}
-      </ConfirmationPrompt>
+      {renderConfirmationPrompt(pageConfirmationOpen)}
 
       <ConsoleActionDrawer
         description={drawerDescription(drawer)}
@@ -1246,6 +1268,7 @@ export function ConfigurationSourcesPanel({
           assignmentReviewGeneration.current += 1;
           setPending(false);
           setActionError(null);
+          clearEditorConfirmation();
           clearEffectiveConfigInspection();
           setDrawer(null);
         }}
@@ -1424,6 +1447,7 @@ export function ConfigurationSourcesPanel({
                   </button>
                 ) : null}
               </div>
+              {renderConfirmationPrompt(assignmentConfirmationOpen)}
 
               {directTargetIds.length === 1 && !selectorExpression.trim() ? (
                 <button
@@ -1594,8 +1618,9 @@ export function ConfigurationSourcesPanel({
                   ? "Create preset"
                   : drawer.kind === "clone"
                     ? "Clone preset"
-                    : "Review preset update"}
+                  : "Review preset update"}
               </button>
+              {renderConfirmationPrompt(presetConfirmationOpen)}
             </fieldset>
           </form>
         ) : null}

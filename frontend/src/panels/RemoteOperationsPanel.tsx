@@ -408,7 +408,7 @@ export function RemoteOperationsPanel({
             onLoadTargets={onLoadTargets}
             onOpenMultiFiles={(path) => {
               setMultiFileInitialPath(path);
-              onSelectSubpage?.("multi_files");
+              onSelectSubpage?.("bulk_files");
             }}
             onOpenTransfers={(path) => {
               setTransferFocusPath(path);

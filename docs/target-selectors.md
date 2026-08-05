@@ -44,19 +44,21 @@ additions/removals and replaces assignments transactionally.
 
 **System > Maintenance > Stale selectors** is the consolidated repair surface
 for mutable saved snapshots. It compares every loaded schedule (including
-backup-policy schedules) and Ping definition with the current visible-fleet
-resolution. Operators can review **Update targets** for selected rows or
-**Update all** resolvable rows. Invalid selector text or an invalid saved
-schedule operation remains **Repair required** and is never silently skipped
-into a write. Schedule updates keep their per-schedule privilege/audit boundary;
-Ping assignment changes use one transactional preview hash. An exact empty
-resolution is explicit and may be frozen after review.
+backup-policy schedules), Ping definition, and active monitoring share with the
+current visible-fleet resolution. Operators can review **Update targets** for
+selected rows or **Update all** resolvable rows. Invalid selector text or an
+invalid saved schedule operation remains **Repair required** and is never
+silently skipped into a write. Schedule updates keep their per-schedule
+privilege/audit boundary; Ping assignments and monitoring shares each use their
+own transactional preview hash. An exact empty resolution is explicit and may
+be frozen after review.
 
 Monitoring shares resolve and freeze their exact VPS list at creation. Their
-target and visibility scope are immutable evidence, so they intentionally have
-no **Update targets** action and do not appear in stale-selector maintenance.
-Approval records are likewise immutable evidence. Create a replacement share
-when either share scope must change.
+saved selector remains audit context; **Update targets** deliberately
+re-resolves it for one or many active shares, previews exact additions and
+removals, and transactionally replaces only the frozen target list. Existing
+public target keys are preserved. Visibility remains immutable evidence.
+Approval records are likewise immutable evidence.
 
 In the console, selector matches are previewed locally as the expression is
 edited. That preview is for orientation only. Direct VPS choices and selector

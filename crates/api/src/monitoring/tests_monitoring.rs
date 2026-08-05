@@ -1,8 +1,14 @@
-use axum::{extract::State, Json};
+use axum::{
+    body::to_bytes,
+    extract::{Path, State},
+    http::header,
+    Json,
+};
 use tokio::sync::broadcast;
 use vpsman_common::{AgentPingProbeKind, AgentPingTarget, AgentRuntimeConfig, PingTargetResult};
 
 use super::*;
+use crate::model_monitoring::MonitoringShareTargetReplacement;
 use crate::repository_monitoring::monitoring_share_status;
 
 #[tokio::test]
@@ -437,7 +443,7 @@ async fn a_single_ping_edit_rejects_a_changed_assignment_snapshot() {
 async fn shared_view_creation_persists_random_public_target_keys() {
     let repo = Repository::Memory(MemoryState::default());
     let state = monitoring_test_state(repo.clone());
-    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    let (operator, headers) = crate::test_auth_context_and_headers(&state).await;
     seed_monitoring_agent(&repo, "v-1").await;
     let request = || CreateMonitoringShareRequest {
         name: "Public status".to_string(),
@@ -455,24 +461,51 @@ async fn shared_view_creation_persists_random_public_target_keys() {
         confirmed: true,
     };
 
-    let (_, Json(first)) = crate::routes_monitoring::create_monitoring_share(
+    let first_response = crate::routes_monitoring::create_monitoring_share(
         State(state.clone()),
         headers.clone(),
         Json(request()),
     )
     .await
     .unwrap();
-    let (_, Json(second)) =
-        crate::routes_monitoring::create_monitoring_share(State(state), headers, Json(request()))
+    assert_eq!(
+        first_response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let first: serde_json::Value = serde_json::from_slice(
+        &to_bytes(first_response.into_body(), usize::MAX)
             .await
-            .unwrap();
+            .unwrap(),
+    )
+    .unwrap();
+    let second_response = crate::routes_monitoring::create_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Json(request()),
+    )
+    .await
+    .unwrap();
+    let second: serde_json::Value = serde_json::from_slice(
+        &to_bytes(second_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let first_share_id = Uuid::parse_str(first["share"]["id"].as_str().unwrap()).unwrap();
+    let second_share_id = Uuid::parse_str(second["share"]["id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        first["share"]["target_client_ids"],
+        serde_json::json!(["v-1"])
+    );
+    assert_eq!(first["share"]["target_update_available"], false);
+    assert!(first.get("secret").is_none());
     let first_record = repo
-        .monitoring_share_record(first.share.id)
+        .monitoring_share_record(first_share_id)
         .await
         .unwrap()
         .unwrap();
     let second_record = repo
-        .monitoring_share_record(second.share.id)
+        .monitoring_share_record(second_share_id)
         .await
         .unwrap()
         .unwrap();
@@ -483,10 +516,119 @@ async fn shared_view_creation_persists_random_public_target_keys() {
         .bytes()
         .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
     assert_ne!(first_key, second_key);
-    assert_ne!(
-        first_key,
-        vpsman_common::payload_hash(format!("{}\0v-1", first_record.token_digest).as_bytes())
+    assert_ne!(first_key, first_record.token_secret);
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    {
+        let mut operators = memory.operators.write().await;
+        let saved_operator = operators
+            .iter_mut()
+            .find(|candidate| candidate.id == operator.operator.id)
+            .unwrap();
+        saved_operator.role = "operator".to_string();
+        saved_operator.scopes = vec!["sharing:read".to_string()];
+    }
+    let read_only_error = crate::routes_monitoring::get_monitoring_share_url(
+        State(state.clone()),
+        headers.clone(),
+        Path(first_share_id),
+    )
+    .await
+    .expect_err("metadata read authority must not recover a bearer URL");
+    assert_eq!(read_only_error.status, axum::http::StatusCode::FORBIDDEN);
+    {
+        let mut operators = memory.operators.write().await;
+        operators
+            .iter_mut()
+            .find(|candidate| candidate.id == operator.operator.id)
+            .unwrap()
+            .scopes = vec!["sharing:write".to_string()];
+    }
+    let url_response = crate::routes_monitoring::get_monitoring_share_url(
+        State(state.clone()),
+        headers.clone(),
+        Path(first_share_id),
+    )
+    .await
+    .expect("sharing:write authorizes bearer URL recovery");
+    assert_eq!(
+        url_response.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-store"
     );
+    let recovered: serde_json::Value = serde_json::from_slice(
+        &to_bytes(url_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered["fragment_path"],
+        format!("#/share/{first_share_id}/{}", first_record.token_secret)
+    );
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    let recovery = audits
+        .iter()
+        .find(|audit| audit.action == "monitoring_share.url_recovered")
+        .expect("URL recovery audit");
+    assert_eq!(recovery.metadata["share_id"], first_share_id.to_string());
+    assert!(!recovery
+        .metadata
+        .to_string()
+        .contains(&first_record.token_secret));
+
+    repo.revoke_monitoring_shares(&[first_share_id], &operator)
+        .await
+        .unwrap();
+    let inactive = crate::routes_monitoring::get_monitoring_share_url(
+        State(state),
+        headers,
+        Path(first_share_id),
+    )
+    .await
+    .expect_err("revoked shares must not return or audit a recovered bearer URL");
+    assert_eq!(inactive.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(inactive.code, "monitoring_share_not_active");
+    assert_eq!(
+        repo.list_audit_logs(20)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|audit| audit.action == "monitoring_share.url_recovered")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn shared_view_creation_rejects_an_empty_frozen_scope() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = monitoring_test_state(repo);
+    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    let error = crate::routes_monitoring::create_monitoring_share(
+        State(state),
+        headers,
+        Json(CreateMonitoringShareRequest {
+            name: "Empty public status".to_string(),
+            selector_expression: "id:v-404".to_string(),
+            target_client_ids: Vec::new(),
+            visibility: MonitoringShareVisibilityRequest {
+                identity_context: false,
+                resources: true,
+                network: true,
+                traffic: true,
+                ping: true,
+                detail_history: true,
+            },
+            expires_in_secs: 3_600,
+            confirmed: true,
+        }),
+    )
+    .await
+    .expect_err("a new public view must contain at least one reviewed VPS");
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "monitoring_share_target_selection_required");
 }
 
 #[tokio::test]
@@ -497,7 +639,7 @@ async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
     let share = MonitoringShareRecord {
         id: Uuid::new_v4(),
         name: "Public status".to_string(),
-        token_digest: vpsman_common::payload_hash(b"share-secret"),
+        token_secret: "a".repeat(64),
         selector_expression: "*".to_string(),
         targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {
@@ -562,6 +704,81 @@ async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
             .count(),
         1
     );
+}
+
+#[tokio::test]
+async fn shared_view_target_refresh_preserves_existing_public_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = monitoring_test_operator();
+    seed_monitoring_agent(&repo, "v-1").await;
+    let now = crate::unix_now();
+    let original_key = "1".repeat(64);
+    let share = MonitoringShareRecord {
+        id: Uuid::new_v4(),
+        name: "Fleet status".to_string(),
+        token_secret: "a".repeat(64),
+        selector_expression: "*".to_string(),
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: "v-1".to_string(),
+            public_client_key: original_key.clone(),
+        }],
+        visibility: MonitoringShareVisibilityView {
+            identity_context: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        expires_at: now.saturating_add(3_600).to_string(),
+        revoked_at: None,
+        revoked_by: None,
+        created_by: Some(operator.operator.id),
+        created_at: now.to_string(),
+        updated_at: now.to_string(),
+    };
+    repo.create_monitoring_share(share.clone(), &operator)
+        .await
+        .unwrap();
+    seed_monitoring_agent(&repo, "v-2").await;
+
+    repo.replace_monitoring_share_targets_bulk(
+        &[MonitoringShareTargetReplacement {
+            expected_share: share.clone(),
+            next_client_ids: vec!["v-1".to_string(), "v-2".to_string()],
+        }],
+        &operator,
+    )
+    .await
+    .unwrap();
+    let stored = repo
+        .monitoring_share_record(share.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.target_client_ids(), vec!["v-1", "v-2"]);
+    assert_eq!(stored.public_client_key("v-1"), Some(original_key.as_str()));
+    assert_eq!(stored.public_client_key("v-2").unwrap().len(), 64);
+    assert_ne!(
+        stored.public_client_key("v-1"),
+        stored.public_client_key("v-2")
+    );
+    let audit = repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|audit| audit.action == "monitoring_share.targets_bulk_updated")
+        .expect("target update audit");
+    assert_eq!(
+        audit.metadata["changes"][0]["added_client_ids"],
+        serde_json::json!(["v-2"])
+    );
+    assert_eq!(
+        audit.metadata["changes"][0]["removed_client_ids"],
+        serde_json::json!([])
+    );
+    assert!(!audit.metadata.to_string().contains(&stored.token_secret));
 }
 
 #[tokio::test]
@@ -810,7 +1027,7 @@ async fn deleting_a_vps_removes_live_ping_but_preserves_frozen_share_scope() {
     let share = MonitoringShareRecord {
         id: Uuid::new_v4(),
         name: "cleanup".to_string(),
-        token_digest: "digest".to_string(),
+        token_secret: "d".repeat(64),
         selector_expression: "*".to_string(),
         targets: vec![MonitoringShareTargetRecord {
             client_id: "v-1".to_string(),
@@ -976,7 +1193,7 @@ fn monitoring_share_expiry_is_fail_closed_for_invalid_values() {
     let mut share = MonitoringShareRecord {
         id: Uuid::new_v4(),
         name: "expiry".to_string(),
-        token_digest: "digest".to_string(),
+        token_secret: "d".repeat(64),
         selector_expression: "*".to_string(),
         targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {

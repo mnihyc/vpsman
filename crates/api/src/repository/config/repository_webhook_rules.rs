@@ -249,7 +249,8 @@ impl Repository {
                 .bind(operator.operator.id)
                 .bind(request.clear_signing_secret)
                 .fetch_one(&mut *tx)
-                .await?;
+                .await
+                .map_err(webhook_rule_database_error)?;
                 let rule = webhook_rule_from_row(row)?;
                 if !rule.enabled {
                     sqlx::query(
@@ -1142,6 +1143,18 @@ pub(crate) fn dry_run_webhook_delivery(
 
 pub(crate) fn validate_webhook_rule_target(target: &str) -> Result<()> {
     validate_webhook_url(target).map(|_| ())
+}
+
+fn webhook_rule_database_error(error: sqlx::Error) -> anyhow::Error {
+    if error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        == Some("webhook_rules_name_key")
+    {
+        anyhow::anyhow!("webhook_rule_name_conflict")
+    } else {
+        error.into()
+    }
 }
 
 #[allow(dead_code)]

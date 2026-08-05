@@ -203,7 +203,7 @@ CREATE INDEX telemetry_ping_rollups_retention_idx
 CREATE TABLE monitoring_share_links (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL,
-    token_digest TEXT NOT NULL UNIQUE,
+    token_secret TEXT NOT NULL UNIQUE,
     selector_expression TEXT NOT NULL,
     show_identity_context BOOLEAN NOT NULL DEFAULT FALSE,
     show_resources BOOLEAN NOT NULL DEFAULT TRUE,
@@ -218,7 +218,7 @@ CREATE TABLE monitoring_share_links (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CHECK (length(trim(name)) BETWEEN 1 AND 128),
-    CHECK (length(token_digest) = 64),
+    CHECK (token_secret ~ '^[0-9a-f]{64}$'),
     -- A frozen grid selection can contain up to 1,000 explicit v-* IDs.
     CHECK (length(trim(selector_expression)) BETWEEN 1 AND 65535),
     CHECK (expires_at > created_at)

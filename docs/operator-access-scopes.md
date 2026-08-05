@@ -46,8 +46,11 @@ role receives the scopes needed for normal daily operation. The default
   definitions/assignments/history, hostname-resolution candidates, raw network
   observations, and topology history exports.
 - `audit:read`: audit logs and audit history exports.
-- `sharing:read`: monitoring-share management records, frozen scope and visible
-  groups, lifecycle state, creator, visitor count, and first/last access evidence.
+- `sharing:read`: monitoring-share management metadata, saved selector and
+  exact frozen target IDs/count, visible groups, lifecycle state, creator,
+  visitor count, and first/last access evidence. It does not expose the bearer
+  URL; unauthenticated public projections use separate allowlisted records and
+  never expose those IDs.
 
 ## Write Scopes
 
@@ -55,9 +58,10 @@ Existing write scopes remain separate from read scopes. Examples include
 `jobs:write`, `inventory:write`, `schedules:write`, `backups:write`,
 `network:write`, `config:write`, `integrations:write`, `templates:write`,
 `history:write`, and `sharing:write`. `sharing:write` permits an operator to
-create, extend, or revoke monitoring shares. A write scope does not automatically
-imply the corresponding sensitive read scope unless the operator record
-explicitly has both, or the operator is an admin with `*`.
+create, update frozen targets, extend, or revoke monitoring shares and recover
+an active bearer URL with **Copy URL**. The same scope already authorizes share
+creation and its returned bearer URL; `sharing:read` remains the separate scope
+for listing management records and target evidence.
 
 Config > Rules writes require `config:write`. Alert policy group and notification
 channel writes require `integrations:write`.
@@ -87,14 +91,17 @@ artifacts.
 
 Creating a shared view resolves and freezes an exact VPS list, visible metric
 groups, detail-history permission, and expiry. The default expiry is 24 hours;
-the accepted range is one minute through 365 days. Target and visibility scope
-cannot change after creation. Active links can be extended, capped at 365 days
-from extension time, or revoked immediately and irreversibly. Expired and
-revoked links cannot be reactivated.
+the accepted range is one minute through 365 days. An active share's frozen
+targets change only through a reviewed **Update targets** action against its
+saved selector; visibility cannot change after creation. Active links can be
+extended, capped at 365 days from extension time, or revoked immediately and
+irreversibly. Expired and revoked links cannot be reactivated.
 
 The returned URL carries a high-entropy secret in its browser fragment. The
-control plane stores only the digest and shows the complete URL once; treat that
-URL as a bearer credential. Public data requests require the share secret plus a
+control plane stores the recoverable high-entropy token so authenticated
+operators can use **Copy URL** later; treat that URL and database field as bearer
+credentials. Each authenticated recovery is recorded in audit evidence and its
+response is never cacheable. Public data requests require the share secret plus a
 visitor bootstrap identity, but never an operator token or privilege assertion.
 Each distinct visitor creates one `monitoring_share.visitor_opened` audit event
 with its share ID, visitor ID, source IP, bounded User-Agent, frozen target count,

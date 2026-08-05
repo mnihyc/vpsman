@@ -3763,13 +3763,31 @@
 }
 
 .countryFlag {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 12px;
+  line-height: 1;
+}
+
+.countryFlagGlyph {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  font-size: 15px;
-  line-height: 1;
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 16px;
+  font-variant-emoji: emoji;
+}
+
+.countryFlagCode {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  height: auto;
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .inspector {
@@ -4799,26 +4817,35 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
 }
 
+.notificationPayloadExample {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .vpsRulesWorkspace {
   align-content: start;
+  gap: 0;
 }
 
 .vpsRulesRegistryFilters {
   grid-template-columns:
     repeat(2, minmax(min(100%, 180px), 1fr))
     minmax(min(100%, 190px), 1fr);
+  padding: 12px 18px 8px;
 }
 
 .vpsRulesMutationScope {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   min-width: 0;
   border-top: 1px solid var(--border);
-  padding-top: 16px;
+  padding: 14px 18px 18px;
 }
 
 .vpsRulesSummary {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  padding: 4px 18px 12px;
 }
 
 .vpsRulesBulkEditor {
@@ -4913,7 +4940,7 @@
 
 .vpsRuleTypedGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
   gap: 10px;
   min-width: 0;
 }

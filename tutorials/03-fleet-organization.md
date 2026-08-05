@@ -114,13 +114,14 @@ list and these optional visible groups: identity context, resources, network,
 traffic, Ping, and detail history. Display name and health are always visible.
 
 The default expiry is 24 hours; accepted expiry is one minute through 365 days.
-The secret public URL is shown once because only its digest is stored. Back and
-Forward retain it in that browser-history entry, but a reload removes it, so copy
-it before refreshing. Target and visibility scope are immutable after creation.
+The public URL is shown after creation and can later be recovered with the
+active row's **Copy URL** action; treat it as a bearer credential. Targets stay
+frozen until **Update targets** re-resolves the saved selector through a reviewed
+preview. Visibility remains immutable after creation.
 
 The Active, Expired, and Revoked tables retain lifecycle and access evidence.
-Select active rows to extend them, capped at 365 days from extension time, or to
-revoke them immediately and irreversibly. Expired and revoked links cannot be
+Select active rows to update targets or extend them, capped at 365 days from
+extension time, or to revoke them immediately and irreversibly. Expired and revoked links cannot be
 reactivated; create a replacement. Each distinct visitor creates one
 `monitoring_share.visitor_opened` audit event with source-IP and bounded
 User-Agent evidence. Later polling updates last-accessed evidence without

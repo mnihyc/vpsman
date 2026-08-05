@@ -93,11 +93,12 @@ use crate::{
     },
     routes_migrations::{create_migration_link, create_migration_run, list_migration_links},
     routes_monitoring::{
-        bulk_ping_target_lifecycle, bulk_update_ping_targets, create_monitoring_share,
-        create_ping_target, delete_ping_target, extend_monitoring_shares, get_client_monitoring,
-        get_ping_target, list_monitoring_cards, list_monitoring_shares, list_ping_targets,
-        make_primary_ping_target, public_monitoring_share_bootstrap, public_monitoring_share_data,
-        revoke_monitoring_shares, update_ping_target,
+        bulk_ping_target_lifecycle, bulk_update_monitoring_share_targets, bulk_update_ping_targets,
+        create_monitoring_share, create_ping_target, delete_ping_target, extend_monitoring_shares,
+        get_client_monitoring, get_monitoring_share_url, get_ping_target, list_monitoring_cards,
+        list_monitoring_shares, list_ping_targets, make_primary_ping_target,
+        public_monitoring_share_bootstrap, public_monitoring_share_data, revoke_monitoring_shares,
+        update_ping_target,
     },
     routes_network::{
         allocate_tunnel_endpoints, create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan,
@@ -357,8 +358,16 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(extend_monitoring_shares),
         )
         .route(
+            "/api/v1/monitoring-shares/update-targets",
+            post(bulk_update_monitoring_share_targets),
+        )
+        .route(
             "/api/v1/monitoring-shares/revoke",
             post(revoke_monitoring_shares),
+        )
+        .route(
+            "/api/v1/monitoring-shares/{share_id}/url",
+            get(get_monitoring_share_url),
         )
         .route(
             "/api/v1/public/monitoring-shares/{share_id}/bootstrap",

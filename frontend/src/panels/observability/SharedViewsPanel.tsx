@@ -1,5 +1,12 @@
 import { Ban, Clock3, Copy, Link2, Plus, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -26,11 +33,14 @@ import {
 import { LocalTargetPreview } from "../TargetImpactPreview";
 import type {
   AgentView,
+  BulkUpdateMonitoringShareTargetsRequest,
+  BulkUpdateMonitoringShareTargetsResponse,
   BulkResolveResponse,
   CreateMonitoringShareRequest,
   CreateMonitoringShareResponse,
   ExtendMonitoringSharesRequest,
   MonitoringSharesMutationResponse,
+  MonitoringShareUrlResponse,
   MonitoringShareView,
   MonitoringShareVisibilityRequest,
   RevokeMonitoringSharesRequest,
@@ -62,7 +72,12 @@ type PendingLifecycleAction =
   | { kind: "revoke"; shares: MonitoringShareView[] }
   | null;
 
-type OneTimeShareUrl = {
+type TargetUpdateReview = {
+  response: BulkUpdateMonitoringShareTargetsResponse;
+  shares: MonitoringShareView[];
+};
+
+type SharedViewUrl = {
   createdAt: string;
   name: string;
   shareId: string;
@@ -127,9 +142,9 @@ export function SharedViewsPanel({
     "observability.shared-views.status",
     "active",
   );
-  const [oneTimeUrl, setOneTimeUrl] =
-    useHistoryEntryState<OneTimeShareUrl | null>(
-      "observability.shared-views.one-time-url",
+  const [sharedViewUrl, setSharedViewUrl] =
+    useHistoryEntryState<SharedViewUrl | null>(
+      "observability.shared-views.public-url",
       null,
     );
   const [shares, setShares] = useState<MonitoringShareView[]>([]);
@@ -143,6 +158,8 @@ export function SharedViewsPanel({
   const [review, setReview] = useState<ReviewedShare | null>(null);
   const [pendingAction, setPendingAction] =
     useState<PendingLifecycleAction>(null);
+  const [targetUpdateReview, setTargetUpdateReview] =
+    useState<TargetUpdateReview | null>(null);
   const [extensionValue, setExtensionValue] = useState(24);
   const [extensionUnit, setExtensionUnit] = useState<DurationUnit>("hours");
   const [pending, setPending] = useState(false);
@@ -152,7 +169,7 @@ export function SharedViewsPanel({
   const initialSelectorConsumed = useRef(onInitialSelectorConsumed);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
   const createFeedbackRef = useRef<HTMLDivElement | null>(null);
-  const oneTimeUrlRef = useRef<HTMLElement | null>(null);
+  const sharedViewUrlRef = useRef<HTMLElement | null>(null);
   const createdUrlFocusShareIdRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -211,6 +228,7 @@ export function SharedViewsPanel({
       drawerOpen ||
       review !== null ||
       pendingAction !== null ||
+      targetUpdateReview !== null ||
       createdUrlFocusShareIdRef.current !== null
     ) {
       return undefined;
@@ -232,6 +250,7 @@ export function SharedViewsPanel({
     loadError,
     pendingAction,
     review,
+    targetUpdateReview,
   ]);
 
   useEffect(() => {
@@ -252,15 +271,16 @@ export function SharedViewsPanel({
 
   useEffect(() => {
     if (
-      !oneTimeUrl ||
+      !sharedViewUrl ||
       drawerOpen ||
       review !== null ||
-      createdUrlFocusShareIdRef.current !== oneTimeUrl.shareId
+      targetUpdateReview !== null ||
+      createdUrlFocusShareIdRef.current !== sharedViewUrl.shareId
     ) {
       return undefined;
     }
     const frame = window.requestAnimationFrame(() => {
-      const outcome = oneTimeUrlRef.current;
+      const outcome = sharedViewUrlRef.current;
       if (!outcome) {
         return;
       }
@@ -269,7 +289,7 @@ export function SharedViewsPanel({
       outcome.focus({ preventScroll: true });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [drawerOpen, oneTimeUrl, review]);
+  }, [drawerOpen, review, sharedViewUrl, targetUpdateReview]);
 
   const sharesByStatus = useMemo(() => {
     const grouped: Record<ShareStatus, MonitoringShareView[]> = {
@@ -334,11 +354,22 @@ export function SharedViewsPanel({
     setFeedback(null);
   }
 
-  function openCreate() {
-    setDraft(defaultShareDraft(initialSelectorSnapshot.current));
+  function enterReviewWorkflow(
+    workflow: "create" | "targets" | "lifecycle" | "copy",
+  ) {
     setReview(null);
+    setPendingAction(null);
+    setTargetUpdateReview(null);
     setActionError(null);
     setFeedback(null);
+    if (workflow !== "create") {
+      setDrawerOpen(false);
+    }
+  }
+
+  function openCreate() {
+    enterReviewWorkflow("create");
+    setDraft(defaultShareDraft(initialSelectorSnapshot.current));
     setDrawerOpen(true);
   }
 
@@ -397,14 +428,14 @@ export function SharedViewsPanel({
       );
       setShares((current) => mergeShares(current, [response.share]));
       createdUrlFocusShareIdRef.current = response.share.id;
-      setOneTimeUrl({
+      setSharedViewUrl({
         createdAt: response.share.created_at,
         name: response.share.name,
         shareId: response.share.id,
         url: absoluteShareUrl(response.fragment_path),
       });
       setFeedback({
-        message: `Created ${response.share.name} for ${response.share.target_count} ${response.share.target_count === 1 ? "VPS" : "VPSs"}. Copy the public URL before refreshing this page.`,
+        message: `Created ${response.share.name} for ${response.share.target_count} ${response.share.target_count === 1 ? "VPS" : "VPSs"}. The public URL is ready to copy and remains recoverable while active.`,
         tone: "success",
       });
       setStatusFilter("active");
@@ -449,7 +480,19 @@ export function SharedViewsPanel({
           { share_ids: ids } satisfies RevokeMonitoringSharesRequest,
         );
       }
-      setShares((current) => mergeShares(current, response.shares));
+      setShares((current) => {
+        const existingById = new Map(current.map((share) => [share.id, share]));
+        const updated = response.shares.map((share) =>
+          pendingAction.kind === "extend"
+            ? {
+                ...share,
+                target_update_available:
+                  existingById.get(share.id)?.target_update_available ?? false,
+              }
+            : share,
+        );
+        return mergeShares(current, updated);
+      });
       setFeedback({
         message:
           pendingAction.kind === "extend"
@@ -467,20 +510,109 @@ export function SharedViewsPanel({
     }
   }
 
-  async function copyOneTimeUrl() {
-    if (!oneTimeUrl) return;
+  async function reviewTargetUpdate(selectedShares: MonitoringShareView[]) {
+    enterReviewWorkflow("targets");
+    setPending(true);
+    try {
+      const response = await apiPost<BulkUpdateMonitoringShareTargetsResponse>(
+        "/api/v1/monitoring-shares/update-targets",
+        apiToken,
+        {
+          share_ids: selectedShares.map((share) => share.id),
+        } satisfies BulkUpdateMonitoringShareTargetsRequest,
+      );
+      if (!targetChangesPresent(response)) {
+        setFeedback({
+          message: `The frozen targets already match the saved ${selectedShares.length === 1 ? "selector" : "selectors"}.`,
+          tone: "info",
+        });
+        return;
+      }
+      setTargetUpdateReview({ response, shares: selectedShares });
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function applyTargetUpdate() {
+    if (!targetUpdateReview) return;
+    setPending(true);
+    setActionError(null);
+    try {
+      const response = await apiPost<BulkUpdateMonitoringShareTargetsResponse>(
+        "/api/v1/monitoring-shares/update-targets",
+        apiToken,
+        {
+          confirmed: true,
+          preview_hash: targetUpdateReview.response.preview_hash,
+          share_ids: targetUpdateReview.shares.map((share) => share.id),
+        } satisfies BulkUpdateMonitoringShareTargetsRequest,
+      );
+      setShares((current) =>
+        applyTargetChanges(current, response.changes),
+      );
+      setFeedback({
+        message: `Updated frozen targets for ${response.changes.length} shared ${response.changes.length === 1 ? "view" : "views"}. Existing public client identities were preserved.`,
+        tone: "success",
+      });
+      setTargetUpdateReview(null);
+      void loadShares();
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function copyShareUrl(share: MonitoringShareView) {
+    enterReviewWorkflow("copy");
+    setPending(true);
+    try {
+      const response = await apiGet<MonitoringShareUrlResponse>(
+        `/api/v1/monitoring-shares/${encodeURIComponent(share.id)}/url`,
+        apiToken,
+      );
+      const recoveredUrl: SharedViewUrl = {
+        createdAt: share.created_at,
+        name: share.name,
+        shareId: share.id,
+        url: absoluteShareUrl(response.fragment_path),
+      };
+      setSharedViewUrl(recoveredUrl);
+      await copyShareUrlText(recoveredUrl);
+    } catch (error) {
+      const message = actionErrorMessage(error);
+      setActionError(message);
+      setFeedback({ message, tone: "danger" });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function copyDisplayedShareUrl() {
+    if (!sharedViewUrl) return;
+    await copyShareUrlText(sharedViewUrl);
+  }
+
+  async function copyShareUrlText(shareUrl: SharedViewUrl) {
     if (!navigator.clipboard?.writeText) {
       setFeedback({
         message:
-          "Clipboard access is unavailable. Select the one-time URL and copy it manually before refreshing.",
+          "Clipboard access is unavailable. Select the URL below and copy it manually.",
         tone: "warning",
       });
       return;
     }
     try {
-      await navigator.clipboard.writeText(oneTimeUrl.url);
+      await navigator.clipboard.writeText(shareUrl.url);
       setFeedback({
-        message: `Copied the one-time URL for ${oneTimeUrl.name}.`,
+        message: `Copied the public URL for ${shareUrl.name}.`,
         tone: "success",
       });
     } catch (error) {
@@ -594,6 +726,22 @@ export function SharedViewsPanel({
       {
         description: (rows) =>
           rows.some((share) => effectiveShareStatus(share) !== "active")
+            ? "Only active shared views can refresh their frozen targets."
+            : rows.some((share) => share.target_update_available)
+              ? `Re-resolve the saved selector for ${rows.length} shared ${rows.length === 1 ? "view" : "views"}, then review exact additions and removals.`
+              : "The selected frozen targets already match their saved selectors.",
+        disabled: (rows) =>
+          pending ||
+          rows.length === 0 ||
+          rows.some((share) => effectiveShareStatus(share) !== "active") ||
+          !rows.some((share) => share.target_update_available),
+        icon: <RefreshCw size={14} />,
+        label: "Update targets",
+        onSelect: (rows) => void reviewTargetUpdate(rows),
+      },
+      {
+        description: (rows) =>
+          rows.some((share) => effectiveShareStatus(share) !== "active")
             ? "Only active shared views can be extended. Expired or revoked links require a replacement."
             : `Extend ${rows.length} selected shared ${rows.length === 1 ? "view" : "views"}; each resulting expiry is capped at 365 days from now.`,
         disabled: (rows) =>
@@ -603,8 +751,7 @@ export function SharedViewsPanel({
         icon: <Clock3 size={14} />,
         label: "Extend",
         onSelect: (rows) => {
-          setActionError(null);
-          setFeedback(null);
+          enterReviewWorkflow("lifecycle");
           setExtensionValue(24);
           setExtensionUnit("hours");
           setPendingAction({ kind: "extend", shares: rows });
@@ -622,8 +769,7 @@ export function SharedViewsPanel({
         icon: <Ban size={14} />,
         label: "Revoke",
         onSelect: (rows) => {
-          setActionError(null);
-          setFeedback(null);
+          enterReviewWorkflow("lifecycle");
           setPendingAction({ kind: "revoke", shares: rows });
         },
         separatorBefore: true,
@@ -631,6 +777,26 @@ export function SharedViewsPanel({
       },
     ],
     [pending],
+  );
+
+  const rowActions = useMemo<ConsoleDataGridAction<MonitoringShareView>[]>(
+    () => [
+      {
+        description: (rows) =>
+          rows.length === 1 && effectiveShareStatus(rows[0]) === "active"
+            ? `Copy the public URL for ${rows[0].name}.`
+            : "Only one active shared view URL can be copied at a time.",
+        disabled: (rows) =>
+          pending ||
+          rows.length !== 1 ||
+          effectiveShareStatus(rows[0]) !== "active",
+        icon: <Copy size={14} />,
+        label: "Copy URL",
+        onSelect: (rows) => void copyShareUrl(rows[0]),
+      },
+      ...actions,
+    ],
+    [actions, pending],
   );
 
   const lifecycleItems = pendingAction
@@ -654,6 +820,10 @@ export function SharedViewsPanel({
           : []),
       ]
     : [];
+  const targetUpdateItems = sharedTargetUpdateReviewItems(
+    targetUpdateReview,
+    agents,
+  );
 
   return (
     <section className="workspace singleColumn observabilitySharedViewsWorkspace">
@@ -701,26 +871,25 @@ export function SharedViewsPanel({
           ))}
         </div>
 
-        {oneTimeUrl ? (
+        {sharedViewUrl ? (
           <section
-            aria-label="One-time shared view URL"
+            aria-label="Shared view public URL"
             className="dashboardSection observabilityGroupSection"
-            ref={oneTimeUrlRef}
+            ref={sharedViewUrlRef}
             tabIndex={-1}
           >
             <div className="dashboardSectionHeader">
               <div>
-                <h2>Save this public URL now</h2>
+                <h2>Public shared-view URL</h2>
                 <span>
-                  The control plane stores only its digest. This browser keeps
-                  the URL for Back/Forward in the current history entry, but a
-                  browser reload removes it.
+                  Copy it now or recover it later from this row's Copy URL
+                  action. Treat it as a bearer credential.
                 </span>
               </div>
               <div className="sectionActions">
                 <button
                   className="primaryAction compactAction"
-                  onClick={() => void copyOneTimeUrl()}
+                  onClick={() => void copyDisplayedShareUrl()}
                   type="button"
                 >
                   <Copy size={14} />
@@ -728,8 +897,8 @@ export function SharedViewsPanel({
                 </button>
                 <button
                   className="secondaryAction compactAction"
-                  onClick={() => setOneTimeUrl(null)}
-                  title="Dismiss this one-time URL after saving it. It cannot be recovered from the control plane."
+                  onClick={() => setSharedViewUrl(null)}
+                  title="Dismiss the displayed URL. It remains available from the row action while the share is active."
                   type="button"
                 >
                   Dismiss
@@ -738,17 +907,17 @@ export function SharedViewsPanel({
             </div>
             <div className="consoleInlineDetailGrid">
               <span>
-                <strong>{oneTimeUrl.name}</strong>
-                <pre>{oneTimeUrl.url}</pre>
+                <strong>{sharedViewUrl.name}</strong>
+                <pre>{sharedViewUrl.url}</pre>
               </span>
               <span>
                 <strong>Share ID</strong>
-                <span>{oneTimeUrl.shareId}</span>
+                <span>{sharedViewUrl.shareId}</span>
               </span>
               <span>
                 <strong>Created</strong>
-                <span title={formatFullTime(oneTimeUrl.createdAt)}>
-                  {formatCompactTime(oneTimeUrl.createdAt)}
+                <span title={formatFullTime(sharedViewUrl.createdAt)}>
+                  {formatCompactTime(sharedViewUrl.createdAt)}
                 </span>
               </span>
             </div>
@@ -773,6 +942,7 @@ export function SharedViewsPanel({
             getRowId={(share) => share.id}
             itemLabel="shared views"
             renderExpandedRow={(share) => <ShareEvidence share={share} />}
+            rowActions={rowActions}
             rows={visibleShares}
             searchPlaceholder="Search name, ID, data, or evidence"
             singleExpandedRow
@@ -808,9 +978,9 @@ export function SharedViewsPanel({
       </div>
 
       <ConsoleActionDrawer
-        description="The selector is resolved on the server at review time. That exact VPS list and the selected visible-data groups become immutable after creation."
+        description="The selector is resolved on the server at review time. Its frozen VPS list can later be explicitly refreshed; visible-data groups remain immutable."
         onClose={closeCreate}
-        open={drawerOpen && review === null}
+        open={drawerOpen}
         title="Create shared view"
       >
         <form
@@ -872,9 +1042,8 @@ export function SharedViewsPanel({
               />
             </div>
             <small>
-              Default * means all current VPSs. Future fleet changes never
-              change this saved scope; create a replacement for a different
-              selector or target set.
+              Default * means all current VPSs. Future fleet changes do not
+              change this saved scope until an operator chooses Update targets.
             </small>
           </div>
 
@@ -963,56 +1132,71 @@ export function SharedViewsPanel({
               {pending ? "Resolving targets" : "Review creation"}
             </button>
           </div>
+          <ConfirmationPrompt
+            confirmLabel="Create shared view"
+            detail="Create one public URL for this exact target and visibility snapshot. Frozen targets change only through an explicit reviewed Update targets action."
+            error={actionError}
+            items={
+              review
+                ? [
+                    { label: "Name", value: review.request.name },
+                    {
+                      label: "Frozen VPSs",
+                      value: review.request.target_client_ids?.length ?? 0,
+                    },
+                    {
+                      label: "Selector evidence",
+                      value: review.request.selector_expression ?? "*",
+                    },
+                    {
+                      label: "Visible data",
+                      value: visibleDataRequestLabel(review.request.visibility),
+                    },
+                    {
+                      label: "Expiry",
+                      value: formatFullTime(
+                        new Date(
+                          Date.now() + review.request.expires_in_secs * 1_000,
+                        ).toISOString(),
+                      ),
+                    },
+                  ]
+                : []
+            }
+            onCancel={() => {
+              if (pending) return;
+              setReview(null);
+            }}
+            onConfirm={() => void createShare()}
+            open={review !== null}
+            pending={pending}
+            title="Confirm public monitoring view"
+          >
+            {review ? (
+              <LocalTargetPreview
+                agents={review.targets}
+                ariaLabel="Reviewed frozen shared view targets"
+              />
+            ) : null}
+          </ConfirmationPrompt>
         </form>
       </ConsoleActionDrawer>
 
       <ConfirmationPrompt
-        confirmLabel="Create shared view"
-        detail="Create one public URL for this exact target and visibility snapshot. The URL is shown once; scope cannot be edited later."
+        confirmLabel="Update targets"
+        detail="Replaces only each selected view's frozen VPS list with the current authoritative result of its saved selector. Visibility and URL stay unchanged."
         error={actionError}
-        items={
-          review
-            ? [
-                { label: "Name", value: review.request.name },
-                {
-                  label: "Frozen VPSs",
-                  value: review.request.target_client_ids?.length ?? 0,
-                },
-                {
-                  label: "Selector evidence",
-                  value: review.request.selector_expression ?? "*",
-                },
-                {
-                  label: "Visible data",
-                  value: visibleDataRequestLabel(review.request.visibility),
-                },
-                {
-                  label: "Expiry",
-                  value: formatFullTime(
-                    new Date(
-                      Date.now() + review.request.expires_in_secs * 1_000,
-                    ).toISOString(),
-                  ),
-                },
-              ]
-            : []
-        }
+        items={targetUpdateItems}
         onCancel={() => {
           if (pending) return;
-          setReview(null);
+          setActionError(null);
+          setTargetUpdateReview(null);
         }}
-        onConfirm={() => void createShare()}
-        open={review !== null}
+        onConfirm={() => void applyTargetUpdate()}
+        open={targetUpdateReview !== null}
         pending={pending}
-        title="Confirm public monitoring view"
-      >
-        {review ? (
-          <LocalTargetPreview
-            agents={review.targets}
-            ariaLabel="Reviewed frozen shared view targets"
-          />
-        ) : null}
-      </ConfirmationPrompt>
+        title="Confirm shared-view target update"
+      />
 
       <ConfirmationPrompt
         confirmDisabled={
@@ -1108,6 +1292,14 @@ function ShareEvidence({ share }: { share: MonitoringShareView }) {
           <span>{share.target_count}</span>
         </span>
         <span>
+          <strong>Target refresh</strong>
+          <span>
+            {share.target_update_available
+              ? "Saved selector now resolves differently"
+              : "Frozen targets match the latest server check"}
+          </span>
+        </span>
+        <span>
           <strong>Always visible</strong>
           <span>Display name · Health</span>
         </span>
@@ -1173,9 +1365,9 @@ function ShareEvidence({ share }: { share: MonitoringShareView }) {
         </span>
       </div>
       <p className="observabilityMetricDefinition">
-        Target and visibility scope are immutable evidence. Extend changes only
-        expiry; Revoke stops access immediately. The secret URL cannot be
-        recovered from this record.
+        Frozen targets change only through a reviewed Update targets action;
+        visibility remains immutable. Extend changes only expiry, Revoke stops
+        access immediately, and Copy URL retrieves the active bearer link.
       </p>
     </div>
   );
@@ -1377,10 +1569,88 @@ function mergeShares(
   );
 }
 
+function applyTargetChanges(
+  shares: MonitoringShareView[],
+  changes: BulkUpdateMonitoringShareTargetsResponse["changes"],
+): MonitoringShareView[] {
+  const byId = new Map(changes.map((change) => [change.share_id, change]));
+  return shares.map((share) => {
+    const change = byId.get(share.id);
+    if (!change) return share;
+    const removed = new Set(change.removed_client_ids);
+    const targetClientIds = [
+      ...share.target_client_ids.filter((clientId) => !removed.has(clientId)),
+      ...change.added_client_ids,
+    ].sort((left, right) => left.localeCompare(right));
+    return {
+      ...share,
+      target_client_ids: targetClientIds,
+      target_count: targetClientIds.length,
+      target_update_available: false,
+    };
+  });
+}
+
 function deduplicateShares(
   shares: MonitoringShareView[],
 ): MonitoringShareView[] {
   return mergeShares([], shares);
+}
+
+function targetChangesPresent(
+  response: BulkUpdateMonitoringShareTargetsResponse,
+): boolean {
+  return response.changes.some(
+    (change) =>
+      change.added_client_ids.length > 0 ||
+      change.removed_client_ids.length > 0,
+  );
+}
+
+function sharedTargetUpdateReviewItems(
+  review: TargetUpdateReview | null,
+  agents: AgentView[],
+): Array<{ label: string; title?: string; value: ReactNode }> {
+  if (!review) return [];
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+  return review.response.changes.flatMap((change) => [
+    {
+      label: `${change.share_name} · selector`,
+      value: <code>{change.selector_expression}</code>,
+    },
+    {
+      label: `${change.share_name} · add (${change.added_client_ids.length})`,
+      title: change.added_client_ids.join(", "),
+      value: exactSharedClientList(change.added_client_ids, agentsById),
+    },
+    {
+      label: `${change.share_name} · remove (${change.removed_client_ids.length})`,
+      title: change.removed_client_ids.join(", "),
+      value: exactSharedClientList(change.removed_client_ids, agentsById),
+    },
+    {
+      label: `${change.share_name} · unchanged`,
+      value: String(change.unchanged_count),
+    },
+  ]);
+}
+
+function exactSharedClientList(
+  clientIds: string[],
+  agentsById: Map<string, AgentView>,
+): ReactNode {
+  if (clientIds.length === 0) return "None";
+  return (
+    <span>
+      {clientIds.map((clientId, index) => (
+        <span key={clientId} title={clientId}>
+          {index > 0 ? ", " : ""}
+          {agentsById.get(clientId)?.display_name?.trim() || "Unknown VPS"} (
+          {clientId})
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function absoluteShareUrl(fragmentPath: string): string {

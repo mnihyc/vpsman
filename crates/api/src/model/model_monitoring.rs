@@ -42,11 +42,11 @@ pub(crate) struct MonitoringShareTargetRecord {
     pub(crate) public_client_key: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct MonitoringShareRecord {
     pub(crate) id: Uuid,
     pub(crate) name: String,
-    pub(crate) token_digest: String,
+    pub(crate) token_secret: String,
     pub(crate) selector_expression: String,
     pub(crate) targets: Vec<MonitoringShareTargetRecord>,
     pub(crate) visibility: MonitoringShareVisibilityView,
@@ -56,6 +56,12 @@ pub(crate) struct MonitoringShareRecord {
     pub(crate) created_by: Option<Uuid>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct MonitoringShareTargetReplacement {
+    pub(crate) expected_share: MonitoringShareRecord,
+    pub(crate) next_client_ids: Vec<String>,
 }
 
 impl MonitoringShareRecord {
@@ -483,7 +489,7 @@ pub(crate) struct MonitoringShareListQuery {
     pub(crate) offset: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct MonitoringShareVisibilityView {
     pub(crate) identity_context: bool,
     pub(crate) resources: bool,
@@ -516,6 +522,8 @@ pub(crate) struct MonitoringShareView {
     pub(crate) name: String,
     pub(crate) selector_expression: String,
     pub(crate) target_count: usize,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) target_update_available: bool,
     pub(crate) visibility: MonitoringShareVisibilityView,
     pub(crate) status: String,
     pub(crate) expires_at: String,
@@ -526,6 +534,11 @@ pub(crate) struct MonitoringShareView {
     pub(crate) visitor_count: usize,
     pub(crate) first_visited_at: Option<String>,
     pub(crate) last_visited_at: Option<String>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct MonitoringShareUrlResponse {
+    pub(crate) fragment_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -542,10 +555,9 @@ pub(crate) struct CreateMonitoringShareRequest {
     pub(crate) confirmed: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct CreateMonitoringShareResponse {
     pub(crate) share: MonitoringShareView,
-    pub(crate) secret: String,
     pub(crate) fragment_path: String,
 }
 
@@ -560,6 +572,33 @@ pub(crate) struct ExtendMonitoringSharesRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RevokeMonitoringSharesRequest {
     pub(crate) share_ids: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BulkUpdateMonitoringShareTargetsRequest {
+    pub(crate) share_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct MonitoringShareTargetChangeView {
+    pub(crate) share_id: Uuid,
+    pub(crate) share_name: String,
+    pub(crate) selector_expression: String,
+    pub(crate) added_client_ids: Vec<String>,
+    pub(crate) removed_client_ids: Vec<String>,
+    pub(crate) unchanged_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct BulkUpdateMonitoringShareTargetsResponse {
+    pub(crate) preview_hash: String,
+    pub(crate) applied: bool,
+    pub(crate) changes: Vec<MonitoringShareTargetChangeView>,
 }
 
 #[derive(Clone, Debug, Serialize)]

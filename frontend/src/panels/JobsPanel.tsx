@@ -33,7 +33,6 @@ import type {
   AgentView,
   BulkResolveResponse,
   CommandTemplateRecord,
-  CreateJobApprovalRequest,
   CreateJobRequest,
   CreateJobResponse,
   DecideJobApprovalRequest,
@@ -257,7 +256,6 @@ export function JobsPanel({
   loading,
   onApproveJobApproval,
   onCreateJob,
-  onCreateJobApproval,
   onDownloadFileBundle,
   onDownloadOutputArchive,
   onDownloadTargetStatusArchive,
@@ -302,9 +300,6 @@ export function JobsPanel({
     request: DecideJobApprovalRequest,
   ) => Promise<JobApprovalDecisionResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onCreateJobApproval: (
-    request: CreateJobApprovalRequest,
-  ) => Promise<JobApprovalRecord>;
   onDownloadOutputChunk: (
     jobId: string,
     clientId: string,
@@ -1390,7 +1385,6 @@ export function JobsPanel({
             dispatchPreset={dispatchPreset}
             onDispatchPresetApplied={onDispatchPresetApplied}
             onCreateJob={onCreateJob}
-            onCreateJobApproval={onCreateJobApproval}
             onDownloadFileTransferSource={onDownloadFileTransferSource}
             onDownloadOutputChunk={onDownloadOutputChunk}
             onOpenRemoteTerminal={() => onOpenRemoteOperations?.("terminal")}
@@ -1400,7 +1394,6 @@ export function JobsPanel({
             onLoadTargets={onLoadTargets}
             onOpenJobDetails={openSubmittedJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onApprovalRequested={() => onSelectSubpage?.("approvals")}
             onResolveTargets={onResolveTargets}
             onDeleteCommandTemplate={onDeleteCommandTemplate}
             onUpsertCommandTemplate={onUpsertCommandTemplate}

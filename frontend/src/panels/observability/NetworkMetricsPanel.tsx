@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
-import { Activity, GitBranch, Route } from "lucide-react";
+import { Activity, GitBranch, Route, SlidersHorizontal } from "lucide-react";
 import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import { consolePalette, dashboardChartColors } from "../../colorPalette";
 import type {
+  AgentView,
   NetworkObservationRecord,
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
@@ -15,9 +17,10 @@ import {
 } from "../../telemetryMetrics";
 import { latencyStatusLabel, telemetryReasonLabel } from "../../topologyRuntime";
 import { formatCompactTime, timestampMillis } from "../../utils";
-import { pushHistoryEntry } from "../../historyEntryState";
+import { pushHistoryEntry, useHistoryEntryState } from "../../historyEntryState";
 
 type NetworkMetricsPanelProps = {
+  agents: AgentView[];
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
   onOpenEvidence: () => void;
@@ -26,6 +29,18 @@ type NetworkMetricsPanelProps = {
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
   tunnelPlans: TunnelPlanRecord[];
+};
+
+type NetworkMetricFilters = {
+  clientId: string;
+  health: "all" | "healthy" | "degraded" | "unverified";
+  planId: string;
+};
+
+const DEFAULT_NETWORK_FILTERS: NetworkMetricFilters = {
+  clientId: "",
+  health: "all",
+  planId: "",
 };
 
 type NetworkMetricGroup = {
@@ -64,6 +79,7 @@ type ThroughputBenchmark = {
 };
 
 export function NetworkMetricsPanel({
+  agents,
   networkObservations,
   networkTrends,
   onOpenEvidence,
@@ -75,6 +91,10 @@ export function NetworkMetricsPanel({
 }: NetworkMetricsPanelProps) {
   const [selectedMetric, setSelectedMetric] = useState<NetworkChartMetric>(
     readNetworkMetricRoute,
+  );
+  const [filters, setFilters] = useHistoryEntryState<NetworkMetricFilters>(
+    "observability.network-metrics.filters",
+    DEFAULT_NETWORK_FILTERS,
   );
 
   useEffect(() => {
@@ -94,24 +114,81 @@ export function NetworkMetricsPanel({
     writeNetworkMetricRoute(metric);
     setSelectedMetric(metric);
   }
-  const enabledPlanIds = new Set(
-    tunnelPlans
-      .filter((plan) => plan.enabled && !plan.deleted_at)
-      .map((plan) => plan.id),
+  const enabledPlans = tunnelPlans.filter(
+    (plan) => plan.enabled && !plan.deleted_at,
   );
+  const enabledPlanIds = new Set(enabledPlans.map((plan) => plan.id));
+  const unavailablePlanFilter =
+    filters.planId && !enabledPlanIds.has(filters.planId)
+      ? filters.planId
+      : null;
+  const recordMatches = (
+    clientIds: Array<string | null | undefined>,
+    planId: string | null,
+    health: "degraded" | "healthy" | "unverified",
+  ) =>
+    (!filters.clientId || clientIds.includes(filters.clientId)) &&
+    (!filters.planId || planId === filters.planId) &&
+    (filters.health === "all" || filters.health === health);
   const declaredObservations = networkObservations.filter(
     (observation) =>
-      Boolean(observation.plan_id) && enabledPlanIds.has(observation.plan_id ?? ""),
+      Boolean(observation.plan_id) &&
+      enabledPlanIds.has(observation.plan_id ?? "") &&
+      recordMatches(
+        [observation.client_id, observation.peer_client_id],
+        observation.plan_id,
+        observation.healthy === null
+          ? "unverified"
+          : observation.healthy
+            ? "healthy"
+            : "degraded",
+      ),
   );
   const declaredTrends = networkTrends.filter(
-    (trend) => Boolean(trend.plan_id) && enabledPlanIds.has(trend.plan_id ?? ""),
+    (trend) =>
+      Boolean(trend.plan_id) &&
+      enabledPlanIds.has(trend.plan_id ?? "") &&
+      recordMatches(
+        [trend.client_id, trend.peer_client_id],
+        trend.plan_id,
+        trend.sample_count === 0
+          ? "unverified"
+          : trend.degraded_count > 0
+            ? "degraded"
+            : "healthy",
+      ),
   );
   const declaredTunnels = telemetryTunnels.filter(
-    (tunnel) => Boolean(tunnel.plan_id) && enabledPlanIds.has(tunnel.plan_id ?? ""),
+    (tunnel) =>
+      Boolean(tunnel.plan_id) &&
+      enabledPlanIds.has(tunnel.plan_id ?? "") &&
+      recordMatches(
+        [tunnel.client_id, tunnel.peer_client_id],
+        tunnel.plan_id,
+        tunnel.latency_status == null
+          ? "unverified"
+          : isTunnelDegraded(tunnel)
+            ? "degraded"
+            : "healthy",
+      ),
   );
   const declaredOspfRecommendations = ospfRecommendations.filter(
-    (recommendation) => enabledPlanIds.has(recommendation.plan_id),
+    (recommendation) =>
+      enabledPlanIds.has(recommendation.plan_id) &&
+      recordMatches(
+        [recommendation.left_client_id, recommendation.right_client_id],
+        recommendation.plan_id,
+        recommendation.sample_count === 0
+          ? "unverified"
+          : recommendation.degraded_count > 0
+            ? "degraded"
+            : "healthy",
+      ),
   );
+  const activeAdvancedFilters =
+    Number(Boolean(filters.clientId)) +
+    Number(Boolean(filters.planId)) +
+    Number(filters.health !== "all");
   const groups = buildMetricGroups(declaredTrends, declaredObservations, declaredTunnels);
   const overlays = buildOverlayRows(
     declaredObservations,
@@ -205,6 +282,87 @@ export function NetworkMetricsPanel({
             </button>
           </div>
         </div>
+
+        <details className="fleetMetricsAdvancedFilters">
+          <summary>
+            <SlidersHorizontal size={14} />
+            <span>Advanced filters</span>
+            {activeAdvancedFilters > 0 ? <b>{activeAdvancedFilters}</b> : null}
+          </summary>
+          <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid">
+            <label>
+              <span>VPS endpoint</span>
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="Network metrics VPS endpoint"
+                onChange={(clientId) =>
+                  setFilters((current) => ({
+                    ...current,
+                    clientId,
+                  }))
+                }
+                placeholder="All VPS endpoints"
+                value={filters.clientId}
+              />
+            </label>
+            <label>
+              <span>Tunnel plan</span>
+              <select
+                aria-label="Network metrics tunnel plan"
+                onChange={(event) =>
+                  setFilters((current) => ({
+                    ...current,
+                    planId: event.target.value,
+                  }))
+                }
+                value={filters.planId}
+              >
+                <option value="">All enabled plans</option>
+                {unavailablePlanFilter ? (
+                  <option value={unavailablePlanFilter}>
+                    Unavailable saved plan · {unavailablePlanFilter}
+                  </option>
+                ) : null}
+                {enabledPlans.map((plan) => (
+                  <option key={plan.id} value={plan.id}>
+                    {plan.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Health</span>
+              <select
+                aria-label="Network metrics health"
+                onChange={(event) =>
+                  setFilters((current) => ({
+                    ...current,
+                    health: event.target.value as NetworkMetricFilters["health"],
+                  }))
+                }
+                value={filters.health}
+              >
+                <option value="all">All states</option>
+                <option value="healthy">Healthy</option>
+                <option value="degraded">Degraded</option>
+                <option value="unverified">Unverified</option>
+              </select>
+            </label>
+            <div className="dashboardScopeHint">
+              {unavailablePlanFilter
+                ? "The saved plan filter is no longer enabled or visible. Reset or select another plan."
+                : "Filters apply to the recent evidence loaded by this page."}
+            </div>
+            <button
+              className="secondaryAction compactAction"
+              disabled={activeAdvancedFilters === 0}
+              onClick={() => setFilters(DEFAULT_NETWORK_FILTERS)}
+              type="button"
+            >
+              Reset filters
+            </button>
+          </div>
+        </details>
 
         <div className="metricGrid observabilityMetricsSummary" aria-label="Network metrics summary">
           <MetricTile

@@ -83,12 +83,6 @@ export function JobEvidencePanel({
   const [evidenceByJob, setEvidenceByJob] = useState<Record<string, EvidenceLoadState>>({});
   const correlationTruncated = jobsTruncated || auditsTruncated;
 
-  useEffect(() => {
-    if (!selectedJobId && jobs.length > 0) {
-      setSelectedJobId(jobs[0].id);
-    }
-  }, [jobs, selectedJobId]);
-
   const agentNameById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent.display_name || agent.id])),
     [agents],
@@ -106,16 +100,9 @@ export function JobEvidencePanel({
   );
 
   const selectedRecord = useMemo(
-    () =>
-      evidenceRows.find((row) => row.job.id === selectedJobId) ??
-      evidenceRows[0] ??
-      null,
+    () => evidenceRows.find((row) => row.job.id === selectedJobId) ?? null,
     [evidenceRows, selectedJobId],
   );
-
-  const selectedEvidence =
-    (selectedRecord ? evidenceByJob[selectedRecord.job.id] : null) ??
-    EMPTY_EVIDENCE_STATE;
 
   useEffect(() => {
     const jobId = selectedRecord?.job.id;
@@ -346,13 +333,21 @@ export function JobEvidencePanel({
         }
         getRowId={(row) => row.job.id}
         itemLabel="jobs"
-        onOpenRow={(row) => setSelectedJobId(row.job.id)}
-        openRowLabel="Select proof"
-        openRowTitle={(row) => `Show evidence proof for job ${row.job.id}.`}
+        onExpandedRowChange={(row) => setSelectedJobId(row?.job.id ?? null)}
+        renderExpandedRow={(record) => (
+          <JobEvidenceDetail
+            agentNameById={agentNameById}
+            auditsTruncated={auditsTruncated}
+            evidence={evidenceByJob[record.job.id] ?? EMPTY_EVIDENCE_STATE}
+            onOpenJobDetails={onOpenJobDetails}
+            record={record}
+          />
+        )}
         rows={evidenceRows}
         rowsTruncated={jobsTruncated}
         searchPlaceholder="Search job ID, actor, status, hash, command, or audit action"
         selectable={false}
+        singleExpandedRow
         storageKey="audit-job-evidence-grid"
         title="Job evidence ledger"
       />
@@ -361,15 +356,6 @@ export function JobEvidencePanel({
         <div className="dashboardWidgetEmpty">Loading job and audit evidence...</div>
       )}
 
-      {selectedRecord && (
-        <JobEvidenceDetail
-          agentNameById={agentNameById}
-          auditsTruncated={auditsTruncated}
-          evidence={selectedEvidence}
-          onOpenJobDetails={onOpenJobDetails}
-          record={selectedRecord}
-        />
-      )}
     </section>
   );
 }

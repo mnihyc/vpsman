@@ -33,9 +33,9 @@ function readMonitorCardDensity(storageKey: string): MonitorCardDensity {
     const stored = window.localStorage.getItem(storageKey);
     return stored === "compact" || stored === "comfortable"
       ? stored
-      : "comfortable";
+      : "compact";
   } catch (error) {
     console.warn("Monitor card density could not be read", error);
-    return "comfortable";
+    return "compact";
   }
 }

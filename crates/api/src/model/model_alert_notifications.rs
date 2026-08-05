@@ -31,6 +31,7 @@ pub(crate) struct FleetAlertNotificationChannelQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateFleetAlertNotificationChannelRequest {
     pub(crate) id: Option<Uuid>,
     pub(crate) name: String,
@@ -44,6 +45,7 @@ pub(crate) struct CreateFleetAlertNotificationChannelRequest {
     pub(crate) cooldown_secs: Option<i64>,
     pub(crate) enabled: Option<bool>,
     pub(crate) notes: Option<String>,
+    #[serde(default)]
     pub(crate) confirmed: bool,
 }
 
@@ -89,6 +91,7 @@ pub(crate) struct FleetAlertNotificationDeliveryQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FleetAlertNotificationDispatchRequest {
     pub(crate) limit: Option<i64>,
     pub(crate) client_id: Option<String>,
@@ -98,16 +101,19 @@ pub(crate) struct FleetAlertNotificationDispatchRequest {
     pub(crate) include_muted: Option<bool>,
     pub(crate) dry_run: Option<bool>,
     pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
     pub(crate) confirmed: bool,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct FleetAlertNotificationProcessRequest {
     pub(crate) limit: Option<i64>,
     pub(crate) status: Option<String>,
     pub(crate) delivery_kind: Option<String>,
     pub(crate) dry_run: Option<bool>,
     pub(crate) preview_hash: Option<String>,
+    #[serde(default)]
     pub(crate) confirmed: bool,
 }
 

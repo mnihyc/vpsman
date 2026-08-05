@@ -250,6 +250,21 @@ export function PingTargetsPanel({
     change();
   }
 
+  function enterReviewWorkflow(
+    workflow: "editor" | "targets" | "lifecycle",
+  ) {
+    invalidateReviewGeneration();
+    setReviewPending(false);
+    setSaveReview(null);
+    setUpdateTargetsReview(null);
+    setLifecycleReview(null);
+    if (workflow !== "editor") {
+      setEditor(null);
+    }
+    setError(null);
+    setFeedback(null);
+  }
+
   async function refreshTargets() {
     setLoading(true);
     setError(null);
@@ -296,7 +311,7 @@ export function PingTargetsPanel({
   }
 
   function openCreate() {
-    invalidateReviewGeneration();
+    enterReviewWorkflow("editor");
     setEditor({ mode: "create" });
     setName("");
     setHost("");
@@ -304,12 +319,10 @@ export function PingTargetsPanel({
     setPort("");
     setEnabled(true);
     setSelectorExpression("*");
-    setError(null);
-    setFeedback(null);
   }
 
   async function openEdit(target: PingTargetView) {
-    invalidateReviewGeneration();
+    enterReviewWorkflow("editor");
     await runPanelAction(setPending, setError, async () => {
       const detail = details[target.id] ?? (await fetchDetail(target.id));
       setEditor({
@@ -425,7 +438,7 @@ export function PingTargetsPanel({
 
   async function reviewTargetUpdates(rows: PingTargetView[]) {
     if (rows.length === 0) return;
-    setFeedback(null);
+    enterReviewWorkflow("targets");
     await runPanelAction(setPending, setError, async () => {
       const targetIds = uniqueSorted(rows.map((row) => row.id));
       const preview = await apiPost<BulkUpdatePingTargetsResponse>(
@@ -691,8 +704,7 @@ export function PingTargetsPanel({
       icon: <Power size={14} />,
       label: "Enable",
       onSelect: (rows) => {
-        setError(null);
-        setFeedback(null);
+        enterReviewWorkflow("lifecycle");
         setLifecycleReview({ action: "enable", targets: rows });
       },
     },
@@ -706,8 +718,7 @@ export function PingTargetsPanel({
       icon: <PowerOff size={14} />,
       label: "Disable",
       onSelect: (rows) => {
-        setError(null);
-        setFeedback(null);
+        enterReviewWorkflow("lifecycle");
         setLifecycleReview({ action: "disable", targets: rows });
       },
     },
@@ -733,8 +744,7 @@ export function PingTargetsPanel({
       icon: <Trash2 size={14} />,
       label: "Delete",
       onSelect: (rows) => {
-        setError(null);
-        setFeedback(null);
+        enterReviewWorkflow("lifecycle");
         setLifecycleReview({ action: "delete", targets: rows });
       },
       separatorBefore: true,
@@ -990,25 +1000,24 @@ export function PingTargetsPanel({
                 ? "Review changes"
                 : "Review create"}
           </button>
+          <ConfirmationPrompt
+            confirmLabel={saveReviewConfirmLabel(saveReview)}
+            detail={saveReviewDetail(saveReview)}
+            error={error}
+            items={saveReviewItems(saveReview)}
+            onCancel={() => {
+              if (pending) return;
+              setSaveReview(null);
+              setError(null);
+            }}
+            onConfirm={() => void confirmSave()}
+            open={saveReview !== null}
+            pending={pending}
+            title="Confirm Ping target change"
+            tone="normal"
+          />
         </form>
       </ConsoleActionDrawer>
-
-      <ConfirmationPrompt
-        confirmLabel={saveReviewConfirmLabel(saveReview)}
-        detail={saveReviewDetail(saveReview)}
-        error={error}
-        items={saveReviewItems(saveReview)}
-        onCancel={() => {
-          if (pending) return;
-          setSaveReview(null);
-          setError(null);
-        }}
-        onConfirm={() => void confirmSave()}
-        open={saveReview !== null}
-        pending={pending}
-        title="Confirm Ping target change"
-        tone="normal"
-      />
 
       <ConfirmationPrompt
         confirmLabel="Update frozen targets"

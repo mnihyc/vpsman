@@ -14,7 +14,6 @@ import {
   Command,
   FolderKanban,
   KeyRound,
-  LockKeyhole,
   RadioTower,
   Save,
   ShieldCheck,
@@ -85,7 +84,6 @@ type ConsoleShellProps = {
   onFleetQueryChange: (query: string) => void;
   onOpenAccessControls: () => void;
   onRetryAuthRefresh: () => void;
-  onLockPrivilege: () => void;
   onSaveFleetView: () => void;
   onSelectView: (view: ActiveView, subpage?: string) => void;
   onSavedFleetViewNameChange: (name: string) => void;
@@ -121,7 +119,6 @@ export function ConsoleShell({
   onClearFleetView,
   onDeleteSavedFleetView,
   onFleetQueryChange,
-  onLockPrivilege,
   onOpenAccessControls,
   onRetryAuthRefresh,
   onSaveFleetView,
@@ -866,27 +863,15 @@ export function ConsoleShell({
               </button>
             )}
             {privilegeUnlocked ? (
-              <>
-                <span
-                  aria-label="Privilege verified for this browser"
-                  className="controlPlanePill"
-                  role="status"
-                  title="Privilege is gateway-verified and remains unlocked in this browser"
-                >
-                  <ShieldCheck size={17} />
-                  <span>Verified</span>
-                </span>
-                <button
-                  aria-label="Lock privilege"
-                  className="secondaryAction"
-                  onClick={onLockPrivilege}
-                  title="Clear the saved privilege unlock and lock privileged actions"
-                  type="button"
-                >
-                  <LockKeyhole size={18} />
-                  <span>Lock</span>
-                </button>
-              </>
+              <span
+                aria-label="Privilege verified for this browser"
+                className="controlPlanePill"
+                role="status"
+                title="Privilege is gateway-verified and remains unlocked in this browser"
+              >
+                <ShieldCheck size={17} />
+                <span>Verified</span>
+              </span>
             ) : (
               <button
                 aria-label="Open privilege unlock"

@@ -22,8 +22,11 @@ import type {
   AgentView,
   ArtifactCleanupPreviewRecord,
   BulkResolveResponse,
+  BulkUpdateMonitoringShareTargetsResponse,
   BulkUpdatePingTargetsResponse,
   JobTargetSelection,
+  MonitoringShareTargetChangeView,
+  MonitoringShareView,
   PingTargetAssignmentChangeView,
   PingTargetView,
   ScheduleRecord,
@@ -39,13 +42,13 @@ type StaleSelectorRow = {
   canUpdate: boolean;
   frozenTargetIds: string[];
   id: string;
-  kind: "Ping target" | "Schedule";
+  kind: "Ping target" | "Schedule" | "Shared view";
   name: string;
   reason: string;
   resolvedTargetIds: string[] | null;
   resourceId: string;
   selectorExpression: string;
-  source: PingTargetView | ScheduleRecord;
+  source: MonitoringShareView | PingTargetView | ScheduleRecord;
   updatedAt: string;
 };
 
@@ -60,6 +63,8 @@ type SelectorUpdateReview = {
   pingTargetIds: string[];
   schedules: ScheduleTargetReview[];
   selectedCount: number;
+  sharePreview: BulkUpdateMonitoringShareTargetsResponse | null;
+  shareIds: string[];
 };
 
 type Feedback = {
@@ -205,10 +210,12 @@ function StaleSelectorMaintenancePanel({
 }) {
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
   const [pingTargets, setPingTargets] = useState<PingTargetView[]>([]);
+  const [shares, setShares] = useState<MonitoringShareView[]>([]);
   const [scheduleLoadError, setScheduleLoadError] = useState<string | null>(
     null,
   );
   const [pingLoadError, setPingLoadError] = useState<string | null>(null);
+  const [shareLoadError, setShareLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -221,9 +228,11 @@ function StaleSelectorMaintenancePanel({
     setLoading(true);
     setScheduleLoadError(null);
     setPingLoadError(null);
-    const [scheduleResult, pingResult] = await Promise.allSettled([
+    setShareLoadError(null);
+    const [scheduleResult, pingResult, shareResult] = await Promise.allSettled([
       loadAllSchedules(apiToken),
       apiGet<PingTargetView[]>("/api/v1/ping-targets", apiToken),
+      loadAllMonitoringShares(apiToken),
     ]);
     if (scheduleResult.status === "fulfilled") {
       setSchedules(scheduleResult.value);
@@ -236,6 +245,12 @@ function StaleSelectorMaintenancePanel({
     } else {
       setPingTargets([]);
       setPingLoadError(errorMessage(pingResult.reason));
+    }
+    if (shareResult.status === "fulfilled") {
+      setShares(shareResult.value);
+    } else {
+      setShares([]);
+      setShareLoadError(errorMessage(shareResult.reason));
     }
     setLoading(false);
   }, [apiToken]);
@@ -251,14 +266,15 @@ function StaleSelectorMaintenancePanel({
   }, [error, privilegeMaterial]);
 
   const rows = useMemo(
-    () => staleSelectorRows(schedules, pingTargets, agents),
-    [agents, pingTargets, schedules],
+    () => staleSelectorRows(schedules, pingTargets, shares, agents),
+    [agents, pingTargets, schedules, shares],
   );
   const updateableRows = rows.filter((row) => row.canUpdate);
   const blockedRows = rows.length - updateableRows.length;
   const pageFeedback = [
     scheduleLoadError ? `Schedules: ${scheduleLoadError}` : null,
     pingLoadError ? `Ping targets: ${pingLoadError}` : null,
+    shareLoadError ? `Shared views: ${shareLoadError}` : null,
   ]
     .filter(Boolean)
     .join(" ");
@@ -381,6 +397,10 @@ function StaleSelectorMaintenancePanel({
       (row): row is StaleSelectorRow & { source: ScheduleRecord } =>
         row.kind === "Schedule",
     );
+    const selectedShares = selected.filter(
+      (row): row is StaleSelectorRow & { source: MonitoringShareView } =>
+        row.kind === "Shared view",
+    );
     if (selectedSchedules.length > 0 && !privilegeMaterial) {
       setError(SCHEDULE_TARGET_PRIVILEGE_REQUIRED);
       onOpenPrivilegeUnlock();
@@ -425,7 +445,22 @@ function StaleSelectorMaintenancePanel({
             )
           : null;
       const pingChanges = pingPreview?.changes.filter(pingChangeHasDelta) ?? [];
-      if (scheduleUpdates.length === 0 && pingChanges.length === 0) {
+      const shareIds = selectedShares.map((row) => row.resourceId);
+      const sharePreview =
+        shareIds.length > 0
+          ? await apiPost<BulkUpdateMonitoringShareTargetsResponse>(
+              "/api/v1/monitoring-shares/update-targets",
+              apiToken,
+              { confirmed: false, share_ids: shareIds },
+            )
+          : null;
+      const shareChanges =
+        sharePreview?.changes.filter(shareChangeHasDelta) ?? [];
+      if (
+        scheduleUpdates.length === 0 &&
+        pingChanges.length === 0 &&
+        shareChanges.length === 0
+      ) {
         setFeedback({
           message:
             "Server resolution confirms every selected frozen target list is current.",
@@ -441,6 +476,10 @@ function StaleSelectorMaintenancePanel({
         pingTargetIds,
         schedules: scheduleUpdates,
         selectedCount: selected.length,
+        sharePreview: sharePreview
+          ? { ...sharePreview, changes: shareChanges }
+          : null,
+        shareIds,
       });
       setFeedback(null);
     } catch (cause) {
@@ -469,6 +508,7 @@ function StaleSelectorMaintenancePanel({
     const failures: string[] = [];
     let updatedSchedules = 0;
     let updatedPingTargets = 0;
+    let updatedShares = 0;
     try {
       const preparedSchedules = await Promise.all(
         snapshot.schedules.map(async (update) => ({
@@ -532,6 +572,23 @@ function StaleSelectorMaintenancePanel({
           failures.push(`Ping targets: ${errorMessage(cause)}`);
         }
       }
+      if (snapshot.sharePreview && snapshot.shareIds.length > 0) {
+        try {
+          const response =
+            await apiPost<BulkUpdateMonitoringShareTargetsResponse>(
+              "/api/v1/monitoring-shares/update-targets",
+              apiToken,
+              {
+                confirmed: true,
+                preview_hash: snapshot.sharePreview.preview_hash,
+                share_ids: snapshot.shareIds,
+              },
+            );
+          updatedShares = response.changes.filter(shareChangeHasDelta).length;
+        } catch (cause) {
+          failures.push(`Shared views: ${errorMessage(cause)}`);
+        }
+      }
     } catch (cause) {
       failures.push(errorMessage(cause));
     }
@@ -544,6 +601,9 @@ function StaleSelectorMaintenancePanel({
         : null,
       updatedPingTargets > 0
         ? `${updatedPingTargets} Ping target${updatedPingTargets === 1 ? "" : "s"}`
+        : null,
+      updatedShares > 0
+        ? `${updatedShares} shared view${updatedShares === 1 ? "" : "s"}`
         : null,
     ].filter(Boolean);
     if (failures.length > 0 && successParts.length === 0) {
@@ -599,9 +659,9 @@ function StaleSelectorMaintenancePanel({
       <div className="scheduleExecutionPolicy selectorMaintenancePolicy">
         <Target size={16} />
         <span>
-          Schedules include backup policies. Ping assignments update
-          transactionally; schedules keep their native per-schedule review and
-          audit boundary. Shared views and approval records are intentionally
+          Schedules include backup policies. Ping assignments and shared-view
+          targets each update transactionally; schedules keep their native
+          per-schedule review and audit boundary. Approval records remain
           immutable evidence and never appear here.
         </span>
       </div>
@@ -617,7 +677,7 @@ function StaleSelectorMaintenancePanel({
             </strong>
             <span>
               {loading
-                ? "Loading all schedule pages and current Ping target assignments."
+                ? "Loading schedules, Ping assignments, and active shared views."
                 : "Mutable frozen target lists match their saved selector expressions."}
             </span>
           </div>
@@ -700,6 +760,7 @@ function StaleSelectorMaintenancePanel({
 function staleSelectorRows(
   schedules: ScheduleRecord[],
   pingTargets: PingTargetView[],
+  shares: MonitoringShareView[],
   agents: AgentView[],
 ): StaleSelectorRow[] {
   const rows: StaleSelectorRow[] = [];
@@ -780,6 +841,37 @@ function staleSelectorRows(
       updatedAt: target.updated_at,
     });
   }
+  for (const share of shares) {
+    if (!share.target_update_available || share.status !== "active") {
+      continue;
+    }
+    const selectorExpression = share.selector_expression.trim();
+    const parsed = parseSearchExpression(selectorExpression);
+    const frozenTargetIds = uniqueSorted(share.target_client_ids);
+    const resolvedTargetIds =
+      selectorExpression && !parsed.error
+        ? uniqueSorted(
+            agentsMatchingExpression(agents, selectorExpression).map(
+              (agent) => agent.id,
+            ),
+          )
+        : null;
+    rows.push({
+      canUpdate: !parsed.error,
+      frozenTargetIds,
+      id: `share:${share.id}`,
+      kind: "Shared view",
+      name: share.name,
+      reason: parsed.error
+        ? `Invalid saved selector: ${parsed.error}`
+        : "Current selector resolution differs from the frozen shared-view targets",
+      resolvedTargetIds,
+      resourceId: share.id,
+      selectorExpression,
+      source: share,
+      updatedAt: share.updated_at,
+    });
+  }
   return rows.sort(
     (left, right) =>
       left.kind.localeCompare(right.kind) ||
@@ -809,13 +901,37 @@ async function loadAllSchedules(apiToken: string): Promise<ScheduleRecord[]> {
   );
 }
 
+async function loadAllMonitoringShares(
+  apiToken: string,
+): Promise<MonitoringShareView[]> {
+  const shares: MonitoringShareView[] = [];
+  for (let page = 0; page < MAX_SELECTOR_PAGES; page += 1) {
+    const records = await apiGet<MonitoringShareView[]>(
+      `${buildListPath("/api/v1/monitoring-shares", {
+        limit: SELECTOR_PAGE_SIZE,
+        offset: page * SELECTOR_PAGE_SIZE,
+      })}&status=active`,
+      apiToken,
+    );
+    shares.push(...records);
+    if (records.length < SELECTOR_PAGE_SIZE) {
+      return shares;
+    }
+  }
+  throw new Error(
+    `Shared-view maintenance scan reached its explicit ${MAX_SELECTOR_PAGES * SELECTOR_PAGE_SIZE}-record boundary; narrow or revoke old shared views before using Update all.`,
+  );
+}
+
 function selectorReviewItems(review: SelectorUpdateReview | null) {
   const pingChanges = review?.pingPreview?.changes ?? [];
   const schedules = review?.schedules ?? [];
+  const shareChanges = review?.sharePreview?.changes ?? [];
   return [
     { label: "Selected stale records", value: review?.selectedCount ?? 0 },
     { label: "Schedule snapshots", value: schedules.length },
     { label: "Ping assignments", value: pingChanges.length },
+    { label: "Shared-view targets", value: shareChanges.length },
     {
       label: "Only change",
       value: "Frozen VPS target IDs",
@@ -827,7 +943,12 @@ function selectorReviewItems(review: SelectorUpdateReview | null) {
           {schedules.map((update) => (
             <span key={`schedule:${update.schedule.id}`}>
               <strong>{update.schedule.name}</strong>
-              <small>
+              <small
+                title={targetDeltaTitle(
+                  update.schedule.target_client_ids,
+                  update.nextTargetIds,
+                )}
+              >
                 {targetDeltaLabel(
                   update.schedule.target_client_ids,
                   update.nextTargetIds,
@@ -838,7 +959,26 @@ function selectorReviewItems(review: SelectorUpdateReview | null) {
           {pingChanges.map((change) => (
             <span key={`ping:${change.target_id}`}>
               <strong>{change.target_name}</strong>
-              <small>
+              <small
+                title={exactDeltaTitle(
+                  change.added_client_ids,
+                  change.removed_client_ids,
+                )}
+              >
+                +{change.added_client_ids.length} / -
+                {change.removed_client_ids.length}
+              </small>
+            </span>
+          ))}
+          {shareChanges.map((change) => (
+            <span key={`share:${change.share_id}`}>
+              <strong>{change.share_name}</strong>
+              <small
+                title={exactDeltaTitle(
+                  change.added_client_ids,
+                  change.removed_client_ids,
+                )}
+              >
                 +{change.added_client_ids.length} / -
                 {change.removed_client_ids.length}
               </small>
@@ -861,12 +1001,33 @@ function pingChangeHasDelta(change: PingTargetAssignmentChangeView): boolean {
   );
 }
 
+function shareChangeHasDelta(
+  change: MonitoringShareTargetChangeView,
+): boolean {
+  return (
+    change.added_client_ids.length > 0 || change.removed_client_ids.length > 0
+  );
+}
+
 function targetDeltaLabel(current: string[], next: string[]): string {
   const currentSet = new Set(current);
   const nextSet = new Set(next);
   const added = next.filter((id) => !currentSet.has(id)).length;
   const removed = current.filter((id) => !nextSet.has(id)).length;
   return `${targetCountLabel(next.length)} now · +${added} / -${removed}`;
+}
+
+function targetDeltaTitle(current: string[], next: string[]): string {
+  const currentSet = new Set(current);
+  const nextSet = new Set(next);
+  return exactDeltaTitle(
+    next.filter((id) => !currentSet.has(id)),
+    current.filter((id) => !nextSet.has(id)),
+  );
+}
+
+function exactDeltaTitle(added: string[], removed: string[]): string {
+  return `Add: ${added.join(", ") || "none"}\nRemove: ${removed.join(", ") || "none"}`;
 }
 
 function targetCountLabel(count: number): string {

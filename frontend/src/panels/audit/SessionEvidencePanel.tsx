@@ -112,7 +112,6 @@ export function SessionEvidencePanel({
   terminalSessionsTruncated: boolean;
 }) {
   const canInspectOperatorAuthority = operator?.role === "admin";
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const authEventsTruncated = operatorAuthEventsTruncated;
   const auditCorrelationTruncated = auditsTruncated || jobsTruncated;
   const authCorrelationTruncated =
@@ -154,19 +153,6 @@ export function SessionEvidencePanel({
         };
       }),
     [audits, jobsById, terminalSessions],
-  );
-  useEffect(() => {
-    if (!selectedKey && evidenceRows.length > 0) {
-      setSelectedKey(terminalKey(evidenceRows[0].session));
-    }
-  }, [evidenceRows, selectedKey]);
-
-  const selectedRecord = useMemo(
-    () =>
-      evidenceRows.find((row) => terminalKey(row.session) === selectedKey) ??
-      evidenceRows[0] ??
-      null,
-    [evidenceRows, selectedKey],
   );
   const terminalStateByKey = useMemo(
     () =>
@@ -533,38 +519,33 @@ export function SessionEvidencePanel({
         }
         getRowId={(row) => terminalKey(row.session)}
         itemLabel="terminal sessions"
-        onOpenRow={(row) => setSelectedKey(terminalKey(row.session))}
-        openRowLabel="Select proof"
-        openRowTitle={(row) =>
-          `Show terminal proof for session ${row.session.session_id}.`
-        }
+        renderExpandedRow={(record) => (
+          <SelectedSessionEvidence
+            agentNameById={agentNameById}
+            auditCorrelationTruncated={auditCorrelationTruncated}
+            authCorrelationTruncated={authCorrelationTruncated}
+            authEventBySessionId={authEventBySessionId}
+            canInspectOperatorAuthority={canInspectOperatorAuthority}
+            operatorSessions={operatorSessions}
+            operatorCorrelationTruncated={operatorCorrelationTruncated}
+            state={
+              terminalStateByKey.get(terminalKey(record.session)) ??
+              terminalEvidenceState(record.session)
+            }
+            record={record}
+          />
+        )}
         rows={evidenceRows}
         rowsTruncated={terminalSessionsTruncated}
         searchPlaceholder="Search terminal session, actor, target, transcript, status, or audit event"
         selectable={false}
+        singleExpandedRow
         storageKey="audit-terminal-session-evidence-grid"
         title="Terminal session evidence"
       />
 
       {loading && (
         <div className="dashboardWidgetEmpty">Loading session evidence...</div>
-      )}
-
-      {selectedRecord && (
-        <SelectedSessionEvidence
-          agentNameById={agentNameById}
-          auditCorrelationTruncated={auditCorrelationTruncated}
-          authCorrelationTruncated={authCorrelationTruncated}
-          authEventBySessionId={authEventBySessionId}
-          canInspectOperatorAuthority={canInspectOperatorAuthority}
-          operatorSessions={operatorSessions}
-          operatorCorrelationTruncated={operatorCorrelationTruncated}
-          state={
-            terminalStateByKey.get(terminalKey(selectedRecord.session)) ??
-            terminalEvidenceState(selectedRecord.session)
-          }
-          record={selectedRecord}
-        />
       )}
 
       <OperatorSessionEvidence

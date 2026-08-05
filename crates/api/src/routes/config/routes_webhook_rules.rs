@@ -50,8 +50,19 @@ pub(crate) async fn upsert_webhook_rule(
         .await?;
     validate_webhook_rule_request(&request)?;
     Ok(Json(
-        state.repo.upsert_webhook_rule(&request, &operator).await?,
+        state
+            .repo
+            .upsert_webhook_rule(&request, &operator)
+            .await
+            .map_err(webhook_rule_upsert_error)?,
     ))
+}
+
+fn webhook_rule_upsert_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("webhook_rule_name_conflict") {
+        return ApiError::conflict("webhook_rule_name_conflict");
+    }
+    ApiError::from(error)
 }
 
 pub(crate) async fn delete_webhook_rule(
@@ -207,16 +218,19 @@ fn validate_webhook_rule_request(request: &CreateWebhookRuleRequest) -> Result<(
     }
     validate_required_text(&request.name, 128, "webhook_rule_name_invalid")?;
     validate_required_text(&request.expression, 4096, "webhook_rule_expression_invalid")?;
-    parse_selector_expression(&request.expression)
-        .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?;
-    validate_webhook_rule_target(&request.target)
-        .map_err(|_| ApiError::bad_request("webhook_rule_target_invalid"))?;
+    parse_selector_expression(&request.expression).map_err(|error| {
+        ApiError::bad_request_with_message("webhook_rule_expression_invalid", error.to_string())
+    })?;
+    validate_webhook_rule_target(&request.target).map_err(|error| {
+        ApiError::bad_request_with_message("webhook_rule_target_invalid", error.to_string())
+    })?;
     if request.body_template.len() > 4096 {
         return Err(ApiError::bad_request("webhook_rule_body_template_too_long"));
     }
     if !request.body_template.trim().is_empty() {
-        validate_template(&request.body_template)
-            .map_err(|_| ApiError::bad_request("webhook_rule_template_invalid"))?;
+        validate_template(&request.body_template).map_err(|error| {
+            ApiError::bad_request_with_message("webhook_rule_template_invalid", error.to_string())
+        })?;
     }
     if request.clear_signing_secret
         && request
@@ -251,11 +265,13 @@ fn validate_webhook_rule_dry_run_request(
         validate_required_text(name, 128, "webhook_rule_name_invalid")?;
     }
     validate_required_text(&request.expression, 4096, "webhook_rule_expression_invalid")?;
-    parse_selector_expression(&request.expression)
-        .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?;
+    parse_selector_expression(&request.expression).map_err(|error| {
+        ApiError::bad_request_with_message("webhook_rule_expression_invalid", error.to_string())
+    })?;
     if let Some(target) = request.target.as_deref() {
-        validate_webhook_rule_target(target)
-            .map_err(|_| ApiError::bad_request("webhook_rule_target_invalid"))?;
+        validate_webhook_rule_target(target).map_err(|error| {
+            ApiError::bad_request_with_message("webhook_rule_target_invalid", error.to_string())
+        })?;
     }
     validate_required_text(&request.event_kind, 128, "webhook_rule_event_kind_invalid")?;
     if let Some(event_id) = request.event_id.as_deref() {
@@ -265,8 +281,9 @@ fn validate_webhook_rule_dry_run_request(
         return Err(ApiError::bad_request("webhook_rule_body_template_too_long"));
     }
     if !request.body_template.trim().is_empty() {
-        validate_template(&request.body_template)
-            .map_err(|_| ApiError::bad_request("webhook_rule_template_invalid"))?;
+        validate_template(&request.body_template).map_err(|error| {
+            ApiError::bad_request_with_message("webhook_rule_template_invalid", error.to_string())
+        })?;
     }
     if let Some(cooldown_secs) = request.cooldown_secs {
         if !(0..=30 * 24 * 60 * 60).contains(&cooldown_secs) {
@@ -449,3 +466,7 @@ fn validate_optional_text(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests_routes_webhook_rules.rs"]
+mod tests;

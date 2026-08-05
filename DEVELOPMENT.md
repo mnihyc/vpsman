@@ -182,14 +182,19 @@ Every update must keep these boundaries explicit:
   generation; current/history reads must not mix generations. Preserve the
   explicit primary selection and never silently replace a removed or disabled
   primary.
-- Monitoring-share target and visibility scope are immutable after creation.
-  Store only the URL-secret digest and a persisted random 256-bit public key for
-  each frozen share target. Never derive a public target key from the share
-  digest or internal VPS ID. Keep public DTOs allowlisted, and audit each
+- Monitoring-share targets are frozen at creation and change only through the
+  reviewed bulk **Update targets** path; visibility remains immutable. Store the
+  recoverable 256-bit bearer token required by authenticated **Copy URL**, and a
+  separate persisted random 256-bit public key for each frozen share target.
+  Preserve keys for unchanged targets during refresh and never derive a public
+  target key from the share token or internal VPS ID. Keep public DTOs allowlisted, and audit each
   distinct visitor bootstrap without auditing every poll. Public projections
   must not reuse private fleet DTOs. Unauthenticated visitor reads belong only
   under `/api/v1/public/monitoring-shares/{share_id}/bootstrap` and `/data`;
-  authenticated management remains under `/api/v1/monitoring-shares`.
+  authenticated management remains under `/api/v1/monitoring-shares`. Copy URL
+  requires operator role with `sharing:write`, records a
+  bearer-recovery audit event without the secret, and returns `Cache-Control:
+  no-store`.
 - Update memory and PostgreSQL behavior together. Test source-tier selection,
   adaptive-span equivalence, compaction-before-pruning, partial coverage/gaps,
   Ping generation/failure modes, frozen selectors, primary uniqueness, share

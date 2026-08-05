@@ -294,7 +294,8 @@ impl Repository {
                 .bind(&candidate.notes)
                 .bind(operator.operator.id)
                 .fetch_one(&mut *tx)
-                .await?;
+                .await
+                .map_err(fleet_alert_notification_channel_database_error)?;
                 let channel = channel_from_row(row)?;
                 if !channel.enabled {
                     sqlx::query(
@@ -1215,6 +1216,18 @@ fn validate_name(name: &str) -> Result<()> {
         "fleet alert notification channel name is invalid"
     );
     Ok(())
+}
+
+fn fleet_alert_notification_channel_database_error(error: sqlx::Error) -> anyhow::Error {
+    if error
+        .as_database_error()
+        .and_then(|database_error| database_error.constraint())
+        == Some("fleet_alert_notification_channels_name_key")
+    {
+        anyhow::anyhow!("fleet_alert_notification_channel_name_conflict")
+    } else {
+        error.into()
+    }
 }
 
 fn normalize_scope_kind(scope_kind: &str) -> Result<String> {

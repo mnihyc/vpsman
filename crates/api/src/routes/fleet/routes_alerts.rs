@@ -28,6 +28,7 @@ use crate::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
+    repository_webhook_rules::validate_webhook_rule_target,
     security::{
         operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
         SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
@@ -386,7 +387,8 @@ pub(crate) async fn upsert_fleet_alert_notification_channel(
         state
             .repo
             .upsert_fleet_alert_notification_channel(&request, &operator)
-            .await?,
+            .await
+            .map_err(fleet_alert_notification_channel_error)?,
     ))
 }
 
@@ -567,7 +569,7 @@ fn validate_alert_notification_channel_query(
         }
     }
     if let Some(scope_kind) = query.scope_kind.as_deref() {
-        validate_alert_policy_scope_kind(scope_kind)?;
+        validate_alert_notification_scope_kind(scope_kind)?;
     }
     if let Some(scope_value) = query.scope_value.as_deref() {
         validate_short_required_value(scope_value, "fleet_alert_notification_scope_value_invalid")?;
@@ -590,7 +592,7 @@ fn validate_alert_notification_channel_request(
         &request.name,
         "fleet_alert_notification_channel_name_invalid",
     )?;
-    validate_alert_policy_scope_kind(&request.scope_kind)?;
+    validate_alert_notification_scope_kind(&request.scope_kind)?;
     if request.scope_kind.trim() == "global" {
         if request
             .scope_value
@@ -630,6 +632,12 @@ fn validate_alert_notification_channel_request(
             "fleet_alert_notification_target_invalid",
         ));
     }
+    validate_webhook_rule_target(target).map_err(|error| {
+        ApiError::bad_request_with_message(
+            "fleet_alert_notification_target_invalid",
+            error.to_string(),
+        )
+    })?;
     if let Some(cooldown_secs) = request.cooldown_secs {
         if !(0..=30 * 24 * 60 * 60).contains(&cooldown_secs) {
             return Err(ApiError::bad_request(
@@ -910,6 +918,9 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
 
 fn fleet_alert_notification_channel_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
+    if message.contains("fleet_alert_notification_channel_name_conflict") {
+        return ApiError::conflict("fleet_alert_notification_channel_name_conflict");
+    }
     if message.contains("fleet_alert_notification_channel_not_found") {
         return ApiError::not_found("fleet_alert_notification_channel_not_found");
     }
@@ -981,12 +992,12 @@ fn validate_alert_state_value(state: &str, code: &'static str) -> Result<(), Api
     }
 }
 
-fn validate_alert_policy_scope_kind(scope_kind: &str) -> Result<(), ApiError> {
+fn validate_alert_notification_scope_kind(scope_kind: &str) -> Result<(), ApiError> {
     if matches!(scope_kind.trim(), "global" | "provider" | "tag" | "client") {
         Ok(())
     } else {
         Err(ApiError::bad_request(
-            "fleet_alert_policy_scope_kind_invalid",
+            "fleet_alert_notification_scope_kind_invalid",
         ))
     }
 }

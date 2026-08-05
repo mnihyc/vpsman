@@ -10,10 +10,10 @@ use vpsman_common::{
 use crate::{
     model::{
         AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareTargetRecord,
-        MonitoringShareView, MonitoringShareVisibilityView, MonitoringShareVisitorRecord,
-        PingRollupView, PingTargetAssignmentRecord, PingTargetAssignmentReplacement,
-        PingTargetAssignmentView, PingTargetDetailView, PingTargetRecord,
-        PingTargetRuntimeSyncView, PingTargetView,
+        MonitoringShareTargetReplacement, MonitoringShareView, MonitoringShareVisibilityView,
+        MonitoringShareVisitorRecord, PingRollupView, PingTargetAssignmentRecord,
+        PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
+        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -25,7 +25,7 @@ use crate::{
         fragment_final_minute_timestamp, logical_span_fragments, proportional_fragment_count,
         LogicalSpanFragment,
     },
-    security::constant_time_eq,
+    security::{constant_time_eq, generate_token},
     util::parse_timestamp_unix,
 };
 
@@ -2094,7 +2094,7 @@ impl Repository {
                     SELECT
                         s.id,
                         s.name,
-                        s.token_digest,
+                        s.token_secret,
                         s.selector_expression,
                         s.show_identity_context,
                         s.show_resources,
@@ -2141,7 +2141,7 @@ impl Repository {
                     SELECT
                         s.id,
                         s.name,
-                        s.token_digest,
+                        s.token_secret,
                         s.selector_expression,
                         s.show_identity_context,
                         s.show_resources,
@@ -2254,7 +2254,7 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO monitoring_share_links (
-                        id, name, token_digest, selector_expression,
+                        id, name, token_secret, selector_expression,
                         show_identity_context, show_resources, show_network,
                         show_traffic, show_ping, allow_detail_history,
                         expires_at, created_by, created_at, updated_at
@@ -2267,7 +2267,7 @@ impl Repository {
                 )
                 .bind(record.id)
                 .bind(&record.name)
-                .bind(&record.token_digest)
+                .bind(&record.token_secret)
                 .bind(&record.selector_expression)
                 .bind(record.visibility.identity_context)
                 .bind(record.visibility.resources)
@@ -2316,6 +2316,344 @@ impl Repository {
             &[],
             Some(operator.operator.username.clone()),
         ))
+    }
+
+    pub(crate) async fn recover_monitoring_share_url(
+        &self,
+        share_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<String> {
+        match self {
+            Self::Memory(memory) => {
+                let records = memory.monitoring_shares.read().await;
+                let record = records
+                    .iter()
+                    .find(|record| record.id == share_id)
+                    .context("monitoring_share_not_found")?;
+                if monitoring_share_status(record, crate::unix_now()) != "active" {
+                    bail!("monitoring_share_not_active");
+                }
+                let token_secret = record.token_secret.clone();
+                let metadata = base_monitoring_audit_metadata(
+                    operator,
+                    serde_json::json!({
+                        "share_id": record.id,
+                        "name": record.name,
+                        "target_count": record.targets.len(),
+                        "expires_at": record.expires_at,
+                    }),
+                );
+                record_memory_monitoring_audit(
+                    memory,
+                    operator,
+                    "monitoring_share.url_recovered",
+                    format!("monitoring_share:{share_id}"),
+                    metadata,
+                )
+                .await;
+                drop(records);
+                Ok(token_secret)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        s.name,
+                        s.token_secret,
+                        s.expires_at::text AS expires_at,
+                        s.expires_at > now() AS unexpired,
+                        s.revoked_at IS NOT NULL AS revoked,
+                        (
+                            SELECT count(*)::bigint
+                            FROM monitoring_share_targets target
+                            WHERE target.share_id = s.id
+                        ) AS target_count
+                    FROM monitoring_share_links s
+                    WHERE s.id = $1
+                    FOR SHARE OF s
+                    "#,
+                )
+                .bind(share_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("monitoring_share_not_found")?;
+                let unexpired: bool = row.try_get("unexpired")?;
+                let revoked: bool = row.try_get("revoked")?;
+                if !unexpired || revoked {
+                    bail!("monitoring_share_not_active");
+                }
+                let token_secret: String = row.try_get("token_secret")?;
+                let metadata = base_monitoring_audit_metadata(
+                    operator,
+                    serde_json::json!({
+                        "share_id": share_id,
+                        "name": row.try_get::<String, _>("name")?,
+                        "target_count": row.try_get::<i64, _>("target_count")?,
+                        "expires_at": row.try_get::<String, _>("expires_at")?,
+                    }),
+                );
+                insert_monitoring_audit(
+                    &mut tx,
+                    Some(operator.operator.id),
+                    "monitoring_share.url_recovered",
+                    &format!("monitoring_share:{share_id}"),
+                    metadata,
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(token_secret)
+            }
+        }
+    }
+
+    pub(crate) async fn replace_monitoring_share_targets_bulk(
+        &self,
+        replacements: &[MonitoringShareTargetReplacement],
+        operator: &AuthContext,
+    ) -> Result<()> {
+        if replacements.is_empty() {
+            bail!("monitoring_share_selection_required");
+        }
+        let share_ids = replacements
+            .iter()
+            .map(|replacement| replacement.expected_share.id)
+            .collect::<BTreeSet<_>>();
+        if share_ids.len() != replacements.len() || share_ids.len() > 1_000 {
+            bail!("monitoring_share_selection_invalid");
+        }
+        let proposed_client_ids = replacements
+            .iter()
+            .flat_map(|replacement| normalized_client_ids(&replacement.next_client_ids))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let changed_share_ids = replacements
+            .iter()
+            .filter(|replacement| {
+                normalized_client_ids(&replacement.expected_share.target_client_ids())
+                    != normalized_client_ids(&replacement.next_client_ids)
+            })
+            .map(|replacement| replacement.expected_share.id)
+            .collect::<BTreeSet<_>>();
+        if changed_share_ids.is_empty() {
+            return Ok(());
+        }
+        let now = crate::unix_now();
+        match self {
+            Self::Memory(memory) => {
+                let _lifecycle = memory.agent_key_lifecycle.lock().await;
+                require_visible_memory_clients(
+                    memory,
+                    &proposed_client_ids,
+                    "monitoring_share_resolution_stale",
+                )
+                .await?;
+                let mut records = memory.monitoring_shares.write().await;
+                for replacement in replacements {
+                    let Some(stored) = records
+                        .iter()
+                        .find(|record| record.id == replacement.expected_share.id)
+                    else {
+                        bail!("monitoring_share_preview_stale");
+                    };
+                    if !same_monitoring_share_revision(stored, &replacement.expected_share)
+                        || monitoring_share_status(stored, now) != "active"
+                    {
+                        bail!("monitoring_share_preview_stale");
+                    }
+                }
+                let mut next_targets_by_share = HashMap::new();
+                for replacement in replacements.iter().filter(|replacement| {
+                    changed_share_ids.contains(&replacement.expected_share.id)
+                }) {
+                    let stored = records
+                        .iter()
+                        .find(|record| record.id == replacement.expected_share.id)
+                        .context("monitoring_share_preview_stale")?;
+                    let existing_keys = stored
+                        .targets
+                        .iter()
+                        .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
+                        .collect::<HashMap<_, _>>();
+                    let targets = normalized_client_ids(&replacement.next_client_ids)
+                        .into_iter()
+                        .map(|client_id| MonitoringShareTargetRecord {
+                            public_client_key: existing_keys
+                                .get(&client_id)
+                                .cloned()
+                                .unwrap_or_else(generate_token),
+                            client_id,
+                        })
+                        .collect::<Vec<_>>();
+                    validate_monitoring_share_targets(&targets)?;
+                    next_targets_by_share.insert(replacement.expected_share.id, targets);
+                }
+                for (share_id, targets) in next_targets_by_share {
+                    let stored = records
+                        .iter_mut()
+                        .find(|record| record.id == share_id)
+                        .context("monitoring_share_preview_stale")?;
+                    stored.targets = targets;
+                    stored.updated_at = now.to_string();
+                }
+                drop(records);
+                record_memory_monitoring_audit(
+                    memory,
+                    operator,
+                    "monitoring_share.targets_bulk_updated",
+                    "monitoring_shares:bulk".to_string(),
+                    share_target_updates_audit_metadata(replacements, operator),
+                )
+                .await;
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &proposed_client_ids,
+                    "monitoring_share_resolution_stale",
+                )
+                .await?;
+                let ids = share_ids.iter().copied().collect::<Vec<_>>();
+                let locked = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        selector_expression,
+                        updated_at::text AS updated_at,
+                        expires_at > now() AS unexpired,
+                        revoked_at IS NOT NULL AS revoked
+                    FROM monitoring_share_links
+                    WHERE id = ANY($1::UUID[])
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                if locked.len() != ids.len() {
+                    bail!("monitoring_share_preview_stale");
+                }
+                for row in &locked {
+                    let id: Uuid = row.try_get("id")?;
+                    let expected = replacements
+                        .iter()
+                        .find(|replacement| replacement.expected_share.id == id)
+                        .context("monitoring_share_preview_stale")?;
+                    let selector_expression: String = row.try_get("selector_expression")?;
+                    let updated_at: String = row.try_get("updated_at")?;
+                    let unexpired: bool = row.try_get("unexpired")?;
+                    let revoked: bool = row.try_get("revoked")?;
+                    if selector_expression != expected.expected_share.selector_expression
+                        || updated_at != expected.expected_share.updated_at
+                        || !unexpired
+                        || revoked
+                    {
+                        bail!("monitoring_share_preview_stale");
+                    }
+                }
+                let target_rows = sqlx::query(
+                    r#"
+                    SELECT share_id, client_id, public_client_key
+                    FROM monitoring_share_targets
+                    WHERE share_id = ANY($1::UUID[])
+                    ORDER BY share_id, client_id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let mut current_by_share = HashMap::<Uuid, Vec<MonitoringShareTargetRecord>>::new();
+                for row in target_rows {
+                    current_by_share
+                        .entry(row.try_get("share_id")?)
+                        .or_default()
+                        .push(MonitoringShareTargetRecord {
+                            client_id: row.try_get("client_id")?,
+                            public_client_key: row.try_get("public_client_key")?,
+                        });
+                }
+                for replacement in replacements {
+                    let current = current_by_share
+                        .remove(&replacement.expected_share.id)
+                        .unwrap_or_default();
+                    if current != replacement.expected_share.targets {
+                        bail!("monitoring_share_preview_stale");
+                    }
+                }
+                for replacement in replacements.iter().filter(|replacement| {
+                    changed_share_ids.contains(&replacement.expected_share.id)
+                }) {
+                    let existing_keys = replacement
+                        .expected_share
+                        .targets
+                        .iter()
+                        .map(|target| (target.client_id.clone(), target.public_client_key.clone()))
+                        .collect::<HashMap<_, _>>();
+                    let targets = normalized_client_ids(&replacement.next_client_ids)
+                        .into_iter()
+                        .map(|client_id| MonitoringShareTargetRecord {
+                            public_client_key: existing_keys
+                                .get(&client_id)
+                                .cloned()
+                                .unwrap_or_else(generate_token),
+                            client_id,
+                        })
+                        .collect::<Vec<_>>();
+                    validate_monitoring_share_targets(&targets)?;
+                    sqlx::query("DELETE FROM monitoring_share_targets WHERE share_id = $1")
+                        .bind(replacement.expected_share.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    if !targets.is_empty() {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO monitoring_share_targets (
+                                share_id, client_id, public_client_key
+                            )
+                            SELECT $1, target.client_id, target.public_client_key
+                            FROM unnest($2::TEXT[], $3::TEXT[])
+                                AS target(client_id, public_client_key)
+                            "#,
+                        )
+                        .bind(replacement.expected_share.id)
+                        .bind(
+                            targets
+                                .iter()
+                                .map(|target| target.client_id.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .bind(
+                            targets
+                                .iter()
+                                .map(|target| target.public_client_key.clone())
+                                .collect::<Vec<_>>(),
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    sqlx::query(
+                        "UPDATE monitoring_share_links SET updated_at = now() WHERE id = $1",
+                    )
+                    .bind(replacement.expected_share.id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                insert_monitoring_audit(
+                    &mut tx,
+                    Some(operator.operator.id),
+                    "monitoring_share.targets_bulk_updated",
+                    "monitoring_shares:bulk",
+                    share_target_updates_audit_metadata(replacements, operator),
+                )
+                .await?;
+                tx.commit().await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn extend_monitoring_shares(
@@ -2541,8 +2879,7 @@ impl Repository {
         let Some(record) = self.monitoring_share_record(share_id).await? else {
             return Ok(None);
         };
-        let digest = vpsman_common::payload_hash(secret.as_bytes());
-        if !constant_time_eq(digest.as_bytes(), record.token_digest.as_bytes()) {
+        if !constant_time_eq(secret.as_bytes(), record.token_secret.as_bytes()) {
             return Ok(None);
         }
         Ok(Some(record))
@@ -3542,6 +3879,7 @@ async fn postgres_monitoring_share_views(
             s.name,
             s.selector_expression,
             target_stats.target_count,
+            target_stats.target_client_ids,
             s.show_identity_context,
             s.show_resources,
             s.show_network,
@@ -3564,7 +3902,12 @@ async fn postgres_monitoring_share_views(
         FROM monitoring_share_links s
         LEFT JOIN operators creator ON creator.id = s.created_by
         CROSS JOIN LATERAL (
-            SELECT count(*)::bigint AS target_count
+            SELECT
+                count(*)::bigint AS target_count,
+                COALESCE(
+                    array_agg(target.client_id ORDER BY target.client_id),
+                    ARRAY[]::TEXT[]
+                ) AS target_client_ids
             FROM monitoring_share_targets target
             WHERE target.share_id = s.id
         ) target_stats
@@ -3608,6 +3951,8 @@ async fn postgres_monitoring_share_views(
                 name: row.try_get("name")?,
                 selector_expression: row.try_get("selector_expression")?,
                 target_count,
+                target_client_ids: row.try_get("target_client_ids")?,
+                target_update_available: false,
                 visibility: MonitoringShareVisibilityView {
                     identity_context: row.try_get("show_identity_context")?,
                     resources: row.try_get("show_resources")?,
@@ -3651,7 +3996,7 @@ fn monitoring_share_record_from_row(row: sqlx::postgres::PgRow) -> Result<Monito
     Ok(MonitoringShareRecord {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
-        token_digest: row.try_get("token_digest")?,
+        token_secret: row.try_get("token_secret")?,
         selector_expression: row.try_get("selector_expression")?,
         targets,
         visibility: MonitoringShareVisibilityView {
@@ -3685,6 +4030,8 @@ fn monitoring_share_view(
         name: record.name.clone(),
         selector_expression: record.selector_expression.clone(),
         target_count: record.targets.len(),
+        target_client_ids: record.target_client_ids(),
+        target_update_available: false,
         visibility: record.visibility.clone(),
         status: monitoring_share_status(record, crate::unix_now()).to_string(),
         expires_at: record.expires_at.clone(),
@@ -3715,6 +4062,21 @@ pub(crate) fn monitoring_share_status(record: &MonitoringShareRecord, now: u64) 
     }
 }
 
+fn same_monitoring_share_revision(
+    stored: &MonitoringShareRecord,
+    expected: &MonitoringShareRecord,
+) -> bool {
+    stored.id == expected.id
+        && stored.name == expected.name
+        && stored.token_secret == expected.token_secret
+        && stored.selector_expression == expected.selector_expression
+        && stored.targets == expected.targets
+        && stored.visibility == expected.visibility
+        && stored.expires_at == expected.expires_at
+        && stored.revoked_at == expected.revoked_at
+        && stored.updated_at == expected.updated_at
+}
+
 fn share_operator_audit_metadata(
     record: &MonitoringShareRecord,
     operator: &AuthContext,
@@ -3730,6 +4092,44 @@ fn share_operator_audit_metadata(
             "target_count": record.targets.len(),
             "visibility": record.visibility,
             "expires_at": record.expires_at,
+        }),
+    )
+}
+
+fn share_target_updates_audit_metadata(
+    replacements: &[MonitoringShareTargetReplacement],
+    operator: &AuthContext,
+) -> serde_json::Value {
+    let changes = replacements
+        .iter()
+        .filter_map(|replacement| {
+            let before = normalized_client_ids(&replacement.expected_share.target_client_ids());
+            let after = normalized_client_ids(&replacement.next_client_ids);
+            if before == after {
+                return None;
+            }
+            let before_set = before.iter().cloned().collect::<BTreeSet<_>>();
+            let after_set = after.iter().cloned().collect::<BTreeSet<_>>();
+            Some(serde_json::json!({
+                "share_id": replacement.expected_share.id,
+                "name": replacement.expected_share.name,
+                "selector_expression": replacement.expected_share.selector_expression,
+                "before_target_count": before.len(),
+                "after_target_count": after.len(),
+                "added_client_ids": after_set.difference(&before_set).cloned().collect::<Vec<_>>(),
+                "removed_client_ids": before_set.difference(&after_set).cloned().collect::<Vec<_>>(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    let share_ids = changes
+        .iter()
+        .filter_map(|change| change.get("share_id").cloned())
+        .collect::<Vec<_>>();
+    base_monitoring_audit_metadata(
+        operator,
+        serde_json::json!({
+            "share_ids": share_ids,
+            "changes": changes,
         }),
     )
 }
