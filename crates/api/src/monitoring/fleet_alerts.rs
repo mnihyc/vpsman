@@ -460,9 +460,9 @@ fn append_resource_alerts(
             );
         }
 
-        if let Some((severity, ratio)) = available_ratio_alert(
+        if let Some((severity, ratio)) = available_ratio_from_used_alert(
             rollup.memory_total_bytes_max,
-            rollup.memory_available_bytes_min,
+            rollup.memory_used_ratio_max,
             policy.memory_available_warning_ratio,
             policy.memory_available_critical_ratio,
         ) {
@@ -476,6 +476,7 @@ fn append_resource_alerts(
                 json!({
                     "memory_total_bytes": rollup.memory_total_bytes_max,
                     "memory_available_bytes_min": rollup.memory_available_bytes_min,
+                    "memory_used_ratio_max": rollup.memory_used_ratio_max,
                     "available_ratio": ratio,
                     "warning_threshold": policy.memory_available_warning_ratio,
                     "critical_threshold": policy.memory_available_critical_ratio,
@@ -484,9 +485,9 @@ fn append_resource_alerts(
             );
         }
 
-        if let Some((severity, ratio)) = available_ratio_alert(
+        if let Some((severity, ratio)) = available_ratio_from_used_alert(
             rollup.disk_total_bytes_max,
-            rollup.disk_available_bytes_min,
+            rollup.disk_used_ratio_max,
             policy.disk_available_warning_ratio,
             policy.disk_available_critical_ratio,
         ) {
@@ -500,6 +501,7 @@ fn append_resource_alerts(
                 json!({
                     "disk_total_bytes": rollup.disk_total_bytes_max,
                     "disk_available_bytes_min": rollup.disk_available_bytes_min,
+                    "disk_used_ratio_max": rollup.disk_used_ratio_max,
                     "available_ratio": ratio,
                     "warning_threshold": policy.disk_available_warning_ratio,
                     "critical_threshold": policy.disk_available_critical_ratio,
@@ -660,20 +662,20 @@ fn latest_rollups(rollups: Vec<TelemetryRollupView>) -> HashMap<String, Telemetr
     latest
 }
 
-fn available_ratio_alert(
+fn available_ratio_from_used_alert(
     total: i64,
-    available: i64,
+    used_ratio: f64,
     warning_threshold: f64,
     critical_threshold: f64,
 ) -> Option<(&'static str, f64)> {
-    if total <= 0 || available < 0 {
+    if total <= 0 || !used_ratio.is_finite() || !(0.0..=1.0).contains(&used_ratio) {
         return None;
     }
-    let ratio = available as f64 / total as f64;
-    if ratio <= critical_threshold {
-        Some(("critical", ratio))
-    } else if ratio <= warning_threshold {
-        Some(("warning", ratio))
+    let available_ratio = 1.0 - used_ratio;
+    if available_ratio <= critical_threshold {
+        Some(("critical", available_ratio))
+    } else if available_ratio <= warning_threshold {
+        Some(("warning", available_ratio))
     } else {
         None
     }

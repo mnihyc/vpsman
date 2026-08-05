@@ -1007,8 +1007,12 @@ async fn dashboard_rollup_aggregation_is_weighted_and_fair_per_client() {
     assert_eq!(aggregated.cpu_load_1_max, 3.4);
     assert_eq!(aggregated.memory_available_bytes_avg, 600);
     assert_eq!(aggregated.memory_available_bytes_min, 500);
+    assert!((aggregated.memory_used_ratio_avg - 0.4).abs() < f64::EPSILON);
+    assert!((aggregated.memory_used_ratio_max - 0.5).abs() < f64::EPSILON);
     assert_eq!(aggregated.disk_available_bytes_avg, 1300);
     assert_eq!(aggregated.disk_available_bytes_min, 1100);
+    assert!((aggregated.disk_used_ratio_avg - 0.35).abs() < f64::EPSILON);
+    assert!((aggregated.disk_used_ratio_max - 0.45).abs() < f64::EPSILON);
     assert_eq!(aggregated.latest_observed_at, "670");
 }
 
@@ -1186,13 +1190,19 @@ fn dashboard_test_rollup(
         memory_total_bytes_max: 1000,
         memory_available_bytes_avg: memory_available,
         memory_available_bytes_min: memory_available,
+        memory_used_ratio_avg: (1000 - memory_available) as f64 / 1000.0,
+        memory_used_ratio_max: (1000 - memory_available) as f64 / 1000.0,
         swap_sample_count: 0,
         swap_total_bytes_max: None,
         swap_available_bytes_avg: None,
         swap_available_bytes_min: None,
+        swap_used_ratio_avg: None,
+        swap_used_ratio_max: None,
         disk_total_bytes_max: 2000,
         disk_available_bytes_avg: disk_available,
         disk_available_bytes_min: disk_available,
+        disk_used_ratio_avg: (2000 - disk_available) as f64 / 2000.0,
+        disk_used_ratio_max: (2000 - disk_available) as f64 / 2000.0,
         network_rx_bytes_max: 0,
         network_tx_bytes_max: 0,
         connections_sample_count: 0,

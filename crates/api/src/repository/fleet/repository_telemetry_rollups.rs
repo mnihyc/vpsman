@@ -33,6 +33,9 @@ fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView>
     let disk_available = metrics.disks.iter().fold(0_u64, |total, disk| {
         total.saturating_add(disk.available_bytes)
     });
+    let disk_total = saturating_u64_to_i64(disk_total);
+    let disk_available = saturating_u64_to_i64(disk_available);
+    let disk_used_ratio = used_ratio_or_zero(disk_total, disk_available);
     let network_rx = metrics.networks.iter().fold(0_u64, |total, network| {
         total.saturating_add(network.rx_bytes)
     });
@@ -40,6 +43,9 @@ fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView>
         total.saturating_add(network.tx_bytes)
     });
     let cpu_usage = metrics.cpu.utilization_ratio;
+    let memory_total = saturating_u64_to_i64(metrics.memory.total_bytes);
+    let memory_available = saturating_u64_to_i64(metrics.memory.available_bytes);
+    let memory_used_ratio = used_ratio_or_zero(memory_total, memory_available);
     let swap = match (
         metrics.memory.swap_total_bytes,
         metrics.memory.swap_available_bytes,
@@ -60,6 +66,7 @@ fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView>
             sample.observed_at
         ),
     };
+    let positive_swap = swap.filter(|(total, _)| *total > 0);
 
     Ok(TelemetryRollupView {
         client_id: sample.client_id,
@@ -76,16 +83,24 @@ fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView>
         cpu_load_5_max: metrics.cpu.load.five,
         cpu_load_15_avg: metrics.cpu.load.fifteen,
         cpu_load_15_max: metrics.cpu.load.fifteen,
-        memory_total_bytes_max: saturating_u64_to_i64(metrics.memory.total_bytes),
-        memory_available_bytes_avg: saturating_u64_to_i64(metrics.memory.available_bytes),
-        memory_available_bytes_min: saturating_u64_to_i64(metrics.memory.available_bytes),
-        swap_sample_count: i32::from(swap.is_some()),
+        memory_total_bytes_max: memory_total,
+        memory_available_bytes_avg: memory_available,
+        memory_available_bytes_min: memory_available,
+        memory_used_ratio_avg: memory_used_ratio,
+        memory_used_ratio_max: memory_used_ratio,
+        swap_sample_count: i32::from(positive_swap.is_some()),
         swap_total_bytes_max: swap.map(|(total, _)| total),
         swap_available_bytes_avg: swap.map(|(_, available)| available),
         swap_available_bytes_min: swap.map(|(_, available)| available),
-        disk_total_bytes_max: saturating_u64_to_i64(disk_total),
-        disk_available_bytes_avg: saturating_u64_to_i64(disk_available),
-        disk_available_bytes_min: saturating_u64_to_i64(disk_available),
+        swap_used_ratio_avg: positive_swap
+            .and_then(|(total, available)| used_ratio(total, available)),
+        swap_used_ratio_max: positive_swap
+            .and_then(|(total, available)| used_ratio(total, available)),
+        disk_total_bytes_max: disk_total,
+        disk_available_bytes_avg: disk_available,
+        disk_available_bytes_min: disk_available,
+        disk_used_ratio_avg: disk_used_ratio,
+        disk_used_ratio_max: disk_used_ratio,
         network_rx_bytes_max: saturating_u64_to_i64(network_rx),
         network_tx_bytes_max: saturating_u64_to_i64(network_tx),
         connections_sample_count: i32::from(metrics.connections.is_some()),
@@ -108,6 +123,15 @@ fn raw_sample_rollup(sample: TelemetrySampleView) -> Result<TelemetryRollupView>
 
 fn saturating_u64_to_i64(value: u64) -> i64 {
     value.min(i64::MAX as u64) as i64
+}
+
+fn used_ratio(total: i64, available: i64) -> Option<f64> {
+    (total > 0)
+        .then(|| (total.saturating_sub(available).max(0) as f64 / total as f64).clamp(0.0, 1.0))
+}
+
+fn used_ratio_or_zero(total: i64, available: i64) -> f64 {
+    used_ratio(total, available).unwrap_or(0.0)
 }
 
 impl Repository {
@@ -410,16 +434,53 @@ impl Repository {
                         round(avg(memory_available_bytes::numeric))::bigint
                             AS memory_available_bytes_avg,
                         min(memory_available_bytes)::bigint AS memory_available_bytes_min,
-                        LEAST(count(swap_total_bytes)::bigint, 2147483647)::integer
-                            AS swap_sample_count,
+                        avg(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
+                            ELSE (memory_total_bytes - memory_available_bytes)::double precision
+                                / memory_total_bytes::double precision
+                        END)::double precision AS memory_used_ratio_avg,
+                        max(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
+                            ELSE (memory_total_bytes - memory_available_bytes)::double precision
+                                / memory_total_bytes::double precision
+                        END)::double precision AS memory_used_ratio_max,
+                        LEAST(
+                            count(*) FILTER (WHERE swap_total_bytes > 0),
+                            2147483647
+                        )::integer AS swap_sample_count,
                         max(swap_total_bytes)::bigint AS swap_total_bytes_max,
-                        round(avg(swap_available_bytes::numeric))::bigint
-                            AS swap_available_bytes_avg,
-                        min(swap_available_bytes)::bigint AS swap_available_bytes_min,
+                        CASE
+                            WHEN max(swap_total_bytes) = 0 THEN 0
+                            ELSE round(avg(swap_available_bytes::numeric)
+                                FILTER (WHERE swap_total_bytes > 0))::bigint
+                        END AS swap_available_bytes_avg,
+                        CASE
+                            WHEN max(swap_total_bytes) = 0 THEN 0
+                            ELSE min(swap_available_bytes)
+                                FILTER (WHERE swap_total_bytes > 0)
+                        END::bigint AS swap_available_bytes_min,
+                        avg(CASE
+                            WHEN swap_total_bytes > 0
+                                THEN (swap_total_bytes - swap_available_bytes)::double precision
+                                / swap_total_bytes::double precision
+                            ELSE NULL
+                        END)::double precision AS swap_used_ratio_avg,
+                        max(CASE
+                            WHEN swap_total_bytes > 0
+                                THEN (swap_total_bytes - swap_available_bytes)::double precision
+                                / swap_total_bytes::double precision
+                            ELSE NULL
+                        END)::double precision AS swap_used_ratio_max,
                         max(disk_total_bytes)::bigint AS disk_total_bytes_max,
                         round(avg(disk_available_bytes::numeric))::bigint
                             AS disk_available_bytes_avg,
                         min(disk_available_bytes)::bigint AS disk_available_bytes_min,
+                        avg(CASE WHEN disk_total_bytes = 0 THEN 0::double precision
+                            ELSE (disk_total_bytes - disk_available_bytes)::double precision
+                                / disk_total_bytes::double precision
+                        END)::double precision AS disk_used_ratio_avg,
+                        max(CASE WHEN disk_total_bytes = 0 THEN 0::double precision
+                            ELSE (disk_total_bytes - disk_available_bytes)::double precision
+                                / disk_total_bytes::double precision
+                        END)::double precision AS disk_used_ratio_max,
                         max(network_rx_bytes)::bigint AS network_rx_bytes_max,
                         max(network_tx_bytes)::bigint AS network_tx_bytes_max,
                         LEAST(count(tcp_sockets)::bigint, 2147483647)::integer
@@ -467,13 +528,19 @@ impl Repository {
                     memory_total_bytes_max,
                     memory_available_bytes_avg,
                     memory_available_bytes_min,
+                    memory_used_ratio_avg,
+                    memory_used_ratio_max,
                     swap_sample_count,
                     swap_total_bytes_max,
                     swap_available_bytes_avg,
                     swap_available_bytes_min,
+                    swap_used_ratio_avg,
+                    swap_used_ratio_max,
                     disk_total_bytes_max,
                     disk_available_bytes_avg,
                     disk_available_bytes_min,
+                    disk_used_ratio_avg,
+                    disk_used_ratio_max,
                     network_rx_bytes_max,
                     network_tx_bytes_max,
                     connections_sample_count,
@@ -1121,13 +1188,19 @@ impl Repository {
                             memory_total_bytes_max,
                             memory_available_bytes_avg,
                             memory_available_bytes_min,
+                            memory_used_ratio_avg,
+                            memory_used_ratio_max,
                             swap_sample_count,
                             swap_total_bytes_max,
                             swap_available_bytes_avg,
                             swap_available_bytes_min,
+                            swap_used_ratio_avg,
+                            swap_used_ratio_max,
                             disk_total_bytes_max,
                             disk_available_bytes_avg,
                             disk_available_bytes_min,
+                            disk_used_ratio_avg,
+                            disk_used_ratio_max,
                             network_rx_bytes_max,
                             network_tx_bytes_max,
                             connections_sample_count,
@@ -1213,6 +1286,8 @@ impl Repository {
                             memory_total_bytes_max,
                             memory_available_bytes_avg,
                             memory_available_bytes_min,
+                            memory_used_ratio_avg,
+                            memory_used_ratio_max,
                             (
                                 swap_sample_count::bigint * fragment_end_minute / source_minutes
                                 - swap_sample_count::bigint * fragment_first_minute / source_minutes
@@ -1220,24 +1295,41 @@ impl Repository {
                             CASE
                                 WHEN swap_sample_count::bigint * fragment_end_minute / source_minutes
                                     - swap_sample_count::bigint * fragment_first_minute / source_minutes > 0
+                                    OR (swap_sample_count = 0 AND swap_total_bytes_max = 0)
                                     THEN swap_total_bytes_max
                                 ELSE NULL
                             END AS swap_total_bytes_max,
                             CASE
                                 WHEN swap_sample_count::bigint * fragment_end_minute / source_minutes
                                     - swap_sample_count::bigint * fragment_first_minute / source_minutes > 0
+                                    OR (swap_sample_count = 0 AND swap_total_bytes_max = 0)
                                     THEN swap_available_bytes_avg
                                 ELSE NULL
                             END AS swap_available_bytes_avg,
                             CASE
                                 WHEN swap_sample_count::bigint * fragment_end_minute / source_minutes
                                     - swap_sample_count::bigint * fragment_first_minute / source_minutes > 0
+                                    OR (swap_sample_count = 0 AND swap_total_bytes_max = 0)
                                     THEN swap_available_bytes_min
                                 ELSE NULL
                             END AS swap_available_bytes_min,
+                            CASE
+                                WHEN swap_sample_count::bigint * fragment_end_minute / source_minutes
+                                    - swap_sample_count::bigint * fragment_first_minute / source_minutes > 0
+                                    THEN swap_used_ratio_avg
+                                ELSE NULL
+                            END AS swap_used_ratio_avg,
+                            CASE
+                                WHEN swap_sample_count::bigint * fragment_end_minute / source_minutes
+                                    - swap_sample_count::bigint * fragment_first_minute / source_minutes > 0
+                                    THEN swap_used_ratio_max
+                                ELSE NULL
+                            END AS swap_used_ratio_max,
                             disk_total_bytes_max,
                             disk_available_bytes_avg,
                             disk_available_bytes_min,
+                            disk_used_ratio_avg,
+                            disk_used_ratio_max,
                             network_rx_bytes_max,
                             network_tx_bytes_max,
                             (
@@ -1303,26 +1395,54 @@ impl Repository {
                                     / NULLIF(sum(sample_count)::numeric, 0),
                                 0
                             ))::bigint AS memory_available_bytes_avg,
-                            min(memory_available_bytes_min)::bigint AS memory_available_bytes_min,
+                            min(memory_available_bytes_min)::bigint
+                                AS memory_available_bytes_min,
+                            COALESCE(
+                                sum(memory_used_ratio_avg::numeric * sample_count::numeric)
+                                    / NULLIF(sum(sample_count)::numeric, 0),
+                                0
+                            )::double precision AS memory_used_ratio_avg,
+                            max(memory_used_ratio_max)::double precision AS memory_used_ratio_max,
                             LEAST(sum(swap_sample_count)::bigint, 2147483647)::integer
                                 AS swap_sample_count,
-                            (max(swap_total_bytes_max)
-                                FILTER (WHERE swap_sample_count > 0))::bigint
-                                AS swap_total_bytes_max,
-                            round(
-                                sum(swap_available_bytes_avg::numeric * swap_sample_count::numeric)
+                            max(swap_total_bytes_max)::bigint AS swap_total_bytes_max,
+                            CASE
+                                WHEN sum(swap_sample_count) > 0 THEN round(
+                                    sum(swap_available_bytes_avg::numeric
+                                        * swap_sample_count::numeric)
+                                        / sum(swap_sample_count)::numeric
+                                )::bigint
+                                WHEN max(swap_total_bytes_max) = 0 THEN 0
+                                ELSE NULL
+                            END AS swap_available_bytes_avg,
+                            CASE
+                                WHEN sum(swap_sample_count) > 0 THEN
+                                    (min(swap_available_bytes_min)
+                                        FILTER (WHERE swap_sample_count > 0))::bigint
+                                WHEN max(swap_total_bytes_max) = 0 THEN 0
+                                ELSE NULL
+                            END AS swap_available_bytes_min,
+                            (
+                                sum(swap_used_ratio_avg::numeric * swap_sample_count::numeric)
                                     / NULLIF(sum(swap_sample_count)::numeric, 0)
-                            )::bigint AS swap_available_bytes_avg,
-                            (min(swap_available_bytes_min)
-                                FILTER (WHERE swap_sample_count > 0))::bigint
-                                AS swap_available_bytes_min,
+                            )::double precision AS swap_used_ratio_avg,
+                            (max(swap_used_ratio_max)
+                                FILTER (WHERE swap_sample_count > 0))::double precision
+                                AS swap_used_ratio_max,
                             max(disk_total_bytes_max)::bigint AS disk_total_bytes_max,
                             round(COALESCE(
                                 sum(disk_available_bytes_avg::numeric * sample_count::numeric)
                                     / NULLIF(sum(sample_count)::numeric, 0),
                                 0
                             ))::bigint AS disk_available_bytes_avg,
-                            min(disk_available_bytes_min)::bigint AS disk_available_bytes_min,
+                            min(disk_available_bytes_min)::bigint
+                                AS disk_available_bytes_min,
+                            COALESCE(
+                                sum(disk_used_ratio_avg::numeric * sample_count::numeric)
+                                    / NULLIF(sum(sample_count)::numeric, 0),
+                                0
+                            )::double precision AS disk_used_ratio_avg,
+                            max(disk_used_ratio_max)::double precision AS disk_used_ratio_max,
                             max(network_rx_bytes_max)::bigint AS network_rx_bytes_max,
                             max(network_tx_bytes_max)::bigint AS network_tx_bytes_max,
                             LEAST(sum(connections_sample_count)::bigint, 2147483647)::integer
@@ -1374,13 +1494,19 @@ impl Repository {
                         memory_total_bytes_max,
                         memory_available_bytes_avg,
                         memory_available_bytes_min,
+                        memory_used_ratio_avg,
+                        memory_used_ratio_max,
                         swap_sample_count,
                         swap_total_bytes_max,
                         swap_available_bytes_avg,
                         swap_available_bytes_min,
+                        swap_used_ratio_avg,
+                        swap_used_ratio_max,
                         disk_total_bytes_max,
                         disk_available_bytes_avg,
                         disk_available_bytes_min,
+                        disk_used_ratio_avg,
+                        disk_used_ratio_max,
                         network_rx_bytes_max,
                         network_tx_bytes_max,
                         connections_sample_count,
@@ -1461,13 +1587,19 @@ impl Repository {
                         memory_total_bytes_max,
                         memory_available_bytes_avg,
                         memory_available_bytes_min,
+                        memory_used_ratio_avg,
+                        memory_used_ratio_max,
                         swap_sample_count,
                         swap_total_bytes_max,
                         swap_available_bytes_avg,
                         swap_available_bytes_min,
+                        swap_used_ratio_avg,
+                        swap_used_ratio_max,
                         disk_total_bytes_max,
                         disk_available_bytes_avg,
                         disk_available_bytes_min,
+                        disk_used_ratio_avg,
+                        disk_used_ratio_max,
                         network_rx_bytes_max,
                         network_tx_bytes_max,
                         connections_sample_count,
@@ -1612,13 +1744,19 @@ impl Repository {
                             memory_total_bytes_max,
                             memory_available_bytes_avg,
                             memory_available_bytes_min,
+                            memory_used_ratio_avg,
+                            memory_used_ratio_max,
                             swap_sample_count,
                             swap_total_bytes_max,
                             swap_available_bytes_avg,
                             swap_available_bytes_min,
+                            swap_used_ratio_avg,
+                            swap_used_ratio_max,
                             disk_total_bytes_max,
                             disk_available_bytes_avg,
                             disk_available_bytes_min,
+                            disk_used_ratio_avg,
+                            disk_used_ratio_max,
                             network_rx_bytes_max,
                             network_tx_bytes_max,
                             connections_sample_count,
@@ -1656,13 +1794,19 @@ impl Repository {
                         memory_total_bytes_max,
                         memory_available_bytes_avg,
                         memory_available_bytes_min,
+                        memory_used_ratio_avg,
+                        memory_used_ratio_max,
                         swap_sample_count,
                         swap_total_bytes_max,
                         swap_available_bytes_avg,
                         swap_available_bytes_min,
+                        swap_used_ratio_avg,
+                        swap_used_ratio_max,
                         disk_total_bytes_max,
                         disk_available_bytes_avg,
                         disk_available_bytes_min,
+                        disk_used_ratio_avg,
+                        disk_used_ratio_max,
                         network_rx_bytes_max,
                         network_tx_bytes_max,
                         connections_sample_count,
@@ -2770,13 +2914,20 @@ struct MemoryRollupAggregate {
     memory_total_max: Option<i64>,
     memory_available_weighted_total: i128,
     memory_available_min: Option<i64>,
+    memory_used_ratio_weighted_total: f64,
+    memory_used_ratio_max: Option<f64>,
     swap_sample_count: i64,
     swap_total_max: Option<i64>,
+    swap_explicit_no_swap: bool,
     swap_available_weighted_total: i128,
     swap_available_min: Option<i64>,
+    swap_used_ratio_weighted_total: f64,
+    swap_used_ratio_max: Option<f64>,
     disk_total_max: Option<i64>,
     disk_available_weighted_total: i128,
     disk_available_min: Option<i64>,
+    disk_used_ratio_weighted_total: f64,
+    disk_used_ratio_max: Option<f64>,
     network_rx_max: Option<i64>,
     network_tx_max: Option<i64>,
     connections_sample_count: i64,
@@ -2854,29 +3005,49 @@ fn aggregate_memory_telemetry_rollups(
                     current.min(row.memory_available_bytes_min)
                 }),
         );
+        aggregate.memory_used_ratio_weighted_total +=
+            row.memory_used_ratio_avg * sample_count as f64;
+        aggregate.memory_used_ratio_max = Some(
+            aggregate
+                .memory_used_ratio_max
+                .map_or(row.memory_used_ratio_max, |current| {
+                    current.max(row.memory_used_ratio_max)
+                }),
+        );
         let swap_sample_count = i64::from(row.swap_sample_count.max(0));
-        if let (Some(total), Some(available_avg), Some(available_min)) = (
-            row.swap_total_bytes_max,
-            row.swap_available_bytes_avg,
-            row.swap_available_bytes_min,
-        ) {
-            aggregate.swap_sample_count = aggregate
-                .swap_sample_count
-                .saturating_add(swap_sample_count);
+        if let Some(total) = row.swap_total_bytes_max {
             aggregate.swap_total_max = Some(
                 aggregate
                     .swap_total_max
                     .map_or(total, |current| current.max(total)),
             );
-            aggregate.swap_available_weighted_total =
-                aggregate.swap_available_weighted_total.saturating_add(
-                    i128::from(available_avg).saturating_mul(i128::from(swap_sample_count)),
-                );
-            aggregate.swap_available_min = Some(
+            aggregate.swap_explicit_no_swap |= swap_sample_count == 0 && total == 0;
+        }
+        if let (Some(used_ratio_avg), Some(used_ratio_max)) =
+            (row.swap_used_ratio_avg, row.swap_used_ratio_max)
+        {
+            aggregate.swap_sample_count = aggregate
+                .swap_sample_count
+                .saturating_add(swap_sample_count);
+            aggregate.swap_used_ratio_weighted_total += used_ratio_avg * swap_sample_count as f64;
+            aggregate.swap_used_ratio_max = Some(
                 aggregate
-                    .swap_available_min
-                    .map_or(available_min, |current| current.min(available_min)),
+                    .swap_used_ratio_max
+                    .map_or(used_ratio_max, |current| current.max(used_ratio_max)),
             );
+            if let (Some(available_avg), Some(available_min)) =
+                (row.swap_available_bytes_avg, row.swap_available_bytes_min)
+            {
+                aggregate.swap_available_weighted_total =
+                    aggregate.swap_available_weighted_total.saturating_add(
+                        i128::from(available_avg).saturating_mul(i128::from(swap_sample_count)),
+                    );
+                aggregate.swap_available_min = Some(
+                    aggregate
+                        .swap_available_min
+                        .map_or(available_min, |current| current.min(available_min)),
+                );
+            }
         }
         aggregate.disk_total_max = Some(
             aggregate
@@ -2894,6 +3065,14 @@ fn aggregate_memory_telemetry_rollups(
                 .disk_available_min
                 .map_or(row.disk_available_bytes_min, |current| {
                     current.min(row.disk_available_bytes_min)
+                }),
+        );
+        aggregate.disk_used_ratio_weighted_total += row.disk_used_ratio_avg * sample_count as f64;
+        aggregate.disk_used_ratio_max = Some(
+            aggregate
+                .disk_used_ratio_max
+                .map_or(row.disk_used_ratio_max, |current| {
+                    current.max(row.disk_used_ratio_max)
                 }),
         );
         aggregate.network_rx_max = Some(
@@ -2974,21 +3153,43 @@ fn aggregate_memory_telemetry_rollups(
                     sample_count,
                 ),
                 memory_available_bytes_min: aggregate.memory_available_min.unwrap_or(0),
+                memory_used_ratio_avg: if sample_count == 0 {
+                    0.0
+                } else {
+                    aggregate.memory_used_ratio_weighted_total / sample_count as f64
+                },
+                memory_used_ratio_max: aggregate.memory_used_ratio_max.unwrap_or(0.0),
                 swap_sample_count: aggregate.swap_sample_count.min(i64::from(i32::MAX)) as i32,
                 swap_total_bytes_max: aggregate.swap_total_max,
-                swap_available_bytes_avg: (aggregate.swap_sample_count > 0).then(|| {
-                    round_i128_div_i64(
+                swap_available_bytes_avg: if aggregate.swap_sample_count > 0 {
+                    Some(round_i128_div_i64(
                         aggregate.swap_available_weighted_total,
                         aggregate.swap_sample_count,
-                    )
-                }),
-                swap_available_bytes_min: aggregate.swap_available_min,
+                    ))
+                } else {
+                    aggregate.swap_explicit_no_swap.then_some(0)
+                },
+                swap_available_bytes_min: if aggregate.swap_sample_count > 0 {
+                    aggregate.swap_available_min
+                } else {
+                    aggregate.swap_explicit_no_swap.then_some(0)
+                },
+                swap_used_ratio_avg: (aggregate.swap_sample_count > 0).then_some(
+                    aggregate.swap_used_ratio_weighted_total / aggregate.swap_sample_count as f64,
+                ),
+                swap_used_ratio_max: aggregate.swap_used_ratio_max,
                 disk_total_bytes_max: aggregate.disk_total_max.unwrap_or(0),
                 disk_available_bytes_avg: round_i128_div_i64(
                     aggregate.disk_available_weighted_total,
                     sample_count,
                 ),
                 disk_available_bytes_min: aggregate.disk_available_min.unwrap_or(0),
+                disk_used_ratio_avg: if sample_count == 0 {
+                    0.0
+                } else {
+                    aggregate.disk_used_ratio_weighted_total / sample_count as f64
+                },
+                disk_used_ratio_max: aggregate.disk_used_ratio_max.unwrap_or(0.0),
                 network_rx_bytes_max: aggregate.network_rx_max.unwrap_or(0),
                 network_tx_bytes_max: aggregate.network_tx_max.unwrap_or(0),
                 connections_sample_count: aggregate
@@ -3544,13 +3745,19 @@ fn telemetry_rollup_from_row(row: sqlx::postgres::PgRow) -> Result<TelemetryRoll
         memory_total_bytes_max: row.try_get("memory_total_bytes_max")?,
         memory_available_bytes_avg: row.try_get("memory_available_bytes_avg")?,
         memory_available_bytes_min: row.try_get("memory_available_bytes_min")?,
+        memory_used_ratio_avg: row.try_get("memory_used_ratio_avg")?,
+        memory_used_ratio_max: row.try_get("memory_used_ratio_max")?,
         swap_sample_count: row.try_get("swap_sample_count")?,
         swap_total_bytes_max: row.try_get("swap_total_bytes_max")?,
         swap_available_bytes_avg: row.try_get("swap_available_bytes_avg")?,
         swap_available_bytes_min: row.try_get("swap_available_bytes_min")?,
+        swap_used_ratio_avg: row.try_get("swap_used_ratio_avg")?,
+        swap_used_ratio_max: row.try_get("swap_used_ratio_max")?,
         disk_total_bytes_max: row.try_get("disk_total_bytes_max")?,
         disk_available_bytes_avg: row.try_get("disk_available_bytes_avg")?,
         disk_available_bytes_min: row.try_get("disk_available_bytes_min")?,
+        disk_used_ratio_avg: row.try_get("disk_used_ratio_avg")?,
+        disk_used_ratio_max: row.try_get("disk_used_ratio_max")?,
         network_rx_bytes_max: row.try_get("network_rx_bytes_max")?,
         network_tx_bytes_max: row.try_get("network_tx_bytes_max")?,
         connections_sample_count: row.try_get("connections_sample_count")?,
@@ -3718,6 +3925,8 @@ fn fragment_telemetry_rollup(
             proportional_fragment_count(row.cpu_usage_sample_count, fragment).min(sample_count);
         let swap_sample_count =
             proportional_fragment_count(row.swap_sample_count, fragment).min(sample_count);
+        let carry_swap_capacity = swap_sample_count > 0
+            || (row.swap_sample_count == 0 && row.swap_total_bytes_max == Some(0));
         let connections_sample_count =
             proportional_fragment_count(row.connections_sample_count, fragment).min(sample_count);
         let latest_observed_at = fragment_final_minute_timestamp(&row.latest_observed_at, fragment);
@@ -3734,14 +3943,20 @@ fn fragment_telemetry_rollup(
             sample_count,
             cpu_usage_sample_count,
             swap_sample_count,
-            swap_total_bytes_max: (swap_sample_count > 0)
+            swap_total_bytes_max: carry_swap_capacity
                 .then_some(row.swap_total_bytes_max)
                 .flatten(),
-            swap_available_bytes_avg: (swap_sample_count > 0)
+            swap_available_bytes_avg: carry_swap_capacity
                 .then_some(row.swap_available_bytes_avg)
                 .flatten(),
-            swap_available_bytes_min: (swap_sample_count > 0)
+            swap_available_bytes_min: carry_swap_capacity
                 .then_some(row.swap_available_bytes_min)
+                .flatten(),
+            swap_used_ratio_avg: (swap_sample_count > 0)
+                .then_some(row.swap_used_ratio_avg)
+                .flatten(),
+            swap_used_ratio_max: (swap_sample_count > 0)
+                .then_some(row.swap_used_ratio_max)
                 .flatten(),
             connections_sample_count,
             tcp_sockets_latest: (connections_sample_count > 0)

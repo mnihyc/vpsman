@@ -791,10 +791,9 @@ function resourceCharts(
           timeline,
           bucketed,
           (row) =>
-            usedPercent(
-              row.memory_total_bytes_max,
-              row.memory_available_bytes_avg,
-            ),
+            row.memory_total_bytes_max > 0
+              ? row.memory_used_ratio_avg * 100
+              : null,
         ),
       ],
     },
@@ -807,7 +806,9 @@ function resourceCharts(
           timeline,
           bucketed,
           (row) =>
-            usedPercent(row.disk_total_bytes_max, row.disk_available_bytes_avg),
+            row.disk_total_bytes_max > 0
+              ? row.disk_used_ratio_avg * 100
+              : null,
         ),
       ],
     },
@@ -1109,12 +1110,6 @@ function rangeEvidence(range: MonitoringRange): string {
       ? "fine realtime samples"
       : "retained minute history";
   return `${source} · ${formatDuration(range.step_secs)} chart buckets · ${formatTime(String(range.start_unix))} – ${formatTime(String(range.end_unix))}`;
-}
-
-function usedPercent(total: number, available: number): number | null {
-  if (!Number.isFinite(total) || !Number.isFinite(available) || total <= 0)
-    return null;
-  return Math.max(0, (1 - available / total) * 100);
 }
 
 function finiteNumber(value: number | null | undefined): number | null {

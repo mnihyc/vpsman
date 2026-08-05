@@ -1,8 +1,8 @@
 use super::*;
 use sha2::{Digest, Sha256};
 use vpsman_common::{
-    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics, AgentPrivilegeMode,
-    GatewayTelemetryIngest, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
+    plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics, AgentPrivilegeMode, DiskStat,
+    GatewayTelemetryIngest, MemoryStat, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
     RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
     TelemetryEnvelope, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
@@ -186,6 +186,17 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
                     cores: 2,
                     utilization_ratio: None,
                 },
+                memory: MemoryStat {
+                    total_bytes: 200,
+                    available_bytes: 50,
+                    swap_total_bytes: Some(200),
+                    swap_available_bytes: Some(50),
+                },
+                disks: vec![DiskStat {
+                    mountpoint: "/".to_string(),
+                    total_bytes: 200,
+                    available_bytes: 50,
+                }],
                 port_forwarding: Some(PortForwardRuntimeSnapshot {
                     status: PortForwardRuntimeStatus::Absent,
                     observed_unix: 1_800_000_000,
@@ -210,9 +221,27 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     assert!(port_forward_runtime.read().await.contains_key("edge-a"));
     event.telemetry_seq = 1;
     event.telemetry.metrics.cpu.load.one = 99.0;
+    event.telemetry.metrics.cpu.cores = 64;
+    event.telemetry.metrics.memory = MemoryStat {
+        total_bytes: 10_000,
+        available_bytes: 0,
+        swap_total_bytes: Some(10_000),
+        swap_available_bytes: Some(0),
+    };
+    event.telemetry.metrics.disks[0].total_bytes = 10_000;
+    event.telemetry.metrics.disks[0].available_bytes = 0;
     assert!(!repo.record_telemetry(&event).await.unwrap());
     event.telemetry_seq = 3;
     event.telemetry.metrics.cpu.load.one = 3.0;
+    event.telemetry.metrics.cpu.cores = 4;
+    event.telemetry.metrics.memory = MemoryStat {
+        total_bytes: 100,
+        available_bytes: 75,
+        swap_total_bytes: Some(100),
+        swap_available_bytes: Some(75),
+    };
+    event.telemetry.metrics.disks[0].total_bytes = 100;
+    event.telemetry.metrics.disks[0].available_bytes = 75;
     assert!(repo.record_telemetry(&event).await.unwrap());
 
     let rollups = repo
@@ -222,6 +251,23 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     assert_eq!(rollups.len(), 1);
     assert_eq!(rollups[0].sample_count, 2);
     assert_eq!(rollups[0].cpu_load_1_avg, 2.0);
+    assert_eq!(rollups[0].cpu_cores_max, 4);
+    assert_eq!(rollups[0].memory_total_bytes_max, 200);
+    assert_eq!(rollups[0].memory_available_bytes_avg, 63);
+    assert_eq!(rollups[0].memory_available_bytes_min, 50);
+    assert!((rollups[0].memory_used_ratio_avg - 0.5).abs() < f64::EPSILON);
+    assert!((rollups[0].memory_used_ratio_max - 0.75).abs() < f64::EPSILON);
+    assert_eq!(rollups[0].swap_sample_count, 2);
+    assert_eq!(rollups[0].swap_total_bytes_max, Some(200));
+    assert_eq!(rollups[0].swap_available_bytes_avg, Some(63));
+    assert_eq!(rollups[0].swap_available_bytes_min, Some(50));
+    assert!((rollups[0].swap_used_ratio_avg.unwrap() - 0.5).abs() < f64::EPSILON);
+    assert!((rollups[0].swap_used_ratio_max.unwrap() - 0.75).abs() < f64::EPSILON);
+    assert_eq!(rollups[0].disk_total_bytes_max, 200);
+    assert_eq!(rollups[0].disk_available_bytes_avg, 63);
+    assert_eq!(rollups[0].disk_available_bytes_min, 50);
+    assert!((rollups[0].disk_used_ratio_avg - 0.5).abs() < f64::EPSILON);
+    assert!((rollups[0].disk_used_ratio_max - 0.75).abs() < f64::EPSILON);
 
     event.gateway_session_id = uuid::Uuid::new_v4();
     event.telemetry_seq = 1;
@@ -259,6 +305,46 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
     assert_eq!(event_ids.len(), 4);
     assert!(event_ids.iter().any(|event_id| event_id.ends_with(":2")));
     assert!(event_ids.iter().any(|event_id| event_id.ends_with(":3")));
+
+    let before_swap_removal = repo
+        .list_telemetry_rollups(10, Some("edge-a"), Some(60), false)
+        .await
+        .unwrap()
+        .remove(0);
+    event.telemetry_seq = 2;
+    event.telemetry.metrics.memory.swap_total_bytes = Some(0);
+    event.telemetry.metrics.memory.swap_available_bytes = Some(0);
+    assert!(repo.record_telemetry(&event).await.unwrap());
+    let after_swap_removal = repo
+        .list_telemetry_rollups(10, Some("edge-a"), Some(60), false)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(after_swap_removal.sample_count, 5);
+    assert_eq!(
+        after_swap_removal.swap_sample_count,
+        before_swap_removal.swap_sample_count
+    );
+    assert_eq!(
+        after_swap_removal.swap_total_bytes_max,
+        before_swap_removal.swap_total_bytes_max
+    );
+    assert_eq!(
+        after_swap_removal.swap_available_bytes_avg,
+        before_swap_removal.swap_available_bytes_avg
+    );
+    assert_eq!(
+        after_swap_removal.swap_available_bytes_min,
+        before_swap_removal.swap_available_bytes_min
+    );
+    assert_eq!(
+        after_swap_removal.swap_used_ratio_avg,
+        before_swap_removal.swap_used_ratio_avg
+    );
+    assert_eq!(
+        after_swap_removal.swap_used_ratio_max,
+        before_swap_removal.swap_used_ratio_max
+    );
 }
 
 #[tokio::test]

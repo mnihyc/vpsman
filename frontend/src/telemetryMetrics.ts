@@ -47,9 +47,9 @@ export function resourceMetricDefinition(metric: DashboardResourceMetric): strin
     case "cpu_load":
       return "Each chart point averages retained 60-second Linux 1-minute load rollups in the displayed interval; load is scheduler demand, not CPU utilization.";
     case "memory_used":
-      return "Each chart point averages retained 60-second used-memory ratios computed from MemTotal and MemAvailable; peak uses the lowest available-memory sample.";
+      return "Each chart point averages retained 60-second used-memory ratios computed independently from each MemTotal and MemAvailable snapshot; peak is the largest snapshot ratio.";
     case "disk_free":
-      return "Each chart point averages retained 60-second free-space ratios across reported filesystems; lowest uses the smallest available-space sample.";
+      return "Each chart point derives free space from retained per-snapshot aggregate-filesystem used ratios; lowest corresponds to the largest used ratio.";
   }
 }
 

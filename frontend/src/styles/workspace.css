@@ -2212,6 +2212,14 @@
   text-align: right;
 }
 
+.vpsMonitorMetric > strong small {
+  margin-left: 3px;
+  color: var(--muted);
+  font-size: 0.82em;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .vpsMonitorMetricTrack {
   grid-column: 1 / -1;
   display: block;
@@ -3317,10 +3325,10 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringChart .dashboardWidgetHeader small {
+  flex: 0 0 auto;
   max-width: 58%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .publicMonitoringChart .dashboardEmptyChart,

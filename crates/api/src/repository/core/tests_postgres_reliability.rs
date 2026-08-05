@@ -10,11 +10,11 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{
     pair_port_expressions, payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello,
-    AgentMetrics, AgentUpdateHeartbeat, CommandOutput, CpuStat, GatewayAgentHelloIngest,
-    GatewayTelemetryIngest, JobCommand, LoadAverage, NetworkStat, OspfControlMode, OspfCostPolicy,
-    OutputStream, PortForwardProtocol, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
-    RuntimeTunnelControl, RuntimeTunnelManager, TelemetryEnvelope, TunnelAddressPair, TunnelKind,
-    TunnelOspfConfig, TunnelPlanInput,
+    AgentMetrics, AgentUpdateHeartbeat, CommandOutput, CpuStat, DiskStat, GatewayAgentHelloIngest,
+    GatewayTelemetryIngest, JobCommand, LoadAverage, MemoryStat, NetworkStat, OspfControlMode,
+    OspfCostPolicy, OutputStream, PortForwardProtocol, PortForwardRuntimeSnapshot,
+    PortForwardRuntimeStatus, RuntimeTunnelControl, RuntimeTunnelManager, TelemetryEnvelope,
+    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -2269,6 +2269,17 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
                     cores: 2,
                     utilization_ratio: None,
                 },
+                memory: MemoryStat {
+                    total_bytes: 200,
+                    available_bytes: 50,
+                    swap_total_bytes: Some(200),
+                    swap_available_bytes: Some(50),
+                },
+                disks: vec![DiskStat {
+                    mountpoint: "/".to_string(),
+                    total_bytes: 200,
+                    available_bytes: 50,
+                }],
                 ..AgentMetrics::default()
             },
         },
@@ -2278,15 +2289,46 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     assert!(!db.repo.record_telemetry(&event).await.unwrap());
     event.telemetry_seq = 1;
     event.telemetry.metrics.cpu.load.one = 99.0;
+    event.telemetry.metrics.cpu.cores = 64;
+    event.telemetry.metrics.memory = MemoryStat {
+        total_bytes: 10_000,
+        available_bytes: 0,
+        swap_total_bytes: Some(10_000),
+        swap_available_bytes: Some(0),
+    };
+    event.telemetry.metrics.disks[0].total_bytes = 10_000;
+    event.telemetry.metrics.disks[0].available_bytes = 0;
     assert!(!db.repo.record_telemetry(&event).await.unwrap());
     event.telemetry_seq = 3;
     event.telemetry.metrics.cpu.load.one = 3.0;
+    event.telemetry.metrics.cpu.cores = 4;
+    event.telemetry.metrics.memory = MemoryStat {
+        total_bytes: 100,
+        available_bytes: 75,
+        swap_total_bytes: Some(100),
+        swap_available_bytes: Some(75),
+    };
+    event.telemetry.metrics.disks[0].total_bytes = 100;
+    event.telemetry.metrics.disks[0].available_bytes = 75;
     assert!(db.repo.record_telemetry(&event).await.unwrap());
     let reconnect_session_id = Uuid::new_v4();
     start_test_gateway_session(&db.repo, "gateway-a", client_id, reconnect_session_id).await;
     event.gateway_session_id = reconnect_session_id;
     event.telemetry_seq = 1;
     event.telemetry.metrics.cpu.load.one = 4.0;
+    event.telemetry.metrics.cpu.cores = 8;
+    event.telemetry.metrics.memory = MemoryStat {
+        total_bytes: 400,
+        available_bytes: 200,
+        swap_total_bytes: Some(400),
+        swap_available_bytes: Some(200),
+    };
+    event.telemetry.metrics.disks[0].total_bytes = 400;
+    event.telemetry.metrics.disks[0].available_bytes = 200;
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+    event.telemetry_seq = 2;
+    event.telemetry.metrics.memory.swap_total_bytes = Some(0);
+    event.telemetry.metrics.memory.swap_available_bytes = Some(0);
     assert!(db.repo.record_telemetry(&event).await.unwrap());
 
     let sample_count: i64 = sqlx::query_scalar(
@@ -2296,7 +2338,100 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(sample_count, 3);
+    assert_eq!(sample_count, 4);
+    let resource_rollup = sqlx::query(
+        r#"
+        SELECT
+            cpu_cores_max,
+            memory_total_bytes_max,
+            memory_available_bytes_avg,
+            memory_available_bytes_min,
+            memory_used_ratio_avg,
+            memory_used_ratio_max,
+            swap_sample_count,
+            swap_total_bytes_max,
+            swap_available_bytes_avg,
+            swap_available_bytes_min,
+            swap_used_ratio_avg,
+            swap_used_ratio_max,
+            disk_total_bytes_max,
+            disk_available_bytes_avg,
+            disk_available_bytes_min,
+            disk_used_ratio_avg,
+            disk_used_ratio_max
+        FROM telemetry_rollups
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(resource_rollup.get::<i32, _>("cpu_cores_max"), 8);
+    assert_eq!(resource_rollup.get::<i64, _>("memory_total_bytes_max"), 400);
+    assert_eq!(
+        resource_rollup.get::<i64, _>("memory_available_bytes_avg"),
+        132
+    );
+    assert_eq!(
+        resource_rollup.get::<i64, _>("memory_available_bytes_min"),
+        50
+    );
+    assert!((resource_rollup.get::<f64, _>("memory_used_ratio_avg") - 0.5).abs() < f64::EPSILON);
+    assert!((resource_rollup.get::<f64, _>("memory_used_ratio_max") - 0.75).abs() < f64::EPSILON);
+    assert_eq!(resource_rollup.get::<i32, _>("swap_sample_count"), 3);
+    assert_eq!(
+        resource_rollup.get::<Option<i64>, _>("swap_total_bytes_max"),
+        Some(400)
+    );
+    assert_eq!(
+        resource_rollup.get::<Option<i64>, _>("swap_available_bytes_avg"),
+        Some(109)
+    );
+    assert_eq!(
+        resource_rollup.get::<Option<i64>, _>("swap_available_bytes_min"),
+        Some(50)
+    );
+    assert!(
+        (resource_rollup
+            .get::<Option<f64>, _>("swap_used_ratio_avg")
+            .unwrap()
+            - 0.5)
+            .abs()
+            < f64::EPSILON
+    );
+    assert!(
+        (resource_rollup
+            .get::<Option<f64>, _>("swap_used_ratio_max")
+            .unwrap()
+            - 0.75)
+            .abs()
+            < f64::EPSILON
+    );
+    assert_eq!(resource_rollup.get::<i64, _>("disk_total_bytes_max"), 400);
+    assert_eq!(
+        resource_rollup.get::<i64, _>("disk_available_bytes_avg"),
+        132
+    );
+    assert_eq!(
+        resource_rollup.get::<i64, _>("disk_available_bytes_min"),
+        50
+    );
+    assert!((resource_rollup.get::<f64, _>("disk_used_ratio_avg") - 0.5).abs() < f64::EPSILON);
+    assert!((resource_rollup.get::<f64, _>("disk_used_ratio_max") - 0.75).abs() < f64::EPSILON);
+    for invalid_swap_state in [
+        "swap_sample_count = 0, swap_total_bytes_max = NULL, swap_available_bytes_avg = 0, swap_available_bytes_min = 0, swap_used_ratio_avg = NULL, swap_used_ratio_max = NULL",
+        "swap_sample_count = 0, swap_total_bytes_max = 0, swap_available_bytes_avg = NULL, swap_available_bytes_min = NULL, swap_used_ratio_avg = NULL, swap_used_ratio_max = NULL",
+        "swap_sample_count = 1, swap_total_bytes_max = NULL, swap_available_bytes_avg = 0, swap_available_bytes_min = 0, swap_used_ratio_avg = 0, swap_used_ratio_max = 0",
+    ] {
+        let result = sqlx::query(&format!(
+            "UPDATE telemetry_rollups SET {invalid_swap_state} WHERE client_id = $1"
+        ))
+        .bind(client_id)
+        .execute(&db.pool)
+        .await;
+        assert!(result.is_err(), "invalid swap state was accepted");
+    }
     let (gateway_session_id, telemetry_seq): (Uuid, i64) = sqlx::query_as(
         "SELECT gateway_session_id, telemetry_seq FROM telemetry_ingest_watermarks WHERE client_id = $1",
     )
@@ -2305,7 +2440,7 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .await
     .unwrap();
     assert_eq!(gateway_session_id, reconnect_session_id);
-    assert_eq!(telemetry_seq, 1);
+    assert_eq!(telemetry_seq, 2);
     let webhook_event_count: i64 = sqlx::query_scalar(
         "SELECT count(*)::bigint FROM webhook_events WHERE kind = 'telemetry.rollup' AND event_id LIKE $1",
     )
@@ -2313,7 +2448,7 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(webhook_event_count, 3);
+    assert_eq!(webhook_event_count, 4);
 
     db.cleanup().await;
 }
@@ -2598,13 +2733,16 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             INSERT INTO telemetry_rollups (
                 client_id, bucket_start, bucket_secs, sample_count,
                 cpu_load_1_avg, cpu_load_1_max,
-                memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
-                disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+                memory_total_bytes_max, memory_available_bytes_avg,
+                memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
+                disk_total_bytes_max, disk_available_bytes_avg,
+                disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
                 network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
             )
             VALUES (
                 $1, to_timestamp($2::double precision), 60, 1,
-                $3, $3, 1000, 500, 500, 2000, 1500, 1500, 0, 0,
+                $3, $3, 1000, 500, 500, 0.5, 0.5,
+                2000, 1500, 1500, 0.25, 0.25, 0, 0,
                 to_timestamp($2::double precision)
             )
             "#,
@@ -2688,19 +2826,23 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         INSERT INTO telemetry_rollups (
             client_id, bucket_start, bucket_secs, sample_count,
             cpu_load_1_avg, cpu_load_1_max,
-            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
-            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         )
         VALUES
             (
                 'selected-telemetry', to_timestamp($1::double precision), 60, 1,
-                1.0, 1.2, 1000, 900, 900, 2000, 1900, 1900, 0, 0,
+                1.0, 1.2, 1000, 900, 900, 0.1, 0.1,
+                2000, 1900, 1900, 0.05, 0.05, 0, 0,
                 to_timestamp($1::double precision)
             ),
             (
                 'selected-telemetry', to_timestamp($2::double precision), 60, 3,
-                3.0, 3.4, 1000, 500, 500, 2000, 1100, 1100, 0, 0,
+                3.0, 3.4, 1000, 500, 500, 0.5, 0.5,
+                2000, 1100, 1100, 0.45, 0.45, 0, 0,
                 to_timestamp($2::double precision)
             )
         "#,
@@ -2733,32 +2875,41 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     assert_eq!(aggregated[0].cpu_load_1_max, 3.4);
     assert_eq!(aggregated[0].memory_available_bytes_avg, 580);
     assert_eq!(aggregated[0].memory_available_bytes_min, 500);
+    assert!((aggregated[0].memory_used_ratio_avg - 0.42).abs() < 0.000_001);
+    assert!((aggregated[0].memory_used_ratio_max - 0.5).abs() < 0.000_001);
     assert_eq!(aggregated[0].disk_available_bytes_avg, 1340);
     assert_eq!(aggregated[0].disk_available_bytes_min, 1100);
+    assert!((aggregated[0].disk_used_ratio_avg - 0.33).abs() < 0.000_001);
+    assert!((aggregated[0].disk_used_ratio_max - 0.45).abs() < 0.000_001);
 
     sqlx::query(
         r#"
         INSERT INTO telemetry_rollups (
             client_id, bucket_start, bucket_secs, sample_count,
             cpu_load_1_avg, cpu_load_1_max,
-            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
-            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         )
         VALUES
             (
                 'multi-day-telemetry', to_timestamp(0), 60, 1,
-                1.0, 1.0, 1000, 900, 900, 2000, 1900, 1900, 0, 0,
+                1.0, 1.0, 1000, 900, 900, 0.1, 0.1,
+                2000, 1900, 1900, 0.05, 0.05, 0, 0,
                 to_timestamp(0)
             ),
             (
                 'multi-day-telemetry', to_timestamp(172800), 60, 1,
-                2.0, 2.0, 1000, 800, 800, 2000, 1800, 1800, 0, 0,
+                2.0, 2.0, 1000, 800, 800, 0.2, 0.2,
+                2000, 1800, 1800, 0.1, 0.1, 0, 0,
                 to_timestamp(172800)
             ),
             (
                 'multi-day-telemetry', to_timestamp(345600), 60, 1,
-                3.0, 3.0, 1000, 700, 700, 2000, 1700, 1700, 0, 0,
+                3.0, 3.0, 1000, 700, 700, 0.3, 0.3,
+                2000, 1700, 1700, 0.15, 0.15, 0, 0,
                 to_timestamp(345600)
             )
         "#,
@@ -3166,17 +3317,21 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             cpu_usage_sample_count, cpu_usage_avg, cpu_usage_max, cpu_cores_max,
             cpu_load_1_avg, cpu_load_1_max,
             cpu_load_5_avg, cpu_load_5_max, cpu_load_15_avg, cpu_load_15_max,
-            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
             swap_sample_count, swap_total_bytes_max,
             swap_available_bytes_avg, swap_available_bytes_min,
-            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            swap_used_ratio_avg, swap_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         ) VALUES (
             'adaptive-telemetry', to_timestamp($1::double precision), 300, 5,
             5, 0.25, 0.25, 2,
             0.5, 0.5, 0.4, 0.4, 0.3, 0.3,
-            1000, 500, 500, 1, 1000, 400, 400,
-            2000, 1000, 1000, 0, 0,
+            1000, 500, 500, 0.5, 0.5,
+            1, 1000, 400, 400, 0.6, 0.6,
+            2000, 1000, 1000, 0.5, 0.5, 0, 0,
             to_timestamp(($1::bigint + 299)::double precision)
         )
         "#,
@@ -3213,10 +3368,14 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             row.swap_total_bytes_max.is_none()
                 && row.swap_available_bytes_avg.is_none()
                 && row.swap_available_bytes_min.is_none()
+                && row.swap_used_ratio_avg.is_none()
+                && row.swap_used_ratio_max.is_none()
         } else {
             row.swap_total_bytes_max == Some(1_000)
                 && row.swap_available_bytes_avg == Some(400)
                 && row.swap_available_bytes_min == Some(400)
+                && row.swap_used_ratio_avg == Some(0.6)
+                && row.swap_used_ratio_max == Some(0.6)
         }
     }));
 
@@ -3340,13 +3499,16 @@ async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded()
         INSERT INTO telemetry_rollups (
             client_id, bucket_start, bucket_secs, sample_count,
             cpu_load_1_avg, cpu_load_1_max,
-            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
-            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         )
         SELECT
             id, date_trunc('minute', now()), 60, 1,
-            2.0, 2.0, 1000, 500, 500, 2000, 1500, 1500, 0, 0, now()
+            2.0, 2.0, 1000, 500, 500, 0.5, 0.5,
+            2000, 1500, 1500, 0.25, 0.25, 0, 0, now()
         FROM visible_clients
         WHERE id LIKE 'policy-rollup-scale-%'
         "#,
@@ -3958,13 +4120,16 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
         INSERT INTO telemetry_rollups (
             client_id, bucket_start, bucket_secs, sample_count,
             cpu_load_1_avg, cpu_load_1_max,
-            memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
-            disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_min, memory_used_ratio_avg, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_min, disk_used_ratio_avg, disk_used_ratio_max,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         )
         VALUES (
             $1, date_trunc('minute', now()), 60, 1,
-            2.0, 2.0, 1000, 500, 500, 2000, 1500, 1500, 0, 0, now()
+            2.0, 2.0, 1000, 500, 500, 0.5, 0.5,
+            2000, 1500, 1500, 0.25, 0.25, 0, 0, now()
         )
         "#,
     )

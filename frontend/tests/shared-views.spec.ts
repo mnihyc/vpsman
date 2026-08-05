@@ -443,7 +443,9 @@ test("public monitoring keeps grid and detail history state without exposing hid
   await expect(card.getByText("Billing", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Uptime", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Filter shared VPSs by tag")).toHaveCount(0);
-  await expect(page.getByLabel("Filter shared VPSs by provider")).toHaveCount(0);
+  await expect(page.getByLabel("Filter shared VPSs by provider")).toHaveCount(
+    0,
+  );
 
   const cardGrid = page.getByLabel("Shared VPS cards");
   const columnCount = () =>
@@ -495,9 +497,7 @@ test("public monitoring keeps grid and detail history state without exposing hid
   await expect(detail.getByLabel("Current shared VPS evidence")).toContainText(
     "Customer gateway",
   );
-  await expect(
-    detail.getByText("System", { exact: true }),
-  ).toHaveCount(0);
+  await expect(detail.getByText("System", { exact: true })).toHaveCount(0);
   await expect(detail.getByText("Billing", { exact: true })).toHaveCount(0);
   await detail
     .getByRole("button", {
@@ -597,6 +597,23 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   await expect(
     card.getByLabel("Current resources for Shared edge"),
   ).toBeVisible();
+  await expect(card.locator(".vpsMonitorMetric > strong small")).toHaveText([
+    "(4-core)",
+    "(3.7 GiB)",
+    "(47 GiB)",
+  ]);
+  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  const resourceMetrics = card.locator(".vpsMonitorMetric");
+  for (const index of [0, 1, 2]) {
+    await expect(
+      resourceMetrics.nth(index).locator(":scope > small"),
+    ).toHaveCount(0);
+  }
+  await expect(resourceMetrics.nth(3).locator(":scope > small")).toContainText(
+    "5m",
+  );
+  await expect(card).not.toContainText("maximum reported capacity");
+  await expect(card).not.toContainText("reported cores");
   await expect(card.getByText("TCP", { exact: true })).toBeVisible();
   await expect(card.getByText("Unlimited", { exact: false })).toBeVisible();
   const cardBilling = card.getByText("Billing", { exact: true }).locator("..");
@@ -625,7 +642,13 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     detail.getByText(/35\.00 ¥\/m · Renews day 15/).first(),
   ).toBeVisible();
   await expect(detail.getByText("Swap", { exact: true })).toBeVisible();
-  await expect(detail.getByText("512 MiB / 2.0 GiB")).toBeVisible();
+  await expect(detail.getByText("None", { exact: true })).toBeVisible();
+  await expect(
+    detail.getByText("RAM", { exact: true }).locator(".."),
+  ).toHaveAttribute("title", "25.0% (3.7 GiB)");
+  await expect(
+    detail.getByText("Reported filesystems", { exact: true }).locator(".."),
+  ).toHaveAttribute("title", "40.0% (47 GiB)");
   await expect(detail.locator(".publicMonitoringDetailHeader")).toContainText(
     "Online · Warning · Updated just now · Read-only history",
   );
@@ -693,8 +716,20 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     name: "Memory / swap used chart",
   });
   await expect(
+    memoryChart.locator(".dashboardWidgetHeader > small"),
+  ).toHaveText("Max · RAM 7.5 GiB · Swap 1.9 GiB");
+  await expect(
     memoryChart.getByRole("button", { name: "Hide Swap used series" }),
   ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    memoryChart.locator("table.srOnly tbody tr").last().locator("td").nth(1),
+  ).toHaveText("No data");
+  const diskChart = detail.getByRole("region", {
+    name: "Aggregate reported disk used chart",
+  });
+  await expect(diskChart.locator(".dashboardWidgetHeader > small")).toHaveText(
+    "93 GiB maximum",
+  );
 
   const range = detail.getByRole("group", { name: "History range" });
   await expect(range.getByRole("button")).toHaveText([
@@ -778,9 +813,9 @@ test("public monitoring labels retained traffic after accounting is unconfigured
   await expect(detail).toContainText(
     "Retained volume predates the current unconfigured accounting state",
   );
-  await expect(detail.getByLabel("Current shared VPS evidence")).not.toContainText(
-    "Traffic",
-  );
+  await expect(
+    detail.getByLabel("Current shared VPS evidence"),
+  ).not.toContainText("Traffic");
   await expect(detail).not.toContainText("Traffic cycle");
 });
 
@@ -823,9 +858,7 @@ test("public monitoring omits empty billing and system groups even when shared",
     name: "Read-only history for Shared edge",
   });
   await expect(detail).toBeVisible();
-  await expect(
-    detail.getByText("System", { exact: true }),
-  ).toHaveCount(0);
+  await expect(detail.getByText("System", { exact: true })).toHaveCount(0);
   await expect(detail).not.toContainText("Billing unavailable");
   await expect(detail).not.toContainText("System information unavailable");
 });
@@ -841,7 +874,9 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
   await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
 
   const grid = page.getByLabel("Shared VPS cards");
-  await page.getByLabel("Filter shared VPSs by provider").selectOption("Hetzner");
+  await page
+    .getByLabel("Filter shared VPSs by provider")
+    .selectOption("Hetzner");
   await expect(grid.getByRole("link")).toHaveCount(2);
   await page.getByLabel("Filter shared VPSs by provider").selectOption("all");
   await page.getByLabel("Filter shared VPSs by tag").selectOption("country:JP");
@@ -1329,16 +1364,19 @@ async function installPublicMonitoringApiMock(
       cpu_usage_avg: 0.24,
       disk_available_bytes: 60_000_000_000,
       disk_total_bytes: 100_000_000_000,
+      disk_used_ratio_avg: 0.4,
       load_1: 0.8,
       load_5: 0.7,
       load_15: 0.6,
       memory_available_bytes: 6_000_000_000,
       memory_total_bytes: 8_000_000_000,
+      memory_used_ratio_avg: 0.25,
       observed_at: observedAt,
       sample_count: 1,
       swap_available_bytes: 1_500_000_000,
       swap_sample_count: 1,
       swap_total_bytes: 2_000_000_000,
+      swap_used_ratio_avg: 0.25,
       tcp_sockets: 37,
       udp_sockets: 4,
     };
@@ -1407,6 +1445,21 @@ async function installPublicMonitoringApiMock(
       load_5: 0.65 + Math.sin(index / 5) * 0.12,
       load_15: 0.6 + Math.sin(index / 6) * 0.08,
       memory_available_bytes: 6_000_000_000 - Math.sin(index / 4) * 300_000_000,
+      memory_used_ratio_avg:
+        1 -
+        (6_000_000_000 - Math.sin(index / 4) * 300_000_000) /
+          resourceBase.memory_total_bytes,
+      swap_available_bytes:
+        index === visualBuckets.length - 1
+          ? 0
+          : resourceBase.swap_available_bytes,
+      swap_sample_count: index === visualBuckets.length - 1 ? 0 : 1,
+      swap_total_bytes:
+        index === visualBuckets.length - 1 ? 0 : resourceBase.swap_total_bytes,
+      swap_used_ratio_avg:
+        index === visualBuckets.length - 1
+          ? undefined
+          : resourceBase.swap_used_ratio_avg,
       tcp_sockets: 37 + Math.round(Math.sin(index / 3) * 5),
       udp_sockets: 4 + Math.round(Math.cos(index / 4)),
     }));
@@ -1486,6 +1539,17 @@ async function installPublicMonitoringApiMock(
         })),
       ),
     ];
+    card.resources = {
+      ...card.resources!,
+      disk_available_bytes: 30_000_000_000,
+      disk_total_bytes: 50_000_000_000,
+      memory_available_bytes: 3_000_000_000,
+      memory_total_bytes: 4_000_000_000,
+      swap_available_bytes: 0,
+      swap_sample_count: 0,
+      swap_total_bytes: 0,
+      swap_used_ratio_avg: undefined,
+    };
   }
   if (!trafficConfigured && !retainTrafficHistory) {
     detail.traffic = undefined;
@@ -1512,6 +1576,10 @@ async function installPublicMonitoringApiMock(
           load_1: card.resources.load_1 + index * 0.16,
           memory_available_bytes:
             card.resources.memory_available_bytes - index * 240_000_000,
+          memory_used_ratio_avg:
+            1 -
+            (card.resources.memory_available_bytes - index * 240_000_000) /
+              card.resources.memory_total_bytes,
           tcp_sockets: (card.resources.tcp_sockets ?? 30) + index * 7,
           udp_sockets: (card.resources.udp_sockets ?? 4) + index,
         }

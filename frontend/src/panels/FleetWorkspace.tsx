@@ -3533,17 +3533,13 @@ function memoryUsedRatio(
   rollup: TelemetryRollupRecord | null | undefined,
 ): number | null {
   if (!rollup || rollup.memory_total_bytes_max <= 0) return null;
-  return (
-    ((rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg) /
-      rollup.memory_total_bytes_max) *
-    100
-  );
+  return rollup.memory_used_ratio_avg * 100;
 }
 function diskFreeRatio(
   rollup: TelemetryRollupRecord | null | undefined,
 ): number | null {
   if (!rollup || rollup.disk_total_bytes_max <= 0) return null;
-  return (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100;
+  return (1 - rollup.disk_used_ratio_avg) * 100;
 }
 function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
   return rates.reduce(
@@ -9259,10 +9255,8 @@ function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
     return "Awaiting rollup";
   }
-  const used =
-    rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg;
-  const percent = Math.round((used / rollup.memory_total_bytes_max) * 100);
-  return `${percent}% (${formatBytes(used)} / ${formatBytes(rollup.memory_total_bytes_max)})`;
+  const percent = Math.round(rollup.memory_used_ratio_avg * 100);
+  return `${percent}% (${formatBytes(rollup.memory_total_bytes_max)})`;
 }
 
 function formatDiskFreeCompact(
@@ -9277,9 +9271,9 @@ function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
     return "Awaiting rollup";
   }
   const percent = Math.round(
-    (rollup.disk_available_bytes_avg / rollup.disk_total_bytes_max) * 100,
+    (1 - rollup.disk_used_ratio_avg) * 100,
   );
-  return `${percent}% free (${formatBytes(rollup.disk_available_bytes_avg)} / ${formatBytes(rollup.disk_total_bytes_max)})`;
+  return `${percent}% free (${formatBytes(rollup.disk_total_bytes_max)})`;
 }
 
 function formatRollupFreshness(

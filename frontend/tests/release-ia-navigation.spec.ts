@@ -879,7 +879,9 @@ test("release IA reaches every configured page and subpage", async ({
       if (ownsFleetSummary) {
         await expect(header.getByLabel("Fleet status summary")).toHaveCount(0);
         if (subpage.id === "monitor") {
-          await expect(page.getByLabel("VPS cards fleet summary")).toBeVisible();
+          await expect(
+            page.getByLabel("VPS cards fleet summary"),
+          ).toBeVisible();
         }
       } else {
         await expect(header.getByLabel("Fleet status summary")).toBeVisible();
@@ -1997,7 +1999,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     .first();
   await expect(edgeCard).toHaveAttribute("role", "link");
   await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
-    "Renews 14",
+    "Renews day 14",
   );
   const snapshot = page.getByLabel("VPS cards current totals");
   await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
@@ -2022,6 +2024,17 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   ).not.toBeVisible();
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(0);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
+  const resourceMetrics = edgeCard.locator(".vpsMonitorMetric");
+  await expect(resourceMetrics.locator(":scope > strong small")).toHaveText([
+    "(4-core)",
+    "(7.5 GiB)",
+    "(93 GiB)",
+  ]);
+  for (const index of [0, 1, 2]) {
+    await expect(
+      resourceMetrics.nth(index).locator(":scope > small"),
+    ).toHaveCount(0);
+  }
   const compactFirstRow = await monitorFirstRowCount(monitor);
   const compactCardWidth = await monitor
     .locator(".vpsMonitorCard")
@@ -2057,11 +2070,16 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     "29.90 ¥/m",
   );
   await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
-    "Renews 14",
+    "Renews day 14",
   );
   await expect(edgeCard).toContainText("1m load");
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
+  for (const index of [0, 1, 2]) {
+    await expect(
+      resourceMetrics.nth(index).locator(":scope > small"),
+    ).toHaveCount(0);
+  }
 
   await page
     .getByLabel("VPS cards density")
@@ -2722,12 +2740,10 @@ test("VPS detail sections stay scoped to their resource history entry", async ({
   const detailSection = detail
     .locator(".detailTabSelect:visible")
     .getByLabel("VPS detail section");
-  const resourcesTab = detail
-    .locator(".detailTabs:visible")
-    .getByRole("tab", {
-      name: "Resources",
-      exact: true,
-    });
+  const resourcesTab = detail.locator(".detailTabs:visible").getByRole("tab", {
+    name: "Resources",
+    exact: true,
+  });
   await expect(detailSection.or(resourcesTab)).toBeVisible();
   const usesSectionSelector = (await detailSection.count()) === 1;
   if (usesSectionSelector) {

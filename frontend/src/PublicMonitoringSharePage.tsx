@@ -451,9 +451,7 @@ export function PublicMonitoringSharePage({
         : [],
     [cards, identityContextVisible],
   );
-  const effectiveTagFilter = tagOptions.includes(tagFilter)
-    ? tagFilter
-    : "all";
+  const effectiveTagFilter = tagOptions.includes(tagFilter) ? tagFilter : "all";
   const effectiveProviderFilter = providerOptions.includes(providerFilter)
     ? providerFilter
     : "all";
@@ -480,12 +478,9 @@ export function PublicMonitoringSharePage({
           matchesSearch &&
           (statusFilter === "all" ||
             publicCardStatusGroup(card, share?.visibility) === statusFilter) &&
-          (effectiveTagFilter === "all" ||
-            tags.includes(effectiveTagFilter)) &&
+          (effectiveTagFilter === "all" || tags.includes(effectiveTagFilter)) &&
           (effectiveProviderFilter === "all" ||
-            publicTagValues(tags, "provider").includes(
-              effectiveProviderFilter,
-            ))
+            publicTagValues(tags, "provider").includes(effectiveProviderFilter))
         );
       })
       .sort((left, right) =>
@@ -778,11 +773,17 @@ export function PublicMonitoringSharePage({
                 <span>
                   <small>Realtime speed</small>
                   <strong>
-                    ↓ {formatByteRateFromBitsPerSecond(fleetSnapshot.network.rxBps)}
+                    ↓{" "}
+                    {formatByteRateFromBitsPerSecond(
+                      fleetSnapshot.network.rxBps,
+                    )}
                   </strong>
                   <em>
-                    ↑ {formatByteRateFromBitsPerSecond(fleetSnapshot.network.txBps)} ·{" "}
-                    {fleetSnapshot.network.freshCount} fresh
+                    ↑{" "}
+                    {formatByteRateFromBitsPerSecond(
+                      fleetSnapshot.network.txBps,
+                    )}{" "}
+                    · {fleetSnapshot.network.freshCount} fresh
                     {cardsComplete ? "" : " · partial"}
                   </em>
                 </span>
@@ -919,14 +920,14 @@ function PublicMonitoringCardView({
 }) {
   const resource = card.resources;
   const cpuPercent = ratioToPercent(resource?.cpu_usage_avg);
-  const memoryUsed = usedPercent(
-    resource?.memory_total_bytes,
-    resource?.memory_available_bytes,
-  );
-  const diskUsed = usedPercent(
-    resource?.disk_total_bytes,
-    resource?.disk_available_bytes,
-  );
+  const memoryUsed =
+    resource && resource.memory_total_bytes > 0
+      ? ratioToPercent(resource.memory_used_ratio_avg)
+      : null;
+  const diskUsed =
+    resource && resource.disk_total_bytes > 0
+      ? ratioToPercent(resource.disk_used_ratio_avg)
+      : null;
   const loadPressure =
     resource && resource.cpu_cores > 0
       ? (resource.load_1 / resource.cpu_cores) * 100
@@ -1028,52 +1029,35 @@ function PublicMonitoringCardView({
             }
             icon={<Activity size={15} />}
             label="CPU"
-            percent={cpuPercent}
-            showCaption={density === "comfortable"}
-            stale={Boolean(resourceProblem)}
-            value={
-              density === "compact" && resource
-                ? `${formatPercent(cpuPercent)} · ${resource.cpu_cores}c`
-                : formatPercent(cpuPercent)
+            context={
+              resource && resource.cpu_cores > 0
+                ? `${resource.cpu_cores}-core`
+                : undefined
             }
+            percent={cpuPercent}
+            showCaption={false}
+            stale={Boolean(resourceProblem)}
+            value={formatPercent(cpuPercent)}
           />
           <PublicMetric
-            caption={capacityCaption(
-              resource?.memory_total_bytes,
-              resource?.memory_available_bytes,
-            )}
+            caption={maximumCapacityCaption(resource?.memory_total_bytes)}
             icon={<Gauge size={15} />}
             label="RAM"
+            context={maximumCapacity(resource?.memory_total_bytes)}
             percent={memoryUsed}
-            showCaption={density === "comfortable"}
+            showCaption={false}
             stale={Boolean(resourceProblem)}
-            value={
-              density === "compact"
-                ? compactCapacity(
-                    resource?.memory_total_bytes,
-                    resource?.memory_available_bytes,
-                  )
-                : formatPercent(memoryUsed)
-            }
+            value={formatPercent(memoryUsed)}
           />
           <PublicMetric
-            caption={capacityCaption(
-              resource?.disk_total_bytes,
-              resource?.disk_available_bytes,
-            )}
+            caption={maximumCapacityCaption(resource?.disk_total_bytes)}
             icon={<Server size={15} />}
             label="Disk"
+            context={maximumCapacity(resource?.disk_total_bytes)}
             percent={diskUsed}
-            showCaption={density === "comfortable"}
+            showCaption={false}
             stale={Boolean(resourceProblem)}
-            value={
-              density === "compact"
-                ? compactCapacity(
-                    resource?.disk_total_bytes,
-                    resource?.disk_available_bytes,
-                  )
-                : formatPercent(diskUsed)
-            }
+            value={formatPercent(diskUsed)}
           />
           <PublicMetric
             caption={
@@ -1185,6 +1169,7 @@ function PublicMonitoringCardView({
 
 function PublicMetric({
   caption,
+  context,
   icon,
   label,
   percent,
@@ -1194,6 +1179,7 @@ function PublicMetric({
   value,
 }: {
   caption: string;
+  context?: string;
   icon: ReactNode;
   label: string;
   percent: number | null;
@@ -1204,6 +1190,7 @@ function PublicMetric({
 }) {
   return (
     <MonitorMetric
+      context={context}
       icon={icon}
       label={label}
       meterCaption={caption}
@@ -1261,12 +1248,10 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
   const fill = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const problem = publicTrafficProblem(traffic);
   const portSpeed = traffic.port_speed?.display;
-  const cycleSummary = traffic.configured
-    ? trafficCycleSummary(traffic)
-    : "";
+  const cycleSummary = traffic.configured ? trafficCycleSummary(traffic) : "";
   const trafficDetail = traffic.configured
-    ? problem ??
-      `RX ${formatOptionalBytes(traffic.rx_bytes)} · TX ${formatOptionalBytes(traffic.tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
+    ? (problem ??
+      `RX ${formatOptionalBytes(traffic.rx_bytes)} · TX ${formatOptionalBytes(traffic.tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`)
     : "Authoritative traffic accounting is not configured for this VPS.";
   return (
     <div
@@ -1407,15 +1392,28 @@ function PublicMonitoringDetailPanel({
   const resourceTimeline = regularTimeline(resources, detail?.range);
   const networkTimeline = regularTimeline(network, detail?.range);
   const trafficTimeline = regularTimeline(traffic, detail?.range);
-  const hasSwapHistory = resources.some((point) => {
+  const hasSwapHistory = resourceTimeline.records.some((point) => {
+    if (!point) return false;
     const total = finiteNumber(point.swap_total_bytes);
     return (
       point.swap_sample_count > 0 &&
       total !== null &&
       total > 0 &&
-      finiteNumber(point.swap_available_bytes) !== null
+      finiteNumber(point.swap_used_ratio_avg) !== null
     );
   });
+  const memoryCapacityMaximum = maximumResourceCapacity(
+    resourceTimeline.records,
+    (point) => point.memory_total_bytes,
+  );
+  const swapCapacityMaximum = maximumResourceCapacity(
+    resourceTimeline.records,
+    (point) => point.swap_total_bytes,
+  );
+  const diskCapacityMaximum = maximumResourceCapacity(
+    resourceTimeline.records,
+    (point) => point.disk_total_bytes,
+  );
   const hasTrafficHistory = traffic.some((point) =>
     [point.rx_bytes, point.tx_bytes, point.total_bytes].some(
       (value) => finiteNumber(value) !== null,
@@ -1456,14 +1454,13 @@ function PublicMonitoringDetailPanel({
     : "";
   const resourcesAvailable = Boolean(
     detail &&
-      (detail.resources !== undefined ||
-        detail.network !== undefined ||
-        (detail.traffic !== undefined &&
-          (currentTrafficConfigured || hasTrafficHistory))),
+    (detail.resources !== undefined ||
+      detail.network !== undefined ||
+      (detail.traffic !== undefined &&
+        (currentTrafficConfigured || hasTrafficHistory))),
   );
   const pingAvailable = Boolean(
-    detail &&
-      (detail.ping_targets !== undefined || detail.ping !== undefined),
+    detail && (detail.ping_targets !== undefined || detail.ping !== undefined),
   );
   const resourceSectionSummary = [
     detail?.resources !== undefined ? "resources" : null,
@@ -1517,7 +1514,11 @@ function PublicMonitoringDetailPanel({
               : ""}
           </p>
         </div>
-        <button aria-label="Back to shared fleet" onClick={onClose} type="button">
+        <button
+          aria-label="Back to shared fleet"
+          onClick={onClose}
+          type="button"
+        >
           Back to fleet
         </button>
       </header>
@@ -1609,157 +1610,161 @@ function PublicMonitoringDetailPanel({
                     <small>Utilization, capacity, load, and connections</small>
                   </header>
                   <div className="dashboardWidgetGrid publicMonitoringDetailCharts">
-                <PublicChart
-                  emptyLabel="CPU utilization is unavailable for this range"
-                  exportFileName={`${exportPrefix}-cpu`}
-                  label="CPU utilization"
-                  lines={[
-                    {
-                      color: consolePalette.chart.blue,
-                      label: "CPU",
-                      values: resourceTimeline.records.map((point) =>
-                        ratioToPercent(point?.cpu_usage_avg),
-                      ),
-                    },
-                  ]}
-                  summary={formatPercent(
-                    ratioToPercent(card.resources?.cpu_usage_avg),
-                  )}
-                  times={resourceTimeline.times}
-                  valueFormatter={(value) => formatPercent(value)}
-                />
-                <PublicChart
-                  emptyLabel="Load history is unavailable for this range"
-                  exportFileName={`${exportPrefix}-load`}
-                  label="Load 1 / 5 / 15"
-                  lines={[
-                    {
-                      color: consolePalette.chart.blue,
-                      label: "Load 1",
-                      values: resourceTimeline.records.map(
-                        (point) => point?.load_1 ?? null,
-                      ),
-                    },
-                    {
-                      color: consolePalette.chart.green,
-                      label: "Load 5",
-                      values: resourceTimeline.records.map(
-                        (point) => point?.load_5 ?? null,
-                      ),
-                    },
-                    {
-                      color: consolePalette.chart.orange,
-                      label: "Load 15",
-                      values: resourceTimeline.records.map(
-                        (point) => point?.load_15 ?? null,
-                      ),
-                    },
-                  ]}
-                  summary={
-                    card.resources
-                      ? [
-                          card.resources.load_1,
-                          card.resources.load_5,
-                          card.resources.load_15,
-                        ]
-                          .map(formatLoad)
-                          .join(" / ")
-                      : "No data"
-                  }
-                  times={resourceTimeline.times}
-                  valueFormatter={(value) =>
-                    value === null ? "No data" : formatNumber(value)
-                  }
-                />
-                <PublicChart
-                  emptyLabel="Memory history is unavailable for this range"
-                  exportFileName={`${exportPrefix}-memory`}
-                  label={hasSwapHistory ? "Memory / swap used" : "Memory used"}
-                  lines={[
-                    {
-                      color: consolePalette.chart.purple,
-                      label: "Memory used",
-                      values: resourceTimeline.records.map((point) =>
-                        usedPercent(
-                          point?.memory_total_bytes,
-                          point?.memory_available_bytes,
-                        ),
-                      ),
-                    },
-                    ...(hasSwapHistory
-                      ? [
-                          {
-                            color: consolePalette.chart.orange,
-                            label: "Swap used",
-                            values: resourceTimeline.records.map((point) =>
-                              point && point.swap_sample_count > 0
-                                ? usedPercent(
-                                    point.swap_total_bytes,
-                                    point.swap_available_bytes,
-                                  )
-                                : null,
-                            ),
-                          },
-                        ]
-                      : []),
-                  ]}
-                  summary={capacityCaption(
-                    card.resources?.memory_total_bytes,
-                    card.resources?.memory_available_bytes,
-                  )}
-                  times={resourceTimeline.times}
-                  valueFormatter={(value) => formatPercent(value)}
-                />
-                <PublicChart
-                  emptyLabel="Disk history is unavailable for this range"
-                  exportFileName={`${exportPrefix}-disk`}
-                  label="Aggregate reported disk used"
-                  lines={[
-                    {
-                      color: consolePalette.chart.orange,
-                      label: "Disk used",
-                      values: resourceTimeline.records.map((point) =>
-                        usedPercent(
-                          point?.disk_total_bytes,
-                          point?.disk_available_bytes,
-                        ),
-                      ),
-                    },
-                  ]}
-                  summary={capacityCaption(
-                    card.resources?.disk_total_bytes,
-                    card.resources?.disk_available_bytes,
-                  )}
-                  times={resourceTimeline.times}
-                  valueFormatter={(value) => formatPercent(value)}
-                />
-                <PublicChart
-                  emptyLabel="TCP and UDP connection history is unavailable for this range"
-                  exportFileName={`${exportPrefix}-connections`}
-                  label="TCP / UDP connections"
-                  lines={[
-                    {
-                      color: consolePalette.chart.purple,
-                      label: "TCP",
-                      values: resourceTimeline.records.map(
-                        (point) => point?.tcp_sockets ?? null,
-                      ),
-                    },
-                    {
-                      color: consolePalette.chart.green,
-                      label: "UDP",
-                      values: resourceTimeline.records.map(
-                        (point) => point?.udp_sockets ?? null,
-                      ),
-                    },
-                  ]}
-                  summary={`TCP ${formatPublicSocketCount(card.resources?.tcp_sockets)} · UDP ${formatPublicSocketCount(card.resources?.udp_sockets)}`}
-                  times={resourceTimeline.times}
-                  valueFormatter={(value) =>
-                    value === null ? "No data" : formatPublicSocketCount(value)
-                  }
-                  wide
-                />
+                    <PublicChart
+                      emptyLabel="CPU utilization is unavailable for this range"
+                      exportFileName={`${exportPrefix}-cpu`}
+                      label="CPU utilization"
+                      lines={[
+                        {
+                          color: consolePalette.chart.blue,
+                          label: "CPU",
+                          values: resourceTimeline.records.map((point) =>
+                            ratioToPercent(point?.cpu_usage_avg),
+                          ),
+                        },
+                      ]}
+                      summary={formatPercent(
+                        ratioToPercent(card.resources?.cpu_usage_avg),
+                      )}
+                      times={resourceTimeline.times}
+                      valueFormatter={(value) => formatPercent(value)}
+                    />
+                    <PublicChart
+                      emptyLabel="Load history is unavailable for this range"
+                      exportFileName={`${exportPrefix}-load`}
+                      label="Load 1 / 5 / 15"
+                      lines={[
+                        {
+                          color: consolePalette.chart.blue,
+                          label: "Load 1",
+                          values: resourceTimeline.records.map(
+                            (point) => point?.load_1 ?? null,
+                          ),
+                        },
+                        {
+                          color: consolePalette.chart.green,
+                          label: "Load 5",
+                          values: resourceTimeline.records.map(
+                            (point) => point?.load_5 ?? null,
+                          ),
+                        },
+                        {
+                          color: consolePalette.chart.orange,
+                          label: "Load 15",
+                          values: resourceTimeline.records.map(
+                            (point) => point?.load_15 ?? null,
+                          ),
+                        },
+                      ]}
+                      summary={
+                        card.resources
+                          ? [
+                              card.resources.load_1,
+                              card.resources.load_5,
+                              card.resources.load_15,
+                            ]
+                              .map(formatLoad)
+                              .join(" / ")
+                          : "No data"
+                      }
+                      times={resourceTimeline.times}
+                      valueFormatter={(value) =>
+                        value === null ? "No data" : formatNumber(value)
+                      }
+                    />
+                    <PublicChart
+                      emptyLabel="Memory history is unavailable for this range"
+                      exportFileName={`${exportPrefix}-memory`}
+                      label={
+                        hasSwapHistory ? "Memory / swap used" : "Memory used"
+                      }
+                      lines={[
+                        {
+                          color: consolePalette.chart.purple,
+                          label: "Memory used",
+                          values: resourceTimeline.records.map((point) =>
+                            point && point.memory_total_bytes > 0
+                              ? point.memory_used_ratio_avg * 100
+                              : null,
+                          ),
+                        },
+                        ...(hasSwapHistory
+                          ? [
+                              {
+                                color: consolePalette.chart.orange,
+                                label: "Swap used",
+                                values: resourceTimeline.records.map((point) =>
+                                  point &&
+                                  point.swap_sample_count > 0 &&
+                                  (finiteNumber(point.swap_total_bytes) ?? 0) >
+                                    0
+                                    ? finiteNumber(
+                                        point.swap_used_ratio_avg,
+                                      ) === null
+                                      ? null
+                                      : (point.swap_used_ratio_avg ?? 0) * 100
+                                    : null,
+                                ),
+                              },
+                            ]
+                          : []),
+                      ]}
+                      summary={memorySwapCapacityCaption(
+                        memoryCapacityMaximum,
+                        swapCapacityMaximum,
+                        hasSwapHistory,
+                      )}
+                      times={resourceTimeline.times}
+                      valueFormatter={(value) => formatPercent(value)}
+                    />
+                    <PublicChart
+                      emptyLabel="Disk history is unavailable for this range"
+                      exportFileName={`${exportPrefix}-disk`}
+                      label="Aggregate reported disk used"
+                      lines={[
+                        {
+                          color: consolePalette.chart.orange,
+                          label: "Disk used",
+                          values: resourceTimeline.records.map((point) =>
+                            point && point.disk_total_bytes > 0
+                              ? point.disk_used_ratio_avg * 100
+                              : null,
+                          ),
+                        },
+                      ]}
+                      summary={maximumCapacityCaption(diskCapacityMaximum)}
+                      times={resourceTimeline.times}
+                      valueFormatter={(value) => formatPercent(value)}
+                    />
+                    <PublicChart
+                      emptyLabel="TCP and UDP connection history is unavailable for this range"
+                      exportFileName={`${exportPrefix}-connections`}
+                      label="TCP / UDP connections"
+                      lines={[
+                        {
+                          color: consolePalette.chart.purple,
+                          label: "TCP",
+                          values: resourceTimeline.records.map(
+                            (point) => point?.tcp_sockets ?? null,
+                          ),
+                        },
+                        {
+                          color: consolePalette.chart.green,
+                          label: "UDP",
+                          values: resourceTimeline.records.map(
+                            (point) => point?.udp_sockets ?? null,
+                          ),
+                        },
+                      ]}
+                      summary={`TCP ${formatPublicSocketCount(card.resources?.tcp_sockets)} · UDP ${formatPublicSocketCount(card.resources?.udp_sockets)}`}
+                      times={resourceTimeline.times}
+                      valueFormatter={(value) =>
+                        value === null
+                          ? "No data"
+                          : formatPublicSocketCount(value)
+                      }
+                      wide
+                    />
                   </div>
                 </section>
               ) : null}
@@ -1769,99 +1774,102 @@ function PublicMonitoringDetailPanel({
                 <section className="publicMonitoringChartGroup">
                   <header>
                     <strong>Network &amp; traffic</strong>
-                    <small>Live rates and authoritative accounting evidence</small>
+                    <small>
+                      Live rates and authoritative accounting evidence
+                    </small>
                   </header>
                   <div className="dashboardWidgetGrid publicMonitoringDetailCharts">
-              {detail.network !== undefined ? (
-                <PublicChart
-                emptyLabel="Network rate history is unavailable for this range"
-                exportFileName={`${exportPrefix}-network`}
-                label="Network RX / TX"
-                lines={[
-                  {
-                    color: consolePalette.chart.blue,
-                    exportLabel: "RX (bps)",
-                    label: "RX",
-                    values: networkTimeline.records.map(
-                      (point) => point?.rx_bps ?? null,
-                    ),
-                  },
-                  {
-                    color: consolePalette.chart.green,
-                    exportLabel: "TX (bps)",
-                    label: "TX",
-                    values: networkTimeline.records.map(
-                      (point) => point?.tx_bps ?? null,
-                    ),
-                  },
-                ]}
-                summary={`↓ ${formatByteRateFromBitsPerSecond(card.network?.rx_bps)} · ↑ ${formatByteRateFromBitsPerSecond(card.network?.tx_bps)}`}
-                times={networkTimeline.times}
-                valueFormatter={formatByteRateFromBitsPerSecond}
-              />
-            ) : null}
-            {detail.traffic !== undefined &&
-            (currentTrafficConfigured || hasTrafficHistory) ? (
-              <>
-                <PublicChart
-                  emptyLabel={
-                    currentTrafficConfigured
-                      ? "Traffic volume history is unavailable for this range"
-                      : "Prior traffic accounting history is unavailable for this range"
-                  }
-                  exportFileName={`${exportPrefix}-traffic`}
-                  label={
-                    currentTrafficConfigured
-                      ? "Traffic volume"
-                      : "Prior traffic accounting history"
-                  }
-                  lines={[
-                    {
-                      color: consolePalette.chart.orange,
-                      initiallyHidden: true,
-                      label: "Total volume",
-                      values: trafficTimeline.records.map(
-                        (point) => point?.total_bytes ?? null,
-                      ),
-                    },
-                    {
-                      color: consolePalette.chart.blue,
-                      label: "RX volume",
-                      values: trafficTimeline.records.map(
-                        (point) => point?.rx_bytes ?? null,
-                      ),
-                    },
-                    {
-                      color: consolePalette.chart.green,
-                      label: "TX volume",
-                      values: trafficTimeline.records.map(
-                        (point) => point?.tx_bytes ?? null,
-                      ),
-                    },
-                  ]}
-                  summary={
-                    currentTrafficConfigured
-                      ? `RX ${formatOptionalBytes(card.traffic?.rx_bytes)} · TX ${formatOptionalBytes(card.traffic?.tx_bytes)}`
-                      : "Current accounting unconfigured"
-                  }
-                  times={trafficTimeline.times}
-                  valueFormatter={(value) =>
-                    value === null ? "No data" : formatBytes(value)
-                  }
-                />
-                {currentTrafficConfigured ? (
-                  <PublicTrafficCycle
-                    resetCount={trafficResetCount}
-                    traffic={card.traffic}
-                  />
-                ) : hasTrafficHistory ? (
-                  <p className="publicMonitoringPriorTrafficNote">
-                    Retained volume predates the current unconfigured accounting
-                    state; it is historical evidence, not a current cycle total.
-                  </p>
-                ) : null}
-              </>
-            ) : null}
+                    {detail.network !== undefined ? (
+                      <PublicChart
+                        emptyLabel="Network rate history is unavailable for this range"
+                        exportFileName={`${exportPrefix}-network`}
+                        label="Network RX / TX"
+                        lines={[
+                          {
+                            color: consolePalette.chart.blue,
+                            exportLabel: "RX (bps)",
+                            label: "RX",
+                            values: networkTimeline.records.map(
+                              (point) => point?.rx_bps ?? null,
+                            ),
+                          },
+                          {
+                            color: consolePalette.chart.green,
+                            exportLabel: "TX (bps)",
+                            label: "TX",
+                            values: networkTimeline.records.map(
+                              (point) => point?.tx_bps ?? null,
+                            ),
+                          },
+                        ]}
+                        summary={`↓ ${formatByteRateFromBitsPerSecond(card.network?.rx_bps)} · ↑ ${formatByteRateFromBitsPerSecond(card.network?.tx_bps)}`}
+                        times={networkTimeline.times}
+                        valueFormatter={formatByteRateFromBitsPerSecond}
+                      />
+                    ) : null}
+                    {detail.traffic !== undefined &&
+                    (currentTrafficConfigured || hasTrafficHistory) ? (
+                      <>
+                        <PublicChart
+                          emptyLabel={
+                            currentTrafficConfigured
+                              ? "Traffic volume history is unavailable for this range"
+                              : "Prior traffic accounting history is unavailable for this range"
+                          }
+                          exportFileName={`${exportPrefix}-traffic`}
+                          label={
+                            currentTrafficConfigured
+                              ? "Traffic volume"
+                              : "Prior traffic accounting history"
+                          }
+                          lines={[
+                            {
+                              color: consolePalette.chart.orange,
+                              initiallyHidden: true,
+                              label: "Total volume",
+                              values: trafficTimeline.records.map(
+                                (point) => point?.total_bytes ?? null,
+                              ),
+                            },
+                            {
+                              color: consolePalette.chart.blue,
+                              label: "RX volume",
+                              values: trafficTimeline.records.map(
+                                (point) => point?.rx_bytes ?? null,
+                              ),
+                            },
+                            {
+                              color: consolePalette.chart.green,
+                              label: "TX volume",
+                              values: trafficTimeline.records.map(
+                                (point) => point?.tx_bytes ?? null,
+                              ),
+                            },
+                          ]}
+                          summary={
+                            currentTrafficConfigured
+                              ? `RX ${formatOptionalBytes(card.traffic?.rx_bytes)} · TX ${formatOptionalBytes(card.traffic?.tx_bytes)}`
+                              : "Current accounting unconfigured"
+                          }
+                          times={trafficTimeline.times}
+                          valueFormatter={(value) =>
+                            value === null ? "No data" : formatBytes(value)
+                          }
+                        />
+                        {currentTrafficConfigured ? (
+                          <PublicTrafficCycle
+                            resetCount={trafficResetCount}
+                            traffic={card.traffic}
+                          />
+                        ) : hasTrafficHistory ? (
+                          <p className="publicMonitoringPriorTrafficNote">
+                            Retained volume predates the current unconfigured
+                            accounting state; it is historical evidence, not a
+                            current cycle total.
+                          </p>
+                        ) : null}
+                      </>
+                    ) : null}
                   </div>
                 </section>
               ) : null}
@@ -1994,16 +2002,13 @@ function PublicMonitoringDetailPanel({
                 exportFileName={`${exportPrefix}-ping-${pingMetric}`}
                 height={190}
                 label={
-                  pingMetric === "latency"
-                    ? "Ping latency"
-                    : "Ping packet loss"
+                  pingMetric === "latency" ? "Ping latency" : "Ping packet loss"
                 }
                 lines={pingLines}
                 onVisibleSeriesKeysChange={(visibleTargetNames) =>
                   setHiddenPingTargets(
                     pingTargetNames.filter(
-                      (targetName) =>
-                        !visibleTargetNames.includes(targetName),
+                      (targetName) => !visibleTargetNames.includes(targetName),
                     ),
                   )
                 }
@@ -2012,9 +2017,7 @@ function PublicMonitoringDetailPanel({
                 valueFormatter={
                   pingMetric === "latency"
                     ? (value) =>
-                        value === null
-                          ? "No data"
-                          : `${formatNumber(value)} ms`
+                        value === null ? "No data" : `${formatNumber(value)} ms`
                     : (value) => formatPercent(value)
                 }
                 visibleSeriesKeys={selectedPingTargetNames}
@@ -2155,28 +2158,25 @@ function PublicMonitoringInformationGroups({
   if (visibility?.resources && resource && resource.memory_total_bytes > 0) {
     hardware.push({
       label: "RAM",
-      title: `${formatPercent(usedPercent(resource.memory_total_bytes, resource.memory_available_bytes))} used`,
-      value: capacityCaption(
+      value: resourceUsageSummary(
+        resource.memory_used_ratio_avg,
         resource.memory_total_bytes,
-        resource.memory_available_bytes,
       ),
     });
   }
   if (
     visibility?.resources &&
     resource &&
-    resource.swap_sample_count > 0 &&
-    resource.swap_total_bytes !== undefined &&
-    resource.swap_available_bytes !== undefined
+    finiteNumber(resource.swap_total_bytes) !== null
   ) {
     hardware.push({
       label: "Swap",
       value:
         resource.swap_total_bytes === 0
           ? "None"
-          : capacityCaption(
+          : resourceUsageSummary(
+              resource.swap_used_ratio_avg,
               resource.swap_total_bytes,
-              resource.swap_available_bytes,
             ),
     });
   }
@@ -2203,10 +2203,9 @@ function PublicMonitoringInformationGroups({
       facts: [
         {
           label: "Reported filesystems",
-          title: `${formatPercent(usedPercent(resource.disk_total_bytes, resource.disk_available_bytes))} used; aggregate reported-filesystem capacity`,
-          value: capacityCaption(
+          value: resourceUsageSummary(
+            resource.disk_used_ratio_avg,
             resource.disk_total_bytes,
-            resource.disk_available_bytes,
           ),
         },
       ],
@@ -2762,10 +2761,9 @@ function comparePublicMonitoringCards(
   const rightCpu = cpuUse(right);
   if (mode === "cpu" && rightCpu !== leftCpu) return rightCpu - leftCpu;
   const memoryUse = (card: PublicMonitoringCard) =>
-    usedPercent(
-      card.resources?.memory_total_bytes,
-      card.resources?.memory_available_bytes,
-    ) ?? -1;
+    card.resources && card.resources.memory_total_bytes > 0
+      ? (ratioToPercent(card.resources.memory_used_ratio_avg) ?? -1)
+      : -1;
   const leftMemory = memoryUse(left);
   const rightMemory = memoryUse(right);
   if (mode === "memory" && rightMemory !== leftMemory) {
@@ -3003,52 +3001,53 @@ function ratioToPercent(value: number | null | undefined): number | null {
   return finite === null ? null : Math.max(0, Math.min(100, finite * 100));
 }
 
-function usedPercent(
-  total: number | null | undefined,
-  available: number | null | undefined,
-): number | null {
+function maximumCapacityCaption(total: number | null | undefined): string {
   const finiteTotal = finiteNumber(total);
-  const finiteAvailable = finiteNumber(available);
-  if (finiteTotal === null || finiteAvailable === null || finiteTotal <= 0)
-    return null;
-  return Math.max(
-    0,
-    Math.min(100, ((finiteTotal - finiteAvailable) / finiteTotal) * 100),
-  );
+  if (finiteTotal === null || finiteTotal <= 0) return "unavailable";
+  return `${formatBytes(finiteTotal)} maximum`;
 }
 
-function capacityCaption(
-  total: number | null | undefined,
-  available: number | null | undefined,
-): string {
-  const finiteTotal = finiteNumber(total);
-  const finiteAvailable = finiteNumber(available);
-  if (finiteTotal === null || finiteAvailable === null || finiteTotal <= 0)
-    return "unavailable";
-  return `${formatBytes(Math.max(0, finiteTotal - finiteAvailable))} / ${formatBytes(finiteTotal)}`;
+function maximumResourceCapacity(
+  records: Array<PublicResourceMetric | null>,
+  value: (record: PublicResourceMetric) => number | null | undefined,
+): number | undefined {
+  let maximum: number | undefined;
+  for (const record of records) {
+    if (!record) continue;
+    const candidate = finiteNumber(value(record));
+    if (candidate === null || candidate <= 0) continue;
+    maximum = maximum === undefined ? candidate : Math.max(maximum, candidate);
+  }
+  return maximum;
 }
 
-function compactCapacity(
-  total: number | null | undefined,
-  available: number | null | undefined,
+function memorySwapCapacityCaption(
+  memoryTotal: number | null | undefined,
+  swapTotal: number | null | undefined,
+  includeSwap: boolean,
 ): string {
+  if (!includeSwap) return maximumCapacityCaption(memoryTotal);
+  const memory = maximumCapacity(memoryTotal);
+  const swap = maximumCapacity(swapTotal);
+  if (memory && swap) {
+    return `Max · RAM\u00a0${memory.replace(" ", "\u00a0")} · Swap\u00a0${swap.replace(" ", "\u00a0")}`;
+  }
+  return maximumCapacityCaption(memoryTotal);
+}
+
+function resourceUsageSummary(
+  usedRatio: number | null | undefined,
+  total: number | null | undefined,
+): string {
+  const capacity = maximumCapacity(total);
+  return `${formatPercent(ratioToPercent(usedRatio))}${capacity ? ` (${capacity})` : ""}`;
+}
+
+function maximumCapacity(total: number | null | undefined): string | undefined {
   const finiteTotal = finiteNumber(total);
-  const finiteAvailable = finiteNumber(available);
-  if (finiteTotal === null || finiteAvailable === null || finiteTotal <= 0) {
-    return "n/a";
-  }
-  const units = ["B", "K", "M", "G", "T", "P"];
-  let divisor = 1;
-  let unit = 0;
-  while (finiteTotal / divisor >= 1024 && unit < units.length - 1) {
-    divisor *= 1024;
-    unit += 1;
-  }
-  const compactNumber = (value: number) => {
-    const scaled = value / divisor;
-    return scaled >= 10 ? Math.round(scaled).toString() : scaled.toFixed(1);
-  };
-  return `${compactNumber(Math.max(0, finiteTotal - finiteAvailable))}/${compactNumber(finiteTotal)}${units[unit]}`;
+  return finiteTotal !== null && finiteTotal > 0
+    ? formatBytes(finiteTotal)
+    : undefined;
 }
 
 function trafficCycleSummary(traffic: PublicTrafficMetric): string {

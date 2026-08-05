@@ -72,7 +72,12 @@ type FleetMonitorPanelProps = {
 
 export type FleetMonitorDensity = MonitorCardDensity;
 type FleetMonitorSort =
-  "warning" | "traffic" | "cpu" | "memory" | "region" | "provider";
+  | "warning"
+  | "traffic"
+  | "cpu"
+  | "memory"
+  | "region"
+  | "provider";
 type FleetMonitorStatusFilter = "all" | "online" | "warning" | "offline";
 type MonitoringEvidenceState = "loading" | "ready" | "unavailable";
 type MonitorRecordBounds = {
@@ -184,15 +189,21 @@ export function FleetMonitorPanel({
           );
           if (!active) return;
           if (page.offset !== offset) {
-            throw new Error("Monitoring card pagination returned the wrong offset");
+            throw new Error(
+              "Monitoring card pagination returned the wrong offset",
+            );
           }
           if (page.items.some((item) => loadedIds.has(item.client.id))) {
-            throw new Error("Monitoring card pagination returned a duplicate VPS");
+            throw new Error(
+              "Monitoring card pagination returned a duplicate VPS",
+            );
           }
           page.items.forEach((item) => loadedIds.add(item.client.id));
           loaded.push(...page.items);
           if (loaded.length > page.total) {
-            throw new Error("Monitoring card pagination exceeded its reported total");
+            throw new Error(
+              "Monitoring card pagination exceeded its reported total",
+            );
           }
           if (page.next_offset === null) {
             if (loaded.length !== page.total) {
@@ -850,10 +861,7 @@ export function VpsMonitorCard({
   const displayState = agentDisplayState(agent);
   const provider = tagValue(agent.tags, "provider") ?? "provider unset";
   const country = countryTagValue(agent.tags);
-  const region =
-    country ??
-    tagValue(agent.tags, "region") ??
-    "region unset";
+  const region = country ?? tagValue(agent.tags, "region") ?? "region unset";
   const currentRates = coherentNetworkRates(rates);
   const rxBps = sumNetworkRate(currentRates, "rx");
   const txBps = sumNetworkRate(currentRates, "tx");
@@ -866,21 +874,16 @@ export function VpsMonitorCard({
   const cpuUsageRatio = finiteRatio(rollup?.cpu_usage_avg);
   const cpuUsed = cpuUsageRatio === null ? null : cpuUsageRatio * 100;
   const cpuCores = finiteMetric(rollup?.cpu_cores_max);
-  const memoryUsedBytes = rollup
-    ? usedCapacity(
-        rollup.memory_total_bytes_max,
-        rollup.memory_available_bytes_avg,
-      )
-    : null;
-  const diskUsedBytes = rollup
-    ? usedCapacity(rollup.disk_total_bytes_max, rollup.disk_available_bytes_avg)
-    : null;
-  const memoryUsed = rollup
-    ? percentValue(memoryUsedBytes ?? Number.NaN, rollup.memory_total_bytes_max)
-    : null;
-  const diskUsed = rollup
-    ? percentValue(diskUsedBytes ?? Number.NaN, rollup.disk_total_bytes_max)
-    : null;
+  const memoryUsed =
+    rollup && rollup.memory_total_bytes_max > 0
+      ? finiteRatio(rollup.memory_used_ratio_avg)
+      : null;
+  const diskUsed =
+    rollup && rollup.disk_total_bytes_max > 0
+      ? finiteRatio(rollup.disk_used_ratio_avg)
+      : null;
+  const memoryUsedPercent = memoryUsed === null ? null : memoryUsed * 100;
+  const diskUsedPercent = diskUsed === null ? null : diskUsed * 100;
   const loadPressure =
     load !== null && cpuCores !== null && cpuCores > 0 ? load / cpuCores : null;
   const resourceFreshness = rollup?.latest_observed_at ?? null;
@@ -1018,6 +1021,11 @@ export function VpsMonitorCard({
         className="vpsMonitorMetrics"
       >
         <MonitorMetric
+          context={
+            cpuCores !== null && cpuCores > 0
+              ? `${Math.round(cpuCores)}-core`
+              : undefined
+          }
           icon={<Activity size={15} />}
           label="CPU"
           meterCaption={
@@ -1032,30 +1040,30 @@ export function VpsMonitorCard({
           value={formatPercent(cpuUsed)}
         />
         <MonitorMetric
+          context={formatMaximumCapacity(rollup?.memory_total_bytes_max)}
           icon={<Gauge size={15} />}
           label={density === "compact" ? "RAM" : "Memory"}
-          meterCaption={formatCapacity(
-            memoryUsedBytes,
+          meterCaption={formatMaximumCapacityCaption(
             rollup?.memory_total_bytes_max,
           )}
           meterMax={100}
-          meterValue={memoryUsed}
+          meterValue={memoryUsedPercent}
           stale={resourceTelemetryState.kind === "stale"}
           title="Used memory as a percentage of reported total memory"
-          value={formatPercent(memoryUsed)}
+          value={formatPercent(memoryUsedPercent)}
         />
         <MonitorMetric
+          context={formatMaximumCapacity(rollup?.disk_total_bytes_max)}
           icon={<Server size={15} />}
           label="Disk"
-          meterCaption={formatCapacity(
-            diskUsedBytes,
+          meterCaption={formatMaximumCapacityCaption(
             rollup?.disk_total_bytes_max,
           )}
           meterMax={100}
-          meterValue={diskUsed}
+          meterValue={diskUsedPercent}
           stale={resourceTelemetryState.kind === "stale"}
           title="Used disk space as a percentage of reported total disk space"
-          value={formatPercent(diskUsed)}
+          value={formatPercent(diskUsedPercent)}
         />
         <MonitorMetric
           icon={<Gauge size={15} />}
@@ -1118,7 +1126,9 @@ export function VpsMonitorCard({
         >
           <small>Billing</small>
           <strong>{billing?.display ?? "—"}</strong>
-          {billing?.cycle ? <em>{formatBillingRenewal(billing.cycle)}</em> : null}
+          {billing?.cycle ? (
+            <em>{formatBillingRenewal(billing.cycle)}</em>
+          ) : null}
         </span>
         <span title={connectionCountTitle("TCP", connectionsTelemetryState)}>
           <small>TCP</small>
@@ -1263,6 +1273,7 @@ export function VpsMonitorCard({
 }
 
 export function MonitorMetric({
+  context,
   icon,
   label,
   meterCaption,
@@ -1274,6 +1285,7 @@ export function MonitorMetric({
   title,
   value,
 }: {
+  context?: string;
   icon: ReactNode;
   label: string;
   meterCaption: string;
@@ -1309,7 +1321,10 @@ export function MonitorMetric({
         {icon}
       </span>
       <span className="vpsMonitorMetricLabel">{label}</span>
-      <strong>{value}</strong>
+      <strong>
+        <span>{value}</span>
+        {context ? <small>({context})</small> : null}
+      </strong>
       <span
         aria-hidden={boundedValue === null ? true : undefined}
         aria-label={
@@ -1963,10 +1978,7 @@ function memoryUsedRatio(rollup: TelemetryRollupRecord | undefined) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
     return -1;
   }
-  return (
-    (rollup.memory_total_bytes_max - rollup.memory_available_bytes_avg) /
-    rollup.memory_total_bytes_max
-  );
+  return rollup.memory_used_ratio_avg;
 }
 
 function providerSortValue(agent: AgentView) {
@@ -2282,39 +2294,19 @@ function sumNetworkRate(
   );
 }
 
-function usedCapacity(total: number, available: number) {
-  if (
-    !Number.isFinite(total) ||
-    !Number.isFinite(available) ||
-    total <= 0 ||
-    available < 0
-  ) {
-    return null;
-  }
-  return Math.max(0, Math.min(total, total - available));
-}
-
-function percentValue(used: number, total: number) {
-  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
-    return null;
-  }
-  return Math.max(0, Math.min(100, (used / total) * 100));
-}
-
 function formatPercent(value: number | null) {
   return value === null ? "n/a" : `${Math.round(value)}%`;
 }
 
-function formatCapacity(used: number | null, total: number | null | undefined) {
-  if (
-    used === null ||
-    typeof total !== "number" ||
-    !Number.isFinite(total) ||
-    total <= 0
-  ) {
-    return "capacity unavailable";
-  }
-  return `${formatBytes(used)} / ${formatBytes(total)}`;
+function formatMaximumCapacity(total: number | null | undefined) {
+  return typeof total === "number" && Number.isFinite(total) && total > 0
+    ? formatBytes(total)
+    : undefined;
+}
+
+function formatMaximumCapacityCaption(total: number | null | undefined) {
+  const capacity = formatMaximumCapacity(total);
+  return capacity ? `${capacity} maximum` : "capacity unavailable";
 }
 
 function formatTrafficUsage(traffic: TrafficAccountingRecord) {

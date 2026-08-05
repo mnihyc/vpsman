@@ -460,13 +460,17 @@ pub(crate) struct PublicResourceMetricView {
     pub(crate) load_15: f64,
     pub(crate) memory_total_bytes: i64,
     pub(crate) memory_available_bytes: i64,
+    pub(crate) memory_used_ratio_avg: f64,
     pub(crate) swap_sample_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) swap_total_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) swap_available_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) swap_used_ratio_avg: Option<f64>,
     pub(crate) disk_total_bytes: i64,
     pub(crate) disk_available_bytes: i64,
+    pub(crate) disk_used_ratio_avg: f64,
     pub(crate) tcp_sockets: Option<i64>,
     pub(crate) udp_sockets: Option<i64>,
     pub(crate) connections_observed_at: Option<String>,

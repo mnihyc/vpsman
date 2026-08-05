@@ -90,6 +90,8 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
     compact.swap_total_bytes_max = Some(1_000);
     compact.swap_available_bytes_avg = Some(400);
     compact.swap_available_bytes_min = Some(400);
+    compact.swap_used_ratio_avg = Some(0.6);
+    compact.swap_used_ratio_max = Some(0.6);
 
     let uncompacted = (0..5)
         .map(|minute| {
@@ -105,6 +107,8 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
             row.swap_total_bytes_max = Some(1_000);
             row.swap_available_bytes_avg = Some(400);
             row.swap_available_bytes_min = Some(400);
+            row.swap_used_ratio_avg = Some(0.6);
+            row.swap_used_ratio_max = Some(0.6);
             row
         })
         .flat_map(|row| fragment_telemetry_rollup(row, Some(180), Some(360), 120))
@@ -135,6 +139,8 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
                     row.swap_total_bytes_max,
                     row.swap_available_bytes_avg,
                     row.swap_available_bytes_min,
+                    row.swap_used_ratio_avg,
+                    row.swap_used_ratio_max,
                 )
             })
             .collect::<Vec<_>>()
@@ -164,6 +170,34 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
             ),
         ]
     );
+}
+
+#[test]
+fn adaptive_resource_fragmentation_preserves_explicit_no_swap_as_a_gap() {
+    let mut compact = rollup("a", 120);
+    compact.bucket_secs = 300;
+    compact.sample_count = 5;
+    compact.swap_sample_count = 0;
+    compact.swap_total_bytes_max = Some(0);
+    compact.swap_available_bytes_avg = Some(0);
+    compact.swap_available_bytes_min = Some(0);
+    compact.swap_used_ratio_avg = None;
+    compact.swap_used_ratio_max = None;
+
+    let fragments = fragment_telemetry_rollup(compact, Some(180), Some(360), 120);
+
+    assert_eq!(
+        rollup_counts(&fragments),
+        vec![("120", 1), ("240", 2), ("360", 1)]
+    );
+    assert!(fragments.iter().all(|row| {
+        row.swap_sample_count == 0
+            && row.swap_total_bytes_max == Some(0)
+            && row.swap_available_bytes_avg == Some(0)
+            && row.swap_available_bytes_min == Some(0)
+            && row.swap_used_ratio_avg.is_none()
+            && row.swap_used_ratio_max.is_none()
+    }));
 }
 
 #[test]
@@ -450,7 +484,21 @@ fn swap_rollups_keep_unavailable_distinct_from_zero_and_weight_known_samples() {
     ];
     assert_eq!(rows[0].swap_sample_count, 0);
     assert_eq!(rows[0].swap_total_bytes_max, None);
+    assert_eq!(rows[1].swap_sample_count, 0);
     assert_eq!(rows[1].swap_total_bytes_max, Some(0));
+    assert_eq!(rows[1].swap_available_bytes_avg, Some(0));
+    assert_eq!(rows[1].swap_available_bytes_min, Some(0));
+    assert_eq!(rows[1].swap_used_ratio_avg, None);
+    assert_eq!(rows[1].swap_used_ratio_max, None);
+
+    let zero_only = aggregate_memory_telemetry_rollups(vec![rows[1].clone()], 300);
+    assert_eq!(zero_only.len(), 1);
+    assert_eq!(zero_only[0].swap_sample_count, 0);
+    assert_eq!(zero_only[0].swap_total_bytes_max, Some(0));
+    assert_eq!(zero_only[0].swap_available_bytes_avg, Some(0));
+    assert_eq!(zero_only[0].swap_available_bytes_min, Some(0));
+    assert_eq!(zero_only[0].swap_used_ratio_avg, None);
+    assert_eq!(zero_only[0].swap_used_ratio_max, None);
 
     let mut one_sided = sample(240, None);
     one_sided.payload["memory"]["swap_total_bytes"] = serde_json::json!(1_000);
@@ -468,10 +516,81 @@ fn swap_rollups_keep_unavailable_distinct_from_zero_and_weight_known_samples() {
     let aggregated = aggregate_memory_telemetry_rollups(rows.into(), 300);
     assert_eq!(aggregated.len(), 1);
     assert_eq!(aggregated[0].sample_count, 3);
-    assert_eq!(aggregated[0].swap_sample_count, 2);
+    assert_eq!(aggregated[0].swap_sample_count, 1);
     assert_eq!(aggregated[0].swap_total_bytes_max, Some(1_000));
-    assert_eq!(aggregated[0].swap_available_bytes_avg, Some(200));
-    assert_eq!(aggregated[0].swap_available_bytes_min, Some(0));
+    assert_eq!(aggregated[0].swap_available_bytes_avg, Some(400));
+    assert_eq!(aggregated[0].swap_available_bytes_min, Some(400));
+    assert_eq!(aggregated[0].swap_used_ratio_avg, Some(0.6));
+    assert_eq!(aggregated[0].swap_used_ratio_max, Some(0.6));
+}
+
+#[test]
+fn dynamic_resource_capacities_keep_snapshot_ratios_when_aggregated() {
+    let sample = |observed_at: u64, memory: (u64, u64), swap: (u64, u64), disk: (u64, u64)| {
+        let metrics = AgentMetrics {
+            observed_unix: observed_at,
+            hostname: "v-1".to_string(),
+            memory: vpsman_common::MemoryStat {
+                total_bytes: memory.0,
+                available_bytes: memory.1,
+                swap_total_bytes: Some(swap.0),
+                swap_available_bytes: Some(swap.1),
+            },
+            disks: vec![vpsman_common::DiskStat {
+                mountpoint: "/".to_string(),
+                total_bytes: disk.0,
+                available_bytes: disk.1,
+            }],
+            ..AgentMetrics::default()
+        };
+        TelemetrySampleView {
+            id: uuid::Uuid::new_v4(),
+            client_id: "v-1".to_string(),
+            observed_at: observed_at.to_string(),
+            cpu_load_1: 0.0,
+            memory_total_bytes: memory.0 as i64,
+            memory_available_bytes: memory.1 as i64,
+            payload: serde_json::to_value(metrics).unwrap(),
+        }
+    };
+
+    let first = raw_sample_rollup(sample(60, (100, 50), (100, 20), (100, 75))).unwrap();
+    let mut later = raw_sample_rollup(sample(120, (400, 300), (400, 200), (400, 40))).unwrap();
+
+    assert_eq!(first.memory_used_ratio_avg, 0.5);
+    assert_eq!(first.swap_used_ratio_avg, Some(0.8));
+    assert_eq!(first.disk_used_ratio_avg, 0.25);
+    assert_eq!(later.memory_used_ratio_avg, 0.25);
+    assert_eq!(later.swap_used_ratio_avg, Some(0.5));
+    assert_eq!(later.disk_used_ratio_avg, 0.9);
+
+    // Model three snapshots at the later capacity to exercise weighted rollup
+    // aggregation while retaining the ratios frozen at each source snapshot.
+    later.sample_count = 3;
+    later.swap_sample_count = 3;
+    let aggregated = aggregate_memory_telemetry_rollups(vec![first, later], 300);
+
+    assert_eq!(aggregated.len(), 1);
+    let row = &aggregated[0];
+    assert_eq!(row.sample_count, 4);
+    assert_eq!(row.memory_total_bytes_max, 400);
+    assert_eq!(row.memory_available_bytes_avg, 238);
+    assert_eq!(row.memory_available_bytes_min, 50);
+    assert!((row.memory_used_ratio_avg - 0.3125).abs() < f64::EPSILON);
+    assert!((row.memory_used_ratio_max - 0.5).abs() < f64::EPSILON);
+
+    assert_eq!(row.swap_sample_count, 4);
+    assert_eq!(row.swap_total_bytes_max, Some(400));
+    assert_eq!(row.swap_available_bytes_avg, Some(155));
+    assert_eq!(row.swap_available_bytes_min, Some(20));
+    assert!((row.swap_used_ratio_avg.unwrap() - 0.575).abs() < f64::EPSILON);
+    assert!((row.swap_used_ratio_max.unwrap() - 0.8).abs() < f64::EPSILON);
+
+    assert_eq!(row.disk_total_bytes_max, 400);
+    assert_eq!(row.disk_available_bytes_avg, 49);
+    assert_eq!(row.disk_available_bytes_min, 40);
+    assert!((row.disk_used_ratio_avg - 0.7375).abs() < f64::EPSILON);
+    assert!((row.disk_used_ratio_max - 0.9).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -517,13 +636,19 @@ fn rollup(client_id: &str, bucket_start: u64) -> TelemetryRollupView {
         memory_total_bytes_max: 0,
         memory_available_bytes_avg: 0,
         memory_available_bytes_min: 0,
+        memory_used_ratio_avg: 0.0,
+        memory_used_ratio_max: 0.0,
         swap_sample_count: 0,
         swap_total_bytes_max: None,
         swap_available_bytes_avg: None,
         swap_available_bytes_min: None,
+        swap_used_ratio_avg: None,
+        swap_used_ratio_max: None,
         disk_total_bytes_max: 0,
         disk_available_bytes_avg: 0,
         disk_available_bytes_min: 0,
+        disk_used_ratio_avg: 0.0,
+        disk_used_ratio_max: 0.0,
         network_rx_bytes_max: 0,
         network_tx_bytes_max: 0,
         connections_sample_count: 0,

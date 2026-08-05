@@ -191,28 +191,20 @@ impl DashboardResourceMetric {
     fn value_for_rollup(self, rollup: &TelemetryRollupView) -> Option<f64> {
         match self {
             Self::CpuLoad => Some(rollup.cpu_load_1_avg.max(0.0)),
-            Self::MemoryUsed => ratio(
-                rollup.memory_total_bytes_max as i128 - rollup.memory_available_bytes_avg as i128,
-                rollup.memory_total_bytes_max as i128,
-            ),
-            Self::DiskFree => ratio(
-                rollup.disk_available_bytes_avg as i128,
-                rollup.disk_total_bytes_max as i128,
-            ),
+            Self::MemoryUsed => (rollup.memory_total_bytes_max > 0)
+                .then_some(rollup.memory_used_ratio_avg.clamp(0.0, 1.0)),
+            Self::DiskFree => (rollup.disk_total_bytes_max > 0)
+                .then_some((1.0 - rollup.disk_used_ratio_avg).clamp(0.0, 1.0)),
         }
     }
 
     fn peak_for_rollup(self, rollup: &TelemetryRollupView) -> Option<f64> {
         match self {
             Self::CpuLoad => Some(rollup.cpu_load_1_max.max(rollup.cpu_load_1_avg).max(0.0)),
-            Self::MemoryUsed => ratio(
-                rollup.memory_total_bytes_max as i128 - rollup.memory_available_bytes_min as i128,
-                rollup.memory_total_bytes_max as i128,
-            ),
-            Self::DiskFree => ratio(
-                rollup.disk_available_bytes_min as i128,
-                rollup.disk_total_bytes_max as i128,
-            ),
+            Self::MemoryUsed => (rollup.memory_total_bytes_max > 0)
+                .then_some(rollup.memory_used_ratio_max.clamp(0.0, 1.0)),
+            Self::DiskFree => (rollup.disk_total_bytes_max > 0)
+                .then_some((1.0 - rollup.disk_used_ratio_max).clamp(0.0, 1.0)),
         }
     }
 
@@ -1059,9 +1051,9 @@ fn build_resources<'a>(
     let mut cpu_total = 0.0_f64;
     let mut cpu_max: Option<f64> = None;
     let mut memory_total = 0_i128;
-    let mut memory_available = 0_i128;
+    let mut memory_used_weighted = 0.0_f64;
     let mut disk_total = 0_i128;
-    let mut disk_available = 0_i128;
+    let mut disk_used_weighted = 0.0_f64;
 
     for rollup in rollups {
         sampled_clients += 1;
@@ -1072,17 +1064,21 @@ fn build_resources<'a>(
                 .max(rollup.cpu_load_1_max),
         );
         memory_total += rollup.memory_total_bytes_max.max(0) as i128;
-        memory_available += rollup.memory_available_bytes_avg.max(0) as i128;
+        memory_used_weighted += rollup.memory_used_ratio_avg.clamp(0.0, 1.0)
+            * rollup.memory_total_bytes_max.max(0) as f64;
         disk_total += rollup.disk_total_bytes_max.max(0) as i128;
-        disk_available += rollup.disk_available_bytes_avg.max(0) as i128;
+        disk_used_weighted +=
+            rollup.disk_used_ratio_avg.clamp(0.0, 1.0) * rollup.disk_total_bytes_max.max(0) as f64;
     }
 
     DashboardResourcesView {
         sampled_clients,
         cpu_load_avg: (sampled_clients > 0).then_some(cpu_total / sampled_clients as f64),
         cpu_load_max: cpu_max,
-        memory_used_ratio: ratio(memory_total - memory_available, memory_total),
-        disk_free_ratio: ratio(disk_available, disk_total),
+        memory_used_ratio: (memory_total > 0)
+            .then_some((memory_used_weighted / memory_total as f64).clamp(0.0, 1.0)),
+        disk_free_ratio: (disk_total > 0)
+            .then_some((1.0 - disk_used_weighted / disk_total as f64).clamp(0.0, 1.0)),
     }
 }
 
@@ -1948,13 +1944,6 @@ fn tag_matches(tags: &[String], expected: &str) -> bool {
 
 fn is_degraded_agent_status(status: &str) -> bool {
     status == "stale"
-}
-
-fn ratio(numerator: i128, denominator: i128) -> Option<f64> {
-    if denominator <= 0 {
-        return None;
-    }
-    Some((numerator.max(0) as f64 / denominator as f64).clamp(0.0, 1.0))
 }
 
 fn total_bps(client: &DashboardNetworkClientView) -> f64 {

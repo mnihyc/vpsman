@@ -5602,14 +5602,12 @@ fn policy_identifier_value(
         "cpu.load_1" => rollup.map(|rollup| rollup.cpu_load_1_max),
         "cpu.load_saturation" => rollup.map(|rollup| rollup.cpu_load_1_max),
         "memory.available_ratio" => rollup.and_then(|rollup| {
-            (rollup.memory_total_bytes_max > 0).then(|| {
-                rollup.memory_available_bytes_min as f64 / rollup.memory_total_bytes_max as f64
-            })
+            (rollup.memory_total_bytes_max > 0)
+                .then(|| (1.0 - rollup.memory_used_ratio_max).clamp(0.0, 1.0))
         }),
         "disk.available_ratio" => rollup.and_then(|rollup| {
-            (rollup.disk_total_bytes_max > 0).then(|| {
-                rollup.disk_available_bytes_min as f64 / rollup.disk_total_bytes_max as f64
-            })
+            (rollup.disk_total_bytes_max > 0)
+                .then(|| (1.0 - rollup.disk_used_ratio_max).clamp(0.0, 1.0))
         }),
         _ => None,
     };

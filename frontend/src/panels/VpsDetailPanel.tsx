@@ -624,8 +624,8 @@ function SummaryTab({
     <div className="vpsDetailGrid">
       <DetailBlock title="Health" icon={<Gauge size={18} />}>
         <VpsFact label="CPU load" value={related.rollup ? related.rollup.cpu_load_1_avg.toFixed(2) : "No resource rollup"} />
-        <VpsFact label="Memory used" value={related.rollup ? percent(related.rollup.memory_total_bytes_max - related.rollup.memory_available_bytes_avg, related.rollup.memory_total_bytes_max) : "No resource rollup"} />
-        <VpsFact label="Disk used" value={related.rollup ? percent(related.rollup.disk_total_bytes_max - related.rollup.disk_available_bytes_avg, related.rollup.disk_total_bytes_max) : "No resource rollup"} />
+        <VpsFact label="Memory used" value={related.rollup && related.rollup.memory_total_bytes_max > 0 ? `${Math.round(related.rollup.memory_used_ratio_avg * 100)}% (${formatBytes(related.rollup.memory_total_bytes_max)})` : "No resource rollup"} />
+        <VpsFact label="Disk used" value={related.rollup && related.rollup.disk_total_bytes_max > 0 ? `${Math.round(related.rollup.disk_used_ratio_avg * 100)}% (${formatBytes(related.rollup.disk_total_bytes_max)})` : "No resource rollup"} />
         <VpsFact
           label="Resource sample"
           value={

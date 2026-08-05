@@ -1503,6 +1503,11 @@ async fn upsert_memory_telemetry_rollup(
     let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
     let observed_at = metrics.observed_unix.to_string();
     let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let memory_total = u64_to_i64(metrics.memory.total_bytes);
+    let memory_available = u64_to_i64(metrics.memory.available_bytes);
+    let memory_used_ratio = resource_used_ratio_or_zero(memory_total, memory_available);
+    let disk_used_ratio = resource_used_ratio_or_zero(disk_total, disk_available);
+    let positive_swap = swap.filter(|(total, _)| *total > 0);
     let mut rollups = rollups.write().await;
     if let Some(rollup) = rollups.iter_mut().find(|rollup| {
         rollup.client_id == client_id
@@ -1539,17 +1544,19 @@ async fn upsert_memory_telemetry_rollup(
             metrics.cpu.load.fifteen,
         );
         rollup.cpu_load_15_max = rollup.cpu_load_15_max.max(metrics.cpu.load.fifteen);
-        rollup.memory_total_bytes_max = rollup
-            .memory_total_bytes_max
-            .max(u64_to_i64(metrics.memory.total_bytes));
+        rollup.memory_total_bytes_max = rollup.memory_total_bytes_max.max(memory_total);
         rollup.memory_available_bytes_avg = weighted_avg_i64(
             rollup.memory_available_bytes_avg,
             current_count,
-            u64_to_i64(metrics.memory.available_bytes),
+            memory_available,
         );
-        rollup.memory_available_bytes_min = rollup
-            .memory_available_bytes_min
-            .min(u64_to_i64(metrics.memory.available_bytes));
+        rollup.memory_available_bytes_min = rollup.memory_available_bytes_min.min(memory_available);
+        rollup.memory_used_ratio_avg = weighted_avg_f64(
+            rollup.memory_used_ratio_avg,
+            current_count,
+            memory_used_ratio,
+        );
+        rollup.memory_used_ratio_max = rollup.memory_used_ratio_max.max(memory_used_ratio);
         if let Some((swap_total, swap_available)) = swap {
             let swap_count = rollup.swap_sample_count.max(0);
             rollup.swap_total_bytes_max = Some(
@@ -1557,18 +1564,38 @@ async fn upsert_memory_telemetry_rollup(
                     .swap_total_bytes_max
                     .map_or(swap_total, |current| current.max(swap_total)),
             );
-            rollup.swap_available_bytes_avg = Some(match rollup.swap_available_bytes_avg {
-                Some(current) if swap_count > 0 => {
-                    weighted_avg_i64(current, swap_count, swap_available)
+            if swap_total == 0 {
+                if swap_count == 0 {
+                    rollup.swap_available_bytes_avg = Some(0);
+                    rollup.swap_available_bytes_min = Some(0);
+                    rollup.swap_used_ratio_avg = None;
+                    rollup.swap_used_ratio_max = None;
                 }
-                _ => swap_available,
-            });
-            rollup.swap_available_bytes_min = Some(
-                rollup
-                    .swap_available_bytes_min
-                    .map_or(swap_available, |current| current.min(swap_available)),
-            );
-            rollup.swap_sample_count = swap_count.saturating_add(1);
+            } else {
+                let swap_used_ratio = resource_used_ratio(swap_total, swap_available);
+                rollup.swap_available_bytes_avg = Some(match rollup.swap_available_bytes_avg {
+                    Some(current) if swap_count > 0 => {
+                        weighted_avg_i64(current, swap_count, swap_available)
+                    }
+                    _ => swap_available,
+                });
+                rollup.swap_available_bytes_min = Some(match rollup.swap_available_bytes_min {
+                    Some(current) if swap_count > 0 => current.min(swap_available),
+                    _ => swap_available,
+                });
+                rollup.swap_used_ratio_avg = Some(match rollup.swap_used_ratio_avg {
+                    Some(current) if swap_count > 0 => {
+                        weighted_avg_f64(current, swap_count, swap_used_ratio)
+                    }
+                    _ => swap_used_ratio,
+                });
+                rollup.swap_used_ratio_max = Some(
+                    rollup
+                        .swap_used_ratio_max
+                        .map_or(swap_used_ratio, |current| current.max(swap_used_ratio)),
+                );
+                rollup.swap_sample_count = swap_count.saturating_add(1);
+            }
         }
         rollup.disk_total_bytes_max = rollup.disk_total_bytes_max.max(disk_total);
         rollup.disk_available_bytes_avg = weighted_avg_i64(
@@ -1577,6 +1604,9 @@ async fn upsert_memory_telemetry_rollup(
             disk_available,
         );
         rollup.disk_available_bytes_min = rollup.disk_available_bytes_min.min(disk_available);
+        rollup.disk_used_ratio_avg =
+            weighted_avg_f64(rollup.disk_used_ratio_avg, current_count, disk_used_ratio);
+        rollup.disk_used_ratio_max = rollup.disk_used_ratio_max.max(disk_used_ratio);
         rollup.network_rx_bytes_max = rollup.network_rx_bytes_max.max(network_rx);
         rollup.network_tx_bytes_max = rollup.network_tx_bytes_max.max(network_tx);
         if let Some(connections) = metrics.connections.as_ref() {
@@ -1614,16 +1644,24 @@ async fn upsert_memory_telemetry_rollup(
         cpu_load_5_max: metrics.cpu.load.five,
         cpu_load_15_avg: metrics.cpu.load.fifteen,
         cpu_load_15_max: metrics.cpu.load.fifteen,
-        memory_total_bytes_max: u64_to_i64(metrics.memory.total_bytes),
-        memory_available_bytes_avg: u64_to_i64(metrics.memory.available_bytes),
-        memory_available_bytes_min: u64_to_i64(metrics.memory.available_bytes),
-        swap_sample_count: i32::from(swap.is_some()),
+        memory_total_bytes_max: memory_total,
+        memory_available_bytes_avg: memory_available,
+        memory_available_bytes_min: memory_available,
+        memory_used_ratio_avg: memory_used_ratio,
+        memory_used_ratio_max: memory_used_ratio,
+        swap_sample_count: i32::from(positive_swap.is_some()),
         swap_total_bytes_max: swap.map(|(total, _)| total),
         swap_available_bytes_avg: swap.map(|(_, available)| available),
         swap_available_bytes_min: swap.map(|(_, available)| available),
+        swap_used_ratio_avg: positive_swap
+            .map(|(total, available)| resource_used_ratio(total, available)),
+        swap_used_ratio_max: positive_swap
+            .map(|(total, available)| resource_used_ratio(total, available)),
         disk_total_bytes_max: disk_total,
         disk_available_bytes_avg: disk_available,
         disk_available_bytes_min: disk_available,
+        disk_used_ratio_avg: disk_used_ratio,
+        disk_used_ratio_max: disk_used_ratio,
         network_rx_bytes_max: network_rx,
         network_tx_bytes_max: network_tx,
         connections_sample_count: i32::from(metrics.connections.is_some()),
@@ -1819,6 +1857,7 @@ async fn upsert_postgres_telemetry_rollup(
     swap: Option<(i64, i64)>,
 ) -> Result<()> {
     let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let positive_swap = swap.filter(|(total, _)| *total > 0);
     sqlx::query(
         r#"
         INSERT INTO telemetry_rollups (
@@ -1839,13 +1878,19 @@ async fn upsert_postgres_telemetry_rollup(
             memory_total_bytes_max,
             memory_available_bytes_avg,
             memory_available_bytes_min,
+            memory_used_ratio_avg,
+            memory_used_ratio_max,
             swap_sample_count,
             swap_total_bytes_max,
             swap_available_bytes_avg,
             swap_available_bytes_min,
+            swap_used_ratio_avg,
+            swap_used_ratio_max,
             disk_total_bytes_max,
             disk_available_bytes_avg,
             disk_available_bytes_min,
+            disk_used_ratio_avg,
+            disk_used_ratio_max,
             network_rx_bytes_max,
             network_tx_bytes_max,
             connections_sample_count,
@@ -1874,22 +1919,28 @@ async fn upsert_postgres_telemetry_rollup(
             $12,
             $12,
             $13,
+            $13,
             $14,
             $15,
-            $15,
+            $16,
             $16,
             $17,
             $17,
             $18,
             $19,
+            $19,
+            $20,
             $20,
             $21,
             $22,
-            CASE WHEN $23::double precision IS NULL
+            $23,
+            $24,
+            $25,
+            CASE WHEN $26::double precision IS NULL
                 THEN NULL
-                ELSE to_timestamp($23::double precision)
+                ELSE to_timestamp($26::double precision)
             END,
-            to_timestamp($24::double precision),
+            to_timestamp($27::double precision),
             now()
         )
         ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
@@ -1935,12 +1986,24 @@ async fn upsert_postgres_telemetry_rollup(
                 EXCLUDED.memory_total_bytes_max
             ),
             memory_available_bytes_avg = round((
-                telemetry_rollups.memory_available_bytes_avg::numeric * telemetry_rollups.sample_count::numeric
-                + EXCLUDED.memory_available_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+                telemetry_rollups.memory_available_bytes_avg::numeric
+                    * telemetry_rollups.sample_count::numeric
+                + EXCLUDED.memory_available_bytes_avg::numeric
+                    * EXCLUDED.sample_count::numeric
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
             memory_available_bytes_min = LEAST(
                 telemetry_rollups.memory_available_bytes_min,
                 EXCLUDED.memory_available_bytes_min
+            ),
+            memory_used_ratio_avg = (
+                telemetry_rollups.memory_used_ratio_avg
+                    * telemetry_rollups.sample_count::double precision
+                + EXCLUDED.memory_used_ratio_avg
+                    * EXCLUDED.sample_count::double precision
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            memory_used_ratio_max = GREATEST(
+                telemetry_rollups.memory_used_ratio_max,
+                EXCLUDED.memory_used_ratio_max
             ),
             swap_sample_count = telemetry_rollups.swap_sample_count
                 + EXCLUDED.swap_sample_count,
@@ -1956,7 +2019,12 @@ async fn upsert_postgres_telemetry_rollup(
             END,
             swap_available_bytes_avg = CASE
                 WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
-                    THEN NULL
+                    THEN CASE
+                        WHEN telemetry_rollups.swap_total_bytes_max IS NULL
+                            AND EXCLUDED.swap_total_bytes_max IS NULL
+                            THEN NULL
+                        ELSE 0
+                    END
                 ELSE round((
                     COALESCE(telemetry_rollups.swap_available_bytes_avg, 0)::numeric
                         * telemetry_rollups.swap_sample_count::numeric
@@ -1967,13 +2035,42 @@ async fn upsert_postgres_telemetry_rollup(
                 )::numeric)::bigint
             END,
             swap_available_bytes_min = CASE
-                WHEN telemetry_rollups.swap_available_bytes_min IS NULL
+                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
+                    THEN CASE
+                        WHEN telemetry_rollups.swap_total_bytes_max IS NULL
+                            AND EXCLUDED.swap_total_bytes_max IS NULL
+                            THEN NULL
+                        ELSE 0
+                    END
+                WHEN telemetry_rollups.swap_sample_count = 0
                     THEN EXCLUDED.swap_available_bytes_min
-                WHEN EXCLUDED.swap_available_bytes_min IS NULL
+                WHEN EXCLUDED.swap_sample_count = 0
                     THEN telemetry_rollups.swap_available_bytes_min
                 ELSE LEAST(
                     telemetry_rollups.swap_available_bytes_min,
                     EXCLUDED.swap_available_bytes_min
+                )
+            END,
+            swap_used_ratio_avg = CASE
+                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
+                    THEN NULL
+                ELSE (
+                    COALESCE(telemetry_rollups.swap_used_ratio_avg, 0)
+                        * telemetry_rollups.swap_sample_count::double precision
+                    + COALESCE(EXCLUDED.swap_used_ratio_avg, 0)
+                        * EXCLUDED.swap_sample_count::double precision
+                ) / (
+                    telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
+                )::double precision
+            END,
+            swap_used_ratio_max = CASE
+                WHEN telemetry_rollups.swap_used_ratio_max IS NULL
+                    THEN EXCLUDED.swap_used_ratio_max
+                WHEN EXCLUDED.swap_used_ratio_max IS NULL
+                    THEN telemetry_rollups.swap_used_ratio_max
+                ELSE GREATEST(
+                    telemetry_rollups.swap_used_ratio_max,
+                    EXCLUDED.swap_used_ratio_max
                 )
             END,
             disk_total_bytes_max = GREATEST(
@@ -1981,12 +2078,24 @@ async fn upsert_postgres_telemetry_rollup(
                 EXCLUDED.disk_total_bytes_max
             ),
             disk_available_bytes_avg = round((
-                telemetry_rollups.disk_available_bytes_avg::numeric * telemetry_rollups.sample_count::numeric
-                + EXCLUDED.disk_available_bytes_avg::numeric * EXCLUDED.sample_count::numeric
+                telemetry_rollups.disk_available_bytes_avg::numeric
+                    * telemetry_rollups.sample_count::numeric
+                + EXCLUDED.disk_available_bytes_avg::numeric
+                    * EXCLUDED.sample_count::numeric
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
             disk_available_bytes_min = LEAST(
                 telemetry_rollups.disk_available_bytes_min,
                 EXCLUDED.disk_available_bytes_min
+            ),
+            disk_used_ratio_avg = (
+                telemetry_rollups.disk_used_ratio_avg
+                    * telemetry_rollups.sample_count::double precision
+                + EXCLUDED.disk_used_ratio_avg
+                    * EXCLUDED.sample_count::double precision
+            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            disk_used_ratio_max = GREATEST(
+                telemetry_rollups.disk_used_ratio_max,
+                EXCLUDED.disk_used_ratio_max
             ),
             network_rx_bytes_max = GREATEST(
                 telemetry_rollups.network_rx_bytes_max,
@@ -2043,11 +2152,17 @@ async fn upsert_postgres_telemetry_rollup(
     .bind(metrics.cpu.load.fifteen)
     .bind(u64_to_i64(metrics.memory.total_bytes))
     .bind(u64_to_i64(metrics.memory.available_bytes))
-    .bind(i32::from(swap.is_some()))
+    .bind(resource_used_ratio_or_zero(
+        u64_to_i64(metrics.memory.total_bytes),
+        u64_to_i64(metrics.memory.available_bytes),
+    ))
+    .bind(i32::from(positive_swap.is_some()))
     .bind(swap.map(|(total, _)| total))
     .bind(swap.map(|(_, available)| available))
+    .bind(positive_swap.map(|(total, available)| resource_used_ratio(total, available)))
     .bind(disk_total)
     .bind(disk_available)
+    .bind(resource_used_ratio_or_zero(disk_total, disk_available))
     .bind(network_rx)
     .bind(network_tx)
     .bind(i32::from(metrics.connections.is_some()))
@@ -2063,7 +2178,12 @@ async fn upsert_postgres_telemetry_rollup(
             .as_ref()
             .map(|connections| u64_to_i64(connections.udp)),
     )
-    .bind(metrics.connections.as_ref().map(|_| metrics.observed_unix as f64))
+    .bind(
+        metrics
+            .connections
+            .as_ref()
+            .map(|_| metrics.observed_unix as f64),
+    )
     .bind(metrics.observed_unix as f64)
     .execute(&mut **tx)
     .await?;
@@ -2499,6 +2619,19 @@ fn weighted_avg_i64(current_avg: i64, current_count: i32, next_value: i64) -> i6
     let denominator = current_count + 1;
     ((numerator + denominator / 2) / denominator).clamp(i128::from(i64::MIN), i128::from(i64::MAX))
         as i64
+}
+
+fn resource_used_ratio(total: i64, available: i64) -> f64 {
+    debug_assert!(total > 0);
+    (total.saturating_sub(available).max(0) as f64 / total.max(1) as f64).clamp(0.0, 1.0)
+}
+
+fn resource_used_ratio_or_zero(total: i64, available: i64) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        resource_used_ratio(total, available)
+    }
 }
 
 fn bucket_start_unix(observed_unix: u64) -> u64 {

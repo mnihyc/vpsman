@@ -406,9 +406,13 @@ vpsctl_json telemetry-rollups --client-id pg-agent-a --bucket-secs 60 --limit 10
   ($rows | map(.memory_total_bytes_max) | max) == 268435456 and
   (($rows | map(.memory_available_bytes_avg * .sample_count) | add) / 2) == 117440512 and
   ($rows | map(.memory_available_bytes_min) | min) == 100663296 and
+  (((($rows | map(.memory_used_ratio_avg * .sample_count) | add) / 2) - 0.5625) | abs) < 0.000000001 and
+  ($rows | map(.memory_used_ratio_max) | max) == 0.625 and
   ($rows | map(.disk_total_bytes_max) | max) == 10737418240 and
   (($rows | map(.disk_available_bytes_avg * .sample_count) | add) / 2) == 4831838208 and
   ($rows | map(.disk_available_bytes_min) | min) == 4294967296 and
+  (((($rows | map(.disk_used_ratio_avg * .sample_count) | add) / 2) - 0.55) | abs) < 0.000000001 and
+  (((($rows | map(.disk_used_ratio_max) | max) - 0.6) | abs) < 0.000000001) and
   ($rows | map(.network_rx_bytes_max) | max) == 4000 and
   ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null
@@ -1186,7 +1190,9 @@ api_get "/api/v1/telemetry/rollups?client_id=pg-agent-a&bucket_secs=60&limit=10"
   map(select(.client_id == "pg-agent-a" and .bucket_secs == 60)) as $rows |
   ($rows | map(.sample_count) | add) == 2 and
   (($rows | map(.memory_available_bytes_avg * .sample_count) | add) / 2) == 117440512 and
+  (((($rows | map(.memory_used_ratio_avg * .sample_count) | add) / 2) - 0.5625) | abs) < 0.000000001 and
   (($rows | map(.disk_available_bytes_avg * .sample_count) | add) / 2) == 4831838208 and
+  (((($rows | map(.disk_used_ratio_avg * .sample_count) | add) / 2) - 0.55) | abs) < 0.000000001 and
   ($rows | map(.network_rx_bytes_max) | max) == 4000 and
   ($rows | map(.network_tx_bytes_max) | max) == 8000
 ' >/dev/null

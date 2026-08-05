@@ -36,13 +36,19 @@ CREATE TABLE telemetry_rollups (
     memory_total_bytes_max BIGINT NOT NULL,
     memory_available_bytes_avg BIGINT NOT NULL,
     memory_available_bytes_min BIGINT NOT NULL,
+    memory_used_ratio_avg DOUBLE PRECISION NOT NULL,
+    memory_used_ratio_max DOUBLE PRECISION NOT NULL,
     swap_sample_count INTEGER NOT NULL DEFAULT 0,
     swap_total_bytes_max BIGINT,
     swap_available_bytes_avg BIGINT,
     swap_available_bytes_min BIGINT,
+    swap_used_ratio_avg DOUBLE PRECISION,
+    swap_used_ratio_max DOUBLE PRECISION,
     disk_total_bytes_max BIGINT NOT NULL DEFAULT 0,
     disk_available_bytes_avg BIGINT NOT NULL DEFAULT 0,
     disk_available_bytes_min BIGINT NOT NULL DEFAULT 0,
+    disk_used_ratio_avg DOUBLE PRECISION NOT NULL DEFAULT 0,
+    disk_used_ratio_max DOUBLE PRECISION NOT NULL DEFAULT 0,
     network_rx_bytes_max BIGINT NOT NULL DEFAULT 0,
     network_tx_bytes_max BIGINT NOT NULL DEFAULT 0,
     connections_sample_count INTEGER NOT NULL DEFAULT 0,
@@ -59,21 +65,33 @@ CREATE TABLE telemetry_rollups (
     CHECK (cpu_usage_max IS NULL OR cpu_usage_max BETWEEN 0 AND 1),
     CHECK (cpu_usage_sample_count BETWEEN 0 AND sample_count),
     CHECK (cpu_cores_max >= 0),
+    CHECK (memory_used_ratio_avg BETWEEN 0 AND 1),
+    CHECK (memory_used_ratio_max BETWEEN 0 AND 1),
     CHECK (swap_sample_count BETWEEN 0 AND sample_count),
-    CHECK (
-        (swap_sample_count = 0 AND
-            swap_total_bytes_max IS NULL
-            AND swap_available_bytes_avg IS NULL
-            AND swap_available_bytes_min IS NULL
+    CHECK ((
+        (swap_sample_count = 0 AND (
+            (swap_total_bytes_max IS NULL
+                AND swap_available_bytes_avg IS NULL
+                AND swap_available_bytes_min IS NULL
+            )
+            OR (swap_total_bytes_max = 0
+                AND swap_available_bytes_avg = 0
+                AND swap_available_bytes_min = 0
+            )
+        )
+            AND swap_used_ratio_avg IS NULL
+            AND swap_used_ratio_max IS NULL
         )
         OR (swap_sample_count > 0
-            AND swap_total_bytes_max IS NOT NULL
+            AND swap_total_bytes_max > 0
             AND swap_available_bytes_avg IS NOT NULL
             AND swap_available_bytes_min IS NOT NULL
+            AND swap_used_ratio_avg IS NOT NULL
+            AND swap_used_ratio_max IS NOT NULL
         )
-    ),
+    ) IS TRUE),
     CHECK (
-        swap_sample_count = 0 OR (
+        swap_total_bytes_max IS NULL OR (
             swap_total_bytes_max >= 0
             AND swap_available_bytes_avg >= 0
             AND swap_available_bytes_min >= 0
@@ -81,6 +99,10 @@ CREATE TABLE telemetry_rollups (
             AND swap_available_bytes_avg <= swap_total_bytes_max
         )
     ),
+    CHECK (swap_used_ratio_avg IS NULL OR swap_used_ratio_avg BETWEEN 0 AND 1),
+    CHECK (swap_used_ratio_max IS NULL OR swap_used_ratio_max BETWEEN 0 AND 1),
+    CHECK (disk_used_ratio_avg BETWEEN 0 AND 1),
+    CHECK (disk_used_ratio_max BETWEEN 0 AND 1),
     CHECK (connections_sample_count BETWEEN 0 AND sample_count),
     CHECK ((connections_sample_count = 0) = (connections_observed_at IS NULL)),
     CHECK (

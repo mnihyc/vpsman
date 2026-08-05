@@ -378,7 +378,47 @@ api_get "/api/v1/tags" | jq -e \
 
 api_get "/api/v1/telemetry/rollups?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
   ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2) | .client_id] | unique | length) >= $expected and
-  all(.[] | select(.bucket_secs == $bucket and .sample_count >= 2); .memory_total_bytes_max > 0 and .disk_total_bytes_max >= 0)
+  all(.[] | select(.bucket_secs == $bucket and .sample_count >= 2);
+    (.memory_total_bytes_max | type) == "number" and
+    (.memory_available_bytes_avg | type) == "number" and
+    (.memory_available_bytes_min | type) == "number" and
+    (.memory_used_ratio_avg | type) == "number" and
+    (.memory_used_ratio_max | type) == "number" and
+    .memory_total_bytes_max > 0 and
+    .memory_available_bytes_min <= .memory_available_bytes_avg and
+    .memory_available_bytes_avg <= .memory_total_bytes_max and
+    .memory_used_ratio_avg >= 0 and
+    .memory_used_ratio_avg <= (.memory_used_ratio_max + 0.000000001) and
+    .memory_used_ratio_max <= 1 and
+    ((.swap_sample_count == 0 and
+      ((.swap_total_bytes_max == null and .swap_available_bytes_avg == null and
+        .swap_available_bytes_min == null) or
+       (.swap_total_bytes_max == 0 and .swap_available_bytes_avg == 0 and
+        .swap_available_bytes_min == 0)) and
+      .swap_used_ratio_avg == null and .swap_used_ratio_max == null) or
+     (.swap_sample_count > 0 and
+      (.swap_total_bytes_max | type) == "number" and
+      .swap_total_bytes_max > 0 and
+      (.swap_available_bytes_avg | type) == "number" and
+      (.swap_available_bytes_min | type) == "number" and
+      (.swap_used_ratio_avg | type) == "number" and
+      (.swap_used_ratio_max | type) == "number" and
+      .swap_available_bytes_min <= .swap_available_bytes_avg and
+      .swap_available_bytes_avg <= .swap_total_bytes_max and
+      .swap_used_ratio_avg >= 0 and
+      .swap_used_ratio_avg <= (.swap_used_ratio_max + 0.000000001) and
+      .swap_used_ratio_max <= 1)) and
+    (.disk_total_bytes_max | type) == "number" and
+    (.disk_available_bytes_avg | type) == "number" and
+    (.disk_available_bytes_min | type) == "number" and
+    (.disk_used_ratio_avg | type) == "number" and
+    (.disk_used_ratio_max | type) == "number" and
+    .disk_total_bytes_max >= 0 and
+    .disk_available_bytes_min <= .disk_available_bytes_avg and
+    .disk_available_bytes_avg <= .disk_total_bytes_max and
+    .disk_used_ratio_avg >= 0 and
+    .disk_used_ratio_avg <= (.disk_used_ratio_max + 0.000000001) and
+    .disk_used_ratio_max <= 1)
 ' >/dev/null
 
 api_get "/api/v1/telemetry/network-rates?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
