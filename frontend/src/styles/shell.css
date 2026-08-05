@@ -2033,6 +2033,7 @@ h2 {
   align-items: center;
   flex: 0 0 auto;
   gap: 6px;
+  margin-inline-start: auto;
 }
 
 .gridPageSize select {
