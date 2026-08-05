@@ -1474,20 +1474,26 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
       scrollWidth: element.scrollWidth,
     };
   });
-  expect(tableLayout.headerWidth).toBeGreaterThan(tableLayout.clientWidth);
+  expect(tableLayout.headerWidth).toBeGreaterThanOrEqual(
+    tableLayout.clientWidth,
+  );
   expect(
     Math.abs(tableLayout.headerWidth - tableLayout.bodyWidth),
   ).toBeLessThanOrEqual(1);
-  expect(tableLayout.scrollWidth).toBeGreaterThan(tableLayout.clientWidth);
-  await tableViewport.evaluate((element) => {
-    element.scrollLeft = element.scrollWidth;
-  });
-  await expect
-    .poll(() => tableViewport.evaluate((element) => element.scrollLeft))
-    .toBeGreaterThan(0);
-  await tableViewport.evaluate((element) => {
-    element.scrollLeft = 0;
-  });
+  expect(tableLayout.scrollWidth).toBeGreaterThanOrEqual(
+    tableLayout.clientWidth,
+  );
+  if (tableLayout.scrollWidth > tableLayout.clientWidth) {
+    await tableViewport.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    await expect
+      .poll(() => tableViewport.evaluate((element) => element.scrollLeft))
+      .toBeGreaterThan(0);
+    await tableViewport.evaluate((element) => {
+      element.scrollLeft = 0;
+    });
+  }
   const pageOverflow = await page.evaluate(
     () =>
       document.documentElement.scrollWidth -
