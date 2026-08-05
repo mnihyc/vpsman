@@ -44,7 +44,13 @@ import type {
   PublicTrafficMetricView as PublicTrafficMetric,
   PublicTrafficHistoryPointView as PublicTrafficPoint,
 } from "./types";
-import { formatCompactTime, formatFullTime, timestampMillis } from "./utils";
+import {
+  formatBillingRenewal,
+  formatCompactTime,
+  formatFullTime,
+  formatVirtualizationLabel,
+  timestampMillis,
+} from "./utils";
 import { agentStatusPresentation } from "./agentDisplayState";
 import {
   formatByteCount as formatBytes,
@@ -59,10 +65,29 @@ type PublicMonitoringSharePageProps = {
 
 type Density = MonitorCardDensity;
 type CardStatusFilter = "all" | "online" | "warning" | "offline";
+type PublicMonitorSort =
+  | "warning"
+  | "traffic"
+  | "cpu"
+  | "memory"
+  | "region"
+  | "provider";
 type CustomBounds = {
   startUnix: number;
   endUnix: number;
 };
+
+const publicMonitorSortOptions: Array<{
+  label: string;
+  value: PublicMonitorSort;
+}> = [
+  { label: "Warnings first", value: "warning" },
+  { label: "Traffic use", value: "traffic" },
+  { label: "CPU use", value: "cpu" },
+  { label: "Memory", value: "memory" },
+  { label: "Region", value: "region" },
+  { label: "Provider", value: "provider" },
+];
 
 // React StrictMode remounts effects in development. Sharing only an in-flight
 // bootstrap avoids recording that remount as a second visitor. The secret is
@@ -85,6 +110,18 @@ export function PublicMonitoringSharePage({
   const [search, setSearch] = useHistoryEntryState(`${historySlot}.search`, "");
   const [statusFilter, setStatusFilter] =
     useHistoryEntryState<CardStatusFilter>(`${historySlot}.status`, "all");
+  const [tagFilter, setTagFilter] = useHistoryEntryState(
+    `${historySlot}.tag`,
+    "all",
+  );
+  const [providerFilter, setProviderFilter] = useHistoryEntryState(
+    `${historySlot}.provider`,
+    "all",
+  );
+  const [sortMode, setSortMode] = useHistoryEntryState<PublicMonitorSort>(
+    `${historySlot}.sort`,
+    "warning",
+  );
   const [window, setWindow] = useHistoryEntryState<MonitoringWindow>(
     `${historySlot}.window`,
     "1d",
@@ -393,22 +430,81 @@ export function PublicMonitoringSharePage({
     window,
   ]);
 
+  const identityContextVisible = share?.visibility.identity_context === true;
+  const tagOptions = useMemo(
+    () =>
+      identityContextVisible
+        ? Array.from(new Set(cards.flatMap((card) => card.tags ?? []))).sort()
+        : [],
+    [cards, identityContextVisible],
+  );
+  const providerOptions = useMemo(
+    () =>
+      identityContextVisible
+        ? Array.from(
+            new Set(
+              cards.flatMap((card) =>
+                publicTagValues(card.tags ?? [], "provider"),
+              ),
+            ),
+          ).sort()
+        : [],
+    [cards, identityContextVisible],
+  );
+  const effectiveTagFilter = tagOptions.includes(tagFilter)
+    ? tagFilter
+    : "all";
+  const effectiveProviderFilter = providerOptions.includes(providerFilter)
+    ? providerFilter
+    : "all";
+  const visibleSortOptions = identityContextVisible
+    ? publicMonitorSortOptions
+    : publicMonitorSortOptions.filter(
+        (option) => option.value !== "region" && option.value !== "provider",
+      );
+  const effectiveSortMode = visibleSortOptions.some(
+    (option) => option.value === sortMode,
+  )
+    ? sortMode
+    : "warning";
   const filteredCards = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    return cards.filter((card) => {
-      const matchesSearch =
-        !query ||
-        card.display_name.toLocaleLowerCase().includes(query) ||
-        (card.tags ?? []).some((tag) =>
-          tag.toLocaleLowerCase().includes(query),
+    return cards
+      .filter((card) => {
+        const tags = card.tags ?? [];
+        const matchesSearch =
+          !query ||
+          card.display_name.toLocaleLowerCase().includes(query) ||
+          tags.some((tag) => tag.toLocaleLowerCase().includes(query));
+        return (
+          matchesSearch &&
+          (statusFilter === "all" ||
+            publicCardStatusGroup(card, share?.visibility) === statusFilter) &&
+          (effectiveTagFilter === "all" ||
+            tags.includes(effectiveTagFilter)) &&
+          (effectiveProviderFilter === "all" ||
+            publicTagValues(tags, "provider").includes(
+              effectiveProviderFilter,
+            ))
         );
-      return (
-        matchesSearch &&
-        (statusFilter === "all" ||
-          publicCardStatusGroup(card, share?.visibility) === statusFilter)
+      })
+      .sort((left, right) =>
+        comparePublicMonitoringCards(
+          left,
+          right,
+          effectiveSortMode,
+          share?.visibility,
+        ),
       );
-    });
-  }, [cards, search, share?.visibility, statusFilter]);
+  }, [
+    cards,
+    effectiveProviderFilter,
+    effectiveSortMode,
+    effectiveTagFilter,
+    search,
+    share?.visibility,
+    statusFilter,
+  ]);
   const summary = useMemo(
     () => summarizeCards(cards, share?.visibility),
     [cards, share?.visibility],
@@ -578,10 +674,68 @@ export function PublicMonitoringSharePage({
                   }
                   value={statusFilter}
                 >
-                  <option value="all">All</option>
+                  <option value="all">All statuses</option>
                   <option value="online">Online</option>
-                  <option value="warning">Warning / unknown</option>
+                  <option value="warning">Warning</option>
                   <option value="offline">Offline</option>
+                </select>
+              </label>
+              {identityContextVisible ? (
+                <>
+                  <label htmlFor="public-monitoring-tag">
+                    <span>Tag</span>
+                    <select
+                      aria-label="Filter shared VPSs by tag"
+                      id="public-monitoring-tag"
+                      name="public-monitoring-tag"
+                      onChange={(event) => setTagFilter(event.target.value)}
+                      value={effectiveTagFilter}
+                    >
+                      <option value="all">All tags</option>
+                      {tagOptions.map((tag) => (
+                        <option key={tag} value={tag}>
+                          {tag}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label htmlFor="public-monitoring-provider">
+                    <span>Provider</span>
+                    <select
+                      aria-label="Filter shared VPSs by provider"
+                      id="public-monitoring-provider"
+                      name="public-monitoring-provider"
+                      onChange={(event) =>
+                        setProviderFilter(event.target.value)
+                      }
+                      value={effectiveProviderFilter}
+                    >
+                      <option value="all">All providers</option>
+                      {providerOptions.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {provider}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              <label htmlFor="public-monitoring-sort">
+                <span>Sort</span>
+                <select
+                  aria-label="Shared VPS sort"
+                  id="public-monitoring-sort"
+                  name="public-monitoring-sort"
+                  onChange={(event) =>
+                    setSortMode(event.target.value as PublicMonitorSort)
+                  }
+                  value={effectiveSortMode}
+                >
+                  {visibleSortOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
                 </select>
               </label>
               <div
@@ -667,7 +821,7 @@ export function PublicMonitoringSharePage({
               </strong>
               <span>
                 {cards.length
-                  ? "Clear the search or change the status filter."
+                  ? "Clear the search or change the filters."
                   : "The owner shared an empty frozen target set."}
               </span>
             </section>
@@ -803,13 +957,17 @@ function PublicMonitoringCardView({
   const country = visibility?.identity_context
     ? countryTagValue(card.tags ?? [])
     : null;
-  const cardTitle = `${card.display_name || "Unnamed VPS"} · ${statusLabel}`;
+  const identitySummary = visibility?.identity_context
+    ? publicIdentitySummary(card.tags ?? [])
+    : "";
+  const cardTitle = `${card.display_name || "Unnamed VPS"} · ${visibleStatusLabel}`;
   const freshness = publicCardFreshness(card, visibility);
   const freshnessLabel = freshness
     ? `Updated ${formatCompactTime(freshness)}`
     : publicCardHasVisibleTelemetry(visibility)
       ? "Visible telemetry unavailable"
       : "Status only";
+  const auxiliaryFacts = publicMonitoringAuxiliaryFacts(card, visibility);
   const cardHeader = (
     <>
       <span
@@ -848,16 +1006,12 @@ function PublicMonitoringCardView({
       }
     >
       {density === "comfortable" && visibility?.identity_context ? (
-        <div className="vpsMonitorTags" aria-label="Shared identity tags">
-          {(card.tags ?? []).length ? (
-            (card.tags ?? []).map((tag) => (
-              <span key={tag} title={tag}>
-                {tag}
-              </span>
-            ))
-          ) : (
-            <span>untagged</span>
-          )}
+        <div
+          className="publicMonitoringIdentityContext"
+          aria-label="Shared identity context"
+          title={identitySummary || "Identity context unavailable"}
+        >
+          {identitySummary || "Identity context unavailable"}
         </div>
       ) : null}
 
@@ -877,7 +1031,11 @@ function PublicMonitoringCardView({
             percent={cpuPercent}
             showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(cpuPercent)}
+            value={
+              density === "compact" && resource
+                ? `${formatPercent(cpuPercent)} · ${resource.cpu_cores}c`
+                : formatPercent(cpuPercent)
+            }
           />
           <PublicMetric
             caption={capacityCaption(
@@ -889,7 +1047,14 @@ function PublicMonitoringCardView({
             percent={memoryUsed}
             showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(memoryUsed)}
+            value={
+              density === "compact"
+                ? compactCapacity(
+                    resource?.memory_total_bytes,
+                    resource?.memory_available_bytes,
+                  )
+                : formatPercent(memoryUsed)
+            }
           />
           <PublicMetric
             caption={capacityCaption(
@@ -901,7 +1066,14 @@ function PublicMonitoringCardView({
             percent={diskUsed}
             showCaption={density === "comfortable"}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(diskUsed)}
+            value={
+              density === "compact"
+                ? compactCapacity(
+                    resource?.disk_total_bytes,
+                    resource?.disk_available_bytes,
+                  )
+                : formatPercent(diskUsed)
+            }
           />
           <PublicMetric
             caption={
@@ -923,7 +1095,15 @@ function PublicMonitoringCardView({
               ) : undefined
             }
             stale={Boolean(resourceProblem)}
-            value={resource ? formatLoad(resource.load_1) : "No data"}
+            value={
+              resource
+                ? density === "compact"
+                  ? [resource.load_1, resource.load_5, resource.load_15]
+                      .map(formatLoad)
+                      .join("/")
+                  : formatLoad(resource.load_1)
+                : "No data"
+            }
           />
         </div>
       ) : null}
@@ -961,29 +1141,22 @@ function PublicMonitoringCardView({
         </div>
       ) : null}
 
-      {visibility?.resources ? (
+      {auxiliaryFacts.length ? (
         <div
-          className="vpsMonitorAuxFacts publicMonitoringConnections"
-          aria-label={`Connection counts for ${card.display_name}`}
+          className="vpsMonitorAuxFacts publicMonitoringAuxFacts"
+          aria-label={`Additional current facts for ${card.display_name}`}
         >
-          <span
-            title={publicConnectionTitle(
-              "TCP",
-              resource?.connections_observed_at,
-            )}
-          >
-            <small>TCP</small>
-            <strong>{formatPublicSocketCount(resource?.tcp_sockets)}</strong>
-          </span>
-          <span
-            title={publicConnectionTitle(
-              "UDP",
-              resource?.connections_observed_at,
-            )}
-          >
-            <small>UDP</small>
-            <strong>{formatPublicSocketCount(resource?.udp_sockets)}</strong>
-          </span>
+          {auxiliaryFacts.map((fact) => (
+            <span
+              data-fact-kind={fact.kind}
+              key={fact.label}
+              title={fact.title}
+            >
+              <small>{fact.label}</small>
+              <strong>{fact.value}</strong>
+              {fact.detail ? <em>{fact.detail}</em> : null}
+            </span>
+          ))}
         </div>
       ) : null}
 
@@ -1076,8 +1249,9 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
         className="publicMonitoringTraffic missing"
         aria-label="Traffic unavailable"
       >
-        <strong>Traffic unavailable</strong>
-        <span>No traffic data was shared.</span>
+        <div className="publicMonitoringTrafficHeading">
+          <strong title="Traffic unavailable">Traffic unavailable</strong>
+        </div>
       </div>
     );
   }
@@ -1086,45 +1260,46 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
     : null;
   const fill = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const problem = publicTrafficProblem(traffic);
-  const stateLabel = traffic.configured ? "Traffic" : "Traffic unconfigured";
   const portSpeed = traffic.port_speed?.display;
-  const trafficHeading = `${stateLabel}${portSpeed ? ` · ${portSpeed}` : ""}`;
-  const cycleSummary = trafficCycleSummary(traffic);
-  const trafficDetail =
-    problem ??
-    `RX ${formatBytes(traffic.rx_bytes)} · TX ${formatBytes(traffic.tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`;
+  const cycleSummary = traffic.configured
+    ? trafficCycleSummary(traffic)
+    : "";
+  const trafficDetail = traffic.configured
+    ? problem ??
+      `RX ${formatOptionalBytes(traffic.rx_bytes)} · TX ${formatOptionalBytes(traffic.tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
+    : "Authoritative traffic accounting is not configured for this VPS.";
   return (
     <div
-      aria-label={`Traffic cycle: ${stateLabel}`}
+      aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
       className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${problem ? " warning" : ""}${percent !== null && percent > 100 ? " overQuota" : ""}`}
     >
-      <div>
-        <strong
-          title={
-            portSpeed
-              ? `${trafficHeading}; display value only—no shaping or enforcement is implied`
-              : trafficHeading
-          }
-        >
-          {trafficHeading}
+      <div className="publicMonitoringTrafficHeading">
+        <strong title={traffic.configured ? "Traffic" : "Traffic unconfigured"}>
+          {traffic.configured ? "Traffic" : "Traffic unconfigured"}
         </strong>
-        <span title={cycleSummary}>{cycleSummary}</span>
+        {portSpeed ? (
+          <span
+            className="publicMonitoringPortSpeed"
+            title={`${portSpeed} port capacity; display value only—no shaping or enforcement is implied`}
+          >
+            {portSpeed}
+          </span>
+        ) : null}
+        {cycleSummary ? <span title={cycleSummary}>{cycleSummary}</span> : null}
       </div>
-      <span
-        aria-label={
-          percent === null
-            ? undefined
-            : `Traffic quota use: ${formatPercent(percent)}`
-        }
-        aria-valuemax={percent === null ? undefined : 100}
-        aria-valuemin={percent === null ? undefined : 0}
-        aria-valuenow={percent === null ? undefined : fill}
-        aria-valuetext={percent === null ? undefined : formatPercent(percent)}
-        className={`vpsMonitorMetricTrack${percent === null ? " missing" : ""}`}
-        role={percent === null ? undefined : "meter"}
-      >
-        <span style={{ width: `${fill}%` }} />
-      </span>
+      {percent !== null ? (
+        <span
+          aria-label={`Traffic quota use: ${formatPercent(percent)}`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={fill}
+          aria-valuetext={formatPercent(percent)}
+          className="vpsMonitorMetricTrack"
+          role="meter"
+        >
+          <span style={{ width: `${fill}%` }} />
+        </span>
+      ) : null}
       <small title={trafficDetail}>{trafficDetail}</small>
     </div>
   );
@@ -1214,10 +1389,17 @@ function PublicMonitoringDetailPanel({
   window: MonitoringWindow;
   visibility: PublicMonitoringShareView["visibility"] | undefined;
 }) {
+  const [section, setSection] = useHistoryEntryState<"resources" | "ping">(
+    `public-monitoring.${card.client_key}.section`,
+    "resources",
+  );
   const [pingMetric, setPingMetric] = useHistoryEntryState<"latency" | "loss">(
     `public-monitoring.${card.client_key}.ping-metric`,
     "latency",
   );
+  const [hiddenPingTargets, setHiddenPingTargets] = useHistoryEntryState<
+    string[]
+  >(`public-monitoring.${card.client_key}.hidden-ping-targets`, []);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const resources = detail?.resources ?? [];
   const network = detail?.network ?? [];
@@ -1225,17 +1407,92 @@ function PublicMonitoringDetailPanel({
   const resourceTimeline = regularTimeline(resources, detail?.range);
   const networkTimeline = regularTimeline(network, detail?.range);
   const trafficTimeline = regularTimeline(traffic, detail?.range);
+  const hasSwapHistory = resources.some((point) => {
+    const total = finiteNumber(point.swap_total_bytes);
+    return (
+      point.swap_sample_count > 0 &&
+      total !== null &&
+      total > 0 &&
+      finiteNumber(point.swap_available_bytes) !== null
+    );
+  });
+  const hasTrafficHistory = traffic.some((point) =>
+    [point.rx_bytes, point.tx_bytes, point.total_bytes].some(
+      (value) => finiteNumber(value) !== null,
+    ),
+  );
+  const currentTrafficConfigured = card.traffic?.configured === true;
   const trafficResetCount = traffic.reduce(
     (total, point) => total + Math.max(0, point.reset_count),
     0,
   );
+  const pingTargetNames = Array.from(
+    new Set([
+      ...(detail?.ping_targets ?? []).map((target) => target.target_name),
+      ...(detail?.ping ?? []).map((point) => point.target_name),
+    ]),
+  ).sort((left, right) => left.localeCompare(right));
+  const hiddenPingTargetSet = new Set(hiddenPingTargets);
+  const selectedPingTargetNames = pingTargetNames.filter(
+    (targetName) => !hiddenPingTargetSet.has(targetName),
+  );
+  const pingTargetColors = stableTargetColors(pingTargetNames);
   const pingChart = pingChartData(detail?.ping ?? [], detail?.range);
+  const pingLines =
+    pingMetric === "latency" ? pingChart.latencyLines : pingChart.lossLines;
+  const visiblePingSeriesCount = pingLines.filter(
+    (line) =>
+      selectedPingTargetNames.includes(line.seriesKey ?? line.label) &&
+      line.values.some((value) => value !== null && Number.isFinite(value)),
+  ).length;
   const exportPrefix = `shared-${card.client_key.slice(0, 12)}-${detail?.range.window ?? window}`;
   const visibleStatusLabel = publicCardVisibleStatusLabel(card, visibility);
   const freshness = publicCardFreshness(card, visibility);
+  const country = visibility?.identity_context
+    ? countryTagValue(card.tags ?? [])
+    : null;
+  const identitySummary = visibility?.identity_context
+    ? publicIdentitySummary(card.tags ?? [])
+    : "";
+  const resourcesAvailable = Boolean(
+    detail &&
+      (detail.resources !== undefined ||
+        detail.network !== undefined ||
+        (detail.traffic !== undefined &&
+          (currentTrafficConfigured || hasTrafficHistory))),
+  );
+  const pingAvailable = Boolean(
+    detail &&
+      (detail.ping_targets !== undefined || detail.ping !== undefined),
+  );
+  const resourceSectionSummary = [
+    detail?.resources !== undefined ? "resources" : null,
+    detail?.network !== undefined ? "network" : null,
+    detail?.traffic !== undefined &&
+    (currentTrafficConfigured || hasTrafficHistory)
+      ? "traffic"
+      : null,
+  ]
+    .filter((label): label is string => Boolean(label))
+    .join(" · ");
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: false });
   }, [card.client_key]);
+  useEffect(() => {
+    if (section === "resources" && !resourcesAvailable && pingAvailable) {
+      setSection("ping");
+    } else if (section === "ping" && !pingAvailable && resourcesAvailable) {
+      setSection("resources");
+    }
+  }, [pingAvailable, resourcesAvailable, section, setSection]);
+
+  const togglePingTarget = (targetName: string) => {
+    setHiddenPingTargets((current) =>
+      current.includes(targetName)
+        ? current.filter((candidate) => candidate !== targetName)
+        : [...current, targetName],
+    );
+  };
   return (
     <section
       aria-busy={loading}
@@ -1245,21 +1502,52 @@ function PublicMonitoringDetailPanel({
       <header className="publicMonitoringDetailHeader">
         <div>
           <h2 ref={headingRef} tabIndex={-1}>
-            {card.display_name || "Unnamed VPS"}
+            {country ? (
+              <CountryFlag country={country} decorative fallback="none" />
+            ) : null}
+            <span>{card.display_name || "Unnamed VPS"}</span>
           </h2>
-          <span>
+          <p>
             {visibleStatusLabel}
             {freshness ? ` · Updated ${formatCompactTime(freshness)}` : ""}
             {` · Read-only history`}
+            {identitySummary ? ` · ${identitySummary}` : ""}
             {detail
               ? ` · ${humanizeToken(detail.range.source)} source · ${detail.range.points} points`
               : ""}
-          </span>
+          </p>
         </div>
-        <button aria-label="Close VPS history" onClick={onClose} type="button">
-          Close
+        <button aria-label="Back to shared fleet" onClick={onClose} type="button">
+          Back to fleet
         </button>
       </header>
+      <PublicMonitoringKpiStrip card={card} visibility={visibility} />
+      <PublicMonitoringInformationGroups card={card} visibility={visibility} />
+      {resourcesAvailable && pingAvailable ? (
+        <div
+          aria-label="Shared VPS detail section"
+          className="dashboardSectionSelector publicMonitoringSectionSelector"
+        >
+          <button
+            aria-pressed={section === "resources"}
+            className={section === "resources" ? "active" : ""}
+            onClick={() => setSection("resources")}
+            type="button"
+          >
+            <strong>Resources</strong>
+            <small>{resourceSectionSummary}</small>
+          </button>
+          <button
+            aria-pressed={section === "ping"}
+            className={section === "ping" ? "active" : ""}
+            onClick={() => setSection("ping")}
+            type="button"
+          >
+            <strong>Ping</strong>
+            <small>Targets · latency · loss</small>
+          </button>
+        </div>
+      ) : null}
       <div className="observabilityMetricsControls publicMonitoringRangeControls">
         <MonitoringRangeTabs
           ariaLabel="History range"
@@ -1312,54 +1600,15 @@ function PublicMonitoringDetailPanel({
         </div>
       ) : detail ? (
         <>
-          {detail.ping_targets !== undefined ? (
-            <div
-              aria-label="Current Ping target evidence"
-              className="vpsMonitoringPingTargets publicMonitoringPingTargets"
-            >
-              {detail.ping_targets.map((target) => {
-                const status = publicPingEffectiveStatus(target);
-                return (
-                  <div
-                    className="vpsMonitoringPingTarget"
-                    key={target.target_name}
-                  >
-                    <span>
-                      <i
-                        style={{
-                          background: stableTargetColor(target.target_name),
-                        }}
-                      />
-                      <strong title={target.target_name}>
-                        {target.target_name}
-                      </strong>
-                      {card.primary_ping?.target_name === target.target_name ? (
-                        <em>Primary</em>
-                      ) : null}
-                    </span>
-                    <ConsoleStatusBadge tone={publicPingTone(status)}>
-                      {publicPingStatusLabel(status)}
-                    </ConsoleStatusBadge>
-                    <small>
-                      {status === "disabled" ? "Last sample: " : ""}
-                      {target.latency_avg_ms === null
-                        ? "No latency"
-                        : `${formatNumber(target.latency_avg_ms)} ms`}
-                      {` · ${target.loss_ratio === null ? "No loss evidence" : formatPercent(target.loss_ratio * 100)}`}
-                    </small>
-                  </div>
-                );
-              })}
-              {!detail.ping_targets.length ? (
-                <p className="dashboardEmptyChart">
-                  No Ping targets are assigned to this VPS.
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-          <div className="dashboardWidgetGrid publicMonitoringDetailCharts">
-            {detail.resources !== undefined ? (
-              <>
+          {section === "resources" ? (
+            <div className="publicMonitoringChartGroups">
+              {detail.resources !== undefined ? (
+                <section className="publicMonitoringChartGroup">
+                  <header>
+                    <strong>Resources</strong>
+                    <small>Utilization, capacity, load, and connections</small>
+                  </header>
+                  <div className="dashboardWidgetGrid publicMonitoringDetailCharts">
                 <PublicChart
                   emptyLabel="CPU utilization is unavailable for this range"
                   exportFileName={`${exportPrefix}-cpu`}
@@ -1373,6 +1622,9 @@ function PublicMonitoringDetailPanel({
                       ),
                     },
                   ]}
+                  summary={formatPercent(
+                    ratioToPercent(card.resources?.cpu_usage_avg),
+                  )}
                   times={resourceTimeline.times}
                   valueFormatter={(value) => formatPercent(value)}
                 />
@@ -1403,6 +1655,17 @@ function PublicMonitoringDetailPanel({
                       ),
                     },
                   ]}
+                  summary={
+                    card.resources
+                      ? [
+                          card.resources.load_1,
+                          card.resources.load_5,
+                          card.resources.load_15,
+                        ]
+                          .map(formatLoad)
+                          .join(" / ")
+                      : "No data"
+                  }
                   times={resourceTimeline.times}
                   valueFormatter={(value) =>
                     value === null ? "No data" : formatNumber(value)
@@ -1411,7 +1674,7 @@ function PublicMonitoringDetailPanel({
                 <PublicChart
                   emptyLabel="Memory history is unavailable for this range"
                   exportFileName={`${exportPrefix}-memory`}
-                  label="Memory used"
+                  label={hasSwapHistory ? "Memory / swap used" : "Memory used"}
                   lines={[
                     {
                       color: consolePalette.chart.purple,
@@ -1423,7 +1686,27 @@ function PublicMonitoringDetailPanel({
                         ),
                       ),
                     },
+                    ...(hasSwapHistory
+                      ? [
+                          {
+                            color: consolePalette.chart.orange,
+                            label: "Swap used",
+                            values: resourceTimeline.records.map((point) =>
+                              point && point.swap_sample_count > 0
+                                ? usedPercent(
+                                    point.swap_total_bytes,
+                                    point.swap_available_bytes,
+                                  )
+                                : null,
+                            ),
+                          },
+                        ]
+                      : []),
                   ]}
+                  summary={capacityCaption(
+                    card.resources?.memory_total_bytes,
+                    card.resources?.memory_available_bytes,
+                  )}
                   times={resourceTimeline.times}
                   valueFormatter={(value) => formatPercent(value)}
                 />
@@ -1443,6 +1726,10 @@ function PublicMonitoringDetailPanel({
                       ),
                     },
                   ]}
+                  summary={capacityCaption(
+                    card.resources?.disk_total_bytes,
+                    card.resources?.disk_available_bytes,
+                  )}
                   times={resourceTimeline.times}
                   valueFormatter={(value) => formatPercent(value)}
                 />
@@ -1466,15 +1753,27 @@ function PublicMonitoringDetailPanel({
                       ),
                     },
                   ]}
+                  summary={`TCP ${formatPublicSocketCount(card.resources?.tcp_sockets)} · UDP ${formatPublicSocketCount(card.resources?.udp_sockets)}`}
                   times={resourceTimeline.times}
                   valueFormatter={(value) =>
                     value === null ? "No data" : formatPublicSocketCount(value)
                   }
+                  wide
                 />
-              </>
-            ) : null}
-            {detail.network !== undefined ? (
-              <PublicChart
+                  </div>
+                </section>
+              ) : null}
+              {detail.network !== undefined ||
+              (detail.traffic !== undefined &&
+                (currentTrafficConfigured || hasTrafficHistory)) ? (
+                <section className="publicMonitoringChartGroup">
+                  <header>
+                    <strong>Network &amp; traffic</strong>
+                    <small>Live rates and authoritative accounting evidence</small>
+                  </header>
+                  <div className="dashboardWidgetGrid publicMonitoringDetailCharts">
+              {detail.network !== undefined ? (
+                <PublicChart
                 emptyLabel="Network rate history is unavailable for this range"
                 exportFileName={`${exportPrefix}-network`}
                 label="Network RX / TX"
@@ -1496,21 +1795,26 @@ function PublicMonitoringDetailPanel({
                     ),
                   },
                 ]}
+                summary={`↓ ${formatByteRateFromBitsPerSecond(card.network?.rx_bps)} · ↑ ${formatByteRateFromBitsPerSecond(card.network?.tx_bps)}`}
                 times={networkTimeline.times}
                 valueFormatter={formatByteRateFromBitsPerSecond}
-                wide
               />
             ) : null}
-            {detail.traffic !== undefined ? (
+            {detail.traffic !== undefined &&
+            (currentTrafficConfigured || hasTrafficHistory) ? (
               <>
                 <PublicChart
                   emptyLabel={
-                    card.traffic?.configured
+                    currentTrafficConfigured
                       ? "Traffic volume history is unavailable for this range"
-                      : "Traffic unconfigured"
+                      : "Prior traffic accounting history is unavailable for this range"
                   }
                   exportFileName={`${exportPrefix}-traffic`}
-                  label="Traffic volume"
+                  label={
+                    currentTrafficConfigured
+                      ? "Traffic volume"
+                      : "Prior traffic accounting history"
+                  }
                   lines={[
                     {
                       color: consolePalette.chart.orange,
@@ -1535,72 +1839,422 @@ function PublicMonitoringDetailPanel({
                       ),
                     },
                   ]}
+                  summary={
+                    currentTrafficConfigured
+                      ? `RX ${formatOptionalBytes(card.traffic?.rx_bytes)} · TX ${formatOptionalBytes(card.traffic?.tx_bytes)}`
+                      : "Current accounting unconfigured"
+                  }
                   times={trafficTimeline.times}
                   valueFormatter={(value) =>
                     value === null ? "No data" : formatBytes(value)
                   }
-                  wide
                 />
-                <PublicTrafficCycle
-                  resetCount={trafficResetCount}
-                  traffic={card.traffic}
-                />
+                {currentTrafficConfigured ? (
+                  <PublicTrafficCycle
+                    resetCount={trafficResetCount}
+                    traffic={card.traffic}
+                  />
+                ) : hasTrafficHistory ? (
+                  <p className="publicMonitoringPriorTrafficNote">
+                    Retained volume predates the current unconfigured accounting
+                    state; it is historical evidence, not a current cycle total.
+                  </p>
+                ) : null}
               </>
             ) : null}
-            {detail.ping !== undefined ? (
-              <div className="publicMonitoringPingHistory wideWidget">
-                <div
-                  className="segmented vpsMonitoringPingMetric"
-                  role="group"
-                  aria-label="Ping chart metric"
-                >
+                  </div>
+                </section>
+              ) : null}
+            </div>
+          ) : null}
+          {section === "ping" && pingAvailable ? (
+            <section
+              aria-label="Shared Ping history"
+              className="publicMonitoringPingHistory"
+            >
+              <header className="publicMonitoringPingToolbar">
+                <div>
+                  <strong>Ping targets</strong>
+                  <small>
+                    {selectedPingTargetNames.length}/{pingTargetNames.length}{" "}
+                    selected · missing samples remain gaps
+                  </small>
+                </div>
+                <div className="publicMonitoringPingActions">
+                  <div
+                    className="segmented vpsMonitoringPingMetric"
+                    role="group"
+                    aria-label="Ping chart metric"
+                  >
+                    <button
+                      aria-pressed={pingMetric === "latency"}
+                      className={pingMetric === "latency" ? "selected" : ""}
+                      onClick={() => setPingMetric("latency")}
+                      type="button"
+                    >
+                      Latency
+                    </button>
+                    <button
+                      aria-pressed={pingMetric === "loss"}
+                      className={pingMetric === "loss" ? "selected" : ""}
+                      onClick={() => setPingMetric("loss")}
+                      type="button"
+                    >
+                      Loss
+                    </button>
+                  </div>
                   <button
-                    aria-pressed={pingMetric === "latency"}
-                    className={pingMetric === "latency" ? "selected" : ""}
-                    onClick={() => setPingMetric("latency")}
+                    className="secondaryAction compactAction"
+                    disabled={
+                      selectedPingTargetNames.length === pingTargetNames.length
+                    }
+                    onClick={() => setHiddenPingTargets([])}
                     type="button"
                   >
-                    Latency
+                    Select all
                   </button>
                   <button
-                    aria-pressed={pingMetric === "loss"}
-                    className={pingMetric === "loss" ? "selected" : ""}
-                    onClick={() => setPingMetric("loss")}
+                    className="secondaryAction compactAction"
+                    disabled={selectedPingTargetNames.length === 0}
+                    onClick={() => setHiddenPingTargets(pingTargetNames)}
                     type="button"
                   >
-                    Loss
+                    Select none
                   </button>
                 </div>
-                <PublicChart
-                  emptyLabel={`Ping ${pingMetric} history is unavailable for this range`}
-                  exportFileName={`${exportPrefix}-ping-${pingMetric}`}
-                  label={
-                    pingMetric === "latency"
-                      ? "Ping latency"
-                      : "Ping packet loss"
-                  }
-                  lines={
-                    pingMetric === "latency"
-                      ? pingChart.latencyLines
-                      : pingChart.lossLines
-                  }
-                  times={pingChart.times}
-                  valueFormatter={
-                    pingMetric === "latency"
-                      ? (value) =>
-                          value === null
-                            ? "No data"
-                            : `${formatNumber(value)} ms`
-                      : (value) => formatPercent(value)
-                  }
-                  wide
-                />
+              </header>
+              <div
+                aria-label="Selectable current Ping target evidence"
+                className="publicMonitoringPingTargets"
+              >
+                {pingTargetNames.map((targetName) => {
+                  const target = detail.ping_targets?.find(
+                    (candidate) => candidate.target_name === targetName,
+                  );
+                  const status = target
+                    ? publicPingEffectiveStatus(target)
+                    : "unavailable";
+                  const selected = !hiddenPingTargetSet.has(targetName);
+                  const latency =
+                    target?.latency_avg_ms === null || !target
+                      ? "No latency"
+                      : `${formatNumber(target.latency_avg_ms)} ms`;
+                  const loss =
+                    target?.loss_ratio === null || !target
+                      ? "No loss evidence"
+                      : formatPercent(target.loss_ratio * 100);
+                  const samplePrefix =
+                    status === "disabled" ? "Last sample: " : "";
+                  return (
+                    <button
+                      aria-label={`${selected ? "Hide" : "Show"} ${targetName} Ping history. ${publicPingStatusLabel(status)}. ${samplePrefix}${latency}. ${loss}`}
+                      aria-pressed={selected}
+                      className={`publicMonitoringPingTarget${selected ? " selected" : ""}`}
+                      key={targetName}
+                      onClick={() => togglePingTarget(targetName)}
+                      type="button"
+                    >
+                      <span>
+                        <i
+                          style={{
+                            background:
+                              pingTargetColors.get(targetName) ??
+                              consolePalette.chart.neutral,
+                          }}
+                        />
+                        <strong title={targetName}>{targetName}</strong>
+                        {card.primary_ping?.target_name === targetName ? (
+                          <em>Primary</em>
+                        ) : null}
+                      </span>
+                      <ConsoleStatusBadge tone={publicPingTone(status)}>
+                        {publicPingStatusLabel(status)}
+                      </ConsoleStatusBadge>
+                      <small>
+                        {samplePrefix}
+                        {latency}
+                        {` · ${loss}`}
+                      </small>
+                    </button>
+                  );
+                })}
+                {!pingTargetNames.length ? (
+                  <p className="dashboardEmptyChart">
+                    No Ping targets are assigned to this VPS.
+                  </p>
+                ) : null}
               </div>
-            ) : null}
-          </div>
+              <PublicChart
+                allowNoVisibleSeries
+                emptyLabel={
+                  pingTargetNames.length && !selectedPingTargetNames.length
+                    ? "Select at least one Ping target to display its history"
+                    : `Ping ${pingMetric} history is unavailable for this range`
+                }
+                exportFileName={`${exportPrefix}-ping-${pingMetric}`}
+                height={190}
+                label={
+                  pingMetric === "latency"
+                    ? "Ping latency"
+                    : "Ping packet loss"
+                }
+                lines={pingLines}
+                onVisibleSeriesKeysChange={(visibleTargetNames) =>
+                  setHiddenPingTargets(
+                    pingTargetNames.filter(
+                      (targetName) =>
+                        !visibleTargetNames.includes(targetName),
+                    ),
+                  )
+                }
+                summary={`${visiblePingSeriesCount} series with data`}
+                times={pingChart.times}
+                valueFormatter={
+                  pingMetric === "latency"
+                    ? (value) =>
+                        value === null
+                          ? "No data"
+                          : `${formatNumber(value)} ms`
+                    : (value) => formatPercent(value)
+                }
+                visibleSeriesKeys={selectedPingTargetNames}
+                wide
+              />
+            </section>
+          ) : null}
         </>
       ) : null}
     </section>
+  );
+}
+
+function PublicMonitoringKpiStrip({
+  card,
+  visibility,
+}: {
+  card: PublicMonitoringCard;
+  visibility: PublicMonitoringShareView["visibility"] | undefined;
+}) {
+  const resource = card.resources;
+  const facts: Array<{
+    detail: string;
+    kind: "billing" | "connection" | "ping" | "traffic" | "uptime";
+    label: string;
+    value: string;
+  }> = [];
+  if (visibility?.billing && card.billing) {
+    const renewal = formatBillingRenewal(card.billing.cycle);
+    facts.push({
+      detail: renewal ?? "Configured billing rule",
+      kind: "billing",
+      label: "Billing",
+      value: renewal
+        ? `${card.billing.display} · ${renewal}`
+        : card.billing.display,
+    });
+  }
+  const uptime = finiteNumber(card.system_information?.uptime_secs);
+  if (visibility?.system_information && uptime !== null && uptime >= 0) {
+    facts.push({
+      detail: card.system_information?.uptime_observed_at
+        ? `Observed ${formatCompactTime(card.system_information.uptime_observed_at)}`
+        : "Latest reported uptime",
+      kind: "uptime",
+      label: "Uptime",
+      value: formatUptime(uptime),
+    });
+  }
+  const traffic = card.traffic;
+  const trafficTotal = finiteNumber(traffic?.total_bytes);
+  if (
+    visibility?.traffic &&
+    traffic?.configured &&
+    trafficTotal !== null &&
+    trafficTotal >= 0
+  ) {
+    facts.push({
+      detail: `${trafficCycleSummary(traffic)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`,
+      kind: "traffic",
+      label: "Traffic",
+      value: formatBytes(trafficTotal),
+    });
+  }
+  const connections = [
+    resource?.tcp_sockets === null || resource?.tcp_sockets === undefined
+      ? null
+      : `TCP ${formatPublicSocketCount(resource.tcp_sockets)}`,
+    resource?.udp_sockets === null || resource?.udp_sockets === undefined
+      ? null
+      : `UDP ${formatPublicSocketCount(resource.udp_sockets)}`,
+  ].filter((value): value is string => Boolean(value));
+  if (visibility?.resources && connections.length) {
+    facts.push({
+      detail: resource?.connections_observed_at
+        ? `Observed ${formatCompactTime(resource.connections_observed_at)}`
+        : "Latest socket-table evidence",
+      kind: "connection",
+      label: "Connections",
+      value: connections.join(" · "),
+    });
+  }
+  if (visibility?.ping && card.primary_ping) {
+    const ping = card.primary_ping;
+    const status = publicPingEffectiveStatus(ping);
+    const latency =
+      ping.latency_avg_ms === null
+        ? null
+        : `${formatNumber(ping.latency_avg_ms)} ms`;
+    facts.push({
+      detail: `${publicPingStatusLabel(status)} · ${latency ?? "No latency"} · ${ping.loss_ratio === null ? "No loss evidence" : `${formatPercent(ping.loss_ratio * 100)} loss`}`,
+      kind: "ping",
+      label: "Primary Ping",
+      value: `${ping.target_name} · ${status === "disabled" ? "Disabled" : (latency ?? publicPingStatusLabel(status))}`,
+    });
+  }
+  if (!facts.length) return null;
+  return (
+    <div
+      aria-label="Current shared VPS evidence"
+      className="publicMonitoringKpiStrip"
+    >
+      {facts.map((fact) => (
+        <span
+          data-fact-kind={fact.kind}
+          key={fact.label}
+          title={`${fact.value}. ${fact.detail}`}
+        >
+          <small>{fact.label}</small>
+          <strong>{fact.value}</strong>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function PublicMonitoringInformationGroups({
+  card,
+  visibility,
+}: {
+  card: PublicMonitoringCard;
+  visibility: PublicMonitoringShareView["visibility"] | undefined;
+}) {
+  const resource = card.resources;
+  const information = card.system_information;
+  type InformationFact = { label: string; title?: string; value: string };
+  const groups: Array<{ facts: InformationFact[]; label: string }> = [];
+  const hardware: InformationFact[] = [];
+  if (visibility?.system_information && information?.cpu_model) {
+    hardware.push({ label: "CPU", value: information.cpu_model });
+  }
+  if (visibility?.resources && resource && resource.cpu_cores > 0) {
+    hardware.push({
+      label: "Cores",
+      value: resource.cpu_cores.toLocaleString(),
+    });
+  }
+  if (visibility?.resources && resource && resource.memory_total_bytes > 0) {
+    hardware.push({
+      label: "RAM",
+      title: `${formatPercent(usedPercent(resource.memory_total_bytes, resource.memory_available_bytes))} used`,
+      value: capacityCaption(
+        resource.memory_total_bytes,
+        resource.memory_available_bytes,
+      ),
+    });
+  }
+  if (
+    visibility?.resources &&
+    resource &&
+    resource.swap_sample_count > 0 &&
+    resource.swap_total_bytes !== undefined &&
+    resource.swap_available_bytes !== undefined
+  ) {
+    hardware.push({
+      label: "Swap",
+      value:
+        resource.swap_total_bytes === 0
+          ? "None"
+          : capacityCaption(
+              resource.swap_total_bytes,
+              resource.swap_available_bytes,
+            ),
+    });
+  }
+  if (hardware.length) groups.push({ facts: hardware, label: "Hardware" });
+
+  const system: InformationFact[] = [];
+  if (visibility?.system_information && information) {
+    if (information.os_name)
+      system.push({ label: "OS", value: information.os_name });
+    if (information.kernel_release)
+      system.push({ label: "Kernel", value: information.kernel_release });
+    if (information.architecture)
+      system.push({ label: "Architecture", value: information.architecture });
+    if (information.virtualization)
+      system.push({
+        label: "Virtualization",
+        value: formatVirtualizationLabel(information.virtualization),
+      });
+  }
+  if (system.length) groups.push({ facts: system, label: "System" });
+
+  if (visibility?.resources && resource && resource.disk_total_bytes > 0) {
+    groups.push({
+      facts: [
+        {
+          label: "Reported filesystems",
+          title: `${formatPercent(usedPercent(resource.disk_total_bytes, resource.disk_available_bytes))} used; aggregate reported-filesystem capacity`,
+          value: capacityCaption(
+            resource.disk_total_bytes,
+            resource.disk_available_bytes,
+          ),
+        },
+      ],
+      label: "Storage",
+    });
+  }
+
+  const network: InformationFact[] = [];
+  if (visibility?.network && card.network && card.network.rx_bps !== null) {
+    network.push({
+      label: "RX",
+      value: formatByteRateFromBitsPerSecond(card.network.rx_bps),
+    });
+  }
+  if (visibility?.network && card.network && card.network.tx_bps !== null) {
+    network.push({
+      label: "TX",
+      value: formatByteRateFromBitsPerSecond(card.network.tx_bps),
+    });
+  }
+  if (visibility?.traffic && card.traffic?.port_speed) {
+    network.push({
+      label: "Port",
+      title: "Display capacity only; no shaping or enforcement is implied",
+      value: card.traffic.port_speed.display,
+    });
+  }
+  if (network.length) groups.push({ facts: network, label: "Network" });
+  if (!groups.length) return null;
+  return (
+    <div
+      aria-label="Shared VPS system information"
+      className="publicMonitoringInformationGroups"
+    >
+      {groups.map((group) => (
+        <section key={group.label}>
+          <h3>{group.label}</h3>
+          <dl>
+            {group.facts.map((fact) => (
+              <div key={fact.label} title={fact.title ?? fact.value}>
+                <dt>{fact.label}</dt>
+                <dd>{fact.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -1611,145 +2265,186 @@ function PublicTrafficCycle({
   resetCount: number;
   traffic?: PublicTrafficMetric;
 }) {
+  if (!traffic?.configured) return null;
   const percent = finiteNumber(traffic?.cycle_percent);
   const fill = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const overQuota = percent !== null && percent > 100;
+  const quotas = [
+    traffic.quota_rx_bytes,
+    traffic.quota_tx_bytes,
+    traffic.quota_total_bytes,
+  ];
+  const hasFiniteQuota = quotas.some(
+    (quota) => quota !== undefined && quota > 0,
+  );
+  const hasUnlimitedQuota = quotas.some((quota) => quota === -1);
+  const limitingQuota = trafficLimitingQuota(traffic);
+  const limitValue = limitingQuota
+    ? `${limitingQuota.label} ${formatBytes(limitingQuota.quota)}`
+    : hasFiniteQuota
+      ? "Unavailable"
+      : hasUnlimitedQuota
+        ? "Unlimited"
+        : "Not set";
+  const cycleWindow =
+    traffic.cycle_start && traffic.cycle_end
+      ? `${formatCompactTime(traffic.cycle_start)} – ${formatCompactTime(traffic.cycle_end)}`
+      : "Current accounting cycle";
   return (
-    <div className="dashboardWidgetChart wideWidget vpsMonitoringTrafficCycle publicMonitoringTrafficCycle">
-      <div className="dashboardWidgetHeader">
-        <strong>Traffic volume / cycle</strong>
-        <small>
-          {traffic?.configured
-            ? `${formatCompactTime(traffic.cycle_start)} – ${formatCompactTime(traffic.cycle_end)}`
-            : "Authoritative traffic accounting"}
-        </small>
+    <div className="dashboardWidgetChart vpsMonitoringTrafficCycle publicMonitoringTrafficCycle">
+      <div className="dashboardWidgetHeader publicMonitoringTrafficCycleHeader">
+        <div>
+          <strong>Traffic cycle</strong>
+          <small title={cycleWindow}>{cycleWindow}</small>
+        </div>
+        {traffic.port_speed ? (
+          <span
+            className="publicMonitoringPortSpeed"
+            title="Display capacity only; no shaping or enforcement is implied"
+          >
+            {traffic.port_speed.display}
+          </span>
+        ) : null}
       </div>
-      {!traffic?.configured ? (
-        <div className="dashboardEmptyChart">Traffic unconfigured</div>
-      ) : (
-        <>
-          <div className="vpsMonitoringTrafficSummary">
-            <PublicTrafficCycleFact
-              label="RX"
-              quota={traffic.quota_rx_bytes}
-              value={traffic.rx_bytes}
-            />
-            <PublicTrafficCycleFact
-              label="TX"
-              quota={traffic.quota_tx_bytes}
-              value={traffic.tx_bytes}
-            />
-            <PublicTrafficCycleFact
-              label="Total"
-              quota={traffic.quota_total_bytes}
-              value={traffic.total_bytes}
-            />
-            <span>
-              <small>Cycle ends</small>
-              <strong>{formatCompactTime(traffic.cycle_end)}</strong>
-              <em>
-                {traffic.state === "ok"
-                  ? "Current accounting evidence"
-                  : humanizeToken(traffic.state)}
-              </em>
-            </span>
-          </div>
-          {percent !== null ? (
-            <div
-              className={`vpsMonitoringTrafficProgress${overQuota ? " overLimit" : ""}`}
-            >
-              <span
-                aria-label={`${formatPercent(percent)} of the limiting traffic quota used`}
-                aria-valuemax={100}
-                aria-valuemin={0}
-                aria-valuenow={fill}
-                aria-valuetext={formatPercent(percent)}
-                className="vpsMonitoringTrafficTrack"
-                role="progressbar"
-              >
-                <i style={{ width: `${fill}%` }} />
-              </span>
-              <strong>{formatPercent(percent)}</strong>
-              <small>
-                {overQuota ? "Quota exceeded" : "Limiting quota used"}
-              </small>
-            </div>
-          ) : (
-            <p className="vpsMonitoringTrafficNote incomplete">
-              Traffic is accounted for, but no quota is configured.
-            </p>
-          )}
-          {traffic.state !== "ok" || resetCount > 0 ? (
-            <p className="vpsMonitoringTrafficNote">
-              {traffic.state !== "ok"
-                ? `Evidence is ${humanizeToken(traffic.state).toLocaleLowerCase()}.`
-                : ""}
-              {resetCount > 0
-                ? ` ${resetCount} counter-reset ${resetCount === 1 ? "interval was" : "intervals were"} excluded.`
-                : ""}
-            </p>
-          ) : null}
-        </>
+      <div className="vpsMonitoringTrafficSummary">
+        <PublicTrafficCycleFact
+          label="RX"
+          title={trafficQuotaTitle("RX", traffic.quota_rx_bytes)}
+          value={formatOptionalBytes(traffic.rx_bytes)}
+        />
+        <PublicTrafficCycleFact
+          label="TX"
+          title={trafficQuotaTitle("TX", traffic.quota_tx_bytes)}
+          value={formatOptionalBytes(traffic.tx_bytes)}
+        />
+        <PublicTrafficCycleFact
+          label="Total"
+          title={trafficQuotaTitle("Total", traffic.quota_total_bytes)}
+          value={formatOptionalBytes(traffic.total_bytes)}
+        />
+        <PublicTrafficCycleFact
+          label="Limit"
+          title={
+            limitingQuota
+              ? `${limitingQuota.label} is the most-used finite quota at ${formatPercent(limitingQuota.percent)}`
+              : "No finite limiting quota is available"
+          }
+          value={limitValue}
+        />
+      </div>
+      {percent !== null ? (
+        <div
+          className={`vpsMonitoringTrafficProgress${overQuota ? " overLimit" : ""}`}
+        >
+          <span
+            aria-label={`${formatPercent(percent)} of the limiting traffic quota used`}
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={fill}
+            aria-valuetext={formatPercent(percent)}
+            className="vpsMonitoringTrafficTrack"
+            role="progressbar"
+          >
+            <i style={{ width: `${fill}%` }} />
+          </span>
+          <strong>{formatPercent(percent)}</strong>
+          <small>{overQuota ? "Quota exceeded" : "Limit used"}</small>
+        </div>
+      ) : hasFiniteQuota ? (
+        <p className="vpsMonitoringTrafficNote incomplete">
+          Limiting quota utilization is unavailable.
+        </p>
+      ) : hasUnlimitedQuota ? null : (
+        <p className="vpsMonitoringTrafficNote incomplete">
+          Accounting is active without a quota.
+        </p>
       )}
+      {traffic.state !== "ok" || resetCount > 0 ? (
+        <p className="vpsMonitoringTrafficNote">
+          {traffic.state !== "ok"
+            ? `Evidence is ${humanizeToken(traffic.state).toLocaleLowerCase()}.`
+            : ""}
+          {resetCount > 0
+            ? ` ${resetCount} counter-reset ${resetCount === 1 ? "interval was" : "intervals were"} excluded.`
+            : ""}
+        </p>
+      ) : null}
     </div>
   );
 }
 
 function PublicTrafficCycleFact({
   label,
-  quota,
+  title,
   value,
 }: {
   label: string;
-  quota: number | null;
-  value: number;
+  title: string;
+  value: string;
 }) {
   return (
-    <span>
+    <span title={title}>
       <small>{label}</small>
-      <strong>{formatBytes(value)}</strong>
-      <em>
-        {quota === -1
-          ? "Unlimited"
-          : quota === null
-            ? "No quota"
-            : `${formatBytes(value)} / ${formatBytes(quota)}`}
-      </em>
+      <strong>{value}</strong>
     </span>
   );
 }
 
+function trafficQuotaTitle(label: string, quota: number | undefined): string {
+  if (quota === -1) return `${label} quota is unlimited`;
+  if (quota === undefined) return `${label} quota is not configured`;
+  return `${label} quota ${formatBytes(quota)}`;
+}
+
 function PublicChart({
+  allowNoVisibleSeries = false,
   emptyLabel,
   exportFileName,
+  height = 170,
   label,
   lines,
+  onVisibleSeriesKeysChange,
+  summary,
   times,
   valueFormatter,
+  visibleSeriesKeys,
   wide = false,
 }: {
+  allowNoVisibleSeries?: boolean;
   emptyLabel: string;
   exportFileName?: string;
+  height?: number;
   label: string;
   lines: TimeSeriesChartLine[];
+  onVisibleSeriesKeysChange?: (seriesKeys: string[]) => void;
+  summary?: string;
   times: string[];
   valueFormatter: (value: number | null) => string;
+  visibleSeriesKeys?: readonly string[];
   wide?: boolean;
 }) {
   return (
-    <div
+    <section
+      aria-label={`${label} chart`}
       className={`dashboardWidgetChart publicMonitoringChart${wide ? " wideWidget" : ""}`}
     >
-      <h3>{label}</h3>
+      <div className="dashboardWidgetHeader">
+        <h3>{label}</h3>
+        {summary ? <small title={summary}>{summary}</small> : null}
+      </div>
       <TimeSeriesChart
+        allowNoVisibleSeries={allowNoVisibleSeries}
         ariaLabel={`${label} shared monitoring chart`}
         emptyLabel={emptyLabel}
         exportFileName={exportFileName}
+        height={height}
         lines={lines}
+        onVisibleSeriesKeysChange={onVisibleSeriesKeysChange}
         times={times}
         valueFormatter={valueFormatter}
+        visibleSeriesKeys={visibleSeriesKeys}
       />
-    </div>
+    </section>
   );
 }
 
@@ -1780,6 +2475,7 @@ function pingChartData(
   const targetNames = Array.from(
     new Set(points.map((point) => point.target_name)),
   ).sort();
+  const targetColors = stableTargetColors(targetNames);
   const targetValues = (
     targetName: string,
     value: (point: PublicPingPoint) => number | null,
@@ -1801,28 +2497,45 @@ function pingChartData(
   };
   const latencyLines = targetNames.map((targetName) => {
     return {
-      color: stableTargetColor(targetName),
+      color: targetColors.get(targetName) ?? consolePalette.chart.neutral,
       label: targetName,
+      seriesKey: targetName,
       values: targetValues(targetName, (point) => point.latency_avg_ms),
     };
   });
   const lossLines = targetNames.map((targetName) => {
     return {
-      color: stableTargetColor(targetName),
+      color: targetColors.get(targetName) ?? consolePalette.chart.neutral,
       label: targetName,
+      seriesKey: targetName,
       values: targetValues(targetName, (point) => point.loss_ratio * 100),
     };
   });
   return { latencyLines, lossLines, times };
 }
 
-function stableTargetColor(targetName: string): string {
-  let hash = 2_166_136_261;
-  for (const character of targetName) {
-    hash ^= character.codePointAt(0) ?? 0;
-    hash = Math.imul(hash, 16_777_619);
-  }
-  return dashboardChartColors[(hash >>> 0) % dashboardChartColors.length];
+function stableTargetColors(targetNames: string[]): Map<string, string> {
+  const used = new Set<number>();
+  return new Map<string, string>(
+    targetNames.map((targetName) => {
+      let hash = 2_166_136_261;
+      for (const character of targetName) {
+        hash ^= character.codePointAt(0) ?? 0;
+        hash = Math.imul(hash, 16_777_619);
+      }
+      const preferred = (hash >>> 0) % dashboardChartColors.length;
+      let colorIndex = preferred;
+      for (let offset = 0; offset < dashboardChartColors.length; offset += 1) {
+        const candidate = (preferred + offset) % dashboardChartColors.length;
+        if (!used.has(candidate)) {
+          colorIndex = candidate;
+          break;
+        }
+      }
+      used.add(colorIndex);
+      return [targetName, dashboardChartColors[colorIndex]] as const;
+    }),
+  );
 }
 
 async function bootstrapMonitoringShare(
@@ -1855,7 +2568,7 @@ async function publicShareJson<T>(
     },
     signal,
   });
-  if (response.status === 404) {
+  if (response.status === 404 || response.status === 410) {
     throw new Error("This shared view link is invalid, expired, or revoked.");
   }
   if (!response.ok) throw await apiErrorFromResponse(response);
@@ -1965,14 +2678,107 @@ function summarizePublicFleet(
   };
 }
 
-function publicTagValue(tags: string[], key: string) {
+function publicTagValues(tags: string[], key: string) {
   const prefix = `${key}:`;
-  return (
-    tags
-      .find((tag) => tag.toLocaleLowerCase().startsWith(prefix))
-      ?.slice(prefix.length)
-      .trim() || null
+  return Array.from(
+    new Set(
+      tags.flatMap((tag) => {
+        if (!tag.toLocaleLowerCase().startsWith(prefix)) return [];
+        const value = tag.slice(prefix.length).trim();
+        return value ? [value] : [];
+      }),
+    ),
   );
+}
+
+function publicTagValue(tags: string[], key: string) {
+  return publicTagValues(tags, key)[0] ?? null;
+}
+
+function publicIdentitySummary(tags: string[]) {
+  return ["provider", "region", "country"]
+    .flatMap((key) => publicTagValues(tags, key))
+    .join(" · ");
+}
+
+function comparePublicMonitoringCards(
+  left: PublicMonitoringCard,
+  right: PublicMonitoringCard,
+  mode: PublicMonitorSort,
+  visibility: PublicMonitoringShareView["visibility"] | undefined,
+): number {
+  const name = () =>
+    (left.display_name || "Unnamed VPS").localeCompare(
+      right.display_name || "Unnamed VPS",
+    );
+  const provider = (card: PublicMonitoringCard) =>
+    publicTagValues(card.tags ?? [], "provider")[0] ?? "provider unset";
+  const region = (card: PublicMonitoringCard) =>
+    countryTagValue(card.tags ?? []) ??
+    publicTagValues(card.tags ?? [], "region")[0] ??
+    "region unset";
+  if (mode === "provider") {
+    return (
+      provider(left).localeCompare(provider(right)) ||
+      region(left).localeCompare(region(right)) ||
+      name()
+    );
+  }
+  if (mode === "region") {
+    return (
+      region(left).localeCompare(region(right)) ||
+      provider(left).localeCompare(provider(right)) ||
+      name()
+    );
+  }
+  const statusRank = (card: PublicMonitoringCard) => {
+    switch (publicCardStatusGroup(card, visibility)) {
+      case "offline":
+        return 3;
+      case "warning":
+        return 2;
+      default:
+        return 0;
+    }
+  };
+  const statusDelta = statusRank(right) - statusRank(left);
+  if (mode === "warning" && statusDelta !== 0) return statusDelta;
+  const trafficUse = (card: PublicMonitoringCard) => {
+    if (!card.traffic?.configured) return -1;
+    return (
+      trafficLimitingQuota(card.traffic)?.percent ??
+      finiteNumber(card.traffic.cycle_percent) ??
+      -1
+    );
+  };
+  const leftTraffic = trafficUse(left);
+  const rightTraffic = trafficUse(right);
+  if (mode === "traffic" && rightTraffic !== leftTraffic) {
+    return rightTraffic - leftTraffic;
+  }
+  const cpuUse = (card: PublicMonitoringCard) =>
+    finiteNumber(card.resources?.cpu_usage_avg) ?? -1;
+  const leftCpu = cpuUse(left);
+  const rightCpu = cpuUse(right);
+  if (mode === "cpu" && rightCpu !== leftCpu) return rightCpu - leftCpu;
+  const memoryUse = (card: PublicMonitoringCard) =>
+    usedPercent(
+      card.resources?.memory_total_bytes,
+      card.resources?.memory_available_bytes,
+    ) ?? -1;
+  const leftMemory = memoryUse(left);
+  const rightMemory = memoryUse(right);
+  if (mode === "memory" && rightMemory !== leftMemory) {
+    return rightMemory - leftMemory;
+  }
+  if (statusDelta !== 0) return statusDelta;
+  const networkUse = (card: PublicMonitoringCard) =>
+    Math.max(0, finiteNumber(card.network?.rx_bps) ?? 0) +
+    Math.max(0, finiteNumber(card.network?.tx_bps) ?? 0);
+  const networkDelta = networkUse(right) - networkUse(left);
+  if (networkDelta !== 0) return networkDelta;
+  if (rightCpu !== leftCpu) return rightCpu - leftCpu;
+  return name();
 }
 
 function formatPublicLocationSummary(locations: string[], unspecified: number) {
@@ -2222,30 +3028,88 @@ function capacityCaption(
   return `${formatBytes(Math.max(0, finiteTotal - finiteAvailable))} / ${formatBytes(finiteTotal)}`;
 }
 
+function compactCapacity(
+  total: number | null | undefined,
+  available: number | null | undefined,
+): string {
+  const finiteTotal = finiteNumber(total);
+  const finiteAvailable = finiteNumber(available);
+  if (finiteTotal === null || finiteAvailable === null || finiteTotal <= 0) {
+    return "n/a";
+  }
+  const units = ["B", "K", "M", "G", "T", "P"];
+  let divisor = 1;
+  let unit = 0;
+  while (finiteTotal / divisor >= 1024 && unit < units.length - 1) {
+    divisor *= 1024;
+    unit += 1;
+  }
+  const compactNumber = (value: number) => {
+    const scaled = value / divisor;
+    return scaled >= 10 ? Math.round(scaled).toString() : scaled.toFixed(1);
+  };
+  return `${compactNumber(Math.max(0, finiteTotal - finiteAvailable))}/${compactNumber(finiteTotal)}${units[unit]}`;
+}
+
 function trafficCycleSummary(traffic: PublicTrafficMetric): string {
-  if (!traffic.configured) {
-    return `${formatBytes(traffic.total_bytes)} this cycle · quota not configured`;
+  if (!traffic.configured) return "Unconfigured";
+  const total = finiteNumber(traffic.total_bytes);
+  if (total === null || total < 0) return "Current total unavailable";
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) {
+    return limitingQuota.label === "Total"
+      ? `${formatBytes(total)} / ${formatBytes(limitingQuota.quota)} · ${formatPercent(limitingQuota.percent)}`
+      : `${formatBytes(total)} total · ${limitingQuota.label} limit ${formatPercent(limitingQuota.percent)}`;
   }
-  if (traffic.quota_total_bytes === -1) {
-    return `${formatBytes(traffic.total_bytes)} / Unlimited`;
+  const quotas = [
+    traffic.quota_total_bytes,
+    traffic.quota_rx_bytes,
+    traffic.quota_tx_bytes,
+  ];
+  if (quotas.some((quota) => quota === -1)) {
+    return `${formatBytes(total)} / Unlimited`;
   }
-  const directionalQuotas = [traffic.quota_rx_bytes, traffic.quota_tx_bytes];
-  if (
-    traffic.quota_total_bytes === null &&
-    directionalQuotas.some((quota) => quota === -1) &&
-    directionalQuotas.every((quota) => quota === null || quota === -1)
-  ) {
-    return `${formatBytes(traffic.total_bytes)} / Unlimited`;
+  if (quotas.some((quota) => quota !== undefined && quota > 0)) {
+    return `${formatBytes(total)} this cycle · quota evidence incomplete`;
   }
-  if (
-    traffic.cycle_percent !== null &&
-    Number.isFinite(traffic.cycle_percent)
-  ) {
-    return traffic.quota_total_bytes === null
-      ? `${formatBytes(traffic.total_bytes)} used · limiting quota ${formatPercent(traffic.cycle_percent)}`
-      : `${formatBytes(traffic.total_bytes)} / ${formatBytes(traffic.quota_total_bytes)} · ${formatPercent(traffic.cycle_percent)}`;
-  }
-  return `${formatBytes(traffic.total_bytes)} this cycle · quota unavailable`;
+  return `${formatBytes(total)} this cycle · quota unavailable`;
+}
+
+function trafficLimitingQuota(traffic: PublicTrafficMetric): {
+  label: "RX" | "TX" | "Total";
+  percent: number;
+  quota: number;
+} | null {
+  const candidates = [
+    {
+      label: "Total" as const,
+      quota: finiteNumber(traffic.quota_total_bytes),
+      used: finiteNumber(traffic.total_bytes),
+    },
+    {
+      label: "RX" as const,
+      quota: finiteNumber(traffic.quota_rx_bytes),
+      used: finiteNumber(traffic.rx_bytes),
+    },
+    {
+      label: "TX" as const,
+      quota: finiteNumber(traffic.quota_tx_bytes),
+      used: finiteNumber(traffic.tx_bytes),
+    },
+  ].flatMap(({ label, quota, used }) =>
+    quota !== null && quota > 0 && used !== null && used >= 0
+      ? [{ label, percent: (used / quota) * 100, quota }]
+      : [],
+  );
+  return (
+    candidates.reduce<(typeof candidates)[number] | null>(
+      (limiting, candidate) =>
+        limiting === null || candidate.percent > limiting.percent
+          ? candidate
+          : limiting,
+      null,
+    ) ?? null
+  );
 }
 
 function formatPublicSocketCount(value: number | null | undefined) {
@@ -2261,6 +3125,82 @@ function publicConnectionTitle(
 ) {
   const freshness = publicFreshnessProblem(observedAt, "Connection telemetry");
   return `${protocol} entries in the agent's Linux network-namespace socket tables; TCP includes every state and listeners. ${freshness ?? "Current telemetry"}.`;
+}
+
+function publicMonitoringAuxiliaryFacts(
+  card: PublicMonitoringCard,
+  visibility: PublicMonitoringShareView["visibility"] | undefined,
+): Array<{
+  detail?: string;
+  kind: "billing" | "connection" | "uptime";
+  label: string;
+  title: string;
+  value: string;
+}> {
+  const facts: Array<{
+    detail?: string;
+    kind: "billing" | "connection" | "uptime";
+    label: string;
+    title: string;
+    value: string;
+  }> = [];
+  if (visibility?.billing && card.billing) {
+    const renewal = formatBillingRenewal(card.billing.cycle);
+    facts.push({
+      detail: renewal ?? undefined,
+      kind: "billing",
+      label: "Billing",
+      title: renewal
+        ? `${card.billing.display} · ${renewal}`
+        : card.billing.display,
+      value: card.billing.display,
+    });
+  }
+  const resource = card.resources;
+  if (visibility?.resources && resource && resource.tcp_sockets !== null) {
+    facts.push({
+      kind: "connection",
+      label: "TCP",
+      title: publicConnectionTitle("TCP", resource?.connections_observed_at),
+      value: formatPublicSocketCount(resource?.tcp_sockets),
+    });
+  }
+  if (visibility?.resources && resource && resource.udp_sockets !== null) {
+    facts.push({
+      kind: "connection",
+      label: "UDP",
+      title: publicConnectionTitle("UDP", resource?.connections_observed_at),
+      value: formatPublicSocketCount(resource?.udp_sockets),
+    });
+  }
+  const uptime = finiteNumber(card.system_information?.uptime_secs);
+  if (visibility?.system_information && uptime !== null && uptime >= 0) {
+    facts.push({
+      kind: "uptime",
+      label: "Uptime",
+      title: card.system_information?.uptime_observed_at
+        ? `Observed ${formatFullTime(card.system_information.uptime_observed_at)}`
+        : "Latest reported uptime",
+      value: formatUptime(uptime),
+    });
+  }
+  return facts;
+}
+
+function formatOptionalBytes(value: number | null | undefined): string {
+  const finite = finiteNumber(value);
+  return finite === null || finite < 0 ? "Unavailable" : formatBytes(finite);
+}
+
+function formatUptime(value: number): string {
+  const seconds = Math.max(0, Math.floor(value));
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
 }
 
 function formatPercent(value: number | null): string {

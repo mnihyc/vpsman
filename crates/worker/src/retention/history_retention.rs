@@ -80,6 +80,11 @@ async fn compact_resource_rollups(pool: &PgPool) -> Result<u64> {
                     2147483647
                 )::integer AS merged_cpu_usage_sample_count,
                 LEAST(
+                    head.swap_sample_count::bigint
+                        + tail.swap_sample_count::bigint,
+                    2147483647
+                )::integer AS merged_swap_sample_count,
+                LEAST(
                     head.connections_sample_count::bigint
                         + tail.connections_sample_count::bigint,
                     2147483647
@@ -110,6 +115,10 @@ async fn compact_resource_rollups(pool: &PgPool) -> Result<u64> {
                     next.memory_total_bytes_max,
                     next.memory_available_bytes_avg,
                     next.memory_available_bytes_min,
+                    next.swap_sample_count,
+                    next.swap_total_bytes_max,
+                    next.swap_available_bytes_avg,
+                    next.swap_available_bytes_min,
                     next.disk_total_bytes_max,
                     next.disk_available_bytes_avg,
                     next.disk_available_bytes_min,
@@ -132,6 +141,8 @@ async fn compact_resource_rollups(pool: &PgPool) -> Result<u64> {
                         = next.sample_count::bigint * head.bucket_secs::bigint
                   AND head.cpu_usage_sample_count::bigint * next.bucket_secs::bigint
                         = next.cpu_usage_sample_count::bigint * head.bucket_secs::bigint
+                  AND head.swap_sample_count::bigint * next.bucket_secs::bigint
+                        = next.swap_sample_count::bigint * head.bucket_secs::bigint
                   AND head.connections_sample_count::bigint * next.bucket_secs::bigint
                         = next.connections_sample_count::bigint * head.bucket_secs::bigint
                   AND head.cpu_usage_avg IS NOT DISTINCT FROM next.cpu_usage_avg
@@ -146,6 +157,11 @@ async fn compact_resource_rollups(pool: &PgPool) -> Result<u64> {
                   AND head.memory_total_bytes_max = next.memory_total_bytes_max
                   AND head.memory_available_bytes_avg = next.memory_available_bytes_avg
                   AND head.memory_available_bytes_min = next.memory_available_bytes_min
+                  AND head.swap_total_bytes_max IS NOT DISTINCT FROM next.swap_total_bytes_max
+                  AND head.swap_available_bytes_avg
+                        IS NOT DISTINCT FROM next.swap_available_bytes_avg
+                  AND head.swap_available_bytes_min
+                        IS NOT DISTINCT FROM next.swap_available_bytes_min
                   AND head.disk_total_bytes_max = next.disk_total_bytes_max
                   AND head.disk_available_bytes_avg = next.disk_available_bytes_avg
                   AND head.disk_available_bytes_min = next.disk_available_bytes_min
@@ -217,6 +233,7 @@ async fn compact_resource_rollups(pool: &PgPool) -> Result<u64> {
             bucket_secs = locked.merged_bucket_secs,
             sample_count = locked.merged_sample_count,
             cpu_usage_sample_count = locked.merged_cpu_usage_sample_count,
+            swap_sample_count = locked.merged_swap_sample_count,
             connections_sample_count = locked.merged_connections_sample_count,
             connections_observed_at = locked.merged_connections_observed_at,
             latest_observed_at = locked.merged_latest_observed_at,

@@ -238,6 +238,57 @@ export function displayNameOrUnnamed(
   return displayName?.trim() || "Unnamed VPS";
 }
 
+export function formatBillingRenewal(
+  value: string | null | undefined,
+): string | null {
+  const cycle = value?.trim();
+  if (!cycle) return null;
+  const day = /^(\d{1,2})$/.exec(cycle);
+  if (day) return `Renews day ${Number(day[1])}`;
+  const anchored = /^(\d{1,2})-(\d{1,2})$/.exec(cycle);
+  if (anchored) {
+    const month = [
+      "Jan",
+      "Feb",
+      "Mar",
+      "Apr",
+      "May",
+      "Jun",
+      "Jul",
+      "Aug",
+      "Sep",
+      "Oct",
+      "Nov",
+      "Dec",
+    ][Number(anchored[2]) - 1];
+    if (month) return `Renews ${Number(anchored[1])} ${month}`;
+  }
+  return `Renewal anchor ${cycle}`;
+}
+
+export function formatVirtualizationLabel(value: string): string {
+  const normalized = value.trim().toLocaleLowerCase();
+  const labels: Record<string, string> = {
+    "cloud-hypervisor": "Cloud Hypervisor",
+    bhyve: "bhyve",
+    bochs: "Bochs",
+    docker: "Docker",
+    firecracker: "Firecracker",
+    "hyper-v": "Hyper-V",
+    kvm: "KVM",
+    lxc: "LXC",
+    openvz: "OpenVZ",
+    parallels: "Parallels",
+    podman: "Podman",
+    qemu: "QEMU",
+    virtualbox: "VirtualBox",
+    vmware: "VMware",
+    wsl: "WSL",
+    xen: "Xen",
+  };
+  return labels[normalized] ?? value.trim();
+}
+
 export function clientIdSuffix(
   clientId: string | null | undefined,
 ): string | null {

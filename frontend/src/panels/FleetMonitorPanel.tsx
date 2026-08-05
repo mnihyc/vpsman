@@ -40,7 +40,12 @@ import {
 } from "../monitorCardDensity";
 import { countryTagValue } from "../tagDisplay";
 import { selectorExpressionForClientIds } from "../searchExpression";
-import { displayNameOrUnnamed, formatTime, timestampMillis } from "../utils";
+import {
+  displayNameOrUnnamed,
+  formatBillingRenewal,
+  formatTime,
+  timestampMillis,
+} from "../utils";
 
 type FleetMonitorPanelProps = {
   agents: AgentView[];
@@ -1113,7 +1118,7 @@ export function VpsMonitorCard({
         >
           <small>Billing</small>
           <strong>{billing?.display ?? "—"}</strong>
-          {billing?.cycle ? <em>Renews {billing.cycle}</em> : null}
+          {billing?.cycle ? <em>{formatBillingRenewal(billing.cycle)}</em> : null}
         </span>
         <span title={connectionCountTitle("TCP", connectionsTelemetryState)}>
           <small>TCP</small>
@@ -2352,7 +2357,7 @@ function billingTitle(billing: BillingPlanView) {
     return "Billing is explicitly disabled with -1; the card therefore shows n/a.";
   }
   return billing.cycle
-    ? `${billing.display}; renewal anchor ${billing.cycle}. Billing cycle is independent of the traffic reset day.`
+    ? `${billing.display}; ${formatBillingRenewal(billing.cycle)}. Billing cycle is independent of the traffic reset day.`
     : `${billing.display}; no renewal anchor is configured. Billing cycle is independent of the traffic reset day.`;
 }
 

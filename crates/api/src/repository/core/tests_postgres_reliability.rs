@@ -2509,6 +2509,8 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         }],
         visibility: crate::model_monitoring::MonitoringShareVisibilityView {
             identity_context: false,
+            billing: true,
+            system_information: true,
             resources: true,
             network: true,
             traffic: true,
@@ -2533,6 +2535,7 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         .unwrap()
         .unwrap();
     assert_eq!(persisted_share.targets, share.targets);
+    assert_eq!(persisted_share.visibility, share.visibility);
     for source_ip in ["198.51.100.10", "198.51.100.11"] {
         db.repo
             .record_monitoring_share_visitor(
@@ -2552,6 +2555,8 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].target_count, 1);
     assert_eq!(listed[0].visitor_count, 2);
+    assert!(listed[0].visibility.billing);
+    assert!(listed[0].visibility.system_information);
     db.cleanup().await;
 }
 
@@ -3162,13 +3167,16 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             cpu_load_1_avg, cpu_load_1_max,
             cpu_load_5_avg, cpu_load_5_max, cpu_load_15_avg, cpu_load_15_max,
             memory_total_bytes_max, memory_available_bytes_avg, memory_available_bytes_min,
+            swap_sample_count, swap_total_bytes_max,
+            swap_available_bytes_avg, swap_available_bytes_min,
             disk_total_bytes_max, disk_available_bytes_avg, disk_available_bytes_min,
             network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
         ) VALUES (
             'adaptive-telemetry', to_timestamp($1::double precision), 300, 5,
             5, 0.25, 0.25, 2,
             0.5, 0.5, 0.4, 0.4, 0.3, 0.3,
-            1000, 500, 500, 2000, 1000, 1000, 0, 0,
+            1000, 500, 500, 1, 1000, 400, 400,
+            2000, 1000, 1000, 0, 0,
             to_timestamp(($1::bigint + 299)::double precision)
         )
         "#,
@@ -3193,6 +3201,24 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
     assert!(adaptive_resources
         .iter()
         .all(|row| row.sample_count == 1 && row.cpu_usage_sample_count == 1));
+    assert_eq!(
+        adaptive_resources
+            .iter()
+            .filter(|row| row.swap_sample_count == 1)
+            .count(),
+        1
+    );
+    assert!(adaptive_resources.iter().all(|row| {
+        if row.swap_sample_count == 0 {
+            row.swap_total_bytes_max.is_none()
+                && row.swap_available_bytes_avg.is_none()
+                && row.swap_available_bytes_min.is_none()
+        } else {
+            row.swap_total_bytes_max == Some(1_000)
+                && row.swap_available_bytes_avg == Some(400)
+                && row.swap_available_bytes_min == Some(400)
+        }
+    }));
 
     sqlx::query(
         r#"
@@ -5727,7 +5753,35 @@ async fn postgres_agent_hello_cannot_restore_a_rotated_key() {
 
     let mut stale_hello = hello_event(client_id, Uuid::new_v4(), None);
     stale_hello.noise_public_key_hex = hex::encode(&old_key);
+    stale_hello.hello.cpu_model = Some("AMD EPYC".to_string());
+    stale_hello.hello.kernel_release = Some("6.12.1".to_string());
+    stale_hello.hello.virtualization = Some("kvm".to_string());
     assert!(db.repo.upsert_agent_hello(&stale_hello).await.unwrap());
+    let system = sqlx::query(
+        r#"
+        SELECT cpu_model, kernel_release, virtualization,
+               system_reported_at IS NOT NULL AS reported
+        FROM clients
+        WHERE id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        system.try_get::<String, _>("cpu_model").unwrap(),
+        "AMD EPYC"
+    );
+    assert_eq!(
+        system.try_get::<String, _>("kernel_release").unwrap(),
+        "6.12.1"
+    );
+    assert_eq!(
+        system.try_get::<String, _>("virtualization").unwrap(),
+        "kvm"
+    );
+    assert!(system.try_get::<bool, _>("reported").unwrap());
 
     let mut tx = db.pool.begin().await.unwrap();
     sqlx::query(
@@ -5965,6 +6019,9 @@ fn hello_event(
             internal_build_number: 1,
             os_release: "test".to_string(),
             arch: "x86_64".to_string(),
+            cpu_model: None,
+            kernel_release: None,
+            virtualization: None,
             update_heartbeat,
             capabilities: AgentCapabilitySnapshot::default(),
         },

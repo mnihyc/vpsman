@@ -1,6 +1,122 @@
 use super::*;
 
 #[test]
+fn public_os_name_uses_display_fields_without_exposing_raw_release_data() {
+    assert_eq!(
+        public_os_name(
+            "NAME=Debian GNU/Linux\nVERSION_ID=\"12\"\nPRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\n"
+        )
+        .as_deref(),
+        Some("Debian GNU/Linux 12 (bookworm)")
+    );
+    assert_eq!(
+        public_os_name("NAME=Alpine Linux\nVERSION_ID=3.20\nID=alpine\n").as_deref(),
+        Some("Alpine Linux 3.20")
+    );
+    assert!(public_os_name("not-an-os-release-document").is_none());
+}
+
+#[tokio::test]
+async fn monitoring_system_information_combines_session_facts_with_latest_uptime() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    memory.agents.write().await.push(crate::model::AgentView {
+        id: "v-1".to_string(),
+        display_name: "VPS 1".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some("200".to_string()),
+        arch: Some("x86_64".to_string()),
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    });
+    memory.client_system_facts.write().await.insert(
+        "v-1".to_string(),
+        crate::model::ClientSystemFactsRecord {
+            os_release: "PRETTY_NAME=\"Debian GNU/Linux 12\"\nSECRET=value\n".to_string(),
+            architecture: "x86_64".to_string(),
+            cpu_model: Some("AMD EPYC".to_string()),
+            kernel_release: Some("6.12.1".to_string()),
+            virtualization: Some("kvm".to_string()),
+            reported_at: "100".to_string(),
+        },
+    );
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(crate::model::TelemetrySampleView {
+            id: Uuid::new_v4(),
+            client_id: "v-1".to_string(),
+            observed_at: "200".to_string(),
+            cpu_load_1: 0.1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            payload: serde_json::json!({"uptime_secs": 86400, "hostname": "private"}),
+        });
+
+    let views = repo
+        .monitoring_system_information_for_clients(&["v-1".to_string()])
+        .await
+        .unwrap();
+    let view = views.get("v-1").unwrap();
+    assert_eq!(view.os_name.as_deref(), Some("Debian GNU/Linux 12"));
+    assert_eq!(view.architecture.as_deref(), Some("x86_64"));
+    assert_eq!(view.cpu_model.as_deref(), Some("AMD EPYC"));
+    assert_eq!(view.kernel_release.as_deref(), Some("6.12.1"));
+    assert_eq!(view.virtualization.as_deref(), Some("kvm"));
+    assert_eq!(view.uptime_secs, Some(86_400));
+    assert_eq!(view.uptime_observed_at.as_deref(), Some("200"));
+
+    memory.agents.write().await[0].status = "revoked".to_string();
+    assert!(repo
+        .monitoring_system_information_for_clients(&["v-1".to_string()])
+        .await
+        .unwrap()
+        .contains_key("v-1"));
+
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(crate::model::TelemetrySampleView {
+            id: Uuid::new_v4(),
+            client_id: "v-1".to_string(),
+            observed_at: "300".to_string(),
+            cpu_load_1: 0.1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            payload: serde_json::json!({"hostname": "private"}),
+        });
+    let view_without_uptime = repo
+        .monitoring_system_information_for_clients(&["v-1".to_string()])
+        .await
+        .unwrap()
+        .remove("v-1")
+        .unwrap();
+    assert_eq!(view_without_uptime.uptime_secs, None);
+    assert_eq!(view_without_uptime.uptime_observed_at, None);
+
+    memory
+        .hidden_clients
+        .write()
+        .await
+        .insert("v-1".to_string());
+    assert!(repo
+        .monitoring_system_information_for_clients(&["v-1".to_string()])
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn monitoring_audit_metadata_is_flat_and_reserves_provenance_fields() {
     let operator = crate::tests::test_operator();
     let metadata = base_monitoring_audit_metadata(
@@ -37,6 +153,8 @@ fn public_share_visitor_audit_uses_canonical_request_ip_key() {
         }],
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,

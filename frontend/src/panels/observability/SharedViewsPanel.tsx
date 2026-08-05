@@ -115,11 +115,13 @@ const STATUS_OPTIONS: Array<{
 ];
 
 const DEFAULT_VISIBILITY: Required<MonitoringShareVisibilityRequest> = {
+  billing: false,
   detail_history: true,
   identity_context: false,
   network: true,
   ping: true,
   resources: true,
+  system_information: false,
   traffic: true,
 };
 
@@ -1411,6 +1413,7 @@ function visibleMetricGroupCount(
   visibility: MonitoringShareVisibilityRequest,
 ): number {
   return [
+    visibility.system_information,
     visibility.resources,
     visibility.network,
     visibility.traffic,
@@ -1435,6 +1438,20 @@ function visibilityOptions(
       disabled: false,
       field: "identity_context",
       label: "Identity context",
+    },
+    {
+      checked: visibility.billing,
+      detail: "Configured billing price and cycle",
+      disabled: false,
+      field: "billing",
+      label: "Billing",
+    },
+    {
+      checked: visibility.system_information,
+      detail: "OS, architecture, CPU, kernel, virtualization, and uptime",
+      disabled: false,
+      field: "system_information",
+      label: "System information",
     },
     {
       checked: visibility.resources,
@@ -1524,6 +1541,8 @@ function optionalVisibilityLabel(
 ): string {
   const labels = [
     visibility.identity_context ? "Identity context" : null,
+    visibility.billing ? "Billing" : null,
+    visibility.system_information ? "System information" : null,
     visibility.resources ? "Resources" : null,
     visibility.network ? "Network rate" : null,
     visibility.traffic ? "Traffic" : null,
@@ -1548,11 +1567,13 @@ function visibleDataRequestLabel(
   visibility: MonitoringShareVisibilityRequest,
 ): string {
   return visibleDataVisibilityLabel({
+    billing: Boolean(visibility.billing),
     detail_history: Boolean(visibility.detail_history),
     identity_context: Boolean(visibility.identity_context),
     network: Boolean(visibility.network),
     ping: Boolean(visibility.ping),
     resources: Boolean(visibility.resources),
+    system_information: Boolean(visibility.system_information),
     traffic: Boolean(visibility.traffic),
   });
 }

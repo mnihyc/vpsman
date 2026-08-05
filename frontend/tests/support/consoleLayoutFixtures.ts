@@ -4575,6 +4575,10 @@ export async function installConsoleApiMock(
           network_rx_bytes_max: [18, 18.4, 18.9][index] * 1_000_000_000,
           network_tx_bytes_max: [8, 8.2, 8.45][index] * 1_000_000_000,
           sample_count: 1,
+          swap_available_bytes_avg: null,
+          swap_available_bytes_min: null,
+          swap_sample_count: 0,
+          swap_total_bytes_max: null,
           tcp_sockets_latest: [34, 41, 38][index],
           udp_sockets_latest: [5, 6, 5][index],
           updated_at: bucketStart,
@@ -4669,6 +4673,7 @@ export async function installConsoleApiMock(
             window: "15m",
           },
           resources,
+          system_information: null,
           traffic:
             trafficAccountingFixture.find(
               (row) => row.client_id === client.id,
@@ -5097,6 +5102,7 @@ export async function installConsoleApiMock(
             primary_ping_history: [],
             resource_history: [],
             resources: null,
+            system_information: null,
             traffic:
               trafficAccountingFixture.find(
                 (row) => row.client_id === client.id,

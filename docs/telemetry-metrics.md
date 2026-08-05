@@ -54,6 +54,7 @@ Operators manage the two tiers independently under Audit > Retention & export:
 | CPU utilization | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and core count. | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted. |
 | Load 1/5/15 | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track. | Missing load evidence remains unavailable; it is not CPU utilization. |
 | Memory used | `(max MemTotal - mean MemAvailable) / max MemTotal` for the interval. | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero. |
+| Swap used | `(max SwapTotal - mean SwapAvailable) / max SwapTotal` for intervals with a complete, valid swap pair. A host that reports a real zero total is shown as having no swap; it does not receive a fabricated curve. | Missing, one-sided, or `available > total` swap evidence remains unavailable. Swap has its own sample count and gaps instead of borrowing memory coverage. |
 | Aggregate reported-filesystem disk used | `(max summed total - mean summed available) / max summed total` across the filesystems reported by the collector. | This is an aggregate of reported filesystems, not a root-volume or quota claim. |
 | TCP/UDP sockets | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry. | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
@@ -69,6 +70,20 @@ that field unavailable without discarding otherwise valid telemetry.
 Cards pair exact CPU, RAM, disk, and load values with proportional tracks or
 small histories. Neutral colors stay stable; warning and danger states come from
 explicit backend alert or data state, not hidden browser thresholds.
+
+## Session-Reported System Information
+
+The agent reports relatively static host facts once in its authenticated session
+hello rather than duplicating them in every telemetry sample: parsed OS name,
+architecture, CPU model, kernel release, and evidenced virtualization kind. The
+control plane stores their observation time with the VPS identity. Uptime remains
+sampled telemetry and is joined from the latest accepted resource evidence.
+
+These facts are descriptive evidence, not inventory discovery. Missing or
+unreadable sources omit only the affected optional fact. The public projection
+contains the normalized display fields only; it never forwards raw `os-release`,
+hostname, IP addresses, capability payloads, build identity, process identity,
+or interface data.
 
 ## Interface Rate
 
@@ -130,6 +145,9 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   **Traffic unconfigured**. Quotas are optional; traffic remains accounted and
   visible without quota progress. A quota value of `-1` means explicitly
   unlimited and remains distinct from an unset quota.
+- When current accounting is unconfigured, retained counter history may still
+  exist from a prior rule. Detail views label it as prior accounting history and
+  never reuse those retained totals, cycle dates, or quotas as current evidence.
 - RX, TX, and total bytes remain exact even when usage exceeds a quota. A visual
   progress track may fill completely, but the numeric percentage and totals may
   exceed 100%.
@@ -218,10 +236,13 @@ bandwidth as evidence, not as automatic discovery of link capacity.
 - CSV export contains only the visible series and selected retained range.
 
 Shared monitoring views reuse these definitions but expose only the immutable
-metric visibility groups selected when the share was created. They never expose real
-VPS IDs, network-address fields, internal configuration, actions, jobs,
-terminals, files, backups, audit data, or operator identity. Operator-entered
-display and Ping target names appear as entered.
+metric visibility groups selected when the share was created. Billing and
+normalized system information are separate, opt-in groups; an unset billing
+rule or absent system fact is omitted rather than rendered as a misleading
+placeholder. They never expose real VPS IDs, network-address fields, raw host
+files, internal configuration, actions, jobs, terminals, files, backups, audit
+data, or operator identity. Operator-entered display and Ping target names
+appear as entered.
 
 ## Fleet Alert Read-Model Bounds
 

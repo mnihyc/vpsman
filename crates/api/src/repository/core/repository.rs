@@ -54,6 +54,8 @@ type CapabilityDegradedJobTargets = HashMap<(Uuid, String), (String, String)>;
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
+    pub(crate) client_system_facts:
+        Arc<RwLock<HashMap<String, crate::model::ClientSystemFactsRecord>>>,
     pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
     pub(crate) client_status_history: Arc<RwLock<Vec<ClientStatusHistoryView>>>,

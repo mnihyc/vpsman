@@ -29,12 +29,13 @@ use crate::{
         MonitoringShareVisibilityView, MonitoringSharesMutationResponse, PingRollupView,
         PingTargetAssignmentChangeView, PingTargetAssignmentReplacement, PingTargetDetailView,
         PingTargetMutationRequest, PingTargetMutationResponse, PingTargetRecord,
-        PingTargetRuntimeSyncView, PingTargetView, PortSpeedView, PublicMonitoringCardView,
-        PublicMonitoringDataView, PublicMonitoringDetailView, PublicMonitoringRangeView,
-        PublicMonitoringShareBootstrapView, PublicMonitoringShareView, PublicNetworkMetricView,
-        PublicNetworkPointView, PublicPingMetricView, PublicPingPointView, PublicPortSpeedView,
-        PublicResourceMetricView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
-        RevokeMonitoringSharesRequest, RuntimeConfigApplyStateRecord, TelemetryNetworkRateView,
+        PingTargetRuntimeSyncView, PingTargetView, PortSpeedView, PublicBillingPlanView,
+        PublicMonitoringCardView, PublicMonitoringDataView, PublicMonitoringDetailView,
+        PublicMonitoringRangeView, PublicMonitoringShareBootstrapView, PublicMonitoringShareView,
+        PublicNetworkMetricView, PublicNetworkPointView, PublicPingMetricView, PublicPingPointView,
+        PublicPortSpeedView, PublicResourceMetricView, PublicSystemInformationView,
+        PublicTrafficHistoryPointView, PublicTrafficMetricView, RevokeMonitoringSharesRequest,
+        RuntimeConfigApplyStateRecord, SystemInformationView, TelemetryNetworkRateView,
         TelemetryRollupView,
     },
     model_alert_policies::TrafficAccountingRecord,
@@ -545,6 +546,8 @@ pub(crate) async fn create_monitoring_share(
     }
     let visibility = MonitoringShareVisibilityView {
         identity_context: request.visibility.identity_context,
+        billing: request.visibility.billing,
+        system_information: request.visibility.system_information,
         resources: request.visibility.resources,
         network: request.visibility.network,
         traffic: request.visibility.traffic,
@@ -552,7 +555,11 @@ pub(crate) async fn create_monitoring_share(
         detail_history: request.visibility.detail_history,
     };
     if visibility.detail_history
-        && !(visibility.resources || visibility.network || visibility.traffic || visibility.ping)
+        && !(visibility.system_information
+            || visibility.resources
+            || visibility.network
+            || visibility.traffic
+            || visibility.ping)
     {
         return Err(ApiError::bad_request(
             "monitoring_share_detail_requires_visible_metrics",
@@ -907,6 +914,10 @@ async fn monitoring_cards_for_agents(
         .repo
         .network_rate_interface_selection_for_clients(&client_ids)
         .await?;
+    let mut system_information = state
+        .repo
+        .monitoring_system_information_for_clients(&client_ids)
+        .await?;
     let resources = state
         .repo
         .list_latest_telemetry_rollups_for_clients(&client_ids, None)
@@ -1023,6 +1034,7 @@ async fn monitoring_cards_for_agents(
             Ok(MonitoringCardView {
                 client,
                 billing: billing.get(&client_id).cloned(),
+                system_information: system_information.remove(&client_id),
                 port_speed: port_speeds.get(&client_id).cloned(),
                 resources: resources.get(&client_id).cloned(),
                 resource_history: resource_history.remove(&client_id).unwrap_or_default(),
@@ -1124,6 +1136,11 @@ async fn client_monitoring_view(
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("monitoring_client_not_found"))?;
+    let system_information = state
+        .repo
+        .monitoring_system_information_for_clients(&client_ids)
+        .await?
+        .remove(client_id);
     let range = monitoring_range(state, &client_ids, query).await?;
     let resources = if range.source == "raw" {
         state
@@ -1220,6 +1237,7 @@ async fn client_monitoring_view(
         .map(|(_, ping)| ping);
     Ok(ClientMonitoringView {
         client,
+        system_information,
         range,
         resources,
         network,
@@ -1356,6 +1374,14 @@ fn public_monitoring_card(
         tags: visibility
             .identity_context
             .then(|| public_identity_tags(card.client.tags)),
+        billing: visibility
+            .billing
+            .then(|| card.billing.map(public_billing_plan))
+            .flatten(),
+        system_information: visibility
+            .system_information
+            .then(|| card.system_information.map(public_system_information))
+            .flatten(),
         resources: visibility
             .resources
             .then(|| card.resources.map(public_resource_metric))
@@ -1395,6 +1421,27 @@ fn public_monitoring_card(
                 .collect()
         }),
     })
+}
+
+fn public_billing_plan(plan: BillingPlanView) -> PublicBillingPlanView {
+    PublicBillingPlanView {
+        disabled: plan.disabled,
+        display: plan.display,
+        cycle: plan.cycle,
+    }
+}
+
+fn public_system_information(information: SystemInformationView) -> PublicSystemInformationView {
+    PublicSystemInformationView {
+        os_name: information.os_name,
+        architecture: information.architecture,
+        cpu_model: information.cpu_model,
+        kernel_release: information.kernel_release,
+        virtualization: information.virtualization,
+        reported_at: information.reported_at,
+        uptime_secs: information.uptime_secs,
+        uptime_observed_at: information.uptime_observed_at,
+    }
 }
 
 fn public_monitoring_detail(
@@ -1494,6 +1541,9 @@ fn public_resource_metric(row: TelemetryRollupView) -> PublicResourceMetricView 
         load_15: row.cpu_load_15_avg,
         memory_total_bytes: row.memory_total_bytes_max,
         memory_available_bytes: row.memory_available_bytes_avg,
+        swap_sample_count: row.swap_sample_count,
+        swap_total_bytes: row.swap_total_bytes_max,
+        swap_available_bytes: row.swap_available_bytes_avg,
         disk_total_bytes: row.disk_total_bytes_max,
         disk_available_bytes: row.disk_available_bytes_avg,
         tcp_sockets: row.tcp_sockets_latest,
@@ -1551,17 +1601,21 @@ fn public_traffic_metric(
     let configured = !row.selectors.is_empty() && row.reset_day.is_some();
     PublicTrafficMetricView {
         configured,
-        cycle_start: row.cycle_start,
-        cycle_end: row.cycle_end,
-        rx_bytes: row.rx_bytes,
-        tx_bytes: row.tx_bytes,
-        total_bytes: row.total_bytes,
-        quota_rx_bytes: row.quota_rx_bytes,
-        quota_tx_bytes: row.quota_tx_bytes,
-        quota_total_bytes: row.quota_total_bytes,
-        cycle_percent: row.cycle_percent,
-        state: row.state,
-        observed_at: row.last_sample_at,
+        cycle_start: configured.then_some(row.cycle_start),
+        cycle_end: configured.then_some(row.cycle_end),
+        rx_bytes: configured.then_some(row.rx_bytes),
+        tx_bytes: configured.then_some(row.tx_bytes),
+        total_bytes: configured.then_some(row.total_bytes),
+        quota_rx_bytes: configured.then_some(row.quota_rx_bytes).flatten(),
+        quota_tx_bytes: configured.then_some(row.quota_tx_bytes).flatten(),
+        quota_total_bytes: configured.then_some(row.quota_total_bytes).flatten(),
+        cycle_percent: configured.then_some(row.cycle_percent).flatten(),
+        state: if configured {
+            row.state
+        } else {
+            "unconfigured".to_string()
+        },
+        observed_at: configured.then_some(row.last_sample_at).flatten(),
         port_speed: port_speed.map(|speed| PublicPortSpeedView {
             bps: speed.bps,
             display: speed.display,

@@ -13,7 +13,7 @@ use crate::{
         MonitoringShareTargetReplacement, MonitoringShareView, MonitoringShareVisibilityView,
         MonitoringShareVisitorRecord, PingRollupView, PingTargetAssignmentRecord,
         PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
-        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView,
+        PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView, SystemInformationView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -30,6 +30,111 @@ use crate::{
 };
 
 impl Repository {
+    pub(crate) async fn monitoring_system_information_for_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<HashMap<String, SystemInformationView>> {
+        if client_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let facts = memory.client_system_facts.read().await;
+                let agents = memory.agents.read().await;
+                let hidden_clients = memory.hidden_clients.read().await;
+                let samples = memory.telemetry_samples.read().await;
+                let mut views = HashMap::new();
+                for client_id in client_ids {
+                    let agent = agents.iter().find(|agent| agent.id == *client_id);
+                    if hidden_clients.contains(client_id) || agent.is_none() {
+                        continue;
+                    }
+                    let facts = facts.get(client_id);
+                    let latest_sample = samples
+                        .iter()
+                        .filter(|sample| sample.client_id == *client_id)
+                        .max_by_key(|sample| {
+                            parse_timestamp_unix(&sample.observed_at).unwrap_or(0)
+                        });
+                    let uptime_secs = latest_sample
+                        .and_then(|sample| sample.payload.get("uptime_secs"))
+                        .and_then(serde_json::Value::as_u64);
+                    let view = system_information_view(
+                        facts.map(|facts| facts.os_release.as_str()),
+                        facts
+                            .map(|facts| facts.architecture.as_str())
+                            .or_else(|| agent.and_then(|agent| agent.arch.as_deref())),
+                        facts.and_then(|facts| facts.cpu_model.as_deref()),
+                        facts.and_then(|facts| facts.kernel_release.as_deref()),
+                        facts.and_then(|facts| facts.virtualization.as_deref()),
+                        facts.map(|facts| facts.reported_at.clone()),
+                        uptime_secs,
+                        uptime_secs
+                            .and_then(|_| latest_sample.map(|sample| sample.observed_at.clone())),
+                    );
+                    if let Some(view) = view {
+                        views.insert(client_id.clone(), view);
+                    }
+                }
+                Ok(views)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client.id AS client_id,
+                        client.os_release,
+                        client.arch,
+                        client.cpu_model,
+                        client.kernel_release,
+                        client.virtualization,
+                        client.system_reported_at::text AS system_reported_at,
+                        latest.payload AS latest_payload,
+                        latest.observed_at::text AS uptime_observed_at
+                    FROM visible_clients client
+                    LEFT JOIN LATERAL (
+                        SELECT sample.payload, sample.observed_at
+                        FROM telemetry_samples sample
+                        WHERE sample.client_id = client.id
+                        ORDER BY sample.observed_at DESC
+                        LIMIT 1
+                    ) latest ON TRUE
+                    WHERE client.id = ANY($1::text[])
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?;
+                let mut views = HashMap::with_capacity(rows.len());
+                for row in rows {
+                    let client_id: String = row.try_get("client_id")?;
+                    let latest_payload: Option<serde_json::Value> =
+                        row.try_get("latest_payload")?;
+                    let uptime_secs = latest_payload
+                        .as_ref()
+                        .and_then(|payload| payload.get("uptime_secs"))
+                        .and_then(serde_json::Value::as_u64);
+                    let uptime_observed_at: Option<String> = row.try_get("uptime_observed_at")?;
+                    if let Some(view) = system_information_view(
+                        row.try_get::<Option<String>, _>("os_release")?.as_deref(),
+                        row.try_get::<Option<String>, _>("arch")?.as_deref(),
+                        row.try_get::<Option<String>, _>("cpu_model")?.as_deref(),
+                        row.try_get::<Option<String>, _>("kernel_release")?
+                            .as_deref(),
+                        row.try_get::<Option<String>, _>("virtualization")?
+                            .as_deref(),
+                        row.try_get("system_reported_at")?,
+                        uptime_secs,
+                        uptime_secs.and(uptime_observed_at),
+                    ) {
+                        views.insert(client_id, view);
+                    }
+                }
+                Ok(views)
+            }
+        }
+    }
+
     pub(crate) async fn list_ping_targets(&self) -> Result<Vec<PingTargetView>> {
         let records = self.list_ping_target_records().await?;
         let assignments = self.list_ping_target_assignment_records(None).await?;
@@ -2097,6 +2202,8 @@ impl Repository {
                         s.token_secret,
                         s.selector_expression,
                         s.show_identity_context,
+                        s.show_billing,
+                        s.show_system_information,
                         s.show_resources,
                         s.show_network,
                         s.show_traffic,
@@ -2144,6 +2251,8 @@ impl Repository {
                         s.token_secret,
                         s.selector_expression,
                         s.show_identity_context,
+                        s.show_billing,
+                        s.show_system_information,
                         s.show_resources,
                         s.show_network,
                         s.show_traffic,
@@ -2255,13 +2364,14 @@ impl Repository {
                     r#"
                     INSERT INTO monitoring_share_links (
                         id, name, token_secret, selector_expression,
-                        show_identity_context, show_resources, show_network,
-                        show_traffic, show_ping, allow_detail_history,
+                        show_identity_context, show_billing, show_system_information,
+                        show_resources, show_network, show_traffic, show_ping,
+                        allow_detail_history,
                         expires_at, created_by, created_at, updated_at
                     ) VALUES (
                         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                        to_timestamp($11::double precision), $12,
-                        to_timestamp($13::double precision), now()
+                        $11, $12, to_timestamp($13::double precision), $14,
+                        to_timestamp($15::double precision), now()
                     )
                     "#,
                 )
@@ -2270,6 +2380,8 @@ impl Repository {
                 .bind(&record.token_secret)
                 .bind(&record.selector_expression)
                 .bind(record.visibility.identity_context)
+                .bind(record.visibility.billing)
+                .bind(record.visibility.system_information)
                 .bind(record.visibility.resources)
                 .bind(record.visibility.network)
                 .bind(record.visibility.traffic)
@@ -3881,6 +3993,8 @@ async fn postgres_monitoring_share_views(
             target_stats.target_count,
             target_stats.target_client_ids,
             s.show_identity_context,
+            s.show_billing,
+            s.show_system_information,
             s.show_resources,
             s.show_network,
             s.show_traffic,
@@ -3955,6 +4069,8 @@ async fn postgres_monitoring_share_views(
                 target_update_available: false,
                 visibility: MonitoringShareVisibilityView {
                     identity_context: row.try_get("show_identity_context")?,
+                    billing: row.try_get("show_billing")?,
+                    system_information: row.try_get("show_system_information")?,
                     resources: row.try_get("show_resources")?,
                     network: row.try_get("show_network")?,
                     traffic: row.try_get("show_traffic")?,
@@ -4001,6 +4117,8 @@ fn monitoring_share_record_from_row(row: sqlx::postgres::PgRow) -> Result<Monito
         targets,
         visibility: MonitoringShareVisibilityView {
             identity_context: row.try_get("show_identity_context")?,
+            billing: row.try_get("show_billing")?,
+            system_information: row.try_get("show_system_information")?,
             resources: row.try_get("show_resources")?,
             network: row.try_get("show_network")?,
             traffic: row.try_get("show_traffic")?,
@@ -4151,6 +4269,80 @@ fn share_visitor_audit_metadata(
         "target_count": share.targets.len(),
         "visibility": share.visibility,
     })
+}
+
+fn system_information_view(
+    os_release: Option<&str>,
+    architecture: Option<&str>,
+    cpu_model: Option<&str>,
+    kernel_release: Option<&str>,
+    virtualization: Option<&str>,
+    reported_at: Option<String>,
+    uptime_secs: Option<u64>,
+    uptime_observed_at: Option<String>,
+) -> Option<SystemInformationView> {
+    let view = SystemInformationView {
+        os_name: os_release.and_then(public_os_name),
+        architecture: architecture.and_then(normalize_public_system_fact),
+        cpu_model: cpu_model.and_then(normalize_public_system_fact),
+        kernel_release: kernel_release.and_then(normalize_public_system_fact),
+        virtualization: virtualization.and_then(normalize_public_system_fact),
+        reported_at,
+        uptime_secs,
+        uptime_observed_at,
+    };
+    (view.os_name.is_some()
+        || view.architecture.is_some()
+        || view.cpu_model.is_some()
+        || view.kernel_release.is_some()
+        || view.virtualization.is_some()
+        || view.uptime_secs.is_some())
+    .then_some(view)
+}
+
+fn public_os_name(os_release: &str) -> Option<String> {
+    let mut pretty_name = None;
+    let mut name = None;
+    let mut version = None;
+    for line in os_release.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = raw_value.trim();
+        let value = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        match key.trim() {
+            "PRETTY_NAME" => pretty_name = normalize_public_system_fact(value),
+            "NAME" => name = normalize_public_system_fact(value),
+            "VERSION" | "VERSION_ID" if version.is_none() => {
+                version = normalize_public_system_fact(value)
+            }
+            _ => {}
+        }
+    }
+    pretty_name.or_else(|| match (name, version) {
+        (Some(name), Some(version)) => Some(format!("{name} {version}")),
+        (Some(name), None) => Some(name),
+        _ => None,
+    })
+}
+
+fn normalize_public_system_fact(value: &str) -> Option<String> {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!value.is_empty()
+        && value.len() <= 255
+        && !value.chars().any(|character| character.is_control()))
+    .then_some(value)
 }
 
 fn validate_monitoring_share_targets(targets: &[MonitoringShareTargetRecord]) -> Result<()> {

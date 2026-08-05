@@ -86,6 +86,9 @@ async fn seed_unprivileged_agent(repo: &crate::repository::Repository, client_id
             internal_build_number: 1,
             os_release: "test".to_string(),
             arch: "x86_64".to_string(),
+            cpu_model: None,
+            kernel_release: None,
+            virtualization: None,
             update_heartbeat: None,
             capabilities: AgentCapabilitySnapshot {
                 privilege_mode: AgentPrivilegeMode::Unprivileged,

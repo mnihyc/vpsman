@@ -531,6 +531,10 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           network_rx_bytes_max: (120 + index * 3 + point) * 1024 * 1024,
           network_tx_bytes_max: (70 + index * 2 + point) * 1024 * 1024,
           sample_count: 12 + point,
+          swap_available_bytes_avg: null,
+          swap_available_bytes_min: null,
+          swap_sample_count: 0,
+          swap_total_bytes_max: null,
           updated_at: `2026-06-07T04:${bucketMinute}:50Z`,
         };
       }),

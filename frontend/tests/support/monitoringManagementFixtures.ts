@@ -7,8 +7,7 @@ import type {
   PingTargetView,
 } from "../../src/types";
 
-export const screenshotPingTargetId =
-  "11111111-aaaa-4111-8111-111111111111";
+export const screenshotPingTargetId = "11111111-aaaa-4111-8111-111111111111";
 
 export async function installMonitoringManagementApiMock(page: Page) {
   const pingTargets = pingTargetFixtures();
@@ -51,7 +50,10 @@ export async function installMonitoringManagementApiMock(page: Page) {
     const url = new URL(route.request().url());
     const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0"));
     const limit = Math.max(1, Number(url.searchParams.get("limit") ?? "100"));
-    await fulfillJson(route, monitoringShareFixtures().slice(offset, offset + limit));
+    await fulfillJson(
+      route,
+      monitoringShareFixtures().slice(offset, offset + limit),
+    );
   });
 }
 
@@ -127,11 +129,13 @@ function pingAssignment(
 
 function monitoringShareFixtures(): MonitoringShareView[] {
   const visibility = {
+    billing: false,
     detail_history: true,
     identity_context: false,
     network: true,
     ping: true,
     resources: true,
+    system_information: false,
     traffic: true,
   };
   return [

@@ -944,12 +944,26 @@ fn validate_gateway_agent_hello(event: &GatewayAgentHelloIngest) -> Result<(), A
         || event.hello.client_id.is_empty()
         || event.hello.client_id.len() > 128
         || event.hello.process_incarnation_id == uuid::Uuid::nil()
+        || ![
+            event.hello.cpu_model.as_deref(),
+            event.hello.kernel_release.as_deref(),
+            event.hello.virtualization.as_deref(),
+        ]
+        .into_iter()
+        .all(valid_optional_agent_host_fact)
     {
         return Err(ApiError::bad_request("invalid_gateway_agent_hello"));
     }
     validate_gateway_remote_ip(event.remote_ip.as_deref())?;
     validate_noise_public_key(&event.noise_public_key_hex)?;
     Ok(())
+}
+
+fn valid_optional_agent_host_fact(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        let value = value.trim();
+        !value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control)
+    })
 }
 
 fn validate_gateway_runtime_config_reload(
@@ -1020,6 +1034,13 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
         .into_iter()
         .all(|value| value.is_finite() && (0.0..=1_000_000.0).contains(&value))
         || metrics.memory.available_bytes > metrics.memory.total_bytes
+        || metrics.memory.swap_total_bytes.is_some()
+            != metrics.memory.swap_available_bytes.is_some()
+        || metrics
+            .memory
+            .swap_total_bytes
+            .zip(metrics.memory.swap_available_bytes)
+            .is_some_and(|(total, available)| available > total)
     {
         return false;
     }

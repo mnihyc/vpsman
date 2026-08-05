@@ -1,6 +1,28 @@
 use super::*;
 
 #[test]
+fn agent_metric_validation_distinguishes_unknown_zero_and_invalid_swap() {
+    let metrics = |swap_total_bytes, swap_available_bytes| vpsman_common::AgentMetrics {
+        observed_unix: 1,
+        hostname: "vps".to_string(),
+        memory: vpsman_common::MemoryStat {
+            total_bytes: 1024,
+            available_bytes: 512,
+            swap_total_bytes,
+            swap_available_bytes,
+        },
+        ..Default::default()
+    };
+
+    assert!(valid_agent_metrics(&metrics(None, None)));
+    assert!(valid_agent_metrics(&metrics(Some(0), Some(0))));
+    assert!(valid_agent_metrics(&metrics(Some(1024), Some(512))));
+    assert!(!valid_agent_metrics(&metrics(Some(1024), None)));
+    assert!(!valid_agent_metrics(&metrics(None, Some(0))));
+    assert!(!valid_agent_metrics(&metrics(Some(1024), Some(2048))));
+}
+
+#[test]
 fn ingest_unsupported_command_output_maps_to_rejected_target_status() {
     let job_id = uuid::Uuid::new_v4();
     let output = CommandOutput {

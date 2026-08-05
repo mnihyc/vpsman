@@ -24,6 +24,10 @@ pub struct LoadAverage {
 pub struct MemoryStat {
     pub total_bytes: u64,
     pub available_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_total_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_available_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

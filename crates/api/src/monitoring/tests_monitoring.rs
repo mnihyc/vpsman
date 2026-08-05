@@ -451,6 +451,8 @@ async fn shared_view_creation_persists_random_public_target_keys() {
         target_client_ids: vec!["v-1".to_string()],
         visibility: MonitoringShareVisibilityRequest {
             identity_context: false,
+            billing: true,
+            system_information: true,
             resources: true,
             network: true,
             traffic: true,
@@ -509,6 +511,8 @@ async fn shared_view_creation_persists_random_public_target_keys() {
         .await
         .unwrap()
         .unwrap();
+    assert!(first_record.visibility.billing);
+    assert!(first_record.visibility.system_information);
     let first_key = first_record.public_client_key("v-1").unwrap();
     let second_key = second_record.public_client_key("v-1").unwrap();
     assert_eq!(first_key.len(), 64);
@@ -615,6 +619,8 @@ async fn shared_view_creation_rejects_an_empty_frozen_scope() {
             target_client_ids: Vec::new(),
             visibility: MonitoringShareVisibilityRequest {
                 identity_context: false,
+                billing: false,
+                system_information: false,
                 resources: true,
                 network: true,
                 traffic: true,
@@ -632,6 +638,71 @@ async fn shared_view_creation_rejects_an_empty_frozen_scope() {
 }
 
 #[tokio::test]
+async fn shared_view_system_information_can_open_read_only_detail() {
+    let repo = Repository::Memory(MemoryState::default());
+    let state = monitoring_test_state(repo.clone());
+    let (_operator, headers) = crate::test_auth_context_and_headers(&state).await;
+    seed_monitoring_agent(&repo, "v-1").await;
+    let response = crate::routes_monitoring::create_monitoring_share(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateMonitoringShareRequest {
+            name: "Current facts only".to_string(),
+            selector_expression: "*".to_string(),
+            target_client_ids: vec!["v-1".to_string()],
+            visibility: MonitoringShareVisibilityRequest {
+                identity_context: false,
+                billing: true,
+                system_information: true,
+                resources: false,
+                network: false,
+                traffic: false,
+                ping: false,
+                detail_history: true,
+            },
+            expires_in_secs: 3_600,
+            confirmed: true,
+        }),
+    )
+    .await
+    .expect("system information is valid read-only detail content");
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["share"]["visibility"]["system_information"], true);
+    assert_eq!(body["share"]["visibility"]["detail_history"], true);
+
+    let error = crate::routes_monitoring::create_monitoring_share(
+        State(state),
+        headers,
+        Json(CreateMonitoringShareRequest {
+            name: "Card facts only".to_string(),
+            selector_expression: "*".to_string(),
+            target_client_ids: vec!["v-1".to_string()],
+            visibility: MonitoringShareVisibilityRequest {
+                identity_context: false,
+                billing: true,
+                system_information: false,
+                resources: false,
+                network: false,
+                traffic: false,
+                ping: false,
+                detail_history: true,
+            },
+            expires_in_secs: 3_600,
+            confirmed: true,
+        }),
+    )
+    .await
+    .expect_err("card-only facts must not enable an empty detail page");
+    assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error.code,
+        "monitoring_share_detail_requires_visible_metrics"
+    );
+}
+
+#[tokio::test]
 async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = monitoring_test_operator();
@@ -644,6 +715,8 @@ async fn shared_view_records_each_new_visitor_once_and_touches_active_access() {
         targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,
@@ -724,6 +797,8 @@ async fn shared_view_target_refresh_preserves_existing_public_identity() {
         }],
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,
@@ -1035,6 +1110,8 @@ async fn deleting_a_vps_removes_live_ping_but_preserves_frozen_share_scope() {
         }],
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,
@@ -1198,6 +1275,8 @@ fn monitoring_share_expiry_is_fail_closed_for_invalid_values() {
         targets: Vec::new(),
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,

@@ -111,7 +111,11 @@ creating another audit event for that visitor.
 Public projections always include display name and health. Depending on
 the immutable visibility selection, they may also include allowlisted
 provider/region/country context whose value is not an IP literal, resources,
-network rate, authoritative traffic, general Ping, and detail history. They use
+network rate, authoritative traffic, billing display, normalized system
+information, general Ping, and detail history. Billing and system information
+are independent opt-in groups and omit missing facts. The projection never
+includes raw `os-release`, hostname, IP addresses, capability payloads, build or
+process identities, or per-interface evidence. They use
 a persisted random 256-bit VPS key generated independently for each target in
 each share. The key is stable for that share's lifetime and is never derived
 from the URL-secret digest or predictable internal VPS ID. Public projections

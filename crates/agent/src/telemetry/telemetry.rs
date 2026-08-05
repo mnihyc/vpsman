@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::CString,
-    path::Path,
+    path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -37,6 +37,182 @@ use crate::telemetry_traffic::traffic_accumulation_for_plan;
 const MAX_LATENCY_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 pub(crate) const GENERAL_PING_INTERVAL_SECS: u64 = 60;
 const GENERAL_PING_MAX_ATTEMPT_TIMEOUT_SECS: u64 = 8;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ConnectionHostFacts {
+    pub(crate) cpu_model: Option<String>,
+    pub(crate) kernel_release: Option<String>,
+    pub(crate) virtualization: Option<String>,
+}
+
+pub(crate) fn collect_connection_host_facts(config: &AgentConfig) -> ConnectionHostFacts {
+    let proc_root = Path::new(&config.telemetry.proc_root);
+    ConnectionHostFacts {
+        cpu_model: optional_connection_fact("CPU model", cpu_model(proc_root)),
+        kernel_release: optional_connection_fact("kernel release", kernel_release(proc_root)),
+        virtualization: virtualization(proc_root, Path::new(&config.telemetry.sys_class_net_dir)),
+    }
+}
+
+fn optional_connection_fact<T>(label: &str, result: Result<Option<T>>) -> Option<T> {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, fact = label, "optional connection host fact is unavailable");
+            None
+        }
+    }
+}
+
+fn cpu_model(proc_root: &Path) -> Result<Option<String>> {
+    let contents = read_proc_file(proc_root, "cpuinfo")?;
+    Ok(parse_cpu_model(&contents))
+}
+
+fn parse_cpu_model(cpuinfo: &str) -> Option<String> {
+    const MODEL_KEYS: [&str; 5] = ["model name", "cpu model", "hardware", "uarch", "processor"];
+    for key in MODEL_KEYS {
+        for line in cpuinfo.lines() {
+            let Some((raw_key, raw_value)) = line.split_once(':') else {
+                continue;
+            };
+            if !raw_key.trim().eq_ignore_ascii_case(key) {
+                continue;
+            }
+            let Some(value) = normalize_connection_fact(raw_value) else {
+                continue;
+            };
+            if key != "processor" || value.chars().any(char::is_alphabetic) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn kernel_release(proc_root: &Path) -> Result<Option<String>> {
+    let contents = read_proc_file(proc_root, "sys/kernel/osrelease")?;
+    Ok(normalize_connection_fact(&contents))
+}
+
+fn normalize_connection_fact(value: &str) -> Option<String> {
+    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!value.is_empty()
+        && value.len() <= 255
+        && !value.chars().any(|character| character.is_control()))
+    .then_some(value)
+}
+
+fn virtualization(proc_root: &Path, sys_class_net_dir: &Path) -> Option<String> {
+    if let Some(kind) = optional_connection_fact(
+        "container virtualization",
+        container_virtualization(proc_root),
+    ) {
+        return Some(kind.to_string());
+    }
+    if proc_root.join("xen").is_dir() {
+        return Some("xen".to_string());
+    }
+
+    if let Some(release) = optional_connection_fact(
+        "virtualization kernel release",
+        read_optional_normalized(&proc_root.join("sys/kernel/osrelease")),
+    ) {
+        if release.to_ascii_lowercase().contains("microsoft") {
+            return Some("wsl".to_string());
+        }
+    }
+
+    let Some(sys_root) = sys_root_from_class_net_dir(sys_class_net_dir) else {
+        tracing::warn!(
+            path = %sys_class_net_dir.display(),
+            "optional virtualization fact is unavailable because the configured sys class net path has no sys root"
+        );
+        return None;
+    };
+    if let Some(kind) = optional_connection_fact(
+        "virtualization hypervisor type",
+        read_optional_normalized(&sys_root.join("hypervisor/type")),
+    ) {
+        if let Some(kind) = classify_virtualization(&kind) {
+            return Some(kind.to_string());
+        }
+    }
+
+    let vendor = optional_connection_fact(
+        "virtualization DMI vendor",
+        read_optional_normalized(&sys_root.join("class/dmi/id/sys_vendor")),
+    );
+    let product = optional_connection_fact(
+        "virtualization DMI product",
+        read_optional_normalized(&sys_root.join("class/dmi/id/product_name")),
+    );
+    let evidence = [vendor, product]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    classify_virtualization(&evidence).map(str::to_string)
+}
+
+fn container_virtualization(proc_root: &Path) -> Result<Option<&'static str>> {
+    if proc_root.join("vz").is_dir() && !proc_root.join("bc").exists() {
+        return Ok(Some("openvz"));
+    }
+    let cgroup_path = proc_root.join("1/cgroup");
+    let cgroup = match std::fs::read_to_string(&cgroup_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", cgroup_path.display()))
+        }
+    };
+    let cgroup = cgroup.to_ascii_lowercase();
+    Ok(if cgroup.contains("docker") {
+        Some("docker")
+    } else if cgroup.contains("libpod") {
+        Some("podman")
+    } else if cgroup.contains("lxc") {
+        Some("lxc")
+    } else {
+        None
+    })
+}
+
+fn sys_root_from_class_net_dir(path: &Path) -> Option<PathBuf> {
+    (path.file_name()?.to_str()? == "net" && path.parent()?.file_name()?.to_str()? == "class")
+        .then(|| path.parent().and_then(Path::parent).map(Path::to_path_buf))
+        .flatten()
+}
+
+fn read_optional_normalized(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(value) => Ok(normalize_connection_fact(&value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn classify_virtualization(evidence: &str) -> Option<&'static str> {
+    let evidence = evidence.to_ascii_lowercase();
+    [
+        ("firecracker", "firecracker"),
+        ("cloud hypervisor", "cloud-hypervisor"),
+        ("vmware", "vmware"),
+        ("virtualbox", "virtualbox"),
+        ("innotek", "virtualbox"),
+        ("microsoft corporation virtual machine", "hyper-v"),
+        ("hyper-v", "hyper-v"),
+        ("xen", "xen"),
+        ("parallels", "parallels"),
+        ("bhyve", "bhyve"),
+        ("kvm", "kvm"),
+        ("qemu", "qemu"),
+        ("bochs", "bochs"),
+    ]
+    .into_iter()
+    .find_map(|(needle, label)| evidence.contains(needle).then_some(label))
+}
 
 #[derive(Default)]
 pub(crate) struct TelemetryRuntimeState {
@@ -583,6 +759,9 @@ fn memory_stat(proc_root: &Path) -> Result<MemoryStat> {
     let contents = read_proc_file(proc_root, "meminfo")?;
     let mut total = None;
     let mut available = None;
+    let mut swap_total = None;
+    let mut swap_available = None;
+    let mut swap_valid = true;
 
     for line in contents.lines() {
         let mut fields = line.split_whitespace();
@@ -590,23 +769,20 @@ fn memory_stat(proc_root: &Path) -> Result<MemoryStat> {
             continue;
         };
         match key {
-            "MemTotal:" | "MemAvailable:" => {
-                let value = fields
-                    .next()
-                    .with_context(|| format!("telemetry {key} value is missing"))?
-                    .parse::<u64>()
-                    .with_context(|| format!("telemetry {key} value is not numeric"))?;
-                ensure!(
-                    fields.next() == Some("kB"),
-                    "telemetry {key} unit is not kB"
-                );
-                let value = value
-                    .checked_mul(1024)
-                    .with_context(|| format!("telemetry {key} value is out of range"))?;
-                if key == "MemTotal:" {
-                    total = Some(value);
-                } else {
-                    available = Some(value);
+            "MemTotal:" | "MemAvailable:" | "SwapTotal:" | "SwapFree:" => {
+                let value = meminfo_value_bytes(&mut fields, key);
+                match key {
+                    "MemTotal:" => total = Some(value?),
+                    "MemAvailable:" => available = Some(value?),
+                    "SwapTotal:" => match value {
+                        Ok(value) => swap_total = Some(value),
+                        Err(_) => swap_valid = false,
+                    },
+                    "SwapFree:" => match value {
+                        Ok(value) => swap_available = Some(value),
+                        Err(_) => swap_valid = false,
+                    },
+                    _ => unreachable!(),
                 }
             }
             _ => {}
@@ -619,10 +795,33 @@ fn memory_stat(proc_root: &Path) -> Result<MemoryStat> {
         total_bytes > 0 && available_bytes <= total_bytes,
         "telemetry memory values are inconsistent"
     );
+    let (swap_total_bytes, swap_available_bytes) = match (swap_valid, swap_total, swap_available) {
+        (true, Some(total), Some(available)) if available <= total => {
+            (Some(total), Some(available))
+        }
+        _ => (None, None),
+    };
     Ok(MemoryStat {
         total_bytes,
         available_bytes,
+        swap_total_bytes,
+        swap_available_bytes,
     })
+}
+
+fn meminfo_value_bytes(fields: &mut std::str::SplitWhitespace<'_>, key: &str) -> Result<u64> {
+    let value = fields
+        .next()
+        .with_context(|| format!("telemetry {key} value is missing"))?
+        .parse::<u64>()
+        .with_context(|| format!("telemetry {key} value is not numeric"))?;
+    ensure!(
+        fields.next() == Some("kB"),
+        "telemetry {key} unit is not kB"
+    );
+    value
+        .checked_mul(1024)
+        .with_context(|| format!("telemetry {key} value is out of range"))
 }
 
 fn network_stats(proc_root: &Path) -> Result<Vec<NetworkStat>> {

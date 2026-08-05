@@ -531,6 +531,17 @@ impl Repository {
                         event.remote_ip.as_deref(),
                     )
                     .await;
+                    memory.client_system_facts.write().await.insert(
+                        event.hello.client_id.clone(),
+                        crate::model::ClientSystemFactsRecord {
+                            os_release: event.hello.os_release.clone(),
+                            architecture: event.hello.arch.clone(),
+                            cpu_model: event.hello.cpu_model.clone(),
+                            kernel_release: event.hello.kernel_release.clone(),
+                            virtualization: event.hello.virtualization.clone(),
+                            reported_at: crate::unix_now().to_string(),
+                        },
+                    );
                     crate::repository_gateway_sessions::expire_memory_active_other_sessions(
                         memory,
                         &event.hello.client_id,
@@ -685,10 +696,14 @@ impl Repository {
                     INSERT INTO clients (
                         id, display_name, public_key, status, agent_version,
                         internal_build_number, process_incarnation_id, os_release, arch,
+                        cpu_model, kernel_release, virtualization, system_reported_at,
                         capabilities, registration_ip,
                         last_ip, last_seen_at
                     )
-                    VALUES ($1, $2, $3, 'online', $4, $5, $6, $7, $8, $9, $10::inet, $10::inet, now())
+                    VALUES (
+                        $1, $2, $3, 'online', $4, $5, $6, $7, $8,
+                        $9, $10, $11, now(), $12, $13::inet, $13::inet, now()
+                    )
                     ON CONFLICT (id) DO UPDATE SET
                         status = CASE
                             WHEN clients.status = 'stale'
@@ -701,6 +716,10 @@ impl Repository {
                         process_incarnation_id = EXCLUDED.process_incarnation_id,
                         os_release = EXCLUDED.os_release,
                         arch = EXCLUDED.arch,
+                        cpu_model = EXCLUDED.cpu_model,
+                        kernel_release = EXCLUDED.kernel_release,
+                        virtualization = EXCLUDED.virtualization,
+                        system_reported_at = EXCLUDED.system_reported_at,
                         capabilities = EXCLUDED.capabilities,
                         registration_ip = COALESCE(clients.registration_ip, EXCLUDED.registration_ip),
                         last_ip = COALESCE(EXCLUDED.last_ip, clients.last_ip),
@@ -734,6 +753,9 @@ impl Repository {
                 .bind(event.hello.process_incarnation_id)
                 .bind(&event.hello.os_release)
                 .bind(&event.hello.arch)
+                .bind(&event.hello.cpu_model)
+                .bind(&event.hello.kernel_release)
+                .bind(&event.hello.virtualization)
                 .bind(sqlx::types::Json(&event.hello.capabilities))
                 .bind(event.remote_ip.as_deref())
                 .execute(&mut *tx)
@@ -856,6 +878,7 @@ impl Repository {
             result.checked_unix = received_unix.saturating_sub(check_age);
         }
         received_metrics.observed_unix = received_unix;
+        let swap = validated_swap_sample(&received_metrics)?;
         let record_result: Result<bool> = match self {
             Self::Memory(memory) => {
                 let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
@@ -927,6 +950,7 @@ impl Repository {
                     &memory.telemetry_rollups,
                     &event.telemetry.client_id,
                     &received_metrics,
+                    swap,
                 )
                 .await;
                 upsert_memory_traffic_counter_samples(
@@ -1021,8 +1045,13 @@ impl Repository {
                     metrics,
                 )
                 .await?;
-                upsert_postgres_telemetry_rollup(&mut tx, &event.telemetry.client_id, metrics)
-                    .await?;
+                upsert_postgres_telemetry_rollup(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    metrics,
+                    swap,
+                )
+                .await?;
                 upsert_postgres_traffic_counter_samples(
                     &mut tx,
                     &event.telemetry.client_id,
@@ -1469,6 +1498,7 @@ async fn upsert_memory_telemetry_rollup(
     rollups: &Arc<RwLock<Vec<TelemetryRollupView>>>,
     client_id: &str,
     metrics: &AgentMetrics,
+    swap: Option<(i64, i64)>,
 ) {
     let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
     let observed_at = metrics.observed_unix.to_string();
@@ -1520,6 +1550,26 @@ async fn upsert_memory_telemetry_rollup(
         rollup.memory_available_bytes_min = rollup
             .memory_available_bytes_min
             .min(u64_to_i64(metrics.memory.available_bytes));
+        if let Some((swap_total, swap_available)) = swap {
+            let swap_count = rollup.swap_sample_count.max(0);
+            rollup.swap_total_bytes_max = Some(
+                rollup
+                    .swap_total_bytes_max
+                    .map_or(swap_total, |current| current.max(swap_total)),
+            );
+            rollup.swap_available_bytes_avg = Some(match rollup.swap_available_bytes_avg {
+                Some(current) if swap_count > 0 => {
+                    weighted_avg_i64(current, swap_count, swap_available)
+                }
+                _ => swap_available,
+            });
+            rollup.swap_available_bytes_min = Some(
+                rollup
+                    .swap_available_bytes_min
+                    .map_or(swap_available, |current| current.min(swap_available)),
+            );
+            rollup.swap_sample_count = swap_count.saturating_add(1);
+        }
         rollup.disk_total_bytes_max = rollup.disk_total_bytes_max.max(disk_total);
         rollup.disk_available_bytes_avg = weighted_avg_i64(
             rollup.disk_available_bytes_avg,
@@ -1567,6 +1617,10 @@ async fn upsert_memory_telemetry_rollup(
         memory_total_bytes_max: u64_to_i64(metrics.memory.total_bytes),
         memory_available_bytes_avg: u64_to_i64(metrics.memory.available_bytes),
         memory_available_bytes_min: u64_to_i64(metrics.memory.available_bytes),
+        swap_sample_count: i32::from(swap.is_some()),
+        swap_total_bytes_max: swap.map(|(total, _)| total),
+        swap_available_bytes_avg: swap.map(|(_, available)| available),
+        swap_available_bytes_min: swap.map(|(_, available)| available),
         disk_total_bytes_max: disk_total,
         disk_available_bytes_avg: disk_available,
         disk_available_bytes_min: disk_available,
@@ -1762,6 +1816,7 @@ async fn upsert_postgres_telemetry_rollup(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
     metrics: &AgentMetrics,
+    swap: Option<(i64, i64)>,
 ) -> Result<()> {
     let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
     sqlx::query(
@@ -1784,6 +1839,10 @@ async fn upsert_postgres_telemetry_rollup(
             memory_total_bytes_max,
             memory_available_bytes_avg,
             memory_available_bytes_min,
+            swap_sample_count,
+            swap_total_bytes_max,
+            swap_available_bytes_avg,
+            swap_available_bytes_min,
             disk_total_bytes_max,
             disk_available_bytes_avg,
             disk_available_bytes_min,
@@ -1816,17 +1875,21 @@ async fn upsert_postgres_telemetry_rollup(
             $12,
             $13,
             $14,
-            $14,
+            $15,
             $15,
             $16,
             $17,
+            $17,
             $18,
             $19,
-            CASE WHEN $20::double precision IS NULL
+            $20,
+            $21,
+            $22,
+            CASE WHEN $23::double precision IS NULL
                 THEN NULL
-                ELSE to_timestamp($20::double precision)
+                ELSE to_timestamp($23::double precision)
             END,
-            to_timestamp($21::double precision),
+            to_timestamp($24::double precision),
             now()
         )
         ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
@@ -1879,6 +1942,40 @@ async fn upsert_postgres_telemetry_rollup(
                 telemetry_rollups.memory_available_bytes_min,
                 EXCLUDED.memory_available_bytes_min
             ),
+            swap_sample_count = telemetry_rollups.swap_sample_count
+                + EXCLUDED.swap_sample_count,
+            swap_total_bytes_max = CASE
+                WHEN telemetry_rollups.swap_total_bytes_max IS NULL
+                    THEN EXCLUDED.swap_total_bytes_max
+                WHEN EXCLUDED.swap_total_bytes_max IS NULL
+                    THEN telemetry_rollups.swap_total_bytes_max
+                ELSE GREATEST(
+                    telemetry_rollups.swap_total_bytes_max,
+                    EXCLUDED.swap_total_bytes_max
+                )
+            END,
+            swap_available_bytes_avg = CASE
+                WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
+                    THEN NULL
+                ELSE round((
+                    COALESCE(telemetry_rollups.swap_available_bytes_avg, 0)::numeric
+                        * telemetry_rollups.swap_sample_count::numeric
+                    + COALESCE(EXCLUDED.swap_available_bytes_avg, 0)::numeric
+                        * EXCLUDED.swap_sample_count::numeric
+                ) / (
+                    telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
+                )::numeric)::bigint
+            END,
+            swap_available_bytes_min = CASE
+                WHEN telemetry_rollups.swap_available_bytes_min IS NULL
+                    THEN EXCLUDED.swap_available_bytes_min
+                WHEN EXCLUDED.swap_available_bytes_min IS NULL
+                    THEN telemetry_rollups.swap_available_bytes_min
+                ELSE LEAST(
+                    telemetry_rollups.swap_available_bytes_min,
+                    EXCLUDED.swap_available_bytes_min
+                )
+            END,
             disk_total_bytes_max = GREATEST(
                 telemetry_rollups.disk_total_bytes_max,
                 EXCLUDED.disk_total_bytes_max
@@ -1946,6 +2043,9 @@ async fn upsert_postgres_telemetry_rollup(
     .bind(metrics.cpu.load.fifteen)
     .bind(u64_to_i64(metrics.memory.total_bytes))
     .bind(u64_to_i64(metrics.memory.available_bytes))
+    .bind(i32::from(swap.is_some()))
+    .bind(swap.map(|(total, _)| total))
+    .bind(swap.map(|(_, available)| available))
     .bind(disk_total)
     .bind(disk_available)
     .bind(network_rx)
@@ -1968,6 +2068,20 @@ async fn upsert_postgres_telemetry_rollup(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn validated_swap_sample(metrics: &AgentMetrics) -> Result<Option<(i64, i64)>> {
+    match (
+        metrics.memory.swap_total_bytes,
+        metrics.memory.swap_available_bytes,
+    ) {
+        (None, None) => Ok(None),
+        (Some(total), Some(available)) if available <= total => {
+            Ok(Some((u64_to_i64(total), u64_to_i64(available))))
+        }
+        (Some(_), Some(_)) => anyhow::bail!("swap_available_bytes exceeds swap_total_bytes"),
+        _ => anyhow::bail!("swap total and available evidence must be reported together"),
+    }
 }
 
 async fn upsert_postgres_telemetry_network_rates(

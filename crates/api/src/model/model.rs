@@ -77,6 +77,19 @@ pub(crate) struct AgentView {
     pub(crate) capabilities: AgentCapabilitySnapshot,
 }
 
+/// Host facts reported once per accepted agent session. These are kept apart
+/// from telemetry so unchanged identity evidence is not duplicated in every
+/// sample.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientSystemFactsRecord {
+    pub(crate) os_release: String,
+    pub(crate) architecture: String,
+    pub(crate) cpu_model: Option<String>,
+    pub(crate) kernel_release: Option<String>,
+    pub(crate) virtualization: Option<String>,
+    pub(crate) reported_at: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DeleteAgentRequest {
     #[serde(default)]
@@ -173,6 +186,10 @@ pub(crate) struct TelemetryRollupView {
     pub(crate) memory_total_bytes_max: i64,
     pub(crate) memory_available_bytes_avg: i64,
     pub(crate) memory_available_bytes_min: i64,
+    pub(crate) swap_sample_count: i32,
+    pub(crate) swap_total_bytes_max: Option<i64>,
+    pub(crate) swap_available_bytes_avg: Option<i64>,
+    pub(crate) swap_available_bytes_min: Option<i64>,
     pub(crate) disk_total_bytes_max: i64,
     pub(crate) disk_available_bytes_avg: i64,
     pub(crate) disk_available_bytes_min: i64,

@@ -17,6 +17,7 @@ export type TimeSeriesChartLine = {
   exportLabel?: string;
   initiallyHidden?: boolean;
   label: string;
+  seriesKey?: string;
   values: Array<number | null>;
 };
 
@@ -29,25 +30,31 @@ type HoverState = {
 };
 
 type TimeSeriesChartProps = {
+  allowNoVisibleSeries?: boolean;
   ariaLabel: string;
   emptyLabel: string;
   exportFileName?: string;
   height?: number;
   lines: TimeSeriesChartLine[];
+  onVisibleSeriesKeysChange?: (seriesKeys: string[]) => void;
   pointsOnly?: boolean;
   times: string[];
   valueFormatter: (value: number | null) => string;
+  visibleSeriesKeys?: readonly string[];
 };
 
 export function TimeSeriesChart({
+  allowNoVisibleSeries = false,
   ariaLabel,
   emptyLabel,
   exportFileName,
   height = 236,
   lines,
+  onVisibleSeriesKeysChange,
   pointsOnly = false,
   times,
   valueFormatter,
+  visibleSeriesKeys,
 }: TimeSeriesChartProps) {
   const captionId = useId();
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -57,7 +64,9 @@ export function TimeSeriesChart({
     () =>
       new Set(
         lines.flatMap((line, index) =>
-          line.initiallyHidden ? [`${index}:${line.label}`] : [],
+          line.initiallyHidden
+            ? [line.seriesKey ?? `${index}:${line.label}`]
+            : [],
         ),
       ),
   );
@@ -73,7 +82,7 @@ export function TimeSeriesChart({
       lines
         .map((line, index) => ({
           ...line,
-          seriesKey: `${index}:${line.label}`,
+          seriesKey: line.seriesKey ?? `${index}:${line.label}`,
           values: unixTimes.map((_, index) => line.values[index] ?? null),
         }))
         .filter((line) =>
@@ -99,17 +108,37 @@ export function TimeSeriesChart({
     () =>
       new Set(
         lines.flatMap((line, index) =>
-          line.initiallyHidden ? [`${index}:${line.label}`] : [],
+          line.initiallyHidden
+            ? [line.seriesKey ?? `${index}:${line.label}`]
+            : [],
         ),
       ),
     [lines],
   );
+  const controlledVisibleSeries = useMemo(
+    () =>
+      visibleSeriesKeys === undefined || onVisibleSeriesKeysChange === undefined
+        ? null
+        : new Set(visibleSeriesKeys),
+    [onVisibleSeriesKeysChange, visibleSeriesKeys],
+  );
+  const canHideEverySeries =
+    controlledVisibleSeries !== null && allowNoVisibleSeries;
+  const effectiveHiddenSeries = useMemo(
+    () =>
+      controlledVisibleSeries === null
+        ? hiddenSeries
+        : new Set(
+            seriesKeys.filter((key) => !controlledVisibleSeries.has(key)),
+          ),
+    [controlledVisibleSeries, hiddenSeries, seriesKeys],
+  );
   const visibleLines = useMemo(
     () =>
       sanitizedLines.filter(
-        (_line, index) => !hiddenSeries.has(seriesKeys[index]),
+        (_line, index) => !effectiveHiddenSeries.has(seriesKeys[index]),
       ),
-    [hiddenSeries, sanitizedLines, seriesKeys],
+    [effectiveHiddenSeries, sanitizedLines, seriesKeys],
   );
   const visibleLineCount = visibleLines.length;
 
@@ -184,7 +213,7 @@ export function TimeSeriesChart({
                 values: sanitizedLines
                   .filter(
                     (_line, lineIndex) =>
-                      !hiddenSeries.has(seriesKeys[lineIndex]),
+                      !effectiveHiddenSeries.has(seriesKeys[lineIndex]),
                   )
                   .map((line) => ({
                     color: line.color,
@@ -219,7 +248,7 @@ export function TimeSeriesChart({
           ...sanitizedLines.map((line, index) => ({
             label: line.label,
             points: { show: true, size: pointsOnly ? 6 : 4, width: 1 },
-            show: !hiddenSeries.has(seriesKeys[index]),
+            show: !effectiveHiddenSeries.has(seriesKeys[index]),
             spanGaps: false,
             stroke: line.color,
             width: pointsOnly ? 0 : 2,
@@ -249,7 +278,7 @@ export function TimeSeriesChart({
   }, [
     data,
     height,
-    hiddenSeries,
+    effectiveHiddenSeries,
     pointsOnly,
     sanitizedLines,
     seriesKeys,
@@ -257,7 +286,10 @@ export function TimeSeriesChart({
     valueFormatter,
   ]);
 
-  const hasData = unixTimes.length > 0 && sanitizedLines.length > 0;
+  const hasData =
+    unixTimes.length > 0 &&
+    sanitizedLines.length > 0 &&
+    visibleLineCount > 0;
   const accessibleRows = useMemo(() => {
     const firstIndex = Math.max(0, unixTimes.length - 12);
     return unixTimes.slice(firstIndex).map((time, offset) => {
@@ -267,7 +299,8 @@ export function TimeSeriesChart({
         timeLabel: formatChartTime(time),
         values: sanitizedLines
           .filter(
-            (_line, lineIndex) => !hiddenSeries.has(seriesKeys[lineIndex]),
+            (_line, lineIndex) =>
+              !effectiveHiddenSeries.has(seriesKeys[lineIndex]),
           )
           .map((line) => ({
             label: line.label,
@@ -275,7 +308,13 @@ export function TimeSeriesChart({
           })),
       };
     });
-  }, [hiddenSeries, sanitizedLines, seriesKeys, unixTimes, valueFormatter]);
+  }, [
+    effectiveHiddenSeries,
+    sanitizedLines,
+    seriesKeys,
+    unixTimes,
+    valueFormatter,
+  ]);
   const latestValues = accessibleRows[accessibleRows.length - 1]?.values ?? [];
   const coverageLabel = useMemo(
     () => chartCoverageLabel(unixTimes, visibleLines),
@@ -304,13 +343,24 @@ export function TimeSeriesChart({
         unixTimes,
         sanitizedLines,
         seriesKeys,
-        hiddenSeries,
+        effectiveHiddenSeries,
       ),
     );
   }
 
   function toggleSeries(seriesKey: string) {
     setHover(null);
+    if (controlledVisibleSeries !== null) {
+      if (!onVisibleSeriesKeysChange) return;
+      const next = new Set(controlledVisibleSeries);
+      if (next.has(seriesKey)) {
+        if (canHideEverySeries || visibleLineCount > 1) next.delete(seriesKey);
+      } else {
+        next.add(seriesKey);
+      }
+      onVisibleSeriesKeysChange([...next]);
+      return;
+    }
     setHiddenSeries((current) => {
       const next = new Set(current);
       if (next.has(seriesKey)) {
@@ -324,6 +374,13 @@ export function TimeSeriesChart({
 
   function showAllSeries() {
     setHover(null);
+    if (controlledVisibleSeries !== null) {
+      if (!onVisibleSeriesKeysChange) return;
+      onVisibleSeriesKeysChange(
+        Array.from(new Set([...controlledVisibleSeries, ...seriesKeys])),
+      );
+      return;
+    }
     setHiddenSeries(new Set());
   }
 
@@ -383,7 +440,7 @@ export function TimeSeriesChart({
                   unixTimes,
                   sanitizedLines,
                   seriesKeys,
-                  hiddenSeries,
+                  effectiveHiddenSeries,
                 ),
               )
             }
@@ -400,8 +457,9 @@ export function TimeSeriesChart({
             >
               {sanitizedLines.map((line, index) => {
                 const seriesKey = seriesKeys[index];
-                const visible = !hiddenSeries.has(seriesKey);
-                const lastVisible = visible && visibleLineCount === 1;
+                const visible = !effectiveHiddenSeries.has(seriesKey);
+                const lastVisible =
+                  !canHideEverySeries && visible && visibleLineCount === 1;
                 return (
                   <button
                     aria-disabled={lastVisible}
@@ -427,12 +485,12 @@ export function TimeSeriesChart({
                 );
               })}
             </div>
-            {(hiddenSeries.size > 0 || exportFileName) && (
+            {(effectiveHiddenSeries.size > 0 || exportFileName) && (
               <div className="timeSeriesLegendActions">
                 <span>
                   {visibleLineCount}/{sanitizedLines.length} series
                 </span>
-                {hiddenSeries.size > 0 && (
+                {effectiveHiddenSeries.size > 0 && (
                   <button
                     className="timeSeriesLegendAction"
                     onClick={showAllSeries}
@@ -488,7 +546,7 @@ export function TimeSeriesChart({
                 {sanitizedLines
                   .filter(
                     (_line, lineIndex) =>
-                      !hiddenSeries.has(seriesKeys[lineIndex]),
+                      !effectiveHiddenSeries.has(seriesKeys[lineIndex]),
                   )
                   .map((line) => (
                     <th key={line.label} scope="col">

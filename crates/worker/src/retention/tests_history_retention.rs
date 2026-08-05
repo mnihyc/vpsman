@@ -27,6 +27,8 @@ async fn compaction_reaches_mergeable_rows_after_unmergeable_prefix() {
             cpu_load_5_avg, cpu_load_5_max, cpu_load_15_avg,
             cpu_load_15_max, memory_total_bytes_max,
             memory_available_bytes_avg, memory_available_bytes_min,
+            swap_sample_count, swap_total_bytes_max,
+            swap_available_bytes_avg, swap_available_bytes_min,
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_min, network_rx_bytes_max,
             network_tx_bytes_max, latest_observed_at
@@ -44,7 +46,8 @@ async fn compaction_reaches_mergeable_rows_after_unmergeable_prefix() {
                 THEN (series.minute_index % 2)::double precision
                 ELSE 9::double precision
             END,
-            0, 0, 0, 0, 1024, 512, 512, 2048, 1024, 1024, 0, 0,
+            0, 0, 0, 0, 1024, 512, 512,
+            1, 1024, 512, 512, 2048, 1024, 1024, 0, 0,
             date_trunc('minute', now()) - interval '36 hours'
                 + series.minute_index * interval '1 minute'
         FROM generate_series(0, 2003) AS series(minute_index)
@@ -92,6 +95,20 @@ async fn compaction_reaches_mergeable_rows_after_unmergeable_prefix() {
     .await
     .unwrap();
     assert!(retained < 2004);
+    let retained_swap_samples: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(sum(swap_sample_count), 0)::bigint FROM telemetry_rollups WHERE client_id = 'compaction-fairness'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained_swap_samples, 2004);
+    let incomplete_swap_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM telemetry_rollups WHERE client_id = 'compaction-fairness' AND (swap_sample_count = 0 OR swap_total_bytes_max IS NULL OR swap_available_bytes_avg IS NULL OR swap_available_bytes_min IS NULL)",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(incomplete_swap_rows, 0);
     let differing_offsets_retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM telemetry_rollups WHERE client_id = 'compaction-offset'",
     )

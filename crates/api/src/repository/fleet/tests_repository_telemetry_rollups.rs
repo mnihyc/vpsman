@@ -86,6 +86,10 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
     compact.tcp_sockets_latest = Some(12);
     compact.udp_sockets_latest = Some(4);
     compact.connections_observed_at = Some("391".to_string());
+    compact.swap_sample_count = 5;
+    compact.swap_total_bytes_max = Some(1_000);
+    compact.swap_available_bytes_avg = Some(400);
+    compact.swap_available_bytes_min = Some(400);
 
     let uncompacted = (0..5)
         .map(|minute| {
@@ -97,6 +101,10 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
             row.tcp_sockets_latest = Some(12);
             row.udp_sockets_latest = Some(4);
             row.connections_observed_at = Some((120 + minute * 60 + 31).to_string());
+            row.swap_sample_count = 1;
+            row.swap_total_bytes_max = Some(1_000);
+            row.swap_available_bytes_avg = Some(400);
+            row.swap_available_bytes_min = Some(400);
             row
         })
         .flat_map(|row| fragment_telemetry_rollup(row, Some(180), Some(360), 120))
@@ -118,6 +126,20 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
             .collect::<Vec<_>>()
     };
     assert_eq!(timestamps(&left), timestamps(&right));
+    let swap = |rows: &[TelemetryRollupView]| {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.bucket_start.clone(),
+                    row.swap_sample_count,
+                    row.swap_total_bytes_max,
+                    row.swap_available_bytes_avg,
+                    row.swap_available_bytes_min,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(swap(&left), swap(&right));
     assert_eq!(
         rollup_counts(&right),
         vec![("120", 1), ("240", 2), ("360", 1)]
@@ -398,6 +420,61 @@ fn socket_rollups_keep_missing_distinct_from_zero_and_choose_latest_known_value(
 }
 
 #[test]
+fn swap_rollups_keep_unavailable_distinct_from_zero_and_weight_known_samples() {
+    let sample = |observed_at, swap: Option<(u64, u64)>| {
+        let metrics = AgentMetrics {
+            observed_unix: observed_at,
+            hostname: "v-1".to_string(),
+            memory: vpsman_common::MemoryStat {
+                swap_total_bytes: swap.map(|(total, _)| total),
+                swap_available_bytes: swap.map(|(_, available)| available),
+                ..Default::default()
+            },
+            ..AgentMetrics::default()
+        };
+        TelemetrySampleView {
+            id: uuid::Uuid::new_v4(),
+            client_id: "v-1".to_string(),
+            observed_at: observed_at.to_string(),
+            cpu_load_1: 0.0,
+            memory_total_bytes: 0,
+            memory_available_bytes: 0,
+            payload: serde_json::to_value(metrics).unwrap(),
+        }
+    };
+
+    let rows = [
+        raw_sample_rollup(sample(60, None)).unwrap(),
+        raw_sample_rollup(sample(120, Some((0, 0)))).unwrap(),
+        raw_sample_rollup(sample(180, Some((1_000, 400)))).unwrap(),
+    ];
+    assert_eq!(rows[0].swap_sample_count, 0);
+    assert_eq!(rows[0].swap_total_bytes_max, None);
+    assert_eq!(rows[1].swap_total_bytes_max, Some(0));
+
+    let mut one_sided = sample(240, None);
+    one_sided.payload["memory"]["swap_total_bytes"] = serde_json::json!(1_000);
+    assert!(raw_sample_rollup(one_sided)
+        .unwrap_err()
+        .to_string()
+        .contains("swap evidence is one-sided"));
+
+    let invalid_available = sample(300, Some((1_000, 1_001)));
+    assert!(raw_sample_rollup(invalid_available)
+        .unwrap_err()
+        .to_string()
+        .contains("swap available exceeds total"));
+
+    let aggregated = aggregate_memory_telemetry_rollups(rows.into(), 300);
+    assert_eq!(aggregated.len(), 1);
+    assert_eq!(aggregated[0].sample_count, 3);
+    assert_eq!(aggregated[0].swap_sample_count, 2);
+    assert_eq!(aggregated[0].swap_total_bytes_max, Some(1_000));
+    assert_eq!(aggregated[0].swap_available_bytes_avg, Some(200));
+    assert_eq!(aggregated[0].swap_available_bytes_min, Some(0));
+}
+
+#[test]
 fn network_budget_is_globally_bounded_and_stably_rank_fair() {
     let mut rows = vec![
         network_rate("a", "eth0", 200),
@@ -440,6 +517,10 @@ fn rollup(client_id: &str, bucket_start: u64) -> TelemetryRollupView {
         memory_total_bytes_max: 0,
         memory_available_bytes_avg: 0,
         memory_available_bytes_min: 0,
+        swap_sample_count: 0,
+        swap_total_bytes_max: None,
+        swap_available_bytes_avg: None,
+        swap_available_bytes_min: None,
         disk_total_bytes_max: 0,
         disk_available_bytes_avg: 0,
         disk_available_bytes_min: 0,

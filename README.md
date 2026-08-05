@@ -14,6 +14,8 @@ one operator surface for fleet inventory, reviewed job dispatch, terminal
 sessions, file transfer, backups, restores, runtime config, network topology,
 agent updates, access control, and audit evidence.
 
+![vpsman Home overview with live fleet posture and operations](docs/assets/vps-overview.png)
+
 ## Contents
 
 - [Why vpsman?](#why-vpsman)
@@ -288,7 +290,10 @@ Read more in [docs/target-selectors.md](docs/target-selectors.md).
 VPS. Comfortable cards retain identity context and fuller histories; Compact
 cards use a materially denser metric hierarchy. Both show exact values alongside
 visual CPU, RAM, aggregate disk, load, network, configured traffic, and primary
-Ping evidence. Selecting a card opens the canonical VPS detail with shared
+Ping evidence. When explicitly shared and available, the same compact surfaces
+also present billing-cycle, uptime, connection-count, swap, and normalized
+system-information evidence without inventing empty facts. Selecting a card
+opens the canonical VPS detail with shared
 **15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
 **All**, and **Custom** ranges. 15m is the rolling realtime view.
 
@@ -305,7 +310,7 @@ active links, or revoke them. Each share freezes its VPS and visible-data scope
 at creation; only an explicit reviewed target update re-resolves its saved
 selector, while visibility remains immutable. Public projections use
 persisted random share-specific VPS keys and never expose internal VPS IDs or
-network-address fields, internal configuration, actions, jobs, terminals,
+network-address fields, raw host files, internal configuration, actions, jobs, terminals,
 files, backups, audit data, or operator identity. Operator-entered public labels
 remain verbatim. Visitor bootstrap/data reads live only below
 `/api/v1/public/monitoring-shares`; share management remains authenticated.

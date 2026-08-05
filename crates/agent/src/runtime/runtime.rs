@@ -59,7 +59,10 @@ use crate::{
     restore_rollback::{execute_restore_rollback_command, RestoreRollbackCommandInput},
     runtime_config_cache::RuntimeConfigCache,
     supervisor::reconcile_supervised_processes_on_start,
-    telemetry::{collect_metrics_for_config, TelemetryRuntimeState, GENERAL_PING_INTERVAL_SECS},
+    telemetry::{
+        collect_connection_host_facts, collect_metrics_for_config, TelemetryRuntimeState,
+        GENERAL_PING_INTERVAL_SECS,
+    },
     terminal::{
         close_all_terminal_sessions_for_lifecycle, control_terminal_session,
         drain_pending_terminal_final_events, execute_terminal_command_with_stream_sink,
@@ -214,6 +217,7 @@ async fn connect_and_stream(
     process_incarnation_id: uuid::Uuid,
 ) -> Result<()> {
     let os_release = configured_os_release(config.telemetry.os_release_file.as_deref())?;
+    let host_facts = collect_connection_host_facts(config);
     info!(%endpoint, "connecting to gateway");
     let tcp = connect_tcp_endpoint(endpoint, config.auth.gateway_connect_timeout_secs).await?;
     let mut stream = connect_noise_stream(tcp, config).await?;
@@ -226,6 +230,9 @@ async fn connect_and_stream(
         internal_build_number: crate::build_info::agent_build_number(),
         os_release,
         arch: std::env::consts::ARCH.to_string(),
+        cpu_model: host_facts.cpu_model,
+        kernel_release: host_facts.kernel_release,
+        virtualization: host_facts.virtualization,
         update_heartbeat: read_activation_heartbeat().unwrap_or_else(|error| {
             warn!(%error, "failed to read update activation heartbeat marker");
             None

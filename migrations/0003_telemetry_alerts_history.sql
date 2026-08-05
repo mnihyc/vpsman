@@ -36,6 +36,10 @@ CREATE TABLE telemetry_rollups (
     memory_total_bytes_max BIGINT NOT NULL,
     memory_available_bytes_avg BIGINT NOT NULL,
     memory_available_bytes_min BIGINT NOT NULL,
+    swap_sample_count INTEGER NOT NULL DEFAULT 0,
+    swap_total_bytes_max BIGINT,
+    swap_available_bytes_avg BIGINT,
+    swap_available_bytes_min BIGINT,
     disk_total_bytes_max BIGINT NOT NULL DEFAULT 0,
     disk_available_bytes_avg BIGINT NOT NULL DEFAULT 0,
     disk_available_bytes_min BIGINT NOT NULL DEFAULT 0,
@@ -55,6 +59,28 @@ CREATE TABLE telemetry_rollups (
     CHECK (cpu_usage_max IS NULL OR cpu_usage_max BETWEEN 0 AND 1),
     CHECK (cpu_usage_sample_count BETWEEN 0 AND sample_count),
     CHECK (cpu_cores_max >= 0),
+    CHECK (swap_sample_count BETWEEN 0 AND sample_count),
+    CHECK (
+        (swap_sample_count = 0 AND
+            swap_total_bytes_max IS NULL
+            AND swap_available_bytes_avg IS NULL
+            AND swap_available_bytes_min IS NULL
+        )
+        OR (swap_sample_count > 0
+            AND swap_total_bytes_max IS NOT NULL
+            AND swap_available_bytes_avg IS NOT NULL
+            AND swap_available_bytes_min IS NOT NULL
+        )
+    ),
+    CHECK (
+        swap_sample_count = 0 OR (
+            swap_total_bytes_max >= 0
+            AND swap_available_bytes_avg >= 0
+            AND swap_available_bytes_min >= 0
+            AND swap_available_bytes_min <= swap_available_bytes_avg
+            AND swap_available_bytes_avg <= swap_total_bytes_max
+        )
+    ),
     CHECK (connections_sample_count BETWEEN 0 AND sample_count),
     CHECK ((connections_sample_count = 0) = (connections_observed_at IS NULL)),
     CHECK (
@@ -206,6 +232,8 @@ CREATE TABLE monitoring_share_links (
     token_secret TEXT NOT NULL UNIQUE,
     selector_expression TEXT NOT NULL,
     show_identity_context BOOLEAN NOT NULL DEFAULT FALSE,
+    show_billing BOOLEAN NOT NULL DEFAULT FALSE,
+    show_system_information BOOLEAN NOT NULL DEFAULT FALSE,
     show_resources BOOLEAN NOT NULL DEFAULT TRUE,
     show_network BOOLEAN NOT NULL DEFAULT TRUE,
     show_traffic BOOLEAN NOT NULL DEFAULT TRUE,

@@ -395,3 +395,40 @@ Do not conclude when the push succeeds:
   checks, deterministic deployment-bundle smoke, and Chrome desktop/mobile
   interaction checks passed. Chrome reported no console issues and scored the
   touched authenticated page 100 for accessibility and best practices.
+
+### 2026-08-05 — public monitoring evidence model
+
+- **Category:** monitoring ownership. **Decision:** CPU model, kernel release,
+  architecture, OS evidence, and evidenced virtualization are relatively static
+  session-hello facts; uptime and swap remain sampled telemetry. Swap carries an
+  independent valid-sample count through raw, minute, compacted, API, and public
+  projections, so missing swap never borrows memory coverage or becomes zero.
+  Adaptive PostgreSQL fragments clear swap values whenever their independent
+  sample count is zero, and uptime's observation time is exposed only with a
+  valid uptime value.
+- **Category:** public boundary. **Decision:** billing and normalized system
+  information are independent opt-in share groups. Public output omits missing
+  facts and allowlists only display-safe fields; it never forwards hostname,
+  addresses, raw host files, capabilities, build/process identities, or
+  per-interface evidence. Recoverably revoked VPSs retain the same public-safe
+  system facts as the canonical visible-client projection; hidden or deleted
+  VPSs do not.
+- **Category:** traffic truthfulness. **Decision:** unconfigured current
+  accounting exposes no retained totals, cycle, or quota as current. Retained
+  counter history can still be queried but is explicitly labeled as prior
+  accounting evidence. Mixed total/RX/TX quotas display the same most-used
+  finite limiting direction used by backend cycle percentage calculation.
+- **Category:** presentation. **Decision:** public cards remain Compact-first;
+  billing/uptime reuse the auxiliary evidence row. Detail uses a bounded KPI
+  strip, grouped hardware/system/storage/network facts, three-column resource
+  charts, a compact traffic-cycle panel, and selectable Ping targets without a
+  second theme or chart dependency. Identity-enabled shares expose the same
+  tag/provider filtering and operational sort choices as the fleet view;
+  billing renewal anchors and virtualization labels are formatted from their
+  actual API contracts, while unknown evidence remains visible rather than
+  guessed. Ping series receive deterministic distinct palette slots.
+- **Evidence:** canonical migration audit; focused memory, real-PostgreSQL
+  adaptive-rollup, and PostgreSQL worker-compaction tests; Rust formatting;
+  frontend type and generated-contract checks; and Chrome screenshot review of
+  a 24-card desktop grid, desktop resource/Ping detail, interactive filtering,
+  and a 390-pixel mobile grid with no horizontal overflow.

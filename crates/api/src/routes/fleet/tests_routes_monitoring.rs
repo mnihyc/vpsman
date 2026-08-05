@@ -15,12 +15,13 @@ use tower::ServiceExt;
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AgentView, MonitoringShareView, MonitoringShareVisibilityView, PublicMonitoringCardView,
+        AgentView, MonitoringShareView, MonitoringShareVisibilityRequest,
+        MonitoringShareVisibilityView, PublicBillingPlanView, PublicMonitoringCardView,
         PublicMonitoringDataView, PublicMonitoringDetailView, PublicMonitoringRangeView,
         PublicMonitoringShareBootstrapView, PublicMonitoringShareView, PublicNetworkMetricView,
         PublicNetworkPointView, PublicPingMetricView, PublicPingPointView, PublicPortSpeedView,
-        PublicResourceMetricView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
-        TelemetryNetworkRateView,
+        PublicResourceMetricView, PublicSystemInformationView, PublicTrafficHistoryPointView,
+        PublicTrafficMetricView, TelemetryNetworkRateView,
     },
     repository::{MemoryState, Repository},
     state::{AppState, DispatcherRuntimeConfig},
@@ -42,6 +43,21 @@ fn router_test_state() -> AppState {
         suite_config_path: "config/vpsman.toml".into(),
         dispatcher_config: DispatcherRuntimeConfig::default(),
     }
+}
+
+#[test]
+fn monitoring_share_optional_visibility_defaults_remain_private() {
+    let visibility: MonitoringShareVisibilityRequest =
+        serde_json::from_value(serde_json::json!({})).unwrap();
+
+    assert!(!visibility.identity_context);
+    assert!(!visibility.billing);
+    assert!(!visibility.system_information);
+    assert!(visibility.resources);
+    assert!(visibility.network);
+    assert!(visibility.traffic);
+    assert!(visibility.ping);
+    assert!(visibility.detail_history);
 }
 
 #[tokio::test]
@@ -74,6 +90,8 @@ async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
         target_update_available: false,
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
+            billing: false,
+            system_information: false,
             resources: true,
             network: true,
             traffic: true,
@@ -265,6 +283,8 @@ fn current_card_rates_reject_stale_and_future_interface_rows() {
 fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     let visibility = MonitoringShareVisibilityView {
         identity_context: true,
+        billing: true,
+        system_information: true,
         resources: true,
         network: true,
         traffic: true,
@@ -297,6 +317,9 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         load_15: 0.3,
         memory_total_bytes: 100,
         memory_available_bytes: 50,
+        swap_sample_count: 1,
+        swap_total_bytes: Some(50),
+        swap_available_bytes: Some(25),
         disk_total_bytes: 200,
         disk_available_bytes: 150,
         tcp_sockets: Some(3),
@@ -319,13 +342,28 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         bps: 1_000_000_000,
         display: "1 Gbps".to_string(),
     };
+    let billing = PublicBillingPlanView {
+        disabled: false,
+        display: "5.00 USD/m".to_string(),
+        cycle: Some("day 1 monthly".to_string()),
+    };
+    let system_information = PublicSystemInformationView {
+        os_name: Some("Debian GNU/Linux 12".to_string()),
+        architecture: Some("x86_64".to_string()),
+        cpu_model: Some("AMD EPYC".to_string()),
+        kernel_release: Some("6.12.1".to_string()),
+        virtualization: Some("kvm".to_string()),
+        reported_at: Some("1".to_string()),
+        uptime_secs: Some(86_400),
+        uptime_observed_at: Some("2".to_string()),
+    };
     let traffic = PublicTrafficMetricView {
         configured: true,
-        cycle_start: "1".to_string(),
-        cycle_end: "2".to_string(),
-        rx_bytes: 1,
-        tx_bytes: 2,
-        total_bytes: 3,
+        cycle_start: Some("1".to_string()),
+        cycle_end: Some("2".to_string()),
+        rx_bytes: Some(1),
+        tx_bytes: Some(2),
+        total_bytes: Some(3),
         quota_rx_bytes: Some(4),
         quota_tx_bytes: Some(5),
         quota_total_bytes: Some(9),
@@ -366,6 +404,8 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         display_name: "VPS".to_string(),
         status: "online".to_string(),
         tags: Some(vec!["provider:test".to_string()]),
+        billing: Some(billing.clone()),
+        system_information: Some(system_information.clone()),
         resources: Some(resource.clone()),
         resource_history: Some(vec![resource.clone()]),
         network: Some(network.clone()),
@@ -400,11 +440,13 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         "visibility",
         &visibility,
         &[
+            "billing",
             "detail_history",
             "identity_context",
             "network",
             "ping",
             "resources",
+            "system_information",
             "traffic",
         ],
     );
@@ -444,6 +486,9 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "memory_total_bytes",
             "observed_at",
             "sample_count",
+            "swap_available_bytes",
+            "swap_sample_count",
+            "swap_total_bytes",
             "tcp_sockets",
             "udp_sockets",
         ],
@@ -455,6 +500,21 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         &["bucket_secs", "bucket_start", "rx_bps", "tx_bps"],
     );
     assert_serialized_keys("port speed", &port_speed, &["bps", "display"]);
+    assert_serialized_keys("billing", &billing, &["cycle", "disabled", "display"]);
+    assert_serialized_keys(
+        "system information",
+        &system_information,
+        &[
+            "architecture",
+            "cpu_model",
+            "kernel_release",
+            "os_name",
+            "reported_at",
+            "uptime_observed_at",
+            "uptime_secs",
+            "virtualization",
+        ],
+    );
     assert_serialized_keys(
         "traffic",
         &traffic,
@@ -517,6 +577,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         "card",
         &card,
         &[
+            "billing",
             "client_key",
             "display_name",
             "network",
@@ -526,6 +587,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "resource_history",
             "resources",
             "status",
+            "system_information",
             "tags",
             "traffic",
         ],
@@ -560,4 +622,31 @@ fn assert_serialized_keys(label: &str, value: &impl serde::Serialize, expected: 
         .collect::<BTreeSet<_>>();
     let expected = expected.iter().copied().collect::<BTreeSet<_>>();
     assert_eq!(actual, expected, "{label} public field allowlist changed");
+}
+
+#[test]
+fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
+    let traffic = PublicTrafficMetricView {
+        configured: false,
+        cycle_start: None,
+        cycle_end: None,
+        rx_bytes: None,
+        tx_bytes: None,
+        total_bytes: None,
+        quota_rx_bytes: None,
+        quota_tx_bytes: None,
+        quota_total_bytes: None,
+        cycle_percent: None,
+        state: "unconfigured".to_string(),
+        observed_at: None,
+        port_speed: Some(PublicPortSpeedView {
+            bps: 1_000_000_000,
+            display: "1 Gbps".to_string(),
+        }),
+    };
+    assert_serialized_keys(
+        "unconfigured traffic",
+        &traffic,
+        &["configured", "port_speed", "state"],
+    );
 }

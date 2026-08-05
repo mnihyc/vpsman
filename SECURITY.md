@@ -35,7 +35,8 @@ Immediately rotate any credential or key that was exposed while reproducing or
 reporting an issue. Never submit production database dumps, agent private keys,
 operator privilege material, internal tokens, live access tokens, or active
 monitoring-share URLs. Revoke an exposed shared view and create a replacement;
-its secret cannot be rotated or recovered from the stored digest.
+its bearer secret is retained server-side for authorized Copy URL recovery but
+cannot be rotated in place, and a revoked or expired link cannot be reactivated.
 
 ## Security-Relevant Scope
 

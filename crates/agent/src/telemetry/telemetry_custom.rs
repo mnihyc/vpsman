@@ -203,7 +203,13 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
     }
     if let Some(memory) = patch.memory.as_ref() {
         ensure!(
-            memory.total_bytes > 0 && memory.available_bytes <= memory.total_bytes,
+            memory.total_bytes > 0
+                && memory.available_bytes <= memory.total_bytes
+                && memory.swap_total_bytes.is_some() == memory.swap_available_bytes.is_some()
+                && memory
+                    .swap_total_bytes
+                    .zip(memory.swap_available_bytes)
+                    .is_none_or(|(total, available)| available <= total),
             "custom telemetry patch has invalid memory"
         );
     }

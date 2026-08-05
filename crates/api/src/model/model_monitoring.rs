@@ -260,6 +260,7 @@ pub(crate) struct CurrentPingView {
 pub(crate) struct MonitoringCardView {
     pub(crate) client: AgentView,
     pub(crate) billing: Option<BillingPlanView>,
+    pub(crate) system_information: Option<SystemInformationView>,
     pub(crate) port_speed: Option<PortSpeedView>,
     pub(crate) resources: Option<TelemetryRollupView>,
     pub(crate) resource_history: Vec<TelemetryRollupView>,
@@ -289,6 +290,18 @@ pub(crate) struct BillingPlanView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct SystemInformationView {
+    pub(crate) os_name: Option<String>,
+    pub(crate) architecture: Option<String>,
+    pub(crate) cpu_model: Option<String>,
+    pub(crate) kernel_release: Option<String>,
+    pub(crate) virtualization: Option<String>,
+    pub(crate) reported_at: Option<String>,
+    pub(crate) uptime_secs: Option<u64>,
+    pub(crate) uptime_observed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct MonitoringCardsPageView {
     pub(crate) items: Vec<MonitoringCardView>,
     pub(crate) offset: usize,
@@ -310,6 +323,7 @@ pub(crate) struct MonitoringRangeView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ClientMonitoringView {
     pub(crate) client: AgentView,
+    pub(crate) system_information: Option<SystemInformationView>,
     pub(crate) range: MonitoringRangeView,
     pub(crate) resources: Vec<TelemetryRollupView>,
     pub(crate) network: Vec<TelemetryNetworkRateView>,
@@ -339,6 +353,10 @@ pub(crate) struct PublicMonitoringCardView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) billing: Option<PublicBillingPlanView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) system_information: Option<PublicSystemInformationView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resources: Option<PublicResourceMetricView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resource_history: Option<Vec<PublicResourceMetricView>>,
@@ -352,6 +370,34 @@ pub(crate) struct PublicMonitoringCardView {
     pub(crate) primary_ping: Option<PublicPingMetricView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_ping_history: Option<Vec<PublicPingPointView>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PublicBillingPlanView {
+    pub(crate) disabled: bool,
+    pub(crate) display: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cycle: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct PublicSystemInformationView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) os_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) architecture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cpu_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) kernel_release: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) virtualization: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reported_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uptime_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uptime_observed_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -414,6 +460,11 @@ pub(crate) struct PublicResourceMetricView {
     pub(crate) load_15: f64,
     pub(crate) memory_total_bytes: i64,
     pub(crate) memory_available_bytes: i64,
+    pub(crate) swap_sample_count: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) swap_total_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) swap_available_bytes: Option<i64>,
     pub(crate) disk_total_bytes: i64,
     pub(crate) disk_available_bytes: i64,
     pub(crate) tcp_sockets: Option<i64>,
@@ -440,17 +491,28 @@ pub(crate) struct PublicNetworkPointView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PublicTrafficMetricView {
     pub(crate) configured: bool,
-    pub(crate) cycle_start: String,
-    pub(crate) cycle_end: String,
-    pub(crate) rx_bytes: i64,
-    pub(crate) tx_bytes: i64,
-    pub(crate) total_bytes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cycle_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cycle_end: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) rx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) tx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) total_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quota_rx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quota_tx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quota_total_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cycle_percent: Option<f64>,
     pub(crate) state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) observed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) port_speed: Option<PublicPortSpeedView>,
 }
 
@@ -492,6 +554,8 @@ pub(crate) struct MonitoringShareListQuery {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct MonitoringShareVisibilityView {
     pub(crate) identity_context: bool,
+    pub(crate) billing: bool,
+    pub(crate) system_information: bool,
     pub(crate) resources: bool,
     pub(crate) network: bool,
     pub(crate) traffic: bool,
@@ -504,6 +568,10 @@ pub(crate) struct MonitoringShareVisibilityView {
 pub(crate) struct MonitoringShareVisibilityRequest {
     #[serde(default)]
     pub(crate) identity_context: bool,
+    #[serde(default)]
+    pub(crate) billing: bool,
+    #[serde(default)]
+    pub(crate) system_information: bool,
     #[serde(default = "default_true")]
     pub(crate) resources: bool,
     #[serde(default = "default_true")]

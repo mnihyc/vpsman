@@ -107,6 +107,9 @@ fn hello_payloads_remain_additive_across_rolling_updates() {
     let decoded_agent: AgentHello = serde_json::from_value(legacy_agent).unwrap();
     assert_eq!(decoded_agent.internal_build_number, 1);
     assert!(decoded_agent.update_heartbeat.is_none());
+    assert!(decoded_agent.cpu_model.is_none());
+    assert!(decoded_agent.kernel_release.is_none());
+    assert!(decoded_agent.virtualization.is_none());
 
     let future_agent = serde_json::json!({
         "client_id": "edge-a",
@@ -115,11 +118,17 @@ fn hello_payloads_remain_additive_across_rolling_updates() {
         "internal_build_number": 2000,
         "os_release": "Linux",
         "arch": "x86_64",
+        "cpu_model": "Example CPU",
+        "kernel_release": "6.12.0",
+        "virtualization": "kvm",
         "capabilities": {},
         "future_optional_capability": { "enabled": true }
     });
     let decoded_agent: AgentHello = serde_json::from_value(future_agent).unwrap();
     assert_eq!(decoded_agent.internal_build_number, 2000);
+    assert_eq!(decoded_agent.cpu_model.as_deref(), Some("Example CPU"));
+    assert_eq!(decoded_agent.kernel_release.as_deref(), Some("6.12.0"));
+    assert_eq!(decoded_agent.virtualization.as_deref(), Some("kvm"));
 
     let legacy_server = serde_json::json!({
         "server_id": "gateway-a",

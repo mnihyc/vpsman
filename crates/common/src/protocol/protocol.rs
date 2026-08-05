@@ -881,6 +881,12 @@ pub struct AgentHello {
     pub os_release: String,
     pub arch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_release: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualization: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_heartbeat: Option<AgentUpdateHeartbeat>,
     #[serde(default)]
     pub capabilities: AgentCapabilitySnapshot,

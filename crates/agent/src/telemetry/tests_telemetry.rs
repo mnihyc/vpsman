@@ -236,6 +236,116 @@ fn incomplete_meminfo_fails_instead_of_becoming_zero() {
 }
 
 #[test]
+fn linux_memory_collection_reports_swap_as_optional_capacity() {
+    let root = std::env::temp_dir().join(format!("vpsman-meminfo-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("meminfo"),
+        "MemTotal: 4096 kB\nMemAvailable: 1024 kB\nSwapTotal: 2048 kB\nSwapFree: 1536 kB\n",
+    )
+    .unwrap();
+
+    let memory = memory_stat(&root).unwrap();
+    assert_eq!(memory.total_bytes, 4096 * 1024);
+    assert_eq!(memory.available_bytes, 1024 * 1024);
+    assert_eq!(memory.swap_total_bytes, Some(2048 * 1024));
+    assert_eq!(memory.swap_available_bytes, Some(1536 * 1024));
+
+    std::fs::write(
+        root.join("meminfo"),
+        "MemTotal: 4096 kB\nMemAvailable: 1024 kB\n",
+    )
+    .unwrap();
+    let without_swap = memory_stat(&root).unwrap();
+    assert_eq!(without_swap.swap_total_bytes, None);
+    assert_eq!(without_swap.swap_available_bytes, None);
+
+    std::fs::write(
+        root.join("meminfo"),
+        "MemTotal: 4096 kB\nMemAvailable: 1024 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+    )
+    .unwrap();
+    let without_swap_capacity = memory_stat(&root).unwrap();
+    assert_eq!(without_swap_capacity.swap_total_bytes, Some(0));
+    assert_eq!(without_swap_capacity.swap_available_bytes, Some(0));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn linux_memory_collection_keeps_core_memory_when_swap_evidence_is_invalid() {
+    let root = std::env::temp_dir().join(format!("vpsman-meminfo-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let overflow_kib = u64::MAX / 1024 + 1;
+    let invalid_swap_cases = vec![
+        "SwapTotal: 2048 kB\n".to_string(),
+        "SwapFree: 1536 kB\n".to_string(),
+        "SwapTotal: 1024 kB\nSwapFree: 2048 kB\n".to_string(),
+        "SwapTotal: invalid kB\nSwapFree: 1536 kB\n".to_string(),
+        "SwapTotal: 2048 bytes\nSwapFree: 1536 kB\n".to_string(),
+        format!("SwapTotal: {overflow_kib} kB\nSwapFree: 1536 kB\n"),
+    ];
+
+    for swap in invalid_swap_cases {
+        std::fs::write(
+            root.join("meminfo"),
+            format!("MemTotal: 4096 kB\nMemAvailable: 1024 kB\n{swap}"),
+        )
+        .unwrap();
+        let memory = memory_stat(&root).unwrap();
+        assert_eq!(memory.total_bytes, 4096 * 1024);
+        assert_eq!(memory.available_bytes, 1024 * 1024);
+        assert_eq!(memory.swap_total_bytes, None);
+        assert_eq!(memory.swap_available_bytes, None);
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn connection_host_facts_use_configured_proc_and_sys_evidence() {
+    let root = std::env::temp_dir().join(format!("vpsman-host-facts-{}", uuid::Uuid::new_v4()));
+    let proc_root = root.join("proc");
+    let sys_root = root.join("sys");
+    std::fs::create_dir_all(proc_root.join("sys/kernel")).unwrap();
+    std::fs::create_dir_all(sys_root.join("class/net")).unwrap();
+    std::fs::create_dir_all(sys_root.join("class/dmi/id")).unwrap();
+    std::fs::write(
+        proc_root.join("cpuinfo"),
+        "processor : 0\nmodel name : Example   Cloud CPU  3.20GHz\n",
+    )
+    .unwrap();
+    std::fs::write(proc_root.join("sys/kernel/osrelease"), "6.12.3-test\n").unwrap();
+    std::fs::write(sys_root.join("class/dmi/id/sys_vendor"), "QEMU\n").unwrap();
+    std::fs::write(sys_root.join("class/dmi/id/product_name"), "KVM\n").unwrap();
+    let mut config = AgentConfig::default();
+    config.telemetry.proc_root = proc_root.to_string_lossy().into_owned();
+    config.telemetry.sys_class_net_dir = sys_root.join("class/net").to_string_lossy().into_owned();
+
+    let facts = collect_connection_host_facts(&config);
+    assert_eq!(
+        facts.cpu_model.as_deref(),
+        Some("Example Cloud CPU 3.20GHz")
+    );
+    assert_eq!(facts.kernel_release.as_deref(), Some("6.12.3-test"));
+    assert_eq!(facts.virtualization.as_deref(), Some("kvm"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn host_fact_parsing_does_not_invent_cpu_or_virtualization_labels() {
+    assert_eq!(parse_cpu_model("processor : 0\nprocessor : 1\n"), None);
+    assert_eq!(
+        parse_cpu_model("Hardware : ARM Neoverse-N1\n"),
+        Some("ARM Neoverse-N1".to_string())
+    );
+    assert_eq!(classify_virtualization("Acme Bare Metal Server"), None);
+    assert_eq!(classify_virtualization("Amazon EC2 OpenStack Nova"), None);
+    assert_eq!(
+        classify_virtualization("Microsoft Corporation Virtual Machine"),
+        Some("hyper-v")
+    );
+}
+
+#[test]
 fn malformed_mount_inventory_fails_instead_of_disappearing() {
     let root = std::env::temp_dir().join(format!("vpsman-mounts-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();

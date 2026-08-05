@@ -902,6 +902,10 @@ export type TelemetryRollupRecord = {
   memory_total_bytes_max: number;
   memory_available_bytes_avg: number;
   memory_available_bytes_min: number;
+  swap_sample_count: number;
+  swap_total_bytes_max: number | null;
+  swap_available_bytes_avg: number | null;
+  swap_available_bytes_min: number | null;
   disk_total_bytes_max: number;
   disk_available_bytes_avg: number;
   disk_available_bytes_min: number;
@@ -946,6 +950,7 @@ export type CurrentPingView = {
 export type MonitoringCardView = {
   client: AgentView;
   billing: BillingPlanView | null;
+  system_information: SystemInformationView | null;
   port_speed: PortSpeedView | null;
   resources: TelemetryRollupRecord | null;
   resource_history: TelemetryRollupRecord[];
@@ -972,6 +977,17 @@ export type BillingPlanView = {
   display: string;
 };
 
+export type SystemInformationView = {
+  os_name: string | null;
+  architecture: string | null;
+  cpu_model: string | null;
+  kernel_release: string | null;
+  virtualization: string | null;
+  reported_at: string | null;
+  uptime_secs: number | null;
+  uptime_observed_at: string | null;
+};
+
 export type MonitoringCardsPageView = {
   items: MonitoringCardView[];
   offset: number;
@@ -991,6 +1007,7 @@ export type MonitoringRangeView = {
 
 export type ClientMonitoringView = {
   client: AgentView;
+  system_information: SystemInformationView | null;
   range: MonitoringRangeView;
   resources: TelemetryRollupRecord[];
   network: TelemetryNetworkRateRecord[];
@@ -1035,6 +1052,9 @@ export type PublicResourceMetricView = {
   load_15: number;
   memory_total_bytes: number;
   memory_available_bytes: number;
+  swap_sample_count: number;
+  swap_total_bytes?: number;
+  swap_available_bytes?: number;
   disk_total_bytes: number;
   disk_available_bytes: number;
   tcp_sockets: number | null;
@@ -1058,18 +1078,35 @@ export type PublicNetworkPointView = {
 
 export type PublicTrafficMetricView = {
   configured: boolean;
-  cycle_start: string;
-  cycle_end: string;
-  rx_bytes: number;
-  tx_bytes: number;
-  total_bytes: number;
-  quota_rx_bytes: number | null;
-  quota_tx_bytes: number | null;
-  quota_total_bytes: number | null;
-  cycle_percent: number | null;
+  cycle_start?: string;
+  cycle_end?: string;
+  rx_bytes?: number;
+  tx_bytes?: number;
+  total_bytes?: number;
+  quota_rx_bytes?: number;
+  quota_tx_bytes?: number;
+  quota_total_bytes?: number;
+  cycle_percent?: number;
   state: string;
-  observed_at: string | null;
-  port_speed: PortSpeedView | null;
+  observed_at?: string;
+  port_speed?: PortSpeedView;
+};
+
+export type PublicBillingPlanView = {
+  disabled: boolean;
+  display: string;
+  cycle?: string;
+};
+
+export type PublicSystemInformationView = {
+  os_name?: string;
+  architecture?: string;
+  cpu_model?: string;
+  kernel_release?: string;
+  virtualization?: string;
+  reported_at?: string;
+  uptime_secs?: number;
+  uptime_observed_at?: string;
 };
 
 export type PublicPingMetricView = {
@@ -1097,6 +1134,8 @@ export type PublicMonitoringCardView = {
   display_name: string;
   status: string;
   tags?: string[];
+  billing?: PublicBillingPlanView;
+  system_information?: PublicSystemInformationView;
   resources?: PublicResourceMetricView;
   resource_history?: PublicResourceMetricView[];
   network?: PublicNetworkMetricView;
@@ -1267,6 +1306,8 @@ export type MonitoringShareListQuery = {
 
 export type MonitoringShareVisibilityView = {
   identity_context: boolean;
+  billing: boolean;
+  system_information: boolean;
   resources: boolean;
   network: boolean;
   traffic: boolean;
@@ -1276,6 +1317,8 @@ export type MonitoringShareVisibilityView = {
 
 export type MonitoringShareVisibilityRequest = {
   identity_context?: boolean;
+  billing?: boolean;
+  system_information?: boolean;
   resources?: boolean;
   network?: boolean;
   traffic?: boolean;

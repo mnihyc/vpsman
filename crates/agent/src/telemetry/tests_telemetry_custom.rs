@@ -81,12 +81,27 @@ fn custom_patch_rejects_empty_and_invalid_overlay_values() {
         memory: Some(MemoryStat {
             total_bytes: 100,
             available_bytes: 101,
+            swap_total_bytes: None,
+            swap_available_bytes: None,
         }),
         ..CustomMetricsPatch::default()
     })
     .unwrap_err()
     .to_string();
     assert!(memory_error.contains("invalid memory"));
+
+    let partial_swap_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+        memory: Some(MemoryStat {
+            total_bytes: 100,
+            available_bytes: 50,
+            swap_total_bytes: Some(20),
+            swap_available_bytes: None,
+        }),
+        ..CustomMetricsPatch::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(partial_swap_error.contains("invalid memory"));
 }
 
 #[test]
