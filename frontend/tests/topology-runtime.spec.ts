@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
+  defaultAgentTunnelMtu,
   runtimeManagerLabel,
 } from "../src/topologyRuntime";
 
@@ -155,4 +156,15 @@ test("tunnel runtime ownership uses one operator-facing vocabulary", () => {
   expect(runtimeManagerLabel("external_managed_adapter")).toBe(
     "External adapter",
   );
+});
+
+test("agent-managed tunnel MTU defaults account for encapsulation", () => {
+  expect(defaultAgentTunnelMtu("gre")).toBe(1476);
+  expect(defaultAgentTunnelMtu("ipip")).toBe(1480);
+  expect(defaultAgentTunnelMtu("sit")).toBe(1480);
+  expect(defaultAgentTunnelMtu("fou")).toBe(1472);
+  expect(defaultAgentTunnelMtu("wireguard")).toBeNull();
+  expect(defaultAgentTunnelMtu("openvpn")).toBeNull();
+  expect(defaultAgentTunnelMtu("tun_tap")).toBeNull();
+  expect(defaultAgentTunnelMtu("custom")).toBeNull();
 });

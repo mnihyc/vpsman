@@ -628,34 +628,38 @@ pub(crate) async fn record_network_routing_terminal_result(
     let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
         return Ok(());
     };
-    let (plan_id, side, adapter, expected_operation, desired_cost) = match &context.operation {
-        JobCommand::NetworkRoutingStatus {
-            plan_id,
-            side,
-            adapter,
-            ..
-        } => (
-            plan_id,
-            *side,
-            adapter,
-            RoutingCostAdapterOperation::Status,
-            None,
-        ),
-        JobCommand::NetworkRoutingApply {
-            plan_id,
-            side,
-            adapter,
-            desired_cost,
-            ..
-        } => (
-            plan_id,
-            *side,
-            adapter,
-            RoutingCostAdapterOperation::Apply,
-            Some(*desired_cost),
-        ),
-        _ => return Ok(()),
-    };
+    let (plan_id, side, adapter, expected_operation, expected_cost, desired_cost) =
+        match &context.operation {
+            JobCommand::NetworkRoutingStatus {
+                plan_id,
+                side,
+                adapter,
+                ..
+            } => (
+                plan_id,
+                *side,
+                adapter,
+                RoutingCostAdapterOperation::Status,
+                None,
+                None,
+            ),
+            JobCommand::NetworkRoutingApply {
+                plan_id,
+                side,
+                adapter,
+                expected_current_cost,
+                desired_cost,
+                ..
+            } => (
+                plan_id,
+                *side,
+                adapter,
+                RoutingCostAdapterOperation::Apply,
+                *expected_current_cost,
+                Some(*desired_cost),
+            ),
+            _ => return Ok(()),
+        };
     let plan_id = uuid::Uuid::parse_str(plan_id)
         .map_err(|_| ApiError::conflict("network_routing_result_plan_id_invalid"))?;
     if outcome_status != TARGET_STATUS_COMPLETED {
@@ -692,15 +696,23 @@ pub(crate) async fn record_network_routing_terminal_result(
         && result.client_id == client_id
         && result.adapter_definition_id == adapter.definition_id
         && result.adapter_definition_hash == adapter.definition_hash
-        && result.after.ready
-        && desired_cost.is_none_or(|desired| result.after.current_cost == Some(desired));
+        && result.current_cost > 0
+        && result.previous_cost.is_none_or(|cost| cost > 0)
+        && match expected_operation {
+            RoutingCostAdapterOperation::Status => result.previous_cost.is_none(),
+            RoutingCostAdapterOperation::Apply => {
+                result.previous_cost.is_some()
+                    && expected_cost.is_none_or(|expected| result.previous_cost == Some(expected))
+            }
+        }
+        && desired_cost.is_none_or(|desired| result.current_cost == desired);
     state
         .repo
         .record_tunnel_plan_ospf_job_result(
             plan_id,
             side,
             job_id,
-            valid.then_some(result.after.current_cost).flatten(),
+            valid.then_some(result.current_cost),
             valid,
         )
         .await?;

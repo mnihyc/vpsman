@@ -430,14 +430,14 @@ ospf_definition="$(jq -nc \
   --arg status_marker "$ospf_status_marker" \
   --arg update_marker "$ospf_update_marker" \
   '{
-    contract_version: 1,
+    contract_version: 2,
     status_command: {
-      argv: ["/bin/echo", $status_marker],
+      argv: ["/bin/sh", "-c", "printf \"100\\n\"", $status_marker, "{plan_id}", "{interface}", "{endpoint_side}"],
       max_timeout_secs: 5,
       max_output_bytes: 4096
     },
     update_command: {
-      argv: ["/bin/echo", $update_marker],
+      argv: ["/bin/sh", "-c", "printf \"cost updated\\n\"", $update_marker, "{plan_id}", "{interface}", "{endpoint_side}", "{desired_cost}"],
       max_timeout_secs: 5,
       max_output_bytes: 4096
     }

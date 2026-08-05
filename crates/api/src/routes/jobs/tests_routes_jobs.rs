@@ -529,6 +529,20 @@ fn unprivileged_submission_allowlist_keeps_server_routing_status_read_only() {
 }
 
 #[test]
+fn routing_jobs_require_the_direct_argv_protocol() {
+    for command in [
+        network_routing_command(false),
+        network_routing_command(true),
+    ] {
+        assert_eq!(vpsman_common::job_command_protocol_version(&command), 2);
+        assert_eq!(
+            vpsman_common::job_command_min_supported_protocol_version(&command),
+            2
+        );
+    }
+}
+
+#[test]
 fn internal_operator_mutations_accept_only_server_issued_commands() {
     let shell = JobCommand::Shell {
         argv: vec!["/bin/true".to_string()],
@@ -752,6 +766,8 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         ospf: None,
     })
     .unwrap();
@@ -804,6 +820,8 @@ fn network_routing_command(apply: bool) -> JobCommand {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         ospf: None,
     })
     .unwrap();

@@ -188,8 +188,13 @@ cargo run -p vpsctl -- config-preset-create \
   --behavior ospf_update_command \
   --name frr-ospf-updater \
   --description "Use the operator-owned FRR helper" \
-  --definition-json '{"contract_version":1,"status_command":{"argv":["/opt/operator/frr-ospf-cost","status"],"max_timeout_secs":10,"max_output_bytes":16384},"update_command":{"argv":["/opt/operator/frr-ospf-cost","apply"],"max_timeout_secs":10,"max_output_bytes":16384}}'
+  --definition-json '{"contract_version":2,"status_command":{"argv":["/opt/operator/frr-ospf-cost","status","--plan-id","{plan_id}","--interface","{interface}","--side","{endpoint_side}"],"max_timeout_secs":10,"max_output_bytes":16384},"update_command":{"argv":["/opt/operator/frr-ospf-cost","apply","--plan-id","{plan_id}","--interface","{interface}","--side","{endpoint_side}","--cost","{desired_cost}"],"max_timeout_secs":10,"max_output_bytes":16384}}'
 ```
+
+The agent invokes each array as exact argv with closed stdin. Status must print
+one decimal cost from 1 through 65535. Update succeeds only with exit code zero;
+its bounded stdout becomes the job message, and the agent runs status again to
+verify the requested cost.
 
 Assign that preset with the same preview-and-confirm flow shown above. One
 reviewed assignment may target many VPSs; no separate bulk screen or live

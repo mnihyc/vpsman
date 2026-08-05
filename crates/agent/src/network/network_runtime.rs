@@ -422,6 +422,26 @@ fn build_iproute2_reconcile_steps(
             required: true,
         });
     }
+    let local_mtu = endpoint
+        .local_mtu
+        .context("agent-managed runtime tunnel endpoint MTU is required")?
+        .to_string();
+    steps.push(RuntimeCommandSpec {
+        label: "runtime_link_mtu",
+        argv: extend_argv(
+            &config.network.runtime_ip_argv,
+            [
+                "link",
+                "set",
+                "dev",
+                &plan.interface_name,
+                "mtu",
+                &local_mtu,
+            ],
+        ),
+        mutates: true,
+        required: true,
+    });
     steps.push(RuntimeCommandSpec {
         label: "runtime_addr_replace",
         argv: extend_argv(
@@ -665,12 +685,19 @@ async fn validate_existing_iproute2_tunnel(
             mismatches.join("; ")
         );
     }
+    let desired_mtu = endpoint
+        .local_mtu
+        .context("agent-managed runtime tunnel endpoint MTU is required")?;
+    let mtu_matches = link.mtu == Some(u64::from(desired_mtu));
     Ok((
         vec![link_report, addr_report],
         serde_json::json!({
-            "status": "matched",
+            "status": if mtu_matches { "matched" } else { "mutable_drift" },
             "interface": plan.interface_name,
             "mode": link.kind,
+            "mtu": link.mtu,
+            "desired_mtu": desired_mtu,
+            "mtu_matches": mtu_matches,
             "local_underlay": link.local,
             "remote_underlay": link.remote,
             "ttl": link.ttl,
@@ -684,6 +711,7 @@ async fn validate_existing_iproute2_tunnel(
 #[derive(Debug)]
 struct ExistingIproute2Tunnel {
     kind: Option<String>,
+    mtu: Option<u64>,
     local: Option<String>,
     remote: Option<String>,
     ttl: Option<String>,
@@ -724,6 +752,7 @@ fn parse_iproute2_link_json(stdout: &str, interface_name: &str) -> Result<Existi
     Ok(ExistingIproute2Tunnel {
         kind: string_field(linkinfo, &["info_kind", "kind"])
             .or_else(|| string_field(data, &["info_kind", "kind", "mode"])),
+        mtu: link.get("mtu").and_then(serde_json::Value::as_u64),
         local: string_field(data, &["local", "local_address", "local-address"]),
         remote: string_field(data, &["remote", "remote_address", "remote-address"]),
         ttl: string_field(data, &["ttl", "hoplimit", "hop_limit", "hop-limit"]),
@@ -1277,74 +1306,110 @@ pub(crate) fn render_runtime_adapter_command(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
 ) -> Result<Vec<String>> {
+    render_runtime_adapter_command_with_placeholders(command, plan, endpoint, &[])
+}
+
+pub(crate) fn render_runtime_adapter_command_with_placeholders(
+    command: &RuntimeTunnelCommand,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+    additional_placeholders: &[(&str, String)],
+) -> Result<Vec<String>> {
     ensure_command_base(&command.argv, "runtime adapter")?;
+    let mut placeholders = vec![
+        ("{interface}", plan.interface_name.clone()),
+        ("{plan}", plan.name.clone()),
+        ("{kind}", runtime_kind_name(plan.kind).to_string()),
+        ("{local_client_id}", endpoint.local_client_id.clone()),
+        ("{peer_client_id}", endpoint.peer_client_id.clone()),
+        (
+            "{local_underlay}",
+            local_underlay(plan, endpoint)
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        (
+            "{remote_underlay}",
+            remote_underlay(plan, endpoint).to_string(),
+        ),
+        ("{local_address}", local_address(plan, endpoint).to_string()),
+        (
+            "{remote_address}",
+            remote_address(plan, endpoint).to_string(),
+        ),
+        ("{prefix_len}", endpoint.tunnel_prefix_len.to_string()),
+        ("{local_ipv4}", family_address(plan, endpoint, true, true)),
+        ("{remote_ipv4}", family_address(plan, endpoint, true, false)),
+        ("{prefix_len_ipv4}", family_prefix_len(plan, true)),
+        ("{local_ipv6}", family_address(plan, endpoint, false, true)),
+        (
+            "{remote_ipv6}",
+            family_address(plan, endpoint, false, false),
+        ),
+        ("{prefix_len_ipv6}", family_prefix_len(plan, false)),
+        ("{fou_port}", plan.runtime_control.fou.port.to_string()),
+        (
+            "{fou_peer_port}",
+            plan.runtime_control.fou.peer_port.to_string(),
+        ),
+        (
+            "{fou_ipproto}",
+            plan.runtime_control.fou.ipproto.to_string(),
+        ),
+        (
+            "{egress_kbps}",
+            plan.runtime_control
+                .traffic_limit
+                .egress_kbps
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "{ingress_kbps}",
+            plan.runtime_control
+                .traffic_limit
+                .ingress_kbps
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "{burst_kb}",
+            plan.runtime_control
+                .traffic_limit
+                .burst_kb
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+    ];
+    placeholders.extend(additional_placeholders.iter().cloned());
     Ok(command
         .argv
         .iter()
-        .map(|part| {
-            part.replace("{interface}", &plan.interface_name)
-                .replace("{plan}", &plan.name)
-                .replace("{kind}", runtime_kind_name(plan.kind))
-                .replace("{local_client_id}", &endpoint.local_client_id)
-                .replace("{peer_client_id}", &endpoint.peer_client_id)
-                .replace(
-                    "{local_underlay}",
-                    local_underlay(plan, endpoint).unwrap_or_default(),
-                )
-                .replace("{remote_underlay}", remote_underlay(plan, endpoint))
-                .replace("{local_address}", local_address(plan, endpoint))
-                .replace("{remote_address}", remote_address(plan, endpoint))
-                .replace("{prefix_len}", &endpoint.tunnel_prefix_len.to_string())
-                .replace("{local_ipv4}", &family_address(plan, endpoint, true, true))
-                .replace(
-                    "{remote_ipv4}",
-                    &family_address(plan, endpoint, true, false),
-                )
-                .replace("{prefix_len_ipv4}", &family_prefix_len(plan, true))
-                .replace("{local_ipv6}", &family_address(plan, endpoint, false, true))
-                .replace(
-                    "{remote_ipv6}",
-                    &family_address(plan, endpoint, false, false),
-                )
-                .replace("{prefix_len_ipv6}", &family_prefix_len(plan, false))
-                .replace("{fou_port}", &plan.runtime_control.fou.port.to_string())
-                .replace(
-                    "{fou_peer_port}",
-                    &plan.runtime_control.fou.peer_port.to_string(),
-                )
-                .replace(
-                    "{fou_ipproto}",
-                    &plan.runtime_control.fou.ipproto.to_string(),
-                )
-                .replace(
-                    "{egress_kbps}",
-                    &plan
-                        .runtime_control
-                        .traffic_limit
-                        .egress_kbps
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-                .replace(
-                    "{ingress_kbps}",
-                    &plan
-                        .runtime_control
-                        .traffic_limit
-                        .ingress_kbps
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-                .replace(
-                    "{burst_kb}",
-                    &plan
-                        .runtime_control
-                        .traffic_limit
-                        .burst_kb
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                )
-        })
+        .map(|part| render_adapter_argument(part, &placeholders))
         .collect())
+}
+
+fn render_adapter_argument(argument: &str, placeholders: &[(&str, String)]) -> String {
+    let mut rendered = String::with_capacity(argument.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = argument[cursor..].find('{') {
+        let start = cursor + relative_start;
+        rendered.push_str(&argument[cursor..start]);
+        let Some(relative_end) = argument[start..].find('}') else {
+            rendered.push_str(&argument[start..]);
+            return rendered;
+        };
+        let end = start + relative_end + 1;
+        let token = &argument[start..end];
+        if let Some((_, value)) = placeholders.iter().find(|(key, _)| *key == token) {
+            rendered.push_str(value);
+        } else {
+            rendered.push_str(token);
+        }
+        cursor = end;
+    }
+    rendered.push_str(&argument[cursor..]);
+    rendered
 }
 
 async fn runtime_link_exists(root: &Path, interface_name: &str) -> bool {

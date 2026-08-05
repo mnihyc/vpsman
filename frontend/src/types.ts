@@ -1870,6 +1870,8 @@ export type TunnelPlanInput = {
   ipv6_tunnel?: TunnelAddressPair | null;
   latency_primary_family?: TunnelAddressFamily;
   bandwidth_mbps: number;
+  left_mtu?: number | null;
+  right_mtu?: number | null;
   ospf?: TunnelOspfConfig | null;
 };
 

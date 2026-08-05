@@ -75,7 +75,7 @@ fn ospf_updater_presets_are_explicitly_unconfigured_or_fully_paired() {
         .is_none());
 
     let configured = serde_json::json!({
-        "contract_version": 1,
+        "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
         "status_command": preset_command("/usr/bin/ospf-status"),
         "update_command": preset_command("/usr/bin/ospf-update")
     });
@@ -93,10 +93,14 @@ fn ospf_updater_presets_are_explicitly_unconfigured_or_fully_paired() {
         ["/usr/bin/ospf-update"]
     );
 
+    let mut legacy = configured.clone();
+    legacy["contract_version"] = serde_json::json!(1);
+    assert!(validate_configuration_preset_definition("ospf_update_command", &legacy).is_err());
+
     assert!(validate_configuration_preset_definition(
         "ospf_update_command",
         &serde_json::json!({
-            "contract_version": 1,
+            "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
             "status_command": preset_command("/usr/bin/ospf-status"),
             "update_command": null
         })
@@ -489,7 +493,7 @@ async fn adapter_names_are_case_insensitive_and_kind_is_immutable() {
                 name: created.name,
                 description: None,
                 definition: serde_json::json!({
-                    "contract_version": 1,
+                    "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
                     "status_command": preset_command("/usr/bin/status"),
                     "update_command": preset_command("/usr/bin/update")
                 }),

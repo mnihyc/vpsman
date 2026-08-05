@@ -585,6 +585,8 @@ async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) ->
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Wireguard),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Wireguard),
         ospf: None,
     };
     crate::tests_network::seed_test_plan_adapter_definitions(repo, &input).await;

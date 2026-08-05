@@ -25,6 +25,8 @@ fn parses_vty_tunnel_plan_for_local_render() {
         "10.255.0.2,10.255.0.3",
         "--bandwidth-mbps",
         "1000",
+        "--left-mtu",
+        "1400",
     ])
     .unwrap();
 
@@ -50,6 +52,8 @@ fn parses_vty_tunnel_plan_for_local_render() {
         vec!["10.255.0.2", "10.255.0.3"]
     );
     assert_eq!(request.input.bandwidth_mbps, 1000);
+    assert_eq!(request.input.left_mtu, Some(1400));
+    assert_eq!(request.input.right_mtu, Some(1476));
     assert!(request.input.ospf.is_none());
 }
 
@@ -93,6 +97,8 @@ fn parses_vty_tunnel_plan_save_aliases() {
     assert!(request.confirmed);
     assert_eq!(request.input.kind, TunnelKind::Fou);
     assert_eq!(request.input.bandwidth_mbps, 100);
+    assert_eq!(request.input.left_mtu, Some(1472));
+    assert_eq!(request.input.right_mtu, Some(1472));
     assert_eq!(request.input.runtime_control.fou.port, 6655);
     assert_eq!(request.input.runtime_control.fou.peer_port, 7755);
     assert_eq!(request.input.runtime_control.fou.ipproto, 47);
@@ -119,6 +125,8 @@ fn parses_vty_tunnel_plan_explicit_dual_stack_endpoints() {
     .unwrap();
 
     assert_eq!(request.input.address_pool_cidr, "");
+    assert_eq!(request.input.left_mtu, None);
+    assert_eq!(request.input.right_mtu, None);
     assert_eq!(
         request.input.ipv4_tunnel.as_ref().unwrap().left,
         "10.255.20.0"

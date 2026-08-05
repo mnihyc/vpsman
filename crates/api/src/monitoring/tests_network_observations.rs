@@ -281,6 +281,8 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: plan.left_mtu,
+        right_mtu: plan.right_mtu,
         ospf: Some(test_ospf(1.0)),
     };
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
@@ -729,6 +731,8 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: plan.left_mtu,
+        right_mtu: plan.right_mtu,
         ospf: Some(test_ospf(1.0)),
     };
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
@@ -925,6 +929,8 @@ async fn topology_graph_exposes_explicit_runtime_status_coverage() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: plan.left_mtu,
+        right_mtu: plan.right_mtu,
         ospf: Some(test_ospf(1.0)),
     };
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
@@ -1034,6 +1040,8 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: plan.left_mtu,
+        right_mtu: plan.right_mtu,
         ospf: Some(test_ospf(0.5)),
     };
     crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
@@ -1135,6 +1143,8 @@ fn test_plan_input(right_client_id: &str) -> TunnelPlanInput {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         ospf: Some(test_ospf(1.0)),
     }
 }

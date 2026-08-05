@@ -4,10 +4,10 @@ use anyhow::{Context, Result};
 use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
-    payload_hash, plan_tunnel, render_tunnel_endpoint_config,
+    default_tunnel_mtu, payload_hash, plan_tunnel, render_tunnel_endpoint_config,
     routing_cost_update_privilege_payload, BandwidthMbps, JobCommand, OspfControlMode,
-    OspfCostPolicy, TunnelAddressFamily, TunnelAddressPair, TunnelKind, TunnelOspfConfig,
-    TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
+    OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair, TunnelKind,
+    TunnelOspfConfig, TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
     NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
     NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
@@ -79,6 +79,18 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) latency_primary_family: TunnelAddressFamilyArg,
     #[arg(long, value_name = "MBPS")]
     pub(crate) bandwidth_mbps: BandwidthMbps,
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "Agent iproute2 left endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
+    )]
+    pub(crate) left_mtu: Option<u16>,
+    #[arg(
+        long,
+        value_name = "BYTES",
+        help = "Agent iproute2 right endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
+    )]
+    pub(crate) right_mtu: Option<u16>,
     #[arg(
         long,
         default_value_t = false,
@@ -906,6 +918,11 @@ pub(crate) fn tunnel_plan(
     token: Option<&str>,
     request: TunnelPlanCommand,
 ) -> Result<()> {
+    let kind: TunnelKind = request.kind.into();
+    let runtime_manager: RuntimeTunnelManager = request.runtime_manager.into();
+    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentIproute2Managed)
+        .then(|| default_tunnel_mtu(kind))
+        .flatten();
     let ospf = if request.ospf {
         Some(TunnelOspfConfig {
             mode: request.ospf_mode.into(),
@@ -933,9 +950,9 @@ pub(crate) fn tunnel_plan(
     let input = TunnelPlanInput {
         name: request.name,
         interface_name: request.interface_name,
-        kind: request.kind.into(),
+        kind,
         runtime_control: build_runtime_control(RuntimeControlArgs {
-            manager: request.runtime_manager.into(),
+            manager: runtime_manager,
             left_adapter_definition_id: request.left_runtime_adapter_definition_id.as_deref(),
             right_adapter_definition_id: request.right_runtime_adapter_definition_id.as_deref(),
             traffic_ingress_kbps: request.traffic_ingress_kbps,
@@ -975,6 +992,8 @@ pub(crate) fn tunnel_plan(
         )?,
         latency_primary_family: request.latency_primary_family.into(),
         bandwidth_mbps: request.bandwidth_mbps,
+        left_mtu: request.left_mtu.or(default_mtu),
+        right_mtu: request.right_mtu.or(default_mtu),
         ospf,
     };
     ensure_explicit_tunnel_endpoints(&input.ipv4_tunnel, &input.ipv6_tunnel, "tunnel-plan")?;

@@ -324,6 +324,8 @@ async fn seeded_plan(mode: OspfControlMode, healthy_windows: u8) -> (Repository,
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         ospf: Some(TunnelOspfConfig {
             mode,
             planned_latency_ms: 18.0,
@@ -518,7 +520,7 @@ fn routing_definition(id: &str, name: &str) -> NetworkAdapterDefinitionView {
         name: name.to_string(),
         description: None,
         definition: serde_json::json!({
-            "contract_version": 1,
+            "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
             "status_command": {
                 "argv": ["/opt/routing/status"],
                 "max_timeout_secs": 10,

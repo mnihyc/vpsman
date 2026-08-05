@@ -1,19 +1,17 @@
-use std::{path::Path, time::Duration};
+use std::{path::Path, process::Stdio, str, time::Duration};
 
 use anyhow::{Context, Result};
 use tokio::{process::Command, time::Instant};
 use vpsman_common::{
     render_tunnel_endpoint_config, CommandOutput, OutputStream, RoutingCostAdapterCommands,
-    RoutingCostAdapterJobResult, RoutingCostAdapterOperation, RoutingCostAdapterRequest,
-    RoutingCostAdapterResponse, RuntimeTunnelCommand, TunnelEndpointSide, TunnelPlan,
-    ROUTING_COST_ADAPTER_CONTRACT_VERSION,
+    RoutingCostAdapterJobResult, RoutingCostAdapterOperation, RuntimeTunnelCommand,
+    TunnelEndpointConfig, TunnelEndpointSide, TunnelPlan, ROUTING_COST_ADAPTER_CONTRACT_VERSION,
 };
 
 use crate::{
-    child_process::{
-        run_child_with_input_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult,
-    },
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
     command_worker::{CommandCancelToken, CommandCanceled},
+    network_runtime::render_runtime_adapter_command_with_placeholders,
 };
 
 pub(crate) struct NetworkRoutingAdapterInput<'a> {
@@ -49,69 +47,63 @@ pub(crate) async fn execute_network_routing_adapter_command(
         RoutingCostAdapterOperation::Status
     };
     let deadline = Instant::now() + Duration::from_secs(input.max_timeout_secs.max(1));
-    let status_request = adapter_request(&input, RoutingCostAdapterOperation::Status, None);
-    let before = run_adapter_command(
+    let before = run_status_command(
         &input.adapter.status,
-        &status_request,
+        input.plan_id,
+        input.plan,
+        &endpoint,
+        input.side,
+        input.expected_current_cost,
+        input.desired_cost,
         remaining_secs(deadline)?,
         input.cancel_token.clone(),
     )
     .await?;
-    validate_adapter_response(&before, &input.plan.interface_name, "status")?;
-    if !before.ready {
-        anyhow::bail!(
-            "routing adapter is not ready{}",
-            response_message_suffix(&before)
-        );
-    }
 
-    let (before_result, update_result, after) = if let Some(desired_cost) = input.desired_cost {
-        if before.current_cost != input.expected_current_cost {
+    let (previous_cost, current_cost, message) = if let Some(desired_cost) = input.desired_cost {
+        if input
+            .expected_current_cost
+            .is_some_and(|expected| before != expected)
+        {
             anyhow::bail!(
-                "stale routing cost confirmation: expected {:?}, observed {:?}",
+                "stale routing cost confirmation: expected {:?}, observed {}",
                 input.expected_current_cost,
-                before.current_cost
+                before
             );
         }
-        let update_request = adapter_request(
-            &input,
-            RoutingCostAdapterOperation::Apply,
-            Some(desired_cost),
-        );
-        let update = run_adapter_command(
+        let update_output = run_adapter_command(
             &input.adapter.update,
-            &update_request,
+            input.plan_id,
+            input.plan,
+            &endpoint,
+            input.side,
+            input.expected_current_cost,
+            Some(desired_cost),
             remaining_secs(deadline)?,
             input.cancel_token.clone(),
+            "update",
         )
         .await?;
-        validate_adapter_response(&update, &input.plan.interface_name, "update")?;
-        if !update.ready || update.applied_cost != Some(desired_cost) {
-            anyhow::bail!(
-                "routing adapter did not acknowledge desired cost {desired_cost}; applied {:?}{}",
-                update.applied_cost,
-                response_message_suffix(&update)
-            );
-        }
-
-        let after = run_adapter_command(
+        let after = run_status_command(
             &input.adapter.status,
-            &status_request,
+            input.plan_id,
+            input.plan,
+            &endpoint,
+            input.side,
+            input.expected_current_cost,
+            Some(desired_cost),
             remaining_secs(deadline)?,
             input.cancel_token.clone(),
         )
         .await?;
-        validate_adapter_response(&after, &input.plan.interface_name, "verification status")?;
-        if !after.ready || after.current_cost != Some(desired_cost) {
+        if after != desired_cost {
             anyhow::bail!(
-                "routing cost verification failed: desired {desired_cost}, observed {:?}{}",
-                after.current_cost,
-                response_message_suffix(&after)
+                "routing cost verification failed: desired {desired_cost}, observed {after}"
             );
         }
-        (Some(before), Some(update), after)
+        (Some(before), after, output_message(&update_output))
     } else {
-        (None, None, before)
+        (None, before, None)
     };
 
     let result = RoutingCostAdapterJobResult {
@@ -122,9 +114,9 @@ pub(crate) async fn execute_network_routing_adapter_command(
         client_id: input.client_id.to_string(),
         adapter_definition_id: input.adapter.definition_id.clone(),
         adapter_definition_hash: input.adapter.definition_hash.clone(),
-        before: before_result,
-        update: update_result,
-        after,
+        previous_cost,
+        current_cost,
+        message,
     };
     Ok(vec![CommandOutput {
         job_id: input.job_id,
@@ -135,65 +127,34 @@ pub(crate) async fn execute_network_routing_adapter_command(
     }])
 }
 
-fn adapter_request(
-    input: &NetworkRoutingAdapterInput<'_>,
-    operation: RoutingCostAdapterOperation,
-    desired_cost: Option<u16>,
-) -> RoutingCostAdapterRequest {
-    let (client_id, peer_client_id, local_underlay, remote_underlay, local_address, remote_address) =
-        match input.side {
-            TunnelEndpointSide::Left => (
-                &input.plan.left_client_id,
-                &input.plan.right_client_id,
-                &input.plan.left_local_underlay,
-                &input.plan.left_remote_underlay,
-                &input.plan.left_tunnel_address,
-                &input.plan.right_tunnel_address,
-            ),
-            TunnelEndpointSide::Right => (
-                &input.plan.right_client_id,
-                &input.plan.left_client_id,
-                &input.plan.right_local_underlay,
-                &input.plan.right_remote_underlay,
-                &input.plan.right_tunnel_address,
-                &input.plan.left_tunnel_address,
-            ),
-        };
-    RoutingCostAdapterRequest {
-        contract_version: ROUTING_COST_ADAPTER_CONTRACT_VERSION,
-        operation,
-        plan_id: input.plan_id.to_string(),
-        plan_name: input.plan.name.clone(),
-        interface_name: input.plan.interface_name.clone(),
-        endpoint_side: input.side,
-        client_id: client_id.clone(),
-        peer_client_id: peer_client_id.clone(),
-        local_underlay: local_underlay.clone(),
-        remote_underlay: remote_underlay.clone(),
-        local_address: local_address.clone(),
-        remote_address: remote_address.clone(),
-        prefix_len: input.plan.tunnel_prefix_len,
-        expected_current_cost: input.expected_current_cost,
-        desired_cost,
-    }
-}
-
 async fn run_adapter_command(
     command: &RuntimeTunnelCommand,
-    request: &RoutingCostAdapterRequest,
+    plan_id: &str,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+    side: TunnelEndpointSide,
+    expected_current_cost: Option<u16>,
+    desired_cost: Option<u16>,
     remaining_timeout_secs: u64,
     cancel_token: CommandCancelToken,
-) -> Result<RoutingCostAdapterResponse> {
+    phase: &str,
+) -> Result<Vec<u8>> {
     validate_adapter_command(command)?;
-    let mut child = Command::new(&command.argv[0]);
-    child.args(&command.argv[1..]);
-    let mut input = serde_json::to_vec(request)?;
-    input.push(b'\n');
+    let argv = render_routing_adapter_command(
+        command,
+        plan_id,
+        plan,
+        endpoint,
+        side,
+        expected_current_cost,
+        desired_cost,
+    )?;
+    let mut child = Command::new(&argv[0]);
+    child.args(&argv[1..]).stdin(Stdio::null());
     let max_output_bytes =
         usize::try_from(command.max_output_bytes.clamp(1024, 64 * 1024)).unwrap_or(64 * 1024);
-    let result = run_child_with_input_bounded_output_cancelable(
+    let result = run_child_with_bounded_output_cancelable(
         child,
-        input,
         command
             .max_timeout_secs
             .clamp(1, 120)
@@ -203,26 +164,107 @@ async fn run_adapter_command(
         cancel_token,
     )
     .await
-    .context("failed to execute routing cost adapter")?;
+    .with_context(|| format!("failed to execute routing cost adapter {phase}"))?;
     let output = match result {
         ChildRunResult::Completed(output) => output,
-        ChildRunResult::TimedOut(_) => anyhow::bail!("routing cost adapter timed out"),
+        ChildRunResult::TimedOut(_) => anyhow::bail!("routing cost adapter {phase} timed out"),
         ChildRunResult::Canceled { reason, .. } => {
             return Err(CommandCanceled::new("network_routing_adapter", reason).into())
         }
     };
     if output.stdout_truncated || output.stderr_truncated {
-        anyhow::bail!("routing cost adapter exceeded the output limit");
+        anyhow::bail!("routing cost adapter {phase} exceeded the output limit");
     }
     if output.exit_code != Some(0) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let message = match (stdout.trim(), stderr.trim()) {
+            ("", "") => "no message".to_string(),
+            (stdout, "") => stdout.to_string(),
+            ("", stderr) => stderr.to_string(),
+            (stdout, stderr) => format!("{stdout}; {stderr}"),
+        };
         anyhow::bail!(
-            "routing cost adapter exited with {:?}: {}",
+            "routing cost adapter {phase} exited with {:?}: {}",
             output.exit_code,
-            stderr.trim()
+            message
         );
     }
-    serde_json::from_slice(&output.stdout).context("routing cost adapter returned invalid JSON")
+    Ok(output.stdout)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_status_command(
+    command: &RuntimeTunnelCommand,
+    plan_id: &str,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+    side: TunnelEndpointSide,
+    expected_current_cost: Option<u16>,
+    desired_cost: Option<u16>,
+    remaining_timeout_secs: u64,
+    cancel_token: CommandCancelToken,
+) -> Result<u16> {
+    let stdout = run_adapter_command(
+        command,
+        plan_id,
+        plan,
+        endpoint,
+        side,
+        expected_current_cost,
+        desired_cost,
+        remaining_timeout_secs,
+        cancel_token,
+        "status",
+    )
+    .await?;
+    parse_status_cost(&stdout)
+}
+
+fn render_routing_adapter_command(
+    command: &RuntimeTunnelCommand,
+    plan_id: &str,
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+    side: TunnelEndpointSide,
+    expected_current_cost: Option<u16>,
+    desired_cost: Option<u16>,
+) -> Result<Vec<String>> {
+    let expected_current_cost = expected_current_cost
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let desired_cost = desired_cost
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    let endpoint_side = match side {
+        TunnelEndpointSide::Left => "left",
+        TunnelEndpointSide::Right => "right",
+    };
+    let placeholders = [
+        ("{plan_id}", plan_id.to_string()),
+        ("{endpoint_side}", endpoint_side.to_string()),
+        ("{expected_current_cost}", expected_current_cost),
+        ("{desired_cost}", desired_cost),
+    ];
+    render_runtime_adapter_command_with_placeholders(command, plan, endpoint, &placeholders)
+}
+
+fn parse_status_cost(stdout: &[u8]) -> Result<u16> {
+    let value = str::from_utf8(stdout)
+        .context("routing cost adapter status output is not UTF-8")?
+        .trim();
+    let cost = value.parse::<u16>().map_err(|_| {
+        anyhow::anyhow!("routing cost adapter status must output one cost from 1 to 65535")
+    })?;
+    if cost == 0 {
+        anyhow::bail!("routing cost adapter status must output one cost from 1 to 65535");
+    }
+    Ok(cost)
+}
+
+fn output_message(stdout: &[u8]) -> Option<String> {
+    let message = String::from_utf8_lossy(stdout).trim().to_string();
+    (!message.is_empty()).then_some(message)
 }
 
 fn validate_adapter_snapshot(adapter: &RoutingCostAdapterCommands) -> Result<()> {
@@ -267,49 +309,12 @@ fn validate_adapter_command(command: &RuntimeTunnelCommand) -> Result<()> {
     Ok(())
 }
 
-fn validate_adapter_response(
-    response: &RoutingCostAdapterResponse,
-    interface_name: &str,
-    phase: &str,
-) -> Result<()> {
-    if response.contract_version != ROUTING_COST_ADAPTER_CONTRACT_VERSION {
-        anyhow::bail!(
-            "routing adapter {phase} returned contract version {}, expected {}",
-            response.contract_version,
-            ROUTING_COST_ADAPTER_CONTRACT_VERSION
-        );
-    }
-    if response.interface_name != interface_name {
-        anyhow::bail!(
-            "routing adapter {phase} returned interface {}, expected {interface_name}",
-            response.interface_name
-        );
-    }
-    if response
-        .message
-        .as_ref()
-        .is_some_and(|value| value.len() > 1024)
-    {
-        anyhow::bail!("routing adapter {phase} message exceeds 1024 bytes");
-    }
-    Ok(())
-}
-
 fn remaining_secs(deadline: Instant) -> Result<u64> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         anyhow::bail!("routing adapter workflow timed out");
     }
     Ok(remaining.as_secs().max(1))
-}
-
-fn response_message_suffix(response: &RoutingCostAdapterResponse) -> String {
-    response
-        .message
-        .as_deref()
-        .filter(|message| !message.trim().is_empty())
-        .map(|message| format!(": {message}"))
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

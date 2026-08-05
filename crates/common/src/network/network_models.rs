@@ -49,7 +49,26 @@ impl TunnelKind {
 }
 
 pub type BandwidthMbps = u32;
-pub const ROUTING_COST_ADAPTER_CONTRACT_VERSION: u16 = 1;
+pub const MIN_TUNNEL_MTU: u16 = 68;
+pub const MIN_IPV6_TUNNEL_MTU: u16 = 1280;
+pub const MAX_TUNNEL_MTU: u16 = u16::MAX;
+pub const ROUTING_COST_ADAPTER_CONTRACT_VERSION: u16 = 2;
+
+/// Returns the editable endpoint MTU baseline for a 1500-byte underlay.
+///
+/// Agent-managed kernel tunnel kinds subtract their deterministic outer
+/// headers. External and abstract kinds return `None` because MTU ownership
+/// belongs to their runtime rather than the tunnel plan.
+pub const fn default_tunnel_mtu(kind: TunnelKind) -> Option<u16> {
+    match kind {
+        TunnelKind::Gre => Some(1476),
+        TunnelKind::Ipip | TunnelKind::Sit => Some(1480),
+        TunnelKind::Fou => Some(1472),
+        TunnelKind::Openvpn | TunnelKind::Wireguard | TunnelKind::TunTap | TunnelKind::Custom => {
+            None
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct OspfCostPolicy {
@@ -185,37 +204,6 @@ pub enum RoutingCostAdapterOperation {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RoutingCostAdapterRequest {
-    pub contract_version: u16,
-    pub operation: RoutingCostAdapterOperation,
-    pub plan_id: String,
-    pub plan_name: String,
-    pub interface_name: String,
-    pub endpoint_side: TunnelEndpointSide,
-    pub client_id: String,
-    pub peer_client_id: String,
-    pub local_underlay: Option<String>,
-    pub remote_underlay: String,
-    pub local_address: String,
-    pub remote_address: String,
-    pub prefix_len: u8,
-    pub expected_current_cost: Option<u16>,
-    pub desired_cost: Option<u16>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct RoutingCostAdapterResponse {
-    pub contract_version: u16,
-    pub interface_name: String,
-    pub ready: bool,
-    pub current_cost: Option<u16>,
-    pub applied_cost: Option<u16>,
-    pub adapter_version: Option<String>,
-    pub message: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingCostAdapterJobResult {
     pub contract_version: u16,
@@ -226,11 +214,10 @@ pub struct RoutingCostAdapterJobResult {
     #[serde(rename = "adapter_template_id", alias = "adapter_definition_id")]
     pub adapter_definition_id: String,
     pub adapter_definition_hash: String,
+    pub previous_cost: Option<u16>,
+    pub current_cost: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before: Option<RoutingCostAdapterResponse>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<RoutingCostAdapterResponse>,
-    pub after: RoutingCostAdapterResponse,
+    pub message: Option<String>,
 }
 
 impl Default for RuntimeTunnelCommand {
@@ -406,6 +393,10 @@ pub struct TunnelPlanInput {
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_mtu: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_mtu: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ospf: Option<TunnelOspfConfig>,
 }
 
@@ -440,6 +431,10 @@ pub struct TunnelPlan {
     pub latency_primary_family: TunnelAddressFamily,
     pub bandwidth_mbps: BandwidthMbps,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_mtu: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_mtu: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ospf: Option<TunnelOspfConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommended_ospf_cost: Option<u16>,
@@ -451,6 +446,8 @@ pub struct TunnelEndpointConfig {
     pub side: TunnelEndpointSide,
     pub local_client_id: String,
     pub peer_client_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_mtu: Option<u16>,
     #[serde(default, skip_serializing_if = "RuntimeTunnelControl::is_default")]
     pub runtime_control: RuntimeTunnelControl,
     pub remote_underlay: String,

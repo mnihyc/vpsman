@@ -4244,18 +4244,32 @@ test("authors OSPF updater presets only with paired bounded commands", async ({
     .getByLabel("Preset behavior")
     .selectOption("ospf_update_command");
   await drawer.getByLabel("Preset name").fill("FRR edge updater");
-  await drawer
-    .getByLabel("Read current OSPF cost arguments")
-    .fill("/usr/bin/vtysh\n-c\nshow ip ospf interface");
+  const statusArguments = drawer.getByLabel(
+    "Read current OSPF cost arguments",
+  );
+  const updateArguments = drawer.getByLabel("Update OSPF cost arguments");
+  await expect(drawer.getByLabel("OSPF updater contract version")).toHaveValue(
+    "2",
+  );
+  await expect(statusArguments).toHaveValue(
+    "/opt/operator/routing-cost\nstatus\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}",
+  );
+  await expect(updateArguments).toHaveValue(
+    "/opt/operator/routing-cost\napply\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}\n--cost\n{desired_cost}",
+  );
+  await expect(drawer).toContainText(
+    "Update reports failure by exit code",
+  );
+  await updateArguments.fill("");
 
   await activate(drawer.getByRole("button", { name: "Create preset" }));
   await expect(drawer.locator(".actionFeedbackDanger")).toContainText(
     "Update OSPF cost arguments require an executable",
   );
 
-  await drawer
-    .getByLabel("Update OSPF cost arguments")
-    .fill("/usr/bin/vtysh\n-c\nconfigure terminal");
+  await updateArguments.fill(
+    "/opt/operator/routing-cost\napply\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}\n--cost\n{desired_cost}",
+  );
   await activate(drawer.getByRole("button", { name: "Create preset" }));
   await expect(drawer).toBeHidden();
 
@@ -4277,14 +4291,34 @@ test("authors OSPF updater presets only with paired bounded commands", async ({
       behavior: "ospf_update_command",
       name: "FRR edge updater",
       definition: {
-        contract_version: 1,
+        contract_version: 2,
         status_command: {
-          argv: ["/usr/bin/vtysh", "-c", "show ip ospf interface"],
+          argv: [
+            "/opt/operator/routing-cost",
+            "status",
+            "--plan-id",
+            "{plan_id}",
+            "--interface",
+            "{interface}",
+            "--side",
+            "{endpoint_side}",
+          ],
           max_output_bytes: 16384,
           max_timeout_secs: 5,
         },
         update_command: {
-          argv: ["/usr/bin/vtysh", "-c", "configure terminal"],
+          argv: [
+            "/opt/operator/routing-cost",
+            "apply",
+            "--plan-id",
+            "{plan_id}",
+            "--interface",
+            "{interface}",
+            "--side",
+            "{endpoint_side}",
+            "--cost",
+            "{desired_cost}",
+          ],
           max_output_bytes: 16384,
           max_timeout_secs: 5,
         },
@@ -4393,9 +4427,20 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   });
   await expect(
     drawer.getByLabel("Start adapter command", { exact: true }),
-  ).toHaveValue("");
-  await expect(drawer.getByLabel("Status adapter command")).toHaveValue("");
+  ).toHaveValue(
+    "/opt/operator/tunnel-adapter\nstart\n--interface\n{interface}\n--kind\n{kind}\n--remote-underlay\n{remote_underlay}\n--local-address\n{local_address}/{prefix_len}\n--remote-address\n{remote_address}",
+  );
+  await expect(drawer.getByLabel("Status adapter command")).toHaveValue(
+    "/opt/operator/tunnel-adapter\nstatus\n--interface\n{interface}",
+  );
+  await expect(drawer.getByLabel("Cleanup adapter command")).toHaveValue(
+    "/opt/operator/tunnel-adapter\ncleanup\n--interface\n{interface}",
+  );
+  await expect(drawer.getByLabel("Restart adapter command")).toHaveValue("");
   await drawer.getByLabel("Adapter definition name").fill("Custom lifecycle");
+  await drawer
+    .getByLabel("Start adapter command", { exact: true })
+    .fill("");
   await drawer
     .getByLabel("Status adapter command")
     .fill("/opt/operator/tunnel-adapter\nstatus");
@@ -4447,6 +4492,100 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   expect(
     (request?.body.definition as Record<string, unknown>).stop_command,
   ).toBeUndefined();
+});
+
+test("creates routing cost adapters with the direct argv v2 contract", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the dense tunnel-plan adapter registry is covered on desktop",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+
+  const registry = page.getByLabel("Network adapter definitions");
+  await activate(
+    registry.getByRole("button", { name: "Routing cost adapter" }),
+  );
+  const drawer = page.getByRole("complementary", {
+    name: "New routing cost adapter",
+  });
+  const readCostCommand = drawer.getByLabel("Read cost adapter command");
+  const defaultReadCostCommand =
+    "/opt/operator/routing-cost\nstatus\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}";
+  await drawer
+    .getByLabel("Adapter definition name")
+    .fill("Direct routing cost");
+  await readCostCommand.fill(
+    "/opt/operator/routing-cost\nstatus\n\n--plan-id\n{plan_id}",
+  );
+  await activate(
+    drawer.getByRole("button", { name: "Create adapter definition" }),
+  );
+  await expect(drawer.locator(".actionFeedbackDanger")).toContainText(
+    "Read cost command cannot contain an empty argument line",
+  );
+  await readCostCommand.fill(defaultReadCostCommand);
+  await activate(
+    drawer.getByRole("button", { name: "Create adapter definition" }),
+  );
+  await expect(drawer).toBeHidden();
+
+  const request = await page.evaluate(() => {
+    return (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          networkAdapterMutations: Array<{
+            action: string;
+            body: Record<string, unknown>;
+          }>;
+        };
+      }
+    ).__vpsmanTestRequests.networkAdapterMutations.at(-1);
+  });
+  expect(request).toEqual({
+    action: "create",
+    body: {
+      adapter_kind: "routing_cost",
+      name: "Direct routing cost",
+      description: null,
+      definition: {
+        contract_version: 2,
+        status_command: {
+          argv: [
+            "/opt/operator/routing-cost",
+            "status",
+            "--plan-id",
+            "{plan_id}",
+            "--interface",
+            "{interface}",
+            "--side",
+            "{endpoint_side}",
+          ],
+          max_timeout_secs: 30,
+          max_output_bytes: 16384,
+        },
+        update_command: {
+          argv: [
+            "/opt/operator/routing-cost",
+            "apply",
+            "--plan-id",
+            "{plan_id}",
+            "--interface",
+            "{interface}",
+            "--side",
+            "{endpoint_side}",
+            "--cost",
+            "{desired_cost}",
+          ],
+          max_timeout_secs: 30,
+          max_output_bytes: 16384,
+        },
+      },
+    },
+  });
 });
 
 test("prefills registered agent update shortcuts into dispatch", async ({
@@ -5947,14 +6086,30 @@ test(
     await activate(page.getByRole("button", { name: "Create plan" }));
     const composer = page.locator(".tunnelPlanComposer");
     await expect(composer).toBeVisible();
+    const leftMtu = composer.getByLabel("Left tunnel MTU");
+    const rightMtu = composer.getByLabel("Right tunnel MTU");
+    await expect(leftMtu).toHaveValue("1476");
+    await expect(rightMtu).toHaveValue("1476");
     await activate(composer.getByRole("button", { name: "Review plan" }));
     await expect(composer.locator(".localActionFeedback")).toContainText(
       "Plan name is required",
     );
     const kind = composer.getByLabel("Tunnel kind");
     await expect(kind.locator('option[value="openvpn"]')).toHaveCount(0);
+    await kind.selectOption("ipip");
+    await expect(leftMtu).toHaveValue("1480");
+    await expect(rightMtu).toHaveValue("1480");
+    await leftMtu.fill("1400");
+    await kind.selectOption("fou");
+    await expect(leftMtu).toHaveValue("1400");
+    await expect(rightMtu).toHaveValue("1472");
+    await kind.selectOption("gre");
+    await expect(leftMtu).toHaveValue("1400");
+    await expect(rightMtu).toHaveValue("1476");
     await activate(composer.getByRole("button", { name: "External observed" }));
     await expect(kind.locator('option[value="openvpn"]')).toHaveCount(1);
+    await expect(leftMtu).toHaveCount(0);
+    await expect(rightMtu).toHaveCount(0);
     await expect(
       composer.getByText("Agent-managed routes and cleanup"),
     ).toHaveCount(0);
@@ -6091,6 +6246,8 @@ test(
       runtime_control: { manager: "external_observed" },
       runtime_topology: {},
     });
+    expect(request).not.toHaveProperty("left_mtu");
+    expect(request).not.toHaveProperty("right_mtu");
     expect(JSON.stringify(request)).not.toMatch(/bird|argv|\/usr\/local/i);
   },
 );

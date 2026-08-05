@@ -39,7 +39,11 @@ import {
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
   DEFAULT_TUNNEL_BANDWIDTH_MBPS,
+  defaultAgentTunnelMtu,
+  MAX_TUNNEL_MTU,
   MAX_TUNNEL_BANDWIDTH_MBPS,
+  MIN_IPV6_TUNNEL_MTU,
+  MIN_TUNNEL_MTU,
   MIN_TUNNEL_BANDWIDTH_MBPS,
   OSPF_COST_MODEL_DETAIL,
   readableTelemetryToken,
@@ -872,6 +876,29 @@ function TunnelPlansWorkspace({
         size: 220,
       },
       {
+        id: "bandwidth",
+        header: "Bandwidth",
+        cell: (plan) => (
+          <span className="historyPrimary">
+            <strong>{plan.plan.bandwidth_mbps} Mbps</strong>
+            {isAgentManagedTunnelPlan(plan) && (
+              <small
+                title={`Left MTU ${plan.plan.left_mtu} bytes · Right MTU ${plan.plan.right_mtu} bytes`}
+              >
+                L{plan.plan.left_mtu} · R{plan.plan.right_mtu}
+              </small>
+            )}
+          </span>
+        ),
+        searchValue: (plan) =>
+          isAgentManagedTunnelPlan(plan)
+            ? `${plan.plan.bandwidth_mbps} Mbps MTU ${plan.plan.left_mtu} ${plan.plan.right_mtu}`
+            : `${plan.plan.bandwidth_mbps} Mbps`,
+        sortValue: (plan) => plan.plan.bandwidth_mbps,
+        minSize: 130,
+        size: 155,
+      },
+      {
         id: "owner",
         header: "Runtime owner",
         cell: (plan) => (
@@ -1574,6 +1601,12 @@ function TunnelPlanDetails({
           label="Bandwidth"
           value={`${plan.plan.bandwidth_mbps} Mbps`}
         />
+        {isAgentManagedTunnelPlan(plan) ? (
+          <PlanFact
+            label="Endpoint MTU"
+            value={`Left ${plan.plan.left_mtu} · Right ${plan.plan.right_mtu}`}
+          />
+        ) : null}
         <PlanFact
           label="Runtime ownership"
           title={
@@ -1726,7 +1759,9 @@ function TunnelPlanComposer({
   );
   const [autoFillOwnership, setAutoFillOwnership] = useState(() => ({
     bandwidth: !initialPlan,
+    leftMtu: !initialPlan || initialPlan.input.left_mtu == null,
     leftRemote: !initialPlan,
+    rightMtu: !initialPlan || initialPlan.input.right_mtu == null,
     rightRemote: !initialPlan,
   }));
   const portSpeedClientIds = useMemo(
@@ -1873,6 +1908,24 @@ function TunnelPlanComposer({
         : { ...current, bandwidthMbps: suggestedValue },
     );
   }, [autoFillOwnership.bandwidth, bandwidthSuggestion.value, initialPlan]);
+  useEffect(() => {
+    const kindMtu = defaultAgentTunnelMtu(form.kind);
+    if (kindMtu === null) return;
+    const suggestedMtu = String(kindMtu);
+    setSnapshot(null);
+    setForm((current) => {
+      const leftMtu = autoFillOwnership.leftMtu
+        ? suggestedMtu
+        : current.leftMtu;
+      const rightMtu = autoFillOwnership.rightMtu
+        ? suggestedMtu
+        : current.rightMtu;
+      if (leftMtu === current.leftMtu && rightMtu === current.rightMtu) {
+        return current;
+      }
+      return { ...current, leftMtu, rightMtu };
+    });
+  }, [autoFillOwnership.leftMtu, autoFillOwnership.rightMtu, form.kind]);
   const runtimeDefinitions = networkAdapterDefinitions.filter(
     (definition) => definition.adapter_kind === "runtime_tunnel",
   );
@@ -2350,6 +2403,58 @@ function TunnelPlanComposer({
               </Field>
             </div>
           )}
+          {form.runtimeManager === "agent_iproute2_managed" ? (
+            <div className="topologyFormGrid twoColumn compactNumericGrid">
+              <Field
+                label="Left MTU"
+                tooltip="Desired inner-interface MTU on the left VPS. New plans start from a 1500-byte underlay reduced by the selected tunnel kind; the value remains editable."
+              >
+                <UnitInput
+                  ariaLabel="Left tunnel MTU"
+                  max={MAX_TUNNEL_MTU}
+                  min={
+                    form.includeIpv6 || form.kind === "sit"
+                      ? MIN_IPV6_TUNNEL_MTU
+                      : MIN_TUNNEL_MTU
+                  }
+                  onChange={(value) => {
+                    setAutoFillOwnership((current) => ({
+                      ...current,
+                      leftMtu: false,
+                    }));
+                    update("leftMtu", value);
+                  }}
+                  required
+                  unit="bytes"
+                  value={form.leftMtu}
+                />
+              </Field>
+              <Field
+                label="Right MTU"
+                tooltip="Desired inner-interface MTU on the right VPS. It is independently editable for asymmetric endpoint requirements."
+              >
+                <UnitInput
+                  ariaLabel="Right tunnel MTU"
+                  max={MAX_TUNNEL_MTU}
+                  min={
+                    form.includeIpv6 || form.kind === "sit"
+                      ? MIN_IPV6_TUNNEL_MTU
+                      : MIN_TUNNEL_MTU
+                  }
+                  onChange={(value) => {
+                    setAutoFillOwnership((current) => ({
+                      ...current,
+                      rightMtu: false,
+                    }));
+                    update("rightMtu", value);
+                  }}
+                  required
+                  unit="bytes"
+                  value={form.rightMtu}
+                />
+              </Field>
+            </div>
+          ) : null}
           {!initialPlan && bandwidthSuggestion.detail ? (
             <span className="formHint">{bandwidthSuggestion.detail}</span>
           ) : null}
@@ -3414,6 +3519,7 @@ function tunnelConnectionAssessmentError(error: unknown): string {
 }
 
 function initialTunnelPlanForm(): TunnelPlanForm {
+  const defaultMtu = String(defaultAgentTunnelMtu("gre"));
   return {
     bandwidthMbps: String(DEFAULT_TUNNEL_BANDWIDTH_MBPS),
     bandwidthWeight: String(DEFAULT_OSPF_POLICY.bandwidth_weight),
@@ -3442,6 +3548,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     leftRoutingDefinitionId: "",
     leftRuntimeDefinitionId: "",
     leftLocalUnderlay: "",
+    leftMtu: defaultMtu,
     leftRemoteUnderlay: "",
     lossWeight: String(DEFAULT_OSPF_POLICY.loss_weight),
     maxCost: String(DEFAULT_OSPF_POLICY.max_cost),
@@ -3460,6 +3567,7 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     rightRoutingDefinitionId: "",
     rightRuntimeDefinitionId: "",
     rightLocalUnderlay: "",
+    rightMtu: defaultMtu,
     rightRemoteUnderlay: "",
     routes: "",
     runtimeManager: "agent_iproute2_managed",
@@ -3508,6 +3616,7 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     leftRoutingDefinitionId: ospf?.left_adapter_template_id ?? "",
     leftRuntimeDefinitionId: runtime.left_adapter_template_id ?? "",
     leftLocalUnderlay: input.left_local_underlay ?? "",
+    leftMtu: String(input.left_mtu ?? defaultAgentTunnelMtu(input.kind) ?? ""),
     leftRemoteUnderlay: input.left_remote_underlay,
     lossWeight: String(policy.loss_weight),
     maxCost: String(policy.max_cost),
@@ -3526,6 +3635,9 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     rightRoutingDefinitionId: ospf?.right_adapter_template_id ?? "",
     rightRuntimeDefinitionId: runtime.right_adapter_template_id ?? "",
     rightLocalUnderlay: input.right_local_underlay ?? "",
+    rightMtu: String(
+      input.right_mtu ?? defaultAgentTunnelMtu(input.kind) ?? "",
+    ),
     rightRemoteUnderlay: input.right_remote_underlay,
     routes: (topology.routes ?? []).map(formatRuntimeRoute).join("\n"),
     runtimeManager: runtime.manager,
@@ -3595,6 +3707,25 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     bandwidth > MAX_TUNNEL_BANDWIDTH_MBPS
   )
     return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
+  if (form.runtimeManager === "agent_iproute2_managed") {
+    const minimumMtu = form.includeIpv6 || form.kind === "sit"
+      ? MIN_IPV6_TUNNEL_MTU
+      : MIN_TUNNEL_MTU;
+    const mtuError =
+      validateIntegerRange(
+        form.leftMtu,
+        "Left MTU",
+        minimumMtu,
+        MAX_TUNNEL_MTU,
+      ) ??
+      validateIntegerRange(
+        form.rightMtu,
+        "Right MTU",
+        minimumMtu,
+        MAX_TUNNEL_MTU,
+      );
+    if (mtuError) return mtuError;
+  }
   if (form.runtimeManager !== "external_observed") {
     const trafficError =
       validateOptionalMbpsLimit(form.ingressMbps, "Ingress limit") ??
@@ -4039,6 +4170,19 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
           version: form.runtimeTopologyVersion,
         })
       : {};
+  const mtu =
+    form.runtimeManager === "agent_iproute2_managed"
+      ? {
+          left_mtu: integerOr(
+            form.leftMtu,
+            defaultAgentTunnelMtu(form.kind) ?? 1500,
+          ),
+          right_mtu: integerOr(
+            form.rightMtu,
+            defaultAgentTunnelMtu(form.kind) ?? 1500,
+          ),
+        }
+      : {};
   return {
     address_pool_cidr: form.ipv4Pool.trim(),
     bandwidth_mbps: clampTunnelBandwidthMbps(form.bandwidthMbps),
@@ -4062,6 +4206,7 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
     left_client_id: form.leftClientId,
     left_local_underlay: form.leftLocalUnderlay.trim() || null,
     left_remote_underlay: form.leftRemoteUnderlay.trim(),
+    ...mtu,
     name: form.name.trim(),
     ospf: form.ospfEnabled
       ? {
@@ -4299,6 +4444,14 @@ function createConfirmationItems(
         .join("; "),
     },
     { label: "Planning bandwidth", value: `${request.bandwidth_mbps} Mbps` },
+    ...(runtime?.manager === "agent_iproute2_managed"
+      ? [
+          {
+            label: "Endpoint MTU",
+            value: `Left ${request.left_mtu} · Right ${request.right_mtu}`,
+          },
+        ]
+      : []),
     {
       label: "OSPF",
       value: request.ospf
@@ -4378,6 +4531,15 @@ function tunnelPlanSaveError(error: unknown): string {
     if (error.code === "tunnel_plan_address_conflict") {
       return "Another saved plan already uses one of these tunnel endpoint addresses.";
     }
+    if (error.code === "invalid_tunnel_mtu") {
+      return "Each endpoint MTU must be a whole number from 68 to 65535 bytes, and at least 1280 for SIT or when IPv6 is enabled.";
+    }
+    if (error.code === "tunnel_mtu_required") {
+      return "Agent iproute2 requires both endpoint MTUs.";
+    }
+    if (error.code === "tunnel_mtu_externally_owned") {
+      return "The selected external runtime owns MTU; endpoint MTUs must remain unset.";
+    }
   }
   return error instanceof Error ? error.message : "Tunnel plan save failed";
 }
@@ -4399,6 +4561,13 @@ function formatTunnelAddresses(plan: TunnelPlanRecord): string {
         `${pair.left}/${pair.prefix_len} / ${pair.right}/${pair.prefix_len}`,
     );
   return values.join("; ") || "No addresses";
+}
+
+function isAgentManagedTunnelPlan(plan: TunnelPlanRecord): boolean {
+  return (
+    (plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") ===
+    "agent_iproute2_managed"
+  );
 }
 
 function formatEndpointUnderlay(
@@ -4609,6 +4778,7 @@ type TunnelPlanForm = {
   leftRoutingDefinitionId: string;
   leftRuntimeDefinitionId: string;
   leftLocalUnderlay: string;
+  leftMtu: string;
   leftRemoteUnderlay: string;
   lossWeight: string;
   maxCost: string;
@@ -4627,6 +4797,7 @@ type TunnelPlanForm = {
   rightRoutingDefinitionId: string;
   rightRuntimeDefinitionId: string;
   rightLocalUnderlay: string;
+  rightMtu: string;
   rightRemoteUnderlay: string;
   routes: string;
   runtimeManager: RuntimeTunnelManager;

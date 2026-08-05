@@ -81,6 +81,8 @@ fn scheduled_speed_test_operation() -> serde_json::Value {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
         ospf: None,
     })
     .unwrap();

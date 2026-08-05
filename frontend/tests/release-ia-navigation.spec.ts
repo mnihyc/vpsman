@@ -4984,9 +4984,32 @@ test("observability network metrics is chart-first and mutation-free", async ({
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Manage plan overrides" }));
   await expect(page.getByText("vpsman / Network / Tunnel plans")).toBeVisible();
+  const routingAdapterDrawer = page.getByRole("complementary", {
+    name: "New routing cost adapter",
+  });
+  await expect(routingAdapterDrawer).toBeVisible();
   await expect(
-    page.getByRole("complementary", { name: "New routing cost adapter" }),
-  ).toBeVisible();
+    routingAdapterDrawer.getByLabel("Read cost adapter command"),
+  ).toHaveValue(
+    "/opt/operator/routing-cost\nstatus\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}",
+  );
+  await expect(
+    routingAdapterDrawer.getByLabel("Update cost adapter command"),
+  ).toHaveValue(
+    "/opt/operator/routing-cost\napply\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}\n--cost\n{desired_cost}",
+  );
+  await expect(routingAdapterDrawer).toContainText(
+    "Read cost must print one number from 1 to 65535",
+  );
+  await expect(routingAdapterDrawer).toContainText(
+    "Update reports failure by exit code",
+  );
+  await expect(routingAdapterDrawer).toContainText(
+    "Routing cost adapters require both Read cost and Update cost",
+  );
+  await expect(routingAdapterDrawer).not.toContainText(
+    "Tunnel runtimes require",
+  );
 });
 
 test("observability dashboards manages read-only dashboard presets", async ({
@@ -7181,6 +7204,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     for (const header of [
       "Plan",
       "Endpoints",
+      "Bandwidth",
       "Runtime owner",
       "Runtime",
       "Connectivity",
@@ -7195,6 +7219,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     }
   }
   await expect(tunnelPlanGrid).toContainText("Agent iproute2");
+  await expect(tunnelPlanGrid).toContainText("L1476 · R1476");
   await expect(tunnelPlanGrid).toContainText("External observed");
   await expect(tunnelPlanGrid).toContainText("Reviewed");
   await expect(tunnelPlanGrid).toContainText("Tunnel only");
@@ -7235,6 +7260,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
   await activate(savedPlan);
   const planDetail = tunnelPlanGrid.locator(".gridExpandedRow");
   await expect(planDetail).toContainText("Declared interfaces");
+  await expect(planDetail).toContainText("Left 1476 · Right 1476");
   await expect(planDetail).toContainText("Reviewed · cost 22");
   await expect(planDetail).toContainText(
     "Partially verified · Peer probe failed; not proof of disconnect",
@@ -7278,6 +7304,8 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     editor.getByLabel("Tunnel interface", { exact: true }),
   ).toHaveValue("tunab");
   await expect(editor.getByLabel("Tunnel bandwidth")).toHaveValue("100");
+  await expect(editor.getByLabel("Left tunnel MTU")).toHaveValue("1476");
+  await expect(editor.getByLabel("Right tunnel MTU")).toHaveValue("1476");
   await expect(
     editor.getByRole("button", { name: "Review update" }),
   ).toBeDisabled();
@@ -7304,7 +7332,9 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
   expect(updateRequest).toMatchObject({
     bandwidth_mbps: 250,
     expected_revision: 3,
+    left_mtu: 1476,
     name: "sfo-fra-gre",
+    right_mtu: 1476,
   });
 
   await activate(page.getByRole("button", { name: "Create plan" }));

@@ -133,6 +133,13 @@ Every update must keep these boundaries explicit:
   that endpoint VPS's effective preset. An explicit missing or invalid override
   is an error; never fall back around it. If neither source is configured, keep
   the endpoint visibly unconfigured and reject dispatch.
+- Keep both OSPF updater sources on routing-cost contract v2: invoke status and
+  update as exact argv with closed stdin. Status prints one decimal cost from 1
+  through 65535. Update reports success or failure by exit code and may write a
+  bounded operator-facing message to stdout; the agent must read status again
+  and verify the requested cost. Do not reintroduce a JSON-stdin adapter model
+  or change the existing command timeout/output budgets as part of this
+  boundary.
 
 ### Monitoring changes
 

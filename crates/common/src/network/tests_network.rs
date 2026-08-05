@@ -41,8 +41,22 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
+        left_mtu: default_tunnel_mtu(kind),
+        right_mtu: default_tunnel_mtu(kind),
         ospf: None,
     }
+}
+
+#[test]
+fn tunnel_mtu_defaults_are_kind_aware_1500_underlay_baselines() {
+    assert_eq!(default_tunnel_mtu(TunnelKind::Gre), Some(1476));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Ipip), Some(1480));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Sit), Some(1480));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Fou), Some(1472));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Wireguard), None);
+    assert_eq!(default_tunnel_mtu(TunnelKind::Openvpn), None);
+    assert_eq!(default_tunnel_mtu(TunnelKind::TunTap), None);
+    assert_eq!(default_tunnel_mtu(TunnelKind::Custom), None);
 }
 
 fn ospf_config() -> TunnelOspfConfig {
@@ -372,17 +386,18 @@ fn topology_intent_accepts_only_declared_interfaces_and_routes() {
 
 #[test]
 fn endpoint_rendering_is_side_specific_without_generating_daemon_files() {
-    let plan = plan_tunnel(&plan_input(
-        TunnelKind::Gre,
-        RuntimeTunnelManager::AgentIproute2Managed,
-    ))
-    .unwrap();
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    input.left_mtu = Some(1400);
+    input.right_mtu = Some(1450);
+    let plan = plan_tunnel(&input).unwrap();
     let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
     assert_eq!(left.local_client_id, "edge-a");
     assert_eq!(left.local_tunnel_address, "10.255.0.0");
+    assert_eq!(left.local_mtu, Some(1400));
     assert_eq!(right.local_client_id, "edge-b");
     assert_eq!(right.local_tunnel_address, "10.255.0.1");
+    assert_eq!(right.local_mtu, Some(1450));
 }
 
 #[test]
@@ -419,7 +434,49 @@ fn plan_rejects_out_of_range_bandwidth_and_invalid_ospf_binding() {
 }
 
 #[test]
-fn published_network_v1_wire_names_remain_stable() {
+fn plan_rejects_invalid_endpoint_mtu_and_enforces_the_ipv6_minimum() {
+    let mut too_small = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    too_small.left_mtu = Some(MIN_TUNNEL_MTU - 1);
+    assert_eq!(
+        plan_tunnel(&too_small),
+        Err(NetworkPlanError::InvalidTunnelMtu)
+    );
+
+    let mut ipv6 = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    ipv6.ipv6_tunnel = Some(TunnelAddressPair {
+        left: "fd00::".to_string(),
+        right: "fd00::1".to_string(),
+        prefix_len: 127,
+    });
+    ipv6.right_mtu = Some(MIN_IPV6_TUNNEL_MTU - 1);
+    assert_eq!(plan_tunnel(&ipv6), Err(NetworkPlanError::InvalidTunnelMtu));
+    ipv6.right_mtu = Some(MIN_IPV6_TUNNEL_MTU);
+    assert!(plan_tunnel(&ipv6).is_ok());
+
+    let mut sit = plan_input(TunnelKind::Sit, RuntimeTunnelManager::AgentIproute2Managed);
+    sit.left_mtu = Some(MIN_IPV6_TUNNEL_MTU - 1);
+    assert_eq!(plan_tunnel(&sit), Err(NetworkPlanError::InvalidTunnelMtu));
+
+    let mut missing = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    missing.right_mtu = None;
+    assert_eq!(
+        plan_tunnel(&missing),
+        Err(NetworkPlanError::TunnelMtuRequired)
+    );
+
+    let mut externally_managed = plan_input(
+        TunnelKind::Wireguard,
+        RuntimeTunnelManager::ExternalManagedAdapter,
+    );
+    externally_managed.left_mtu = Some(1420);
+    assert_eq!(
+        plan_tunnel(&externally_managed),
+        Err(NetworkPlanError::TunnelMtuExternallyOwned)
+    );
+}
+
+#[test]
+fn published_network_wire_names_remain_stable() {
     let ospf = ospf_config();
     let encoded_ospf = serde_json::to_value(&ospf).unwrap();
     assert_eq!(
@@ -460,17 +517,9 @@ fn published_network_v1_wire_names_remain_stable() {
         client_id: "edge-a".to_string(),
         adapter_definition_id: LEFT_ROUTING_ADAPTER.to_string(),
         adapter_definition_hash: "a".repeat(64),
-        before: None,
-        update: None,
-        after: RoutingCostAdapterResponse {
-            contract_version: ROUTING_COST_ADAPTER_CONTRACT_VERSION,
-            interface_name: "tunab".to_string(),
-            ready: true,
-            current_cost: Some(20),
-            applied_cost: None,
-            adapter_version: None,
-            message: None,
-        },
+        previous_cost: None,
+        current_cost: 20,
+        message: None,
     };
     let encoded_result = serde_json::to_value(result).unwrap();
     assert_eq!(encoded_result["adapter_template_id"], LEFT_ROUTING_ADAPTER);

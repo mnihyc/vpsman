@@ -1721,13 +1721,20 @@ function PresetDefinitionEditor({
     return (
       <div className="compactForm">
         <strong>OSPF updater command</strong>
+        <span className="formHint">
+          Commands receive direct argv with no stdin. vpsman replaces
+          {" {plan_id}, {interface}, {endpoint_side}, and {desired_cost}. "}
+          Read current cost must print one number from 1 to 65535. Update
+          reports failure by exit code; its output is retained as the message,
+          then vpsman reads the cost again to verify it.
+        </span>
         <label>
           <span>Contract version</span>
           <input
             aria-label="OSPF updater contract version"
             readOnly
             type="number"
-            value={1}
+            value={2}
           />
         </label>
         <BoundedCommandEditor
@@ -2066,9 +2073,29 @@ function defaultDefinition(
       return { source: "linux_ping_preset" };
     case "ospf_update_command":
       return {
-        contract_version: 1,
-        status_command: defaultCommand(),
-        update_command: defaultCommand(),
+        contract_version: 2,
+        status_command: defaultCommand(
+          "/opt/operator/routing-cost",
+          "status",
+          "--plan-id",
+          "{plan_id}",
+          "--interface",
+          "{interface}",
+          "--side",
+          "{endpoint_side}",
+        ),
+        update_command: defaultCommand(
+          "/opt/operator/routing-cost",
+          "apply",
+          "--plan-id",
+          "{plan_id}",
+          "--interface",
+          "{interface}",
+          "--side",
+          "{endpoint_side}",
+          "--cost",
+          "{desired_cost}",
+        ),
       };
     case "process_inventory":
       return { source: "linux_procfs", proc_root: "/proc" };
@@ -2140,9 +2167,9 @@ function defaultDefinitionForSource(
   return defaultDefinition(behavior);
 }
 
-function defaultCommand(): Record<string, JsonValue> {
+function defaultCommand(...argv: string[]): Record<string, JsonValue> {
   return {
-    argv: [],
+    argv,
     max_timeout_secs: 5,
     max_output_bytes: 16384,
   };
@@ -2693,8 +2720,8 @@ function validatePresetDefinition(
   definition: Record<string, JsonValue>,
 ): string | null {
   if (behavior === "ospf_update_command") {
-    if (definition.contract_version !== 1) {
-      return "OSPF updater contract version must be 1";
+    if (definition.contract_version !== 2) {
+      return "OSPF updater contract version must be 2";
     }
     return (
       validateBoundedCommand(

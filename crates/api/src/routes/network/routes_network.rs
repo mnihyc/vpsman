@@ -958,7 +958,7 @@ pub(crate) async fn dispatch_routing_jobs(
     right_adapter: RoutingCostAdapterCommands,
     apply: Option<(Option<u16>, Option<u16>, u16)>,
 ) -> (Vec<CreateJobResponse>, Vec<TunnelPlanOspfDispatchView>) {
-    // Network command protocol v1 requires both OSPF adapter identifiers in the
+    // The routing command protocol requires both OSPF adapter identifiers in the
     // plan. Freeze the effective per-endpoint source into this job-only snapshot
     // so published agents can execute preset-backed jobs without re-resolving it.
     let mut resolved_plan = plan.plan.clone();
@@ -1127,6 +1127,9 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         | NetworkPlanError::InvalidBandwidthMbps
         | NetworkPlanError::InvalidOspfConfig
         | NetworkPlanError::TunnelAddressRequired => "invalid_tunnel_plan_input",
+        NetworkPlanError::InvalidTunnelMtu => "invalid_tunnel_mtu",
+        NetworkPlanError::TunnelMtuRequired => "tunnel_mtu_required",
+        NetworkPlanError::TunnelMtuExternallyOwned => "tunnel_mtu_externally_owned",
     }
 }
 

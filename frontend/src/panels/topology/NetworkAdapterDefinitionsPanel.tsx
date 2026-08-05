@@ -477,9 +477,17 @@ function AdapterCommandFields({
     <div className="compactForm">
       <strong>Commands</strong>
       <span className="formHint">
-        Enter one argument per line. The first line must be an absolute
-        executable path. Tunnel runtimes require Status, one of Start or
-        Restart, and one of Stop or Cleanup.
+        Enter one argument per line; each line is passed as one exact argv
+        value, and quote characters are literal. The first line must be an
+        absolute executable path.
+        {kind === "runtime_tunnel"
+          ? " Tunnel runtimes require Status, one of Start or Restart, and one of Stop or Cleanup."
+          : " Routing cost adapters require both Read cost and Update cost."}
+      </span>
+      <span className="formHint">
+        {kind === "runtime_tunnel"
+          ? "New definitions contain editable examples. Replace the executable and argument layout for your adapter; values such as {interface}, {remote_underlay}, and {local_address} are replaced from each endpoint's tunnel plan."
+          : "New definitions contain editable examples. vpsman replaces {plan_id}, {interface}, {endpoint_side}, and {desired_cost} in direct argv and sends no stdin. Read cost must print one number from 1 to 65535. Update reports failure by exit code; its output is retained as the message, then vpsman reads the cost again to verify it."}
       </span>
       {fields.map(({ field, hint, label, required }) => {
         const command = asObject(definition[field]);
@@ -573,22 +581,67 @@ function AdapterCommandFields({
 function defaultAdapterDefinition(
   kind: NetworkAdapterKind,
 ): Record<string, JsonValue> {
-  const command = () => ({
-    argv: [],
+  const command = (...argv: string[]) => ({
+    argv,
     max_timeout_secs: 30,
     max_output_bytes: 16384,
   });
   if (kind === "routing_cost") {
     return {
-      contract_version: 1,
-      status_command: command(),
-      update_command: command(),
+      contract_version: 2,
+      status_command: command(
+        "/opt/operator/routing-cost",
+        "status",
+        "--plan-id",
+        "{plan_id}",
+        "--interface",
+        "{interface}",
+        "--side",
+        "{endpoint_side}",
+      ),
+      update_command: command(
+        "/opt/operator/routing-cost",
+        "apply",
+        "--plan-id",
+        "{plan_id}",
+        "--interface",
+        "{interface}",
+        "--side",
+        "{endpoint_side}",
+        "--cost",
+        "{desired_cost}",
+      ),
     };
   }
   return {
     manager: "external_managed_adapter",
     contract_version: 1,
-    status_command: command(),
+    startup_command: command(
+      "/opt/operator/tunnel-adapter",
+      "start",
+      "--interface",
+      "{interface}",
+      "--kind",
+      "{kind}",
+      "--remote-underlay",
+      "{remote_underlay}",
+      "--local-address",
+      "{local_address}/{prefix_len}",
+      "--remote-address",
+      "{remote_address}",
+    ),
+    cleanup_command: command(
+      "/opt/operator/tunnel-adapter",
+      "cleanup",
+      "--interface",
+      "{interface}",
+    ),
+    status_command: command(
+      "/opt/operator/tunnel-adapter",
+      "status",
+      "--interface",
+      "{interface}",
+    ),
   };
 }
 
@@ -632,10 +685,7 @@ function strings(value: JsonValue | undefined): string[] {
 }
 
 function lines(value: string): string[] {
-  return value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return value === "" ? [] : value.split("\n");
 }
 
 function number(value: JsonValue | undefined, fallback: number): number {
@@ -697,6 +747,9 @@ function validateAdapterCommand(
   const command = asObject(value);
   const argv = strings(command.argv);
   if (argv.length === 0) return `${label} command is required`;
+  if (argv.some((argument) => argument.length === 0)) {
+    return `${label} command cannot contain an empty argument line`;
+  }
   if (!argv[0].startsWith("/")) {
     return `${label} command must start with an absolute executable path`;
   }

@@ -35,6 +35,8 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1476),
+        right_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1400),
         ospf: None,
     })
     .unwrap()
@@ -43,17 +45,30 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
 #[test]
 fn reconnect_repair_uses_only_declared_managed_runtime_evidence() {
     let managed = test_plan(RuntimeTunnelManager::AgentIproute2Managed);
-    let interface = serde_json::json!({ "exists": true, "operstate": "up" });
+    let interface = serde_json::json!({ "exists": true, "operstate": "up", "mtu": 1476 });
     let desired = vec![serde_json::json!({ "exists": true, "operstate": "up" })];
     let stale = Vec::new();
     let adapter = serde_json::json!({ "configured": false });
-    assert!(
-        runtime_reconcile_reasons(&managed, &interface, &desired, &stale, &adapter,).is_empty()
-    );
+    assert!(runtime_reconcile_reasons(
+        &managed,
+        Some(1476),
+        &interface,
+        &desired,
+        &stale,
+        &adapter,
+    )
+    .is_empty());
 
     let missing_interface = serde_json::json!({ "exists": false });
     assert_eq!(
-        runtime_reconcile_reasons(&managed, &missing_interface, &desired, &stale, &adapter,),
+        runtime_reconcile_reasons(
+            &managed,
+            Some(1476),
+            &missing_interface,
+            &desired,
+            &stale,
+            &adapter,
+        ),
         vec!["runtime_interface_missing"]
     );
 
@@ -62,12 +77,18 @@ fn reconnect_repair_uses_only_declared_managed_runtime_evidence() {
     assert_eq!(
         runtime_reconcile_reasons(
             &adapter_managed,
+            None,
             &interface,
             &desired,
             &stale,
             &adapter_failed,
         ),
         vec!["adapter_status_failed"]
+    );
+
+    assert_eq!(
+        runtime_reconcile_reasons(&managed, Some(1400), &interface, &desired, &stale, &adapter,),
+        vec!["runtime_interface_mtu_mismatch"]
     );
 }
 

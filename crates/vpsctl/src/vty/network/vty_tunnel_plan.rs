@@ -2,9 +2,9 @@ use std::net::IpAddr;
 
 use anyhow::{Context, Result};
 use vpsman_common::{
-    default_ospf_healthy_windows, default_ospf_min_cost_delta, plan_tunnel, BandwidthMbps,
-    OspfControlMode, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
-    TunnelKind, TunnelOspfConfig, TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS,
+    default_ospf_healthy_windows, default_ospf_min_cost_delta, default_tunnel_mtu, plan_tunnel,
+    BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily,
+    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS,
     MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
@@ -42,6 +42,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut right_tunnel_ipv6_cidr = None::<String>;
     let mut latency_primary_family = TunnelAddressFamily::Ipv4;
     let mut bandwidth = None::<BandwidthMbps>;
+    let mut left_mtu = None::<u16>;
+    let mut right_mtu = None::<u16>;
     let mut ospf_enabled = false;
     let mut ospf_mode = OspfControlMode::Reviewed;
     let mut ospf_latency_ms = None::<f64>;
@@ -327,6 +329,28 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                     value,
                     "--bandwidth-mbps=",
                 ))?);
+                index += 1;
+            }
+            "--left-mtu" => {
+                left_mtu = Some(parse_u16(
+                    next_value(tokens, index, "--left-mtu")?,
+                    "--left-mtu",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--left-mtu=") => {
+                left_mtu = Some(parse_u16(flag_value(value, "--left-mtu="), "--left-mtu")?);
+                index += 1;
+            }
+            "--right-mtu" => {
+                right_mtu = Some(parse_u16(
+                    next_value(tokens, index, "--right-mtu")?,
+                    "--right-mtu",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--right-mtu=") => {
+                right_mtu = Some(parse_u16(flag_value(value, "--right-mtu="), "--right-mtu")?);
                 index += 1;
             }
             "--ospf-mode" => {
@@ -698,10 +722,14 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         );
         None
     };
+    let kind = required(kind, "--kind")?;
+    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentIproute2Managed)
+        .then(|| default_tunnel_mtu(kind))
+        .flatten();
     let input = TunnelPlanInput {
         name: required(name, "--name")?,
         interface_name: required(interface_name, "--interface-name")?,
-        kind: required(kind, "--kind")?,
+        kind,
         runtime_control: build_runtime_control(RuntimeControlArgs {
             manager: runtime_manager,
             left_adapter_definition_id: left_runtime_adapter_definition_id.as_deref(),
@@ -743,6 +771,8 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         )?,
         latency_primary_family,
         bandwidth_mbps: required(bandwidth, "--bandwidth-mbps")?,
+        left_mtu: left_mtu.or(default_mtu),
+        right_mtu: right_mtu.or(default_mtu),
         ospf,
     };
     ensure_explicit_tunnel_endpoints(&input.ipv4_tunnel, &input.ipv6_tunnel, "tunnel-plan")?;

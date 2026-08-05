@@ -55,9 +55,9 @@ routing_adapter_script="$ROOT_DIR/scripts/fixtures/routing-cost-adapter-smoke.py
 routing_adapter_definition="$(jq -nc \
   --arg python "$routing_adapter_python" \
   --arg script "$routing_adapter_script" '{
-  contract_version: 1,
-  status_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096},
-  update_command: {argv:[$python, $script], max_timeout_secs:5, max_output_bytes:4096}
+  contract_version: 2,
+  status_command: {argv:[$python, $script, "status", "--plan-id", "{plan_id}", "--interface", "{interface}", "--side", "{endpoint_side}", "--client-id", "{local_client_id}"], max_timeout_secs:5, max_output_bytes:4096},
+  update_command: {argv:[$python, $script, "apply", "--plan-id", "{plan_id}", "--interface", "{interface}", "--side", "{endpoint_side}", "--client-id", "{local_client_id}", "--cost", "{desired_cost}"], max_timeout_secs:5, max_output_bytes:4096}
 }')"
 routing_adapter_json="$(curl -fsS \
   -H "Authorization: Bearer $access_token" \

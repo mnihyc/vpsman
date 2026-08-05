@@ -318,61 +318,40 @@ Both forms use the same contract:
 
 ```json
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "status_command": {
-    "argv": ["/opt/operator/routing-cost-adapter", "status"],
+    "argv": ["/opt/operator/routing-cost", "status", "--plan-id", "{plan_id}", "--interface", "{interface}", "--side", "{endpoint_side}"],
     "max_timeout_secs": 10,
     "max_output_bytes": 16384
   },
   "update_command": {
-    "argv": ["/opt/operator/routing-cost-adapter", "apply"],
+    "argv": ["/opt/operator/routing-cost", "apply", "--plan-id", "{plan_id}", "--interface", "{interface}", "--side", "{endpoint_side}", "--cost", "{desired_cost}"],
     "max_timeout_secs": 10,
     "max_output_bytes": 16384
   }
 }
 ```
 
-Both commands receive one JSON object on stdin. A status request resembles:
+vpsman invokes each command as exact argv, without a shell, and closes stdin.
+The routing commands can use the runtime endpoint placeholders plus:
 
-```json
-{
-  "contract_version": 1,
-  "operation": "status",
-  "plan_id": "<plan_uuid>",
-  "plan_name": "edge-a-edge-b",
-  "interface_name": "gre42",
-  "endpoint_side": "left",
-  "client_id": "edge-a",
-  "peer_client_id": "edge-b",
-  "local_underlay": "10.0.0.10",
-  "remote_underlay": "203.0.113.20",
-  "local_address": "10.255.0.0",
-  "remote_address": "10.255.0.1",
-  "prefix_len": 31,
-  "expected_current_cost": null,
-  "desired_cost": null
-}
+```text
+{plan_id} {endpoint_side} {expected_current_cost} {desired_cost}
 ```
 
-The executable writes exactly one contract response to stdout:
+Use `{plan_id}`, `{interface}`, and `{endpoint_side}` so one reusable helper can
+locate the exact tunnel endpoint. The update command receives the requested
+cost through `{desired_cost}`. `{expected_current_cost}` is also available when
+the helper wants the reviewed previous value, although the agent independently
+checks it before invoking update.
 
-```json
-{
-  "contract_version": 1,
-  "interface_name": "gre42",
-  "ready": true,
-  "current_cost": 14,
-  "applied_cost": null,
-  "adapter_version": "1.0.0",
-  "message": null
-}
-```
-
-For an apply request, `expected_current_cost` and `desired_cost` are populated.
-The update response must set `applied_cost` to the desired value. The agent then
-runs status again and accepts the job only when `current_cost` equals that
-value. A changed current cost, interface, adapter-definition hash, recommendation, or
-endpoint snapshot rejects stale confirmation.
+Status must exit zero and print exactly one decimal cost from 1 through 65535.
+Update success or failure is its exit code; bounded stdout is retained as the
+operator-facing result message. The agent reads status before update, rejects a
+stale reviewed cost, then reads status again and accepts the job only when it
+equals `{desired_cost}`. When no cost has been recorded yet, that first status
+read establishes the baseline instead of inventing one. A changed current cost, adapter-definition hash,
+recommendation, or endpoint snapshot rejects stale confirmation.
 
 Enable reviewed OSPF on a plan after each endpoint resolves a configured updater
 from its effective `ospf_update_command` preset or explicit per-plan override:

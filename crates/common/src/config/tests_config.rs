@@ -11,14 +11,15 @@ use crate::{
 };
 
 fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
+    let kind = if manager == RuntimeTunnelManager::AgentIproute2Managed {
+        TunnelKind::Gre
+    } else {
+        TunnelKind::Wireguard
+    };
     plan_tunnel(&TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "tunab".to_string(),
-        kind: if manager == RuntimeTunnelManager::AgentIproute2Managed {
-            TunnelKind::Gre
-        } else {
-            TunnelKind::Wireguard
-        },
+        kind,
         runtime_control: crate::RuntimeTunnelControl {
             manager,
             left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
@@ -45,6 +46,8 @@ fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
+        left_mtu: crate::default_tunnel_mtu(kind),
+        right_mtu: crate::default_tunnel_mtu(kind),
         ospf: None,
     })
     .unwrap()

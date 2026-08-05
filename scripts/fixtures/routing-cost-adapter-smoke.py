@@ -1,69 +1,50 @@
 #!/usr/bin/env python3
-"""Stateful routing-cost adapter used only by the live integration smoke."""
+"""Stateful direct-argv routing-cost adapter used by the live smoke test."""
 
-import json
+import argparse
 import os
 from pathlib import Path
 import re
-import sys
 
 
-def fail(message: str) -> None:
-    print(message, file=sys.stderr)
-    raise SystemExit(2)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=("status", "apply"))
+    parser.add_argument("--plan-id", required=True)
+    parser.add_argument("--interface", required=True)
+    parser.add_argument("--side", choices=("left", "right"), required=True)
+    parser.add_argument("--client-id", required=True)
+    parser.add_argument("--cost", type=int)
+    args = parser.parse_args()
+    if args.operation == "apply" and not 1 <= (args.cost or 0) <= 65535:
+        parser.error("apply requires --cost from 1 to 65535")
+    if args.operation == "status" and args.cost is not None:
+        parser.error("status does not accept --cost")
+    return args
 
 
-try:
-    request = json.load(sys.stdin)
-except (json.JSONDecodeError, UnicodeDecodeError) as error:
-    fail(f"invalid adapter request: {error}")
-
-if request.get("contract_version") != 1:
-    fail("unsupported adapter contract version")
-
-client_id = request.get("client_id")
-interface_name = request.get("interface_name")
-operation = request.get("operation")
-if not isinstance(client_id, str) or not isinstance(interface_name, str):
-    fail("adapter request identity is missing")
-if operation not in {"status", "apply"}:
-    fail("adapter operation is invalid")
-
+args = parse_args()
 state_root = os.environ.get("VPSMAN_SMOKE_ROUTING_STATE_DIR")
 if not state_root:
-    fail("VPSMAN_SMOKE_ROUTING_STATE_DIR is missing")
-safe_client_id = re.sub(r"[^A-Za-z0-9_.-]", "_", client_id)
+    raise SystemExit("VPSMAN_SMOKE_ROUTING_STATE_DIR is missing")
+
+safe_client_id = re.sub(r"[^A-Za-z0-9_.-]", "_", args.client_id)
 state_path = Path(state_root) / f"{safe_client_id}.cost"
 state_path.parent.mkdir(parents=True, exist_ok=True)
 try:
     current_cost = int(state_path.read_text(encoding="ascii").strip())
 except FileNotFoundError:
     current_cost = 1000
-except ValueError:
-    fail("stored routing cost is invalid")
+except ValueError as error:
+    raise SystemExit("stored routing cost is invalid") from error
 
-applied_cost = None
-if operation == "apply":
-    desired_cost = request.get("desired_cost")
-    if not isinstance(desired_cost, int) or not 1 <= desired_cost <= 65535:
-        fail("desired routing cost is invalid")
+if args.operation == "status":
+    print(current_cost)
+else:
     temporary_path = state_path.with_suffix(".tmp")
-    temporary_path.write_text(f"{desired_cost}\n", encoding="ascii")
+    temporary_path.write_text(f"{args.cost}\n", encoding="ascii")
     temporary_path.replace(state_path)
-    current_cost = desired_cost
-    applied_cost = desired_cost
-
-json.dump(
-    {
-        "contract_version": 1,
-        "interface_name": interface_name,
-        "ready": True,
-        "current_cost": current_cost,
-        "applied_cost": applied_cost,
-        "adapter_version": "live-smoke-v1",
-        "message": "operator-owned smoke adapter ready",
-    },
-    sys.stdout,
-    separators=(",", ":"),
-)
-sys.stdout.write("\n")
+    print(
+        f"updated {args.plan_id} {args.side} interface {args.interface} "
+        f"to cost {args.cost}"
+    )

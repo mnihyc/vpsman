@@ -84,6 +84,8 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
+        left_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1476),
+        right_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1400),
         ospf: None,
     })
     .unwrap()
@@ -91,15 +93,27 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
 
 #[test]
 fn external_adapter_commands_render_only_declared_plan_values() {
-    let plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+    let mut plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+    plan.name = "edge-{kind}".to_string();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let rendered =
-        render_runtime_adapter_command(adapter().startup.as_ref().unwrap(), &plan, &endpoint)
-            .unwrap();
+    let rendered = render_runtime_adapter_command(
+        &command(&[
+            "/opt/vpsman-adapters/wg-runtime",
+            "start",
+            "{plan}",
+            "{interface}",
+            "{local_underlay}",
+            "{remote_underlay}",
+        ]),
+        &plan,
+        &endpoint,
+    )
+    .unwrap();
     assert_eq!(rendered[0], "/opt/vpsman-adapters/wg-runtime");
-    assert_eq!(rendered[2], "tunab");
-    assert_eq!(rendered[3], "10.0.0.10");
-    assert_eq!(rendered[4], "203.0.113.20");
+    assert_eq!(rendered[2], "edge-{kind}");
+    assert_eq!(rendered[3], "tunab");
+    assert_eq!(rendered[4], "10.0.0.10");
+    assert_eq!(rendered[5], "203.0.113.20");
 }
 
 #[test]
@@ -122,6 +136,56 @@ fn iproute2_tunnel_argv_uses_only_the_endpoint_declared_source_and_destination()
         .windows(2)
         .any(|pair| pair == ["remote", "198.51.100.10"]));
     assert!(!right_argv.iter().any(|part| part == "local"));
+}
+
+#[test]
+fn iproute2_reconcile_applies_the_local_endpoint_mtu() {
+    let config = AgentConfig::default();
+    let plan = plan(RuntimeTunnelManager::AgentIproute2Managed);
+    let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+    let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
+
+    let left_steps = build_iproute2_reconcile_steps(&config, &plan, &left, false).unwrap();
+    let right_steps = build_iproute2_reconcile_steps(&config, &plan, &right, false).unwrap();
+    let left_mtu = left_steps
+        .iter()
+        .find(|step| step.label == "runtime_link_mtu")
+        .unwrap();
+    let right_mtu = right_steps
+        .iter()
+        .find(|step| step.label == "runtime_link_mtu")
+        .unwrap();
+
+    assert_eq!(
+        left_mtu.argv,
+        ["/sbin/ip", "link", "set", "dev", "tunab", "mtu", "1476"]
+    );
+    assert_eq!(
+        right_mtu.argv,
+        ["/sbin/ip", "link", "set", "dev", "tunab", "mtu", "1400"]
+    );
+    assert!(left_mtu.required);
+    assert!(right_mtu.required);
+    let left_labels = left_steps.iter().map(|step| step.label).collect::<Vec<_>>();
+    assert_eq!(
+        &left_labels[1..4],
+        [
+            "runtime_tunnel_add",
+            "runtime_link_mtu",
+            "runtime_addr_replace"
+        ]
+    );
+}
+
+#[test]
+fn iproute2_link_inspection_keeps_observed_mtu() {
+    let link = parse_iproute2_link_json(
+        r#"[{"ifname":"tunab","mtu":1476,"linkinfo":{"info_kind":"gre","info_data":{"local":"10.0.0.10","remote":"203.0.113.20","ttl":255}}}]"#,
+        "tunab",
+    )
+    .unwrap();
+
+    assert_eq!(link.mtu, Some(1476));
 }
 
 #[test]

@@ -378,6 +378,8 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: Some(1476),
+        right_mtu: Some(1476),
         ospf: None,
     })
     .unwrap();
@@ -979,6 +981,8 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: Some(1476),
+        right_mtu: Some(1476),
         ospf: None,
     })
     .unwrap();
@@ -1125,6 +1129,8 @@ fn runtime_sync_test_plan(
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
+        left_mtu: Some(1476),
+        right_mtu: Some(1476),
         ospf: None,
     })
     .unwrap()

@@ -9,7 +9,7 @@ use super::{
         RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
         RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, TunnelAddressFamily,
         TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation,
-        TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
+        TunnelOspfConfig, TunnelPlan, TunnelPlanInput, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
     },
 };
 
@@ -55,6 +55,12 @@ pub enum NetworkPlanError {
     InvalidRuntimeTunnelRoute,
     #[error("bandwidth must be between 10 and 10000 Mbps")]
     InvalidBandwidthMbps,
+    #[error("tunnel MTU must be between 68 and 65535 bytes, and at least 1280 for SIT or IPv6")]
+    InvalidTunnelMtu,
+    #[error("agent-managed tunnel requires both endpoint MTUs")]
+    TunnelMtuRequired,
+    #[error("external tunnel manager owns MTU; endpoint MTUs must be omitted")]
+    TunnelMtuExternallyOwned,
     #[error("OSPF configuration is invalid")]
     InvalidOspfConfig,
 }
@@ -93,6 +99,13 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         .collect::<HashSet<_>>();
     let ipv4_tunnel = resolve_ipv4_tunnel(input, &reserved_ipv4)?;
     let ipv6_tunnel = resolve_ipv6_tunnel(input, &reserved_ipv6)?;
+    validate_tunnel_mtus(
+        input.runtime_control.manager,
+        input.kind,
+        input.left_mtu,
+        input.right_mtu,
+        ipv6_tunnel.is_some(),
+    )?;
     if ipv4_tunnel.is_none() && ipv6_tunnel.is_none() {
         return Err(NetworkPlanError::TunnelAddressRequired);
     }
@@ -145,6 +158,8 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
         ipv6_tunnel: ipv6_tunnel.clone(),
         latency_primary_family: primary_family,
         bandwidth_mbps: input.bandwidth_mbps,
+        left_mtu: input.left_mtu,
+        right_mtu: input.right_mtu,
         ospf: input.ospf.clone(),
         recommended_ospf_cost,
         conflicts,
@@ -203,6 +218,34 @@ fn validate_bandwidth_mbps(value: u32) -> Result<(), NetworkPlanError> {
     } else {
         Err(NetworkPlanError::InvalidBandwidthMbps)
     }
+}
+
+fn validate_tunnel_mtus(
+    manager: RuntimeTunnelManager,
+    kind: TunnelKind,
+    left_mtu: Option<u16>,
+    right_mtu: Option<u16>,
+    ipv6_enabled: bool,
+) -> Result<(), NetworkPlanError> {
+    match manager {
+        RuntimeTunnelManager::AgentIproute2Managed => {
+            let (Some(left_mtu), Some(right_mtu)) = (left_mtu, right_mtu) else {
+                return Err(NetworkPlanError::TunnelMtuRequired);
+            };
+            let requires_ipv6_mtu = ipv6_enabled || kind == TunnelKind::Sit;
+            for value in [left_mtu, right_mtu] {
+                if value < MIN_TUNNEL_MTU || (requires_ipv6_mtu && value < MIN_IPV6_TUNNEL_MTU) {
+                    return Err(NetworkPlanError::InvalidTunnelMtu);
+                }
+            }
+        }
+        RuntimeTunnelManager::ExternalObserved | RuntimeTunnelManager::ExternalManagedAdapter => {
+            if left_mtu.is_some() || right_mtu.is_some() {
+                return Err(NetworkPlanError::TunnelMtuExternallyOwned);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_ospf_config(config: &TunnelOspfConfig) -> Result<(), NetworkPlanError> {
@@ -329,6 +372,7 @@ pub fn render_tunnel_endpoint_config(
         local_underlay,
         local_address,
         remote_address,
+        local_mtu,
     ) = match side {
         TunnelEndpointSide::Left => (
             &plan.left_client_id,
@@ -337,6 +381,7 @@ pub fn render_tunnel_endpoint_config(
             &plan.left_local_underlay,
             &plan.left_tunnel_address,
             &plan.right_tunnel_address,
+            plan.left_mtu,
         ),
         TunnelEndpointSide::Right => (
             &plan.right_client_id,
@@ -345,12 +390,14 @@ pub fn render_tunnel_endpoint_config(
             &plan.right_local_underlay,
             &plan.right_tunnel_address,
             &plan.left_tunnel_address,
+            plan.right_mtu,
         ),
     };
     Ok(TunnelEndpointConfig {
         side,
         local_client_id: local_client_id.clone(),
         peer_client_id: peer_client_id.clone(),
+        local_mtu,
         runtime_control: plan.runtime_control.clone(),
         remote_underlay: remote_underlay.clone(),
         local_underlay: local_underlay.clone(),

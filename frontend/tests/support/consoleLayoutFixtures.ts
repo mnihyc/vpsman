@@ -2523,7 +2523,6 @@ export const tunnelPlans = [
       name: "sfo-fra-gre",
       interface_name: "tunab",
       kind: "gre",
-      runtime_control: { manager: "agent_iproute2_managed" },
       runtime_topology: {
         desired_interfaces: ["tunab"],
         version: "declared:v1",
@@ -2545,6 +2544,8 @@ export const tunnelPlans = [
       ipv6_tunnel: null,
       latency_primary_family: "ipv4",
       bandwidth_mbps: 100,
+      left_mtu: 1476,
+      right_mtu: 1476,
       ospf: {
         mode: "reviewed",
         planned_latency_ms: 14,
@@ -2568,7 +2569,6 @@ export const tunnelPlans = [
       name: "sfo-fra-gre",
       interface_name: "tunab",
       kind: "gre",
-      runtime_control: { manager: "agent_iproute2_managed" },
       runtime_topology: {
         desired_interfaces: ["tunab"],
         version: "declared:v1",
@@ -2590,6 +2590,8 @@ export const tunnelPlans = [
       ipv6_tunnel: null,
       latency_primary_family: "ipv4",
       bandwidth_mbps: 100,
+      left_mtu: 1476,
+      right_mtu: 1476,
       ospf: {
         mode: "reviewed",
         planned_latency_ms: 14,

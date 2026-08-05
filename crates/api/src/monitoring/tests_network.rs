@@ -1180,14 +1180,15 @@ async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_p
 }
 
 pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> TunnelPlanInput {
+    let kind = if manager == RuntimeTunnelManager::AgentIproute2Managed {
+        TunnelKind::Gre
+    } else {
+        TunnelKind::Wireguard
+    };
     TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "tunab".to_string(),
-        kind: if manager == RuntimeTunnelManager::AgentIproute2Managed {
-            TunnelKind::Gre
-        } else {
-            TunnelKind::Wireguard
-        },
+        kind,
         runtime_control: RuntimeTunnelControl {
             manager,
             left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
@@ -1214,6 +1215,8 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
+        left_mtu: vpsman_common::default_tunnel_mtu(kind),
+        right_mtu: vpsman_common::default_tunnel_mtu(kind),
         ospf: ospf.then(|| TunnelOspfConfig {
             mode: OspfControlMode::Reviewed,
             planned_latency_ms: 18.0,
@@ -1281,7 +1284,7 @@ pub(super) async fn seed_test_plan_adapter_definitions(repo: &Repository, input:
             })
         } else {
             serde_json::json!({
-                "contract_version": 1,
+                "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
                 "status_command": command("status"),
                 "update_command": command("update")
             })
@@ -1382,7 +1385,7 @@ async fn assign_test_ospf_preset(
                 name: format!("{client_id} OSPF updater"),
                 description: None,
                 definition: serde_json::json!({
-                    "contract_version": 1,
+                    "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
                     "status_command": command("status"),
                     "update_command": command("update")
                 }),

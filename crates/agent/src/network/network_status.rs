@@ -98,6 +98,7 @@ async fn inspect_runtime_status(
             .await?;
     let summary = summarize_runtime_status(
         plan,
+        endpoint.local_mtu,
         &interface,
         &desired_interfaces,
         &declared_stale_interfaces,
@@ -150,6 +151,7 @@ pub(crate) async fn runtime_tunnel_requires_reconnect_sync(
     .await?;
     Ok(!runtime_reconcile_reasons(
         &telemetry_plan.plan,
+        endpoint.local_mtu,
         &interface,
         &desired_interfaces,
         &declared_stale_interfaces,
@@ -432,6 +434,7 @@ async fn inspect_runtime_adapter_status(
 
 fn summarize_runtime_status(
     plan: &TunnelPlan,
+    desired_mtu: Option<u16>,
     interface: &serde_json::Value,
     desired_interfaces: &[serde_json::Value],
     declared_stale_interfaces: &[serde_json::Value],
@@ -451,6 +454,7 @@ fn summarize_runtime_status(
         .count();
     let reasons = runtime_reconcile_reasons(
         plan,
+        desired_mtu,
         interface,
         desired_interfaces,
         declared_stale_interfaces,
@@ -477,6 +481,9 @@ fn summarize_runtime_status(
         } else if healthy {
             "healthy"
         } else if reasons.contains(&"runtime_interface_missing")
+            || reasons.contains(&"runtime_plan_mtu_unconfigured")
+            || reasons.contains(&"runtime_interface_mtu_mismatch")
+            || reasons.contains(&"runtime_interface_mtu_unavailable")
             || reasons.contains(&"desired_interface_missing")
             || reasons.contains(&"stale_interface_present")
         {
@@ -496,6 +503,8 @@ fn summarize_runtime_status(
         "reasons": reasons,
         "interface_exists": interface_exists,
         "interface_operstate": interface_operstate,
+        "interface_mtu": interface["mtu"],
+        "desired_mtu": desired_mtu,
         "desired_missing_count": desired_missing_count,
         "stale_present_count": stale_present_count,
         "adapter_state": adapter_state,
@@ -511,6 +520,7 @@ fn summarize_runtime_status(
 
 fn runtime_reconcile_reasons(
     plan: &TunnelPlan,
+    desired_mtu: Option<u16>,
     interface: &serde_json::Value,
     desired_interfaces: &[serde_json::Value],
     declared_stale_interfaces: &[serde_json::Value],
@@ -521,6 +531,18 @@ fn runtime_reconcile_reasons(
         reasons.push("runtime_interface_missing");
     } else if interface["operstate"].as_str() == Some("down") {
         reasons.push("runtime_interface_down");
+    }
+    if plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
+        && interface["exists"].as_bool() == Some(true)
+    {
+        match (interface["mtu"].as_u64(), desired_mtu) {
+            (_, None) => reasons.push("runtime_plan_mtu_unconfigured"),
+            (Some(actual), Some(desired)) if actual != u64::from(desired) => {
+                reasons.push("runtime_interface_mtu_mismatch");
+            }
+            (None, Some(_)) => reasons.push("runtime_interface_mtu_unavailable"),
+            (Some(_), Some(_)) => {}
+        }
     }
     if desired_interfaces
         .iter()

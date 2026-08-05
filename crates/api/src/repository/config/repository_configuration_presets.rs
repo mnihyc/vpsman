@@ -113,7 +113,7 @@ fn system_configuration_presets() -> Vec<SystemConfigurationPreset> {
             description:
                 "Do not run OSPF status or update commands unless an operator assigns a configured preset or a tunnel plan overrides it.",
             definition: serde_json::json!({
-                "contract_version": 1,
+                "contract_version": vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION,
                 "status_command": null,
                 "update_command": null
             }),
@@ -2468,8 +2468,13 @@ pub(crate) fn validate_network_adapter_definition(
         object.keys().all(|key| allowed.contains(&key.as_str())),
         "network_adapter_definition_unknown_field"
     );
+    let expected_contract_version = if request.adapter_kind == "routing_cost" {
+        u64::from(vpsman_common::ROUTING_COST_ADAPTER_CONTRACT_VERSION)
+    } else {
+        1
+    };
     anyhow::ensure!(
-        object.get("contract_version").and_then(Value::as_u64) == Some(1),
+        object.get("contract_version").and_then(Value::as_u64) == Some(expected_contract_version),
         "network_adapter_contract_version_invalid"
     );
     let command = |field: &str, required: bool| -> Result<Option<PresetCommand>> {

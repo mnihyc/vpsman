@@ -45,6 +45,7 @@ pub const HOST_STORAGE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION: u16 = 2;
 
 pub const JOB_STATUS_QUEUED: &str = "queued";
 pub const JOB_STATUS_RUNNING: &str = "running";
@@ -3050,9 +3051,10 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. }
-        | JobCommand::NetworkRoutingStatus { .. }
-        | JobCommand::NetworkRoutingApply { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
+            NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
+        }
     }
 }
 
@@ -3114,9 +3116,10 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. }
-        | JobCommand::NetworkRoutingStatus { .. }
-        | JobCommand::NetworkRoutingApply { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::NetworkSpeedTest { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
+            NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::StorageInventory { .. } => HOST_STORAGE_COMMAND_PROTOCOL_VERSION,
         JobCommand::ServiceInventory { .. }
         | JobCommand::ServiceAction { .. }

@@ -5,6 +5,7 @@ import type {
   RuntimeTunnelManager,
   RuntimeTunnelRoute,
   RuntimeTunnelTopologyIntent,
+  TunnelKind,
 } from "./types";
 
 export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
@@ -15,6 +16,9 @@ export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
 export const MIN_TUNNEL_BANDWIDTH_MBPS = 10;
 export const MAX_TUNNEL_BANDWIDTH_MBPS = 10000;
 export const DEFAULT_TUNNEL_BANDWIDTH_MBPS = 100;
+export const MIN_TUNNEL_MTU = 68;
+export const MIN_IPV6_TUNNEL_MTU = 1280;
+export const MAX_TUNNEL_MTU = 65535;
 const OSPF_BANDWIDTH_REFERENCE_MBPS = 100;
 const OSPF_BANDWIDTH_WEIGHT = 10;
 const OSPF_LOSS_WEIGHT = 400;
@@ -109,6 +113,23 @@ export function clampTunnelBandwidthMbps(value: unknown): number {
     MAX_TUNNEL_BANDWIDTH_MBPS,
     Math.max(MIN_TUNNEL_BANDWIDTH_MBPS, normalizeTunnelBandwidthMbps(value)),
   );
+}
+
+export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
+  switch (kind) {
+    case "gre":
+      return 1476;
+    case "ipip":
+    case "sit":
+      return 1480;
+    case "fou":
+      return 1472;
+    case "wireguard":
+    case "openvpn":
+    case "tun_tap":
+    case "custom":
+      return null;
+  }
 }
 
 export function calculateOspfCostPreview({
