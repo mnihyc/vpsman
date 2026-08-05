@@ -224,7 +224,7 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
       .getByRole("button", { name: "Unlock", exact: true }),
   );
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
 
   await activate(
@@ -271,7 +271,7 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
       .getByRole("button", { name: "Open privilege unlock" }),
   ).toBeVisible();
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toHaveCount(0);
 });
 

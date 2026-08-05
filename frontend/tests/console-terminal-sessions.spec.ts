@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { terminalSessions } from "./support/jobSessionFixtures";
 import {
-  lockPrivilegeFromTop,
+  lockPrivilegeFromVault,
   openConsoleSubpage,
 } from "./support/consoleNavigation";
 
@@ -274,7 +274,7 @@ test("requires privilege only for terminal open and keeps an authorized session 
     "Unlock privilege, then open the terminal from this launcher.",
   );
 
-  await lockPrivilegeFromTop(page);
+  await lockPrivilegeFromVault(page);
   await expect(
     panel.getByRole("button", { name: "Unlock privilege" }),
   ).toBeVisible();

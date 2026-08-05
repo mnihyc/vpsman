@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   activate,
-  lockPrivilegeFromTop,
+  lockPrivilegeFromVault,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -163,8 +163,11 @@ test("submits the privilege unlock form with Enter", async ({
 
   await expect(dialog).toBeHidden();
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
+  await expect(
+    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+  ).toHaveCount(0);
 });
 
 test("restores a persistent verified unlock after refresh and confirms before locking", async ({
@@ -173,7 +176,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "topbar privilege persistence is covered in the desktop console",
+    "browser privilege persistence is covered in the desktop console",
   );
   await installConsoleApiMock(page);
   await page.goto("/");
@@ -204,7 +207,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
   await page.reload();
   await waitForConsoleShell(page);
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
   await expect
     .poll(async () =>
@@ -219,9 +222,11 @@ test("restores a persistent verified unlock after refresh and confirms before lo
     )
     .toBe(1);
 
-  await activate(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
-  );
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+  const vault = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "Privilege vault" }),
+  });
+  await activate(vault.getByRole("button", { name: "Lock now" }));
   const prompt = page.getByLabel("Confirm privilege lock");
   await expect(prompt).toBeVisible();
   await expect
@@ -239,8 +244,9 @@ test("restores a persistent verified unlock after refresh and confirms before lo
     })
     .toBe(true);
   await activate(prompt.getByRole("button", { name: "Cancel" }));
+  await expect(vault.getByRole("button", { name: "Lock now" })).toBeVisible();
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
   expect(
     await page.evaluate(() =>
@@ -253,12 +259,10 @@ test("restores a persistent verified unlock after refresh and confirms before lo
   await peerPage.goto("/");
   await waitForConsoleShell(peerPage);
   await expect(
-    peerPage.locator(".topbar").getByRole("button", {
-      name: "Lock privilege",
-    }),
+    peerPage.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
 
-  await lockPrivilegeFromTop(page);
+  await lockPrivilegeFromVault(page);
   expect(
     await page.evaluate(() =>
       window.localStorage.getItem("vpsman.privilegeGrant"),
@@ -418,7 +422,7 @@ test("keeps privilege locked when password or salt verification is denied", asyn
     "Super password or privilege salt did not match",
   );
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toHaveCount(0);
   expect(
     await page.evaluate(() =>
@@ -522,7 +526,7 @@ test("privilege unlock reaches refreshable session actions while Audit evidence 
       .getByRole("button", { name: "Cancel" }),
   );
 
-  await lockPrivilegeFromTop(page);
+  await lockPrivilegeFromVault(page);
   await openConsoleSubpage(page, "Audit", "Sessions");
   await expect(
     page
@@ -747,7 +751,19 @@ test("uses persisted terminal-open evidence when retained audit rows are insuffi
   await waitForConsoleShell(page);
   await openConsoleSubpage(page, "Audit", "Sessions");
 
-  const detail = page.getByLabel("Selected terminal session evidence");
+  const terminalGrid = page.getByLabel("Terminal session evidence data grid");
+  await expect(
+    terminalGrid.getByLabel("Selected terminal session evidence"),
+  ).toHaveCount(0);
+  const terminalRecord = terminalGrid
+    .locator(".gridBody [role=row], .gridMobileCard")
+    .filter({ hasText: "61616161" })
+    .first();
+  await terminalRecord.click();
+  await expect(terminalRecord).toHaveAttribute("aria-expanded", "true");
+  const detail = terminalGrid
+    .locator(".gridExpandedRow")
+    .getByLabel("Selected terminal session evidence");
   await expect(detail).toContainText("2030");
   await expect(detail).not.toContainText("Open time unavailable");
 });

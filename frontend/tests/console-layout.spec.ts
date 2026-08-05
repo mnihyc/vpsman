@@ -7,7 +7,7 @@ import {
 } from "./support/consoleLayoutFixtures";
 import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
 import {
-  lockPrivilegeFromTop,
+  lockPrivilegeFromVault,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
   waitForConsoleShell,
@@ -2638,7 +2638,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   );
   await expect(privilegeDialog).toBeHidden();
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
   await expect(page.getByLabel("API DB pool")).toHaveValue("40");
   await expect(
@@ -6478,9 +6478,9 @@ test("generates local privilege assertions before dispatching a privileged job",
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   const topbar = page.locator(".topbar");
   await expect(
-    topbar.getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
-  await lockPrivilegeFromTop(page);
+  await lockPrivilegeFromVault(page);
   await expect(
     page.locator(".commandComposer").getByLabel("Super password"),
   ).toHaveCount(0);
@@ -6995,7 +6995,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Choose restore artifact" }));
   const restoreWorkflow = page.getByLabel("Choose restore artifact");
@@ -7381,7 +7381,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
 
   await unlockPrivilegeFor(page, "Network", "Tests");
   await expect(
-    page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
+    page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
   await expect(networkTestsPanel).toContainText("Probe/speed unlocked");
 

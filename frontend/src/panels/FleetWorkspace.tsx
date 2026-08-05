@@ -8277,6 +8277,7 @@ export function WebhookRuleManager({
               >
                 <input
                   aria-label="Webhook cooldown seconds"
+                  max={2592000}
                   min={0}
                   title="Minimum seconds between new automatic deliveries for this rule. Retries are controlled separately."
                   type="number"

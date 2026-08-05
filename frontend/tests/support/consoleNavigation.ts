@@ -254,40 +254,59 @@ async function recoverWorkspaceRouteError(page: Page, attempt: number) {
 export async function unlockPrivilegeFromTop(page: Page) {
   await waitForConsoleShell(page);
   const topbar = page.locator(".topbar");
-  if (
-    (await topbar.getByRole("button", { name: "Lock privilege" }).count()) > 0
-  ) {
-    return;
+  const verified = topbar.getByLabel("Privilege verified for this browser");
+  if ((await verified.count()) === 0) {
+    await activate(
+      topbar.getByRole("button", { name: "Open privilege unlock" }),
+    );
+    const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel(/super password/i).fill("local-super-password");
+    await dialog
+      .getByLabel(/(privilege salt|verifier salt hex)/i)
+      .fill("00112233445566778899aabbccddeeff");
+    await activate(
+      dialog
+        .getByLabel("Unlock with privilege material")
+        .getByRole("button", { name: /Unlock( privilege)?/ }),
+    );
+    await expect(dialog).toBeHidden();
   }
-  await activate(topbar.getByRole("button", { name: "Open privilege unlock" }));
-  const dialog = page.getByRole("dialog", { name: "Unlock privilege" });
-  await expect(dialog).toBeVisible();
-  await dialog.getByLabel(/super password/i).fill("local-super-password");
-  await dialog
-    .getByLabel(/(privilege salt|verifier salt hex)/i)
-    .fill("00112233445566778899aabbccddeeff");
-  await activate(
-    dialog
-      .getByLabel("Unlock with privilege material")
-      .getByRole("button", { name: /Unlock( privilege)?/ }),
-  );
-  await expect(dialog).toBeHidden();
+  await expect(verified).toBeVisible();
   await expect(
     topbar.getByRole("button", { name: "Lock privilege" }),
-  ).toBeVisible();
+  ).toHaveCount(0);
 }
 
-export async function lockPrivilegeFromTop(page: Page) {
-  const topbar = page.locator(".topbar");
-  await activate(topbar.getByRole("button", { name: "Lock privilege" }));
+export async function lockPrivilegeFromVault(page: Page) {
+  const returnUrl = page.url();
+  await openConsoleSubpage(page, "Access", "Privilege vault");
+  const vault = page.locator(".controlPanel").filter({
+    has: page.getByRole("heading", { level: 2, name: "Privilege vault" }),
+  });
+  await activate(vault.getByRole("button", { name: "Lock now" }));
   const prompt = page.getByLabel("Confirm privilege lock");
   await expect(prompt).toBeVisible();
   await activate(
     prompt.getByRole("button", { name: "Lock privilege", exact: true }),
   );
   await expect(
-    topbar.getByRole("button", { name: "Open privilege unlock" }),
+    page.locator(".topbar").getByRole("button", {
+      name: "Open privilege unlock",
+    }),
   ).toBeVisible();
+  await expect(page.getByLabel("Privilege vault state")).toContainText(
+    "Locked",
+  );
+  for (
+    let attempt = 0;
+    page.url() !== returnUrl && attempt < 3;
+    attempt += 1
+  ) {
+    await page.goBack();
+    await waitForConsoleShell(page);
+  }
+  await expect(page).toHaveURL(returnUrl);
 }
 
 async function loginMockConsoleSession(page: Page) {

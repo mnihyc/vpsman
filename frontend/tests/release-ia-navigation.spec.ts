@@ -1,6 +1,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { normalizeSubpage, viewLabel, viewSubpages } from "../src/constants";
+import { OPERATOR_MONITOR_DENSITY_STORAGE_KEY } from "../src/monitorCardDensity";
 import {
   backupId,
   installConsoleApiMock,
@@ -429,7 +430,7 @@ test("keyboard navigation reaches release shell controls and page primary action
   await expectReachableByTab(
     page,
     page.getByRole("button", { name: "Open privilege unlock" }),
-    "privilege lock control",
+    "privilege unlock control",
     100,
   );
 
@@ -1982,18 +1983,19 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   ).toBeVisible();
   const monitor = page.getByLabel("VPS monitor cards");
   await expect(monitor).toBeVisible();
-  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  await expect(monitor).toHaveAttribute("data-density", "compact");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (storageKey) => window.localStorage.getItem(storageKey),
+        OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
+      ),
+    )
+    .toBe("compact");
   const edgeCard = monitor
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
     .first();
   await expect(edgeCard).toHaveAttribute("role", "link");
-  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toBeVisible();
-  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toContainText(
-    "alpha",
-  );
-  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
-    "29.90 ¥/m",
-  );
   await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
     "Renews 14",
   );
@@ -2014,23 +2016,12 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(
     edgeCard.locator(".vpsMonitorPing > span small"),
   ).toHaveAttribute("title", /\S/);
-  await expect(edgeCard).toContainText("1m load");
-  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
+  await expect(edgeCard.getByText("No contact").first()).toBeVisible();
+  await expect(
+    edgeCard.locator(".vpsMonitorCardMain > small"),
+  ).not.toBeVisible();
+  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(0);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
-  const comfortableFirstRow = await monitorFirstRowCount(monitor);
-  const comfortableCardWidth = await monitor
-    .locator(".vpsMonitorCard")
-    .first()
-    .evaluate((card) => card.getBoundingClientRect().width);
-  const comfortableCardHeight = await edgeCard.evaluate(
-    (card) => card.getBoundingClientRect().height,
-  );
-
-  await page
-    .getByLabel("VPS cards density")
-    .getByRole("button", { name: "Compact" })
-    .click();
-  await expect(monitor).toHaveAttribute("data-density", "compact");
   const compactFirstRow = await monitorFirstRowCount(monitor);
   const compactCardWidth = await monitor
     .locator(".vpsMonitorCard")
@@ -2039,20 +2030,44 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   const compactCardHeight = await edgeCard.evaluate(
     (card) => card.getBoundingClientRect().height,
   );
+
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Comfortable" })
+    .click();
+  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  const comfortableFirstRow = await monitorFirstRowCount(monitor);
+  const comfortableCardWidth = await monitor
+    .locator(".vpsMonitorCard")
+    .first()
+    .evaluate((card) => card.getBoundingClientRect().width);
+  const comfortableCardHeight = await edgeCard.evaluate(
+    (card) => card.getBoundingClientRect().height,
+  );
   expect(comfortableFirstRow).toBeGreaterThanOrEqual(2);
   expect(compactFirstRow).toBeGreaterThanOrEqual(comfortableFirstRow);
   expect(compactCardWidth).toBeLessThan(comfortableCardWidth);
   expect(compactCardHeight).toBeLessThan(comfortableCardHeight);
   expect(comfortableCardHeight).toBeLessThan(430);
-  await expect(edgeCard.getByText("No contact").first()).toBeVisible();
-  await expect(
-    edgeCard.locator(".vpsMonitorCardMain > small"),
-  ).not.toBeVisible();
+  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toBeVisible();
+  await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toContainText(
+    "alpha",
+  );
+  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
+    "29.90 ¥/m",
+  );
   await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
     "Renews 14",
   );
-  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(0);
+  await expect(edgeCard).toContainText("1m load");
+  await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
+
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Compact" })
+    .click();
+  await expect(monitor).toHaveAttribute("data-density", "compact");
 
   await page.getByLabel("VPS cards sort").selectOption("traffic");
   await expect(monitor).toHaveAttribute("data-sort", "traffic");
@@ -2117,10 +2132,6 @@ for (const fixtureCount of [0, 1, 8, 20, 100, 1_000]) {
         },
       )
       .toBe(fixtureCount);
-    await page
-      .getByLabel("VPS cards density")
-      .getByRole("button", { name: "Compact" })
-      .click();
     await expect(monitor).toHaveAttribute("data-density", "compact");
     await expectMonitorCardsToFit(page, `${fixtureCount} generated VPS`);
   });
@@ -2141,11 +2152,8 @@ test("fleet monitor density remains responsive on a narrow viewport", async ({
   await openConsoleSubpage(page, "Fleet", "Monitor");
 
   const monitor = page.getByLabel("VPS monitor cards");
+  await expect(monitor).toHaveAttribute("data-density", "compact");
   expect(await monitorFirstRowCount(monitor)).toBe(1);
-  await page
-    .getByLabel("VPS cards density")
-    .getByRole("button", { name: "Compact" })
-    .click();
   expect(await monitorFirstRowCount(monitor)).toBe(1);
   await expectMonitorCardsToFit(page, "narrow compact VPS");
 });
@@ -2165,6 +2173,12 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
   await openConsoleSubpage(page, "Fleet", "Monitor");
 
   const monitor = page.getByLabel("VPS monitor cards");
+  await expect(monitor).toHaveAttribute("data-density", "compact");
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Comfortable" })
+    .click();
+  await expect(monitor).toHaveAttribute("data-density", "comfortable");
   const comfortableFirstRow = await monitorFirstRowCount(monitor);
   expect(comfortableFirstRow).toBeGreaterThanOrEqual(2);
   await expectMonitorCardsToFit(page, "laptop comfortable VPS");
@@ -4366,6 +4380,9 @@ test("observability webhook rule editor retains registry and navigation context"
   await expect(
     editor.getByRole("textbox", { name: "Webhook body template" }),
   ).toBeVisible();
+  const cooldown = editor.getByLabel("Webhook cooldown seconds");
+  await expect(cooldown).toHaveAttribute("min", "0");
+  await expect(cooldown).toHaveAttribute("max", "2592000");
   await editor
     .getByLabel("Webhook signing secret")
     .fill("fixture-webhook-secret");
@@ -5805,7 +5822,20 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
     panel.getByLabel("Terminal session evidence data grid"),
   ).toContainText("Replayable transcript");
 
-  const detail = panel.getByLabel("Selected terminal session evidence");
+  const terminalGrid = panel.getByLabel("Terminal session evidence data grid");
+  await expect(
+    terminalGrid.getByLabel("Selected terminal session evidence"),
+  ).toHaveCount(0);
+  const terminalRecord = terminalGrid
+    .locator(".gridBody [role=row], .gridMobileCard")
+    .filter({ hasText: "61616161" })
+    .first();
+  await expect(terminalRecord).toHaveAttribute("aria-expanded", "false");
+  await terminalRecord.click();
+  await expect(terminalRecord).toHaveAttribute("aria-expanded", "true");
+  const detail = terminalGrid
+    .locator(".gridExpandedRow")
+    .getByLabel("Selected terminal session evidence");
   await expect(detail).toContainText("Started");
   await expect(detail).toContainText("Last activity");
   await expect(detail).toContainText("Expiry");

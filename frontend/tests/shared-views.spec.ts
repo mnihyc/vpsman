@@ -60,20 +60,22 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await activeGridBeforeCreate
     .getByRole("button", { name: "Create shared view" })
     .click();
+  const createDrawer = page.getByRole("complementary", {
+    name: "Create shared view",
+  });
+  await expect(createDrawer).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Create shared view" }),
+    createDrawer.getByRole("heading", { name: "Create shared view" }),
   ).toBeVisible();
-  const drawerLayout = await page
-    .locator(".actionDrawer:visible")
-    .evaluate((drawer) => {
-      const body = drawer.querySelector<HTMLElement>(".actionDrawerBody");
-      return {
-        bodyOverflowY: body ? getComputedStyle(body).overflowY : null,
-        drawerMaxHeight: getComputedStyle(drawer).maxHeight,
-        drawerOverflowY: getComputedStyle(drawer).overflowY,
-        drawerPosition: getComputedStyle(drawer).position,
-      };
-    });
+  const drawerLayout = await createDrawer.evaluate((drawer) => {
+    const body = drawer.querySelector<HTMLElement>(".actionDrawerBody");
+    return {
+      bodyOverflowY: body ? getComputedStyle(body).overflowY : null,
+      drawerMaxHeight: getComputedStyle(drawer).maxHeight,
+      drawerOverflowY: getComputedStyle(drawer).overflowY,
+      drawerPosition: getComputedStyle(drawer).position,
+    };
+  });
   expect(drawerLayout).toEqual({
     bodyOverflowY: "visible",
     drawerMaxHeight: "none",
@@ -86,9 +88,13 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await expect(page.getByLabel("Shared view target selector")).toHaveValue("*");
   await page.getByRole("button", { name: "Review creation" }).click();
 
-  const createConfirmation = page
+  const createConfirmation = createDrawer
     .locator(".confirmationPrompt")
     .filter({ hasText: "Confirm public monitoring view" });
+  await expect(createDrawer).toBeVisible();
+  await expect(
+    createDrawer.getByLabel("Shared view display name"),
+  ).toHaveValue("Regional customer view");
   await expect(
     createConfirmation.getByText("Confirm public monitoring view", {
       exact: true,
@@ -97,6 +103,38 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await expect(
     createConfirmation.getByText("3", { exact: true }),
   ).toBeVisible();
+  const confirmationLayout = await createConfirmation.evaluate((prompt) => {
+    const form = prompt.closest("form.consoleFormGrid");
+    const actions = prompt.previousElementSibling;
+    const formBounds = form?.getBoundingClientRect();
+    const actionsBounds = actions?.getBoundingClientRect();
+    const promptBounds = prompt.getBoundingClientRect();
+    return {
+      followsActions:
+        actions?.classList.contains("consoleFormActions") === true,
+      formContainsPrompt: form?.contains(prompt) === true,
+      horizontalOffset: formBounds
+        ? Math.abs(promptBounds.left - formBounds.left)
+        : null,
+      promptWidth: promptBounds.width,
+      verticalGap: actionsBounds
+        ? promptBounds.top - actionsBounds.bottom
+        : null,
+      widthDifference: formBounds
+        ? formBounds.width - promptBounds.width
+        : null,
+    };
+  });
+  expect(confirmationLayout.formContainsPrompt).toBe(true);
+  expect(confirmationLayout.followsActions).toBe(true);
+  expect(confirmationLayout.horizontalOffset).not.toBeNull();
+  expect(confirmationLayout.horizontalOffset!).toBeLessThanOrEqual(2);
+  expect(confirmationLayout.widthDifference).not.toBeNull();
+  expect(Math.abs(confirmationLayout.widthDifference!)).toBeLessThanOrEqual(4);
+  expect(confirmationLayout.promptWidth).toBeGreaterThan(0);
+  expect(confirmationLayout.verticalGap).not.toBeNull();
+  expect(confirmationLayout.verticalGap!).toBeGreaterThanOrEqual(0);
+  expect(confirmationLayout.verticalGap!).toBeLessThanOrEqual(20);
   await createConfirmation
     .getByRole("button", { name: "Create shared view", exact: true })
     .click();
@@ -388,18 +426,20 @@ test("public monitoring keeps grid and detail history state without exposing hid
         getComputedStyle(node).gridTemplateColumns.split(/\s+/).filter(Boolean)
           .length,
     );
-  const comfortableHeight = await card.evaluate(
-    (node) => node.getBoundingClientRect().height,
-  );
-  const isMobile = (page.viewportSize()?.width ?? 1_000) < 500;
-  expect(await columnCount()).toBe(isMobile ? 1 : 3);
-  await page.getByRole("button", { name: "Compact", exact: true }).click();
+  await expect(cardGrid).toHaveAttribute("data-density", "compact");
   const compactHeight = await card.evaluate(
     (node) => node.getBoundingClientRect().height,
   );
+  const isMobile = (page.viewportSize()?.width ?? 1_000) < 500;
   expect(await columnCount()).toBe(isMobile ? 1 : 5);
-  expect(compactHeight).toBeLessThan(comfortableHeight);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  const comfortableHeight = await card.evaluate(
+    (node) => node.getBoundingClientRect().height,
+  );
+  expect(await columnCount()).toBe(isMobile ? 1 : 3);
+  expect(compactHeight).toBeLessThan(comfortableHeight);
+  await page.getByRole("button", { name: "Compact", exact: true }).click();
+  await expect(cardGrid).toHaveAttribute("data-density", "compact");
 
   await page.getByLabel("Search shared VPSs").fill("edge");
   if (isMobile) {

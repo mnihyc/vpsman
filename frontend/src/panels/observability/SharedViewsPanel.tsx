@@ -1133,6 +1133,7 @@ export function SharedViewsPanel({
             </button>
           </div>
           <ConfirmationPrompt
+            className="fieldFull"
             confirmLabel="Create shared view"
             detail="Create one public URL for this exact target and visibility snapshot. Frozen targets change only through an explicit reviewed Update targets action."
             error={actionError}

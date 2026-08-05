@@ -117,6 +117,7 @@ installExternalFocusTracker();
 export function ConfirmationPrompt({
   cancelLabel = "Cancel",
   children,
+  className,
   confirmDisabled = false,
   confirmLabel,
   detail,
@@ -134,6 +135,7 @@ export function ConfirmationPrompt({
 }: {
   cancelLabel?: string;
   children?: ReactNode;
+  className?: string;
   confirmDisabled?: boolean;
   confirmLabel: string;
   detail: ReactNode;
@@ -437,7 +439,7 @@ export function ConfirmationPrompt({
   const prompt = (
     <section
       ref={promptRef}
-      className={`confirmationPrompt ${tone} ${displayMode}Prompt`}
+      className={`confirmationPrompt ${tone} ${displayMode}Prompt${className ? ` ${className}` : ""}`}
       aria-label={title}
       aria-describedby={error ? errorId : undefined}
       aria-modal={displayMode === "overlay" ? true : undefined}
