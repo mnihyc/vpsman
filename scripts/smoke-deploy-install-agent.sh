@@ -373,6 +373,9 @@ if grep -Fq -- "--user restart vpsman-agent.service" "$fake_systemctl_log"; then
   exit 1
 fi
 grep -q "installed and enabled direct gateway agent" "$SMOKE_TMPDIR/default-start.log"
+grep -Fq \
+  "gateway public key: 2222222222222222222222222222222222222222222222222222222222222222" \
+  "$SMOKE_TMPDIR/default-start.log"
 
 active_private_key=3333333333333333333333333333333333333333333333333333333333333333
 active_topology_before="$(sha256sum "$managed_systemctl_state/topology" | awk '{print $1}')"
