@@ -8,7 +8,8 @@ use sqlx::{types::Json as SqlJson, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    RuntimeTunnelManager, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    RuntimeTunnelManager, TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput,
 };
 
 use crate::{
@@ -775,21 +776,50 @@ impl Repository {
                     anyhow::bail!("tunnel_plan_name_is_immutable");
                 }
                 let previous_plan: SqlJson<serde_json::Value> = existing_row.try_get("plan")?;
-                let previous_plan = serde_json::from_value::<TunnelPlan>(previous_plan.0)
-                    .context("invalid persisted tunnel plan")?;
+                let previous_plan = serde_json::from_value::<TunnelPlan>(previous_plan.0);
                 let previous_credentials = existing_row
                     .try_get::<Option<SqlJson<serde_json::Value>>, _>("builtin_credentials")?
-                    .map(|value| {
-                        serde_json::from_value(value.0)
-                            .context("invalid persisted tunnel builtin credentials")
-                    })
-                    .transpose()?;
-                let builtin_credentials = reconcile_tunnel_builtin_credentials(
-                    plan_id,
-                    Some(&previous_plan),
-                    previous_credentials.as_ref(),
-                    plan,
-                )?;
+                    .map(|value| serde_json::from_value::<TunnelBuiltinCredentials>(value.0))
+                    .transpose();
+                let builtin_credentials = match (&previous_plan, &previous_credentials) {
+                    (Ok(previous_plan), Ok(previous_credentials)) => {
+                        reconcile_tunnel_builtin_credentials(
+                            plan_id,
+                            Some(previous_plan),
+                            previous_credentials.as_ref(),
+                            plan,
+                        )?
+                    }
+                    _ => {
+                        let previous_plan_error =
+                            previous_plan.as_ref().err().map(ToString::to_string);
+                        let previous_credentials_error =
+                            previous_credentials.as_ref().err().map(ToString::to_string);
+                        warn!(
+                            event = "tunnel_plan_configuration_repair",
+                            %plan_id,
+                            previous_plan_error = previous_plan_error.as_deref().unwrap_or("none"),
+                            previous_credentials_error = previous_credentials_error
+                                .as_deref()
+                                .unwrap_or("none"),
+                            "regenerating credentials while applying reviewed tunnel replacement"
+                        );
+                        let valid_previous_credentials =
+                            previous_credentials.as_ref().ok().and_then(Option::as_ref);
+                        let generation = match (valid_previous_credentials, plan.kind) {
+                            (
+                                Some(previous @ TunnelBuiltinCredentials::Wireguard { .. }),
+                                TunnelKind::Wireguard,
+                            )
+                            | (
+                                Some(previous @ TunnelBuiltinCredentials::Openvpn { .. }),
+                                TunnelKind::Openvpn,
+                            ) => next_credential_generation(previous)?,
+                            _ => 1,
+                        };
+                        generate_tunnel_builtin_credentials(plan_id, plan, generation)?
+                    }
+                };
                 validate_postgres_tunnel_plan_resource_conflicts(&mut tx, plan, Some(plan_id))
                     .await?;
                 validate_postgres_tunnel_plan_adapter_references(&mut tx, plan).await?;

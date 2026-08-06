@@ -562,6 +562,11 @@ async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) ->
             .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
         ..RuntimeTunnelControl::default()
     };
+    let endpoint_mtu = if manager == RuntimeTunnelManager::AgentBuiltin {
+        vpsman_common::default_tunnel_mtu(TunnelKind::Wireguard)
+    } else {
+        None
+    };
     let input = TunnelPlanInput {
         name: "edge-a-edge-b".to_string(),
         interface_name: "wg0".to_string(),
@@ -585,8 +590,8 @@ async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) ->
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Wireguard),
-        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Wireguard),
+        left_mtu: endpoint_mtu,
+        right_mtu: endpoint_mtu,
         ospf: None,
     };
     crate::tests_network::seed_test_plan_adapter_definitions(repo, &input).await;
