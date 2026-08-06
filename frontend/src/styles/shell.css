@@ -1286,6 +1286,10 @@ nav {
   color: var(--muted);
 }
 
+.gridToolbarActions .secondaryAction:disabled {
+  opacity: 0.5;
+}
+
 .secondaryAction.active {
   border-color: var(--primary-border);
   background: var(--primary-soft);
