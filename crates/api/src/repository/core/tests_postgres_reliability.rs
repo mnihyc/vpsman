@@ -676,6 +676,8 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
     noisy_input.name = "topology-noisy".to_string();
     noisy_input.interface_name = "tun-noisy".to_string();
     noisy_input.runtime_control = Default::default();
+    noisy_input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    noisy_input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
     noisy_input.left_client_id = "topology-noisy-left".to_string();
     noisy_input.right_client_id = "topology-noisy-right".to_string();
     noisy_input.address_pool_cidr = "10.70.0.0/30".to_string();
@@ -1799,6 +1801,8 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
     tunnel_input.name = "atomic-ospf-plan".to_string();
     tunnel_input.interface_name = "gre77".to_string();
     tunnel_input.kind = TunnelKind::Gre;
+    tunnel_input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    tunnel_input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
     tunnel_input.left_client_id = "atomic-a".to_string();
     tunnel_input.right_client_id = "atomic-b".to_string();
     tunnel_input.runtime_control = RuntimeTunnelControl {
