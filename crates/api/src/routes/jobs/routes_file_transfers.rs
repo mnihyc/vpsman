@@ -74,11 +74,19 @@ pub(crate) async fn list_file_transfer_sessions(
     let mut sessions = state
         .repo
         .list_file_transfer_sessions(limit_or_default(query.limit), client_id, query.session_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_sessions_unavailable",
+            "File-transfer sessions could not be loaded.",
+        ))?;
     state
         .repo
         .annotate_file_transfer_handoff_evidence(&mut sessions)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_handoff_evidence_load_failed",
+            "File-transfer handoff evidence could not be loaded.",
+        ))?;
     Ok(Json(sessions))
 }
 
@@ -94,7 +102,11 @@ pub(crate) async fn list_file_transfer_source_artifacts(
         state
             .repo
             .list_file_transfer_source_artifacts(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "file_transfer_source_artifacts_unavailable",
+                "File-transfer source artifacts could not be loaded.",
+            ))?,
     ))
 }
 
@@ -146,7 +158,11 @@ pub(crate) async fn upload_file_transfer_source_artifact(
     .await?;
     if let Err(error) = store.put_new(&object_key, &bytes).await {
         release_file_transfer_artifact_reservation(&state, &object_key).await;
-        return Err(ApiError::from(error));
+        return Err(ApiError::internal(
+            "file_transfer_source_store_failed",
+            "The file-transfer source could not be stored.",
+            error,
+        ));
     }
     let artifact = match state
         .repo
@@ -170,7 +186,11 @@ pub(crate) async fn upload_file_transfer_source_artifact(
                 true,
             )
             .await;
-            return Err(ApiError::from(error));
+            return Err(ApiError::internal(
+                "file_transfer_source_record_failed",
+                "The file-transfer source could not be recorded.",
+                error,
+            ));
         }
     };
     Ok((axum::http::StatusCode::CREATED, Json(artifact)))
@@ -191,7 +211,11 @@ pub(crate) async fn download_file_transfer_source_artifact(
     let artifact = state
         .repo
         .get_file_transfer_source_artifact(artifact_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_source_artifact_unavailable",
+            "The file-transfer source artifact could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("file_transfer_source_artifact_not_found"))?;
     if artifact.status == "deleting" || artifact.status == "creating" {
         return Err(ApiError::conflict(
@@ -251,7 +275,11 @@ pub(crate) async fn create_file_transfer_handoff(
             sha256_hex,
             size_bytes,
         )
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_handoff_lookup_failed",
+            "The file-transfer handoff could not be checked.",
+        ))?
     {
         return Ok(Json(FileTransferHandoffView {
             client_id,
@@ -319,7 +347,11 @@ pub(crate) async fn create_file_transfer_handoff(
         Err(error) => {
             release_file_transfer_artifact_reservation(&state, &object_key).await;
             let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(ApiError::from(error));
+            return Err(ApiError::internal(
+                "file_transfer_handoff_store_failed",
+                "The file-transfer handoff could not be stored.",
+                error,
+            ));
         }
     };
     let handoff_artifact = NewServerArtifact {
@@ -339,7 +371,11 @@ pub(crate) async fn create_file_transfer_handoff(
             created_object,
         )
         .await;
-        return Err(ApiError::from(error));
+        return Err(ApiError::internal(
+            "file_transfer_handoff_record_failed",
+            "The file-transfer handoff could not be recorded.",
+            error,
+        ));
     }
     Ok(Json(FileTransferHandoffView {
         client_id,
@@ -543,11 +579,19 @@ async fn completed_download_session(
     let mut sessions = state
         .repo
         .list_file_transfer_sessions(1, Some(client_id), Some(session_id))
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_sessions_unavailable",
+            "File-transfer sessions could not be loaded.",
+        ))?;
     state
         .repo
         .annotate_file_transfer_handoff_evidence(&mut sessions)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_handoff_evidence_load_failed",
+            "File-transfer handoff evidence could not be loaded.",
+        ))?;
     let session = sessions
         .into_iter()
         .next()
@@ -592,29 +636,47 @@ async fn write_handoff_temp_file(
     let chunks = state
         .repo
         .list_file_transfer_download_handoff_chunks(client_id, session_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "file_transfer_handoff_chunks_unavailable",
+            "File-transfer handoff chunks could not be loaded.",
+        ))?;
     if chunks.is_empty() && expected_size_bytes != 0 {
         return Err(ApiError::conflict("file_transfer_handoff_chunks_missing"));
     }
     let chunks = select_valid_handoff_chunks(state, chunks).await?;
     let mut file = create_private_file_new_async(temp_path)
         .await
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+        .map_err(|error| {
+            ApiError::internal(
+                "file_transfer_handoff_assembly_failed",
+                "The file-transfer handoff could not be assembled.",
+                anyhow::Error::from(error),
+            )
+        })?;
     let mut hasher = Sha256::new();
     let mut next_offset = 0_i64;
     for chunk in &chunks {
         if chunk.offset != next_offset {
             return Err(ApiError::conflict("file_transfer_handoff_chunk_gap"));
         }
-        file.write_all(&chunk.bytes)
-            .await
-            .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+        file.write_all(&chunk.bytes).await.map_err(|error| {
+            ApiError::internal(
+                "file_transfer_handoff_assembly_failed",
+                "The file-transfer handoff could not be assembled.",
+                anyhow::Error::from(error),
+            )
+        })?;
         hasher.update(&chunk.bytes);
         next_offset = next_offset.saturating_add(chunk.size_bytes);
     }
-    file.sync_data()
-        .await
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    file.sync_data().await.map_err(|error| {
+        ApiError::internal(
+            "file_transfer_handoff_assembly_failed",
+            "The file-transfer handoff could not be assembled.",
+            anyhow::Error::from(error),
+        )
+    })?;
     drop(file);
     if next_offset != expected_size_bytes {
         return Err(ApiError::conflict("file_transfer_handoff_size_mismatch"));
@@ -712,7 +774,11 @@ async fn load_handoff_chunk_bytes(
             })?;
             let data = store
                 .get_with_limit(object_key, state.artifact_max_bytes())
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "file_transfer_handoff_artifact_load_failed",
+                    "The file-transfer handoff artifact could not be loaded.",
+                ))?;
             if let Some(expected_hash) = output.artifact_sha256_hex.as_deref() {
                 if hex::encode(Sha256::digest(&data)) != expected_hash {
                     return Err(ApiError::conflict(
@@ -752,7 +818,13 @@ fn validate_handoff_client_id(client_id: &str) -> Result<(), ApiError> {
 
 fn file_transfer_handoff_temp_path(session_id: Uuid) -> Result<PathBuf, ApiError> {
     let root = std::env::temp_dir().join("vpsman-transfer-handoff");
-    ensure_private_dir(&root).map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    ensure_private_dir(&root).map_err(|error| {
+        ApiError::internal(
+            "file_transfer_handoff_spool_unavailable",
+            "The file-transfer handoff workspace is unavailable.",
+            anyhow::Error::from(error),
+        )
+    })?;
     Ok(root.join(format!(
         "vpsman-transfer-handoff-{session_id}-{}.tmp",
         Uuid::new_v4()
@@ -805,7 +877,11 @@ async fn reserve_file_transfer_artifact(
             {
                 ApiError::conflict(conflict_code)
             } else {
-                ApiError::from(error)
+                ApiError::internal(
+                    "file_transfer_artifact_reservation_failed",
+                    "The file-transfer artifact could not be reserved.",
+                    error,
+                )
             }
         })
 }

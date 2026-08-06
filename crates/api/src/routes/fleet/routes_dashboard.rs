@@ -351,7 +351,14 @@ async fn build_dashboard_overview(
     preferences: &OperatorPreferences,
 ) -> Result<DashboardOverviewView, ApiError> {
     let now = snapshot_unix;
-    let agents = state.repo.list_agents().await?;
+    let agents = state
+        .repo
+        .list_agents()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?;
     let available_filters = build_available_filters(&agents);
     let scoped_agents = agents
         .iter()
@@ -394,7 +401,11 @@ async fn build_dashboard_overview(
             start_unix: state
                 .repo
                 .dashboard_telemetry_start_unix(&scoped_client_id_list)
-                .await?
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "dashboard_history_range_unavailable",
+                    "The available dashboard-history range could not be loaded.",
+                ))?
                 .unwrap_or(range.end_unix),
             ..range
         }
@@ -413,7 +424,11 @@ async fn build_dashboard_overview(
     let network_rate_selection = state
         .repo
         .network_rate_interface_selection_for_clients(&scoped_client_id_list)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_interface_selection_unavailable",
+            "Network-interface selection could not be loaded.",
+        ))?;
     let network_rates = load_dashboard_network_rates(
         state,
         &telemetry_range,
@@ -425,7 +440,11 @@ async fn build_dashboard_overview(
     let mut running_jobs = state
         .repo
         .list_dashboard_running_jobs(&scoped_client_id_list, DASHBOARD_LIMIT + 1)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_jobs_unavailable",
+            "Dashboard job evidence could not be loaded.",
+        ))?;
     let running_jobs_truncated = running_jobs.len() > DASHBOARD_LIMIT as usize;
     running_jobs.truncate(DASHBOARD_LIMIT as usize);
     let running_job_targets =
@@ -438,7 +457,11 @@ async fn build_dashboard_overview(
             range.end_unix,
             DASHBOARD_LIMIT + 1,
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_backups_unavailable",
+            "Dashboard backup evidence could not be loaded.",
+        ))?;
     let backups_truncated = backup_requests.len() > DASHBOARD_LIMIT as usize;
     backup_requests.truncate(DASHBOARD_LIMIT as usize);
     let latest_rollups = latest_rollups_by_client(&rollups);
@@ -841,7 +864,11 @@ async fn load_dashboard_rollups(
                 chart_step_secs as i32,
                 client_ids,
             )
-            .await?);
+            .await
+            .map_err(ApiError::internal_mapper(
+                "dashboard_resource_history_unavailable",
+                "Dashboard resource history could not be loaded.",
+            ))?);
     }
     let bounded_range = telemetry_query_bounds(range);
     Ok(state
@@ -854,7 +881,11 @@ async fn load_dashboard_rollups(
             chart_step_secs as i32,
             client_ids,
         )
-        .await?)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_resource_history_unavailable",
+            "Dashboard resource history could not be loaded.",
+        ))?)
 }
 
 async fn load_dashboard_network_rates(
@@ -874,7 +905,11 @@ async fn load_dashboard_network_rates(
                 chart_step_secs as i32,
                 selection,
             )
-            .await?);
+            .await
+            .map_err(ApiError::internal_mapper(
+                "dashboard_network_history_unavailable",
+                "Dashboard network history could not be loaded.",
+            ))?);
     }
     let bounded_range = telemetry_query_bounds(range);
     Ok(state
@@ -887,7 +922,11 @@ async fn load_dashboard_network_rates(
             chart_step_secs as i32,
             selection,
         )
-        .await?)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_network_history_unavailable",
+            "Dashboard network history could not be loaded.",
+        ))?)
 }
 
 fn dashboard_uses_raw_samples(range: &DashboardRange) -> bool {
@@ -968,7 +1007,11 @@ async fn running_job_targets_by_client(
     for target in state
         .repo
         .list_dashboard_job_targets(&job_ids, client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "dashboard_job_targets_unavailable",
+            "Dashboard job targets could not be loaded.",
+        ))?
     {
         *counts.entry(target.client_id).or_insert(0) += 1;
     }

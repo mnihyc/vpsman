@@ -47,7 +47,9 @@ pub(crate) async fn list_schedules(
         limit: Some(limit_or_default(query.limit)),
         ..query
     };
-    Ok(Json(state.repo.query_schedules(&query).await?))
+    Ok(Json(state.repo.query_schedules(&query).await.map_err(
+        ApiError::internal_mapper("schedules_unavailable", "Schedules could not be loaded."),
+    )?))
 }
 
 pub(crate) async fn get_schedule(
@@ -97,7 +99,16 @@ pub(crate) async fn create_schedule(
     .await?;
     Ok((
         StatusCode::CREATED,
-        Json(state.repo.create_schedule(request, &operator).await?),
+        Json(
+            state
+                .repo
+                .create_schedule(request, &operator)
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "schedule_create_failed",
+                    "The schedule could not be created.",
+                ))?,
+        ),
     ))
 }
 
@@ -120,7 +131,11 @@ pub(crate) async fn update_schedule(
         selector_expression: request.expected_selector_expression.clone(),
         target_client_ids: request.expected_target_client_ids.clone(),
     };
-    let current = state.repo.schedule_by_id(schedule_id).await?;
+    let current = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     require_schedule_snapshot(&current, &expectation)?;
     let selector_unchanged =
         request.selector_expression.trim() == expectation.selector_expression.trim();
@@ -172,7 +187,11 @@ pub(crate) async fn update_schedule_targets(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_schedule_confirmed(request.confirmed)?;
-    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     require_valid_schedule_operation(&schedule)?;
     let selector_expression = schedule.selector_expression.trim().to_string();
     if selector_expression.is_empty() {
@@ -185,7 +204,11 @@ pub(crate) async fn update_schedule_targets(
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: selector_expression.clone(),
         })
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedule_targets_resolution_failed",
+            "Schedule targets could not be resolved.",
+        ))?
         .targets
         .into_iter()
         .map(|target| target.id)
@@ -257,7 +280,11 @@ pub(crate) async fn defer_schedule(
         .await?;
     validate_defer_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
-    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     require_valid_schedule_operation(&schedule)?;
     verify_schedule_privilege_for_view(
         &state,
@@ -278,7 +305,11 @@ pub(crate) async fn defer_schedule(
                 request.reason.as_deref(),
                 &operator,
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "schedule_defer_failed",
+                "The schedule could not be deferred.",
+            ))?,
     ))
 }
 
@@ -295,7 +326,11 @@ pub(crate) async fn apply_schedule_now(
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
     require_schedule_confirmed(request.confirmed)?;
-    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     let operation = require_valid_schedule_operation(&schedule)?.clone();
     verify_schedule_privilege_for_view(
         &state,
@@ -335,7 +370,11 @@ pub(crate) async fn delete_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_schedule_confirmed(request.confirmed)?;
-    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     verify_schedule_privilege_for_view(
         &state,
         "schedule.delete",
@@ -349,7 +388,11 @@ pub(crate) async fn delete_schedule(
     state
         .repo
         .soft_delete_schedule(schedule_id, &operator)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedule_delete_failed",
+            "The schedule could not be deleted.",
+        ))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -364,7 +407,11 @@ async fn mutate_schedule_enabled(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     require_schedule_confirmed(request.confirmed)?;
-    let schedule = state.repo.schedule_by_id(schedule_id).await?;
+    let schedule = state
+        .repo
+        .schedule_by_id(schedule_id)
+        .await
+        .map_err(map_schedule_lookup_error)?;
     if enabled {
         require_valid_schedule_operation(&schedule)?;
     }
@@ -389,7 +436,11 @@ async fn mutate_schedule_enabled(
         state
             .repo
             .set_schedule_enabled(schedule_id, enabled, &operator)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "schedule_enabled_state_update_failed",
+                "The schedule enabled state could not be changed.",
+            ))?,
     ))
 }
 
@@ -508,8 +559,13 @@ async fn verify_schedule_privilege_for_definition(
             resolved_schedule_targets(state, request.target_client_ids).await?
         }
     };
-    let operation_payload = encode_json(request.operation)
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    let operation_payload = encode_json(request.operation).map_err(|error| {
+        ApiError::internal(
+            "schedule_privilege_intent_failed",
+            "The schedule privilege request could not be prepared.",
+            anyhow::Error::from(error),
+        )
+    })?;
     let operation_payload_hash = payload_hash(&operation_payload);
     let command_type = job_command_type_label(request.operation);
     let schedule_id = schedule_id.map(|id| id.to_string());
@@ -617,7 +673,11 @@ async fn resolved_schedule_targets(
     let resolved = state
         .repo
         .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedule_targets_resolution_failed",
+            "Schedule targets could not be resolved.",
+        ))?
         .targets
         .into_iter()
         .map(|agent| agent.id)
@@ -648,7 +708,11 @@ pub(crate) async fn require_selector_target_snapshot(
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: selector_expression.to_string(),
         })
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedule_targets_resolution_failed",
+            "Schedule targets could not be resolved.",
+        ))?
         .targets
         .into_iter()
         .map(|target| target.id)
@@ -761,7 +825,11 @@ pub(crate) fn map_schedule_snapshot_error(error: anyhow::Error) -> ApiError {
     if error.to_string().contains("schedule_snapshot_stale") {
         ApiError::conflict("schedule_snapshot_stale")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "schedule_mutation_failed",
+            "The schedule change could not be completed.",
+            error,
+        )
     }
 }
 
@@ -773,6 +841,10 @@ fn map_schedule_lookup_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::not_found("schedule_not_found")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "schedule_unavailable",
+            "The schedule could not be loaded.",
+            error,
+        )
     }
 }

@@ -96,17 +96,38 @@ pub(crate) async fn list_jobs(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    let jobs = state.repo.query_jobs(&query).await?;
+    let jobs = state
+        .repo
+        .query_jobs(&query)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "jobs_unavailable",
+            "Jobs could not be loaded.",
+        ))?;
     let mut reconciled = false;
     for job in jobs
         .iter()
         .filter(|job| job.command_type == "terminal_open")
     {
-        state.repo.reconcile_terminal_job_by_id(job.id).await?;
+        state
+            .repo
+            .reconcile_terminal_job_by_id(job.id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "terminal_job_reconciliation_failed",
+                "Terminal job state could not be reconciled.",
+            ))?;
         reconciled = true;
     }
     Ok(Json(if reconciled {
-        state.repo.query_jobs(&query).await?
+        state
+            .repo
+            .query_jobs(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "jobs_unavailable",
+                "Jobs could not be loaded.",
+            ))?
     } else {
         jobs
     }))
@@ -120,11 +141,22 @@ pub(crate) async fn get_job(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    state.repo.reconcile_terminal_job_by_id(job_id).await?;
+    state
+        .repo
+        .reconcile_terminal_job_by_id(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_job_reconciliation_failed",
+            "Terminal job state could not be reconciled.",
+        ))?;
     let job = state
         .repo
         .get_job(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_unavailable",
+            "The job could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("job_not_found"))?;
     Ok(Json(job))
 }
@@ -137,7 +169,12 @@ pub(crate) async fn list_job_targets(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_job_targets(job_id).await?))
+    Ok(Json(state.repo.list_job_targets(job_id).await.map_err(
+        ApiError::internal_mapper(
+            "job_targets_unavailable",
+            "Job targets could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn download_job_target_statuses(
@@ -148,7 +185,15 @@ pub(crate) async fn download_job_target_statuses(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    let mut targets = state.repo.list_job_targets(job_id).await?;
+    let mut targets =
+        state
+            .repo
+            .list_job_targets(job_id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_targets_unavailable",
+                "Job targets could not be loaded.",
+            ))?;
     targets.sort_by(|left, right| left.client_id.cmp(&right.client_id));
 
     let archive_temp = TempDownloadFile::new("vpsman-job-target-status", "tar")?;
@@ -157,8 +202,20 @@ pub(crate) async fn download_job_target_statuses(
         write_job_target_status_archive(&archive_path, targets)
     })
     .await
-    .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?
-    .map_err(ApiError::from)?;
+    .map_err(|error| {
+        ApiError::internal(
+            "job_target_status_export_failed",
+            "The job target-status export could not be prepared.",
+            anyhow::anyhow!(error),
+        )
+    })?
+    .map_err(|error| {
+        ApiError::internal(
+            "job_target_status_export_failed",
+            "The job target-status export could not be prepared.",
+            error,
+        )
+    })?;
 
     let body = streaming_temp_file_body(archive_temp).await?;
     let mut response = Response::new(body);
@@ -215,7 +272,11 @@ pub(crate) async fn list_job_outputs(
                 limit: limit.saturating_add(1),
             },
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_outputs_unavailable",
+            "Job outputs could not be loaded.",
+        ))?;
     let has_more = items.len() as i64 > limit;
     if has_more {
         items.truncate(limit as usize);
@@ -318,8 +379,20 @@ pub(crate) async fn download_file_download_bundle(
         write_file_download_bundle_archive(&archive_path, entries)
     })
     .await
-    .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?
-    .map_err(ApiError::from)?;
+    .map_err(|error| {
+        ApiError::internal(
+            "file_download_bundle_export_failed",
+            "The file download bundle could not be prepared.",
+            anyhow::anyhow!(error),
+        )
+    })?
+    .map_err(|error| {
+        ApiError::internal(
+            "file_download_bundle_export_failed",
+            "The file download bundle could not be prepared.",
+            error,
+        )
+    })?;
 
     let body = streaming_temp_file_body(archive_temp).await?;
     let mut response = Response::new(body);
@@ -435,8 +508,20 @@ pub(crate) async fn download_job_output_archive(
     let archive_size =
         tokio::task::spawn_blocking(move || write_job_output_archive(&archive_path, entries))
             .await
-            .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?
-            .map_err(ApiError::from)?;
+            .map_err(|error| {
+                ApiError::internal(
+                    "job_output_export_failed",
+                    "The job output export could not be prepared.",
+                    anyhow::anyhow!(error),
+                )
+            })?
+            .map_err(|error| {
+                ApiError::internal(
+                    "job_output_export_failed",
+                    "The job output export could not be prepared.",
+                    error,
+                )
+            })?;
 
     let body = streaming_temp_file_body(archive_temp).await?;
     let mut response = Response::new(body);
@@ -596,7 +681,13 @@ struct TempDownloadFile {
 impl TempDownloadFile {
     fn new(prefix: &str, extension: &str) -> Result<Self, ApiError> {
         let root = std::env::temp_dir().join("vpsman-api-download-spool");
-        ensure_private_dir(&root).map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+        ensure_private_dir(&root).map_err(|error| {
+            ApiError::internal(
+                "job_download_spool_unavailable",
+                "The job download workspace is unavailable.",
+                anyhow::anyhow!(error),
+            )
+        })?;
         Ok(Self {
             path: root.join(format!("{prefix}-{}.{}", Uuid::new_v4(), extension)),
         })
@@ -686,7 +777,7 @@ async fn spool_selected_job_outputs(
     let temp = TempDownloadFile::new("vpsman-job-output-stream", "bin")?;
     let mut file = create_private_file_new_async(temp.path())
         .await
-        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+        .map_err(job_download_spool_error)?;
     let mut hasher = Sha256::new();
     let mut size_bytes = 0_u64;
     for output in outputs {
@@ -700,11 +791,9 @@ async fn spool_selected_job_outputs(
         hasher.update(&bytes);
         file.write_all(&bytes)
             .await
-            .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+            .map_err(job_download_spool_error)?;
     }
-    file.flush()
-        .await
-        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    file.flush().await.map_err(job_download_spool_error)?;
     drop(file);
     Ok(SpooledFileDownloadPayload {
         temp,
@@ -720,7 +809,7 @@ async fn spool_file_download_payload(
     let temp = TempDownloadFile::new("vpsman-file-download-entry", "bin")?;
     let mut file = create_private_file_new_async(temp.path())
         .await
-        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+        .map_err(job_download_spool_error)?;
     let mut hasher = Sha256::new();
     let mut size_bytes = 0_u64;
     for output in outputs.iter().filter(|output| output.stream == "stdout") {
@@ -736,11 +825,9 @@ async fn spool_file_download_payload(
         hasher.update(&bytes);
         file.write_all(&bytes)
             .await
-            .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+            .map_err(job_download_spool_error)?;
     }
-    file.flush()
-        .await
-        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    file.flush().await.map_err(job_download_spool_error)?;
     drop(file);
     Ok(SpooledFileDownloadPayload {
         temp,
@@ -898,7 +985,7 @@ fn target_status_entry_name(client_id: &str) -> String {
 async fn streaming_temp_file_body(temp: TempDownloadFile) -> Result<Body, ApiError> {
     let file = tokio::fs::File::open(temp.path())
         .await
-        .map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+        .map_err(job_download_spool_error)?;
     let stream = stream::try_unfold(
         (
             file,
@@ -1001,9 +1088,22 @@ fn encode_job_output_cursor(output: &JobOutputListItemView) -> Result<String, Ap
         client_id: output.client_id.clone(),
         seq: output.seq,
     };
-    let bytes =
-        serde_json::to_vec(&payload).map_err(|error| ApiError::from(anyhow::anyhow!(error)))?;
+    let bytes = serde_json::to_vec(&payload).map_err(|error| {
+        ApiError::internal(
+            "job_output_cursor_failed",
+            "The job output cursor could not be prepared.",
+            anyhow::anyhow!(error),
+        )
+    })?;
     Ok(BASE64_URL.encode(bytes))
+}
+
+fn job_download_spool_error(error: std::io::Error) -> ApiError {
+    ApiError::internal(
+        "job_download_spool_failed",
+        "The job download could not be prepared.",
+        anyhow::anyhow!(error),
+    )
 }
 
 async fn load_job_outputs_for_export(
@@ -1032,7 +1132,11 @@ async fn load_job_outputs_for_export(
                     limit: page_limit,
                 },
             )
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_outputs_unavailable",
+                "Job outputs could not be loaded.",
+            ))?;
         if items.is_empty() {
             break;
         }
@@ -1140,7 +1244,11 @@ pub(crate) async fn materialize_output_bytes(
             .ok_or_else(|| ApiError::not_found("job_output_artifact_not_found"))?;
         let bytes = store
             .get_with_limit(object_key, state.artifact_max_bytes())
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_output_artifact_load_failed",
+                "The job-output artifact could not be loaded.",
+            ))?;
         if let Some(expected_hash) = output.artifact_sha256_hex.as_deref() {
             if vpsman_common::payload_hash(&bytes) != expected_hash {
                 return Err(ApiError::conflict("job_output_artifact_integrity_mismatch"));
@@ -1196,7 +1304,16 @@ pub(crate) async fn compare_job_outputs(
         .as_deref()
         .unwrap_or(&operator.operator.preferences.bulk_output_compare_mode);
     validate_output_compare_mode(mode)?;
-    Ok(Json(state.repo.compare_job_outputs(job_id, mode).await?))
+    Ok(Json(
+        state
+            .repo
+            .compare_job_outputs(job_id, mode)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_output_comparison_unavailable",
+                "The job-output comparison could not be loaded.",
+            ))?,
+    ))
 }
 
 fn validate_output_compare_mode(mode: &str) -> Result<(), ApiError> {
@@ -1218,7 +1335,11 @@ pub(crate) async fn download_job_output_chunk(
     let output = state
         .repo
         .get_job_output(job_id, &client_id, seq)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_output_unavailable",
+            "The job output could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("job_output_download_not_found"))?;
     if !matches!(output.stream.as_str(), "stdout" | "stderr") {
         return Err(ApiError::bad_request("job_output_status_not_downloadable"));
@@ -1266,7 +1387,11 @@ pub(crate) async fn download_job_output_chunk(
     let artifact = state
         .repo
         .get_job_output_artifact_ref(job_id, &client_id, seq)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_output_artifact_unavailable",
+            "The job-output artifact could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("job_output_artifact_not_found"))?;
     let expected_size = u64::try_from(artifact.size_bytes)
         .map_err(|_| ApiError::conflict("job_output_artifact_integrity_mismatch"))?;
@@ -1342,7 +1467,11 @@ fn map_process_supervisor_inventory_error(error: anyhow::Error) -> ApiError {
             "Exact process inventory exceeds the bounded history scan. Request a smaller limit or prune retained job-output history before retrying.",
         )
     } else {
-        error.into()
+        ApiError::internal(
+            "process_supervisor_inventory_unavailable",
+            "The process-supervisor inventory could not be loaded.",
+            error,
+        )
     }
 }
 
@@ -1354,7 +1483,12 @@ pub(crate) async fn list_audit_logs(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_AUDIT_READ)
         .await?;
-    Ok(Json(state.repo.query_audit_logs(&query).await?))
+    Ok(Json(state.repo.query_audit_logs(&query).await.map_err(
+        ApiError::internal_mapper(
+            "audit_logs_unavailable",
+            "Audit records could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn get_audit_log(
@@ -1368,7 +1502,11 @@ pub(crate) async fn get_audit_log(
     let audit = state
         .repo
         .get_audit_log(audit_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "audit_log_unavailable",
+            "The audit record could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("audit_event_not_found"))?;
     Ok(Json(audit))
 }
@@ -1385,7 +1523,11 @@ pub(crate) async fn list_network_observations(
         state
             .repo
             .list_network_observations(limit_or_default(query.limit), true)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_observations_unavailable",
+                "Network observations could not be loaded.",
+            ))?,
     ))
 }
 
@@ -1401,7 +1543,11 @@ pub(crate) async fn list_network_observation_trends(
         state
             .repo
             .list_network_observation_trends(limit_or_default(query.limit), true)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_observation_trends_unavailable",
+                "Network observation trends could not be loaded.",
+            ))?,
     ))
 }
 

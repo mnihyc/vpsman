@@ -52,7 +52,11 @@ pub(crate) async fn list_configuration_presets(
         state
             .repo
             .list_configuration_presets(query.behavior.as_deref())
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "configuration_presets_unavailable",
+                "The configuration presets could not be loaded.",
+            ))?,
     ))
 }
 
@@ -216,7 +220,11 @@ pub(crate) async fn list_configuration_sources(
     let mut rows = state
         .repo
         .list_configuration_sources(query.client_id.as_deref(), query.behavior.as_deref())
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "configuration_sources_unavailable",
+            "The configuration sources could not be loaded.",
+        ))?;
     if query.client_id.is_some() && rows.is_empty() {
         return Err(ApiError::not_found("configuration_client_not_found"));
     }
@@ -334,16 +342,30 @@ pub(crate) async fn effective_agent_config(
     let mut sources = state
         .repo
         .list_configuration_sources(Some(&query.client_id), None)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "configuration_sources_unavailable",
+            "The configuration sources could not be loaded.",
+        ))?;
     let mut desired_configs = enrich_runtime_sync(&state, &mut sources).await?;
     let mut config = desired_configs
         .remove(&query.client_id)
         .ok_or_else(|| ApiError::not_found("runtime_config_client_not_found"))?;
     clear_runtime_tunnel_credentials(&mut config.network);
-    let sections = serde_json::to_value(&config)
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
-    let toml = toml::to_string_pretty(&config)
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    let sections = serde_json::to_value(&config).map_err(|error| {
+        ApiError::internal(
+            "effective_agent_config_projection_failed",
+            "The effective agent configuration could not be displayed.",
+            anyhow::Error::from(error),
+        )
+    })?;
+    let toml = toml::to_string_pretty(&config).map_err(|error| {
+        ApiError::internal(
+            "effective_agent_config_projection_failed",
+            "The effective agent configuration could not be displayed.",
+            anyhow::Error::from(error),
+        )
+    })?;
     Ok(Json(EffectiveAgentConfigView {
         client_id: query.client_id,
         sections,
@@ -366,7 +388,11 @@ pub(crate) async fn list_network_adapter_definitions(
         state
             .repo
             .list_network_adapter_definitions(query.adapter_kind.as_deref())
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_adapter_definitions_unavailable",
+                "The network adapter definitions could not be loaded.",
+            ))?,
     ))
 }
 
@@ -401,7 +427,11 @@ pub(crate) async fn update_network_adapter_definition(
     let existing = state
         .repo
         .network_adapter_definition_by_id(definition_id, None)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_adapter_definition_unavailable",
+            "The network adapter definition could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("network_adapter_definition_not_found"))?;
     if existing.adapter_kind != request.adapter_kind {
         return Err(ApiError::conflict(
@@ -456,7 +486,11 @@ async fn resolve_override_targets(
             .resolve_bulk_targets(&BulkResolveRequest {
                 selector_expression: selector_expression.trim().to_string(),
             })
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "configuration_override_targets_unavailable",
+                "The configuration override targets could not be resolved.",
+            ))?;
         selected.extend(resolved.targets.into_iter().map(|agent| agent.id));
     }
     if selected.is_empty() {
@@ -472,7 +506,11 @@ async fn resolve_override_targets(
     let known = state
         .repo
         .list_agents()
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "agent_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?
         .into_iter()
         .map(|agent| agent.id)
         .collect::<BTreeSet<_>>();
@@ -497,7 +535,14 @@ async fn enrich_runtime_sync(
     if client_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let agents = state.repo.list_agents_for_client_ids(&client_ids).await?;
+    let agents = state
+        .repo
+        .list_agents_for_client_ids(&client_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "agent_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?;
     let agents_by_id = agents
         .into_iter()
         .map(|agent| (agent.id.clone(), agent))
@@ -506,15 +551,30 @@ async fn enrich_runtime_sync(
     let applies = state
         .repo
         .list_runtime_config_apply_states(apply_client_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "runtime_config_apply_states_unavailable",
+            "The runtime configuration apply states could not be loaded.",
+        ))?
         .into_iter()
         .map(|apply| (apply.client_id.clone(), apply))
         .collect::<HashMap<_, _>>();
-    let tunnel_plans = state.repo.list_tunnel_plans().await?;
+    let tunnel_plans = state
+        .repo
+        .list_tunnel_plans()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plans_unavailable",
+            "The tunnel plans could not be loaded.",
+        ))?;
     let preset_patches = state
         .repo
         .render_configuration_preset_patches_for_clients(&client_ids)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "configuration_preset_patches_unavailable",
+            "The configuration preset patches could not be loaded.",
+        ))?;
     let mut desired_hash_futures = Vec::with_capacity(client_ids.len());
     for client_id in &client_ids {
         let client_id = client_id.clone();
@@ -534,8 +594,13 @@ async fn enrich_runtime_sync(
                 tunnel_plans,
             )
             .await?;
-            let desired_hash = runtime_config_content_hash(&desired)
-                .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+            let desired_hash = runtime_config_content_hash(&desired).map_err(|error| {
+                ApiError::internal(
+                    "configuration_source_sync_hash_failed",
+                    "The configuration sync preview could not be prepared.",
+                    anyhow::Error::from(error),
+                )
+            })?;
             Ok::<_, ApiError>((client_id, desired, desired_hash))
         });
     }

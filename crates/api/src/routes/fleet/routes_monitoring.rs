@@ -139,7 +139,14 @@ pub(crate) async fn list_ping_targets(
     state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    let mut targets = state.repo.list_ping_targets().await?;
+    let mut targets = state
+        .repo
+        .list_ping_targets()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_targets_unavailable",
+            "Ping targets could not be loaded.",
+        ))?;
     enrich_ping_target_evidence(&state, &mut targets).await?;
     Ok(Json(targets))
 }
@@ -155,7 +162,11 @@ pub(crate) async fn get_ping_target(
     let mut detail = state
         .repo
         .get_ping_target_detail(target_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_unavailable",
+            "The Ping target could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
     enrich_ping_target_evidence(&state, std::slice::from_mut(&mut detail.target)).await?;
     Ok(Json(detail))
@@ -226,12 +237,20 @@ pub(crate) async fn update_ping_target(
     let existing = state
         .repo
         .ping_target_record(target_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_unavailable",
+            "The Ping target could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
     let mut prior_assignments = state
         .repo
         .list_ping_target_assignment_records(Some(target_id))
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_assignments_unavailable",
+            "Ping-target assignments could not be loaded.",
+        ))?
         .into_iter()
         .map(|assignment| assignment.client_id)
         .collect::<Vec<_>>();
@@ -315,14 +334,25 @@ pub(crate) async fn bulk_update_ping_targets(
     if target_ids.is_empty() {
         return Err(ApiError::bad_request("ping_target_selection_required"));
     }
-    let assignments = state.repo.list_ping_target_assignment_records(None).await?;
+    let assignments = state
+        .repo
+        .list_ping_target_assignment_records(None)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_assignments_unavailable",
+            "Ping-target assignments could not be loaded.",
+        ))?;
     let mut replacements = Vec::new();
     let mut changes = Vec::new();
     for target_id in &target_ids {
         let target = state
             .repo
             .ping_target_record(*target_id)
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "ping_target_unavailable",
+                "The Ping target could not be loaded.",
+            ))?
             .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
         let resolved = resolve_selector(
             &state,
@@ -492,7 +522,11 @@ pub(crate) async fn list_monitoring_shares(
             query.limit.unwrap_or(100),
             query.offset.unwrap_or(0),
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_shares_unavailable",
+            "Shared monitoring views could not be loaded.",
+        ))?;
     enrich_monitoring_share_target_evidence(&state, &mut shares).await?;
     Ok(Json(shares))
 }
@@ -677,7 +711,11 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
         let share = state
             .repo
             .monitoring_share_record(*share_id)
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_share_unavailable",
+                "The shared monitoring view could not be loaded.",
+            ))?
             .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
         if monitoring_share_status(&share, crate::unix_now()) != "active" {
             return Err(ApiError::conflict("monitoring_share_not_active"));
@@ -756,7 +794,11 @@ pub(crate) async fn public_monitoring_share_bootstrap(
     let share = state
         .repo
         .authenticate_monitoring_share(share_id, secret)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_authentication_unavailable",
+            "The shared monitoring view could not be authenticated.",
+        ))?
         .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
     if monitoring_share_status(&share, crate::unix_now()) != "active" {
         return Err(ApiError::gone("monitoring_share_unavailable"));
@@ -771,12 +813,20 @@ pub(crate) async fn public_monitoring_share_bootstrap(
     let visible_target_count = state
         .repo
         .list_agents_for_client_ids(&target_client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_targets_unavailable",
+            "Shared-view VPS targets could not be loaded.",
+        ))?
         .len();
     let (visitor_id, _) = state
         .repo
         .record_monitoring_share_visitor(&share, proposed_visitor_id, &source_ip, user_agent)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_visitor_record_failed",
+            "Shared-view access could not be recorded.",
+        ))?;
     let mut response = Json(PublicMonitoringShareBootstrapView {
         share: public_monitoring_share(&share, visible_target_count),
         visitor_id,
@@ -804,7 +854,11 @@ pub(crate) async fn public_monitoring_share_data(
     let share = state
         .repo
         .authenticate_monitoring_share(share_id, secret)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_authentication_unavailable",
+            "The shared monitoring view could not be authenticated.",
+        ))?
         .ok_or_else(|| ApiError::not_found("monitoring_share_not_found"))?;
     if monitoring_share_status(&share, crate::unix_now()) != "active" {
         return Err(ApiError::gone("monitoring_share_unavailable"));
@@ -813,7 +867,11 @@ pub(crate) async fn public_monitoring_share_data(
     if !state
         .repo
         .touch_monitoring_share_visitor(share.id, visitor_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_visitor_update_failed",
+            "Shared-view access evidence could not be updated.",
+        ))?
     {
         return Err(ApiError::unauthorized(
             "monitoring_share_visitor_bootstrap_required",
@@ -823,7 +881,11 @@ pub(crate) async fn public_monitoring_share_data(
     let mut agents = state
         .repo
         .list_agents_for_client_ids(&target_client_ids)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_share_targets_unavailable",
+            "Shared-view VPS targets could not be loaded.",
+        ))?;
     sort_monitoring_agents(&mut agents);
     let total = agents.len();
     let offset = query.offset.unwrap_or(0).min(total);
@@ -883,11 +945,25 @@ async fn monitoring_agents(
         .map(str::trim)
         .filter(|selector| !selector.is_empty())
     else {
-        return Ok(state.repo.list_agents().await?);
+        return Ok(state
+            .repo
+            .list_agents()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "vps_inventory_unavailable",
+                "The VPS inventory could not be loaded.",
+            ))?);
     };
     let client_ids =
         resolve_selector(state, selector_expression, MAX_MONITORING_SELECTOR_BYTES).await?;
-    Ok(state.repo.list_agents_for_client_ids(&client_ids).await?)
+    Ok(state
+        .repo
+        .list_agents_for_client_ids(&client_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?)
 }
 
 fn sort_monitoring_agents(agents: &mut [AgentView]) {
@@ -913,15 +989,27 @@ async fn monitoring_cards_for_agents(
     let network_rate_selection = state
         .repo
         .network_rate_interface_selection_for_clients(&client_ids)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_interface_selection_unavailable",
+            "Network-interface selection could not be loaded.",
+        ))?;
     let mut system_information = state
         .repo
         .monitoring_system_information_for_clients(&client_ids)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_system_information_unavailable",
+            "VPS system information could not be loaded.",
+        ))?;
     let resources = state
         .repo
         .list_latest_telemetry_rollups_for_clients(&client_ids, None)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_resources_unavailable",
+            "VPS resource metrics could not be loaded.",
+        ))?
         .into_iter()
         .map(|row| (row.client_id.clone(), row))
         .collect::<HashMap<_, _>>();
@@ -931,7 +1019,11 @@ async fn monitoring_cards_for_agents(
     for row in state
         .repo
         .list_dashboard_raw_telemetry_rollups(16, history_start, history_end, 60, &client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_resource_history_unavailable",
+            "VPS resource history could not be loaded.",
+        ))?
     {
         resource_history
             .entry(row.client_id.clone())
@@ -942,7 +1034,11 @@ async fn monitoring_cards_for_agents(
     for row in state
         .repo
         .list_latest_telemetry_network_rates_for_selection(&network_rate_selection)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_network_rates_unavailable",
+            "VPS network rates could not be loaded.",
+        ))?
         .into_iter()
         .filter(|row| network_rate_is_current(row, history_end))
     {
@@ -958,7 +1054,11 @@ async fn monitoring_cards_for_agents(
             60,
             &network_rate_selection,
         )
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_network_history_unavailable",
+            "VPS network history could not be loaded.",
+        ))?
     {
         network_history
             .entry(row.client_id.clone())
@@ -968,7 +1068,11 @@ async fn monitoring_cards_for_agents(
     let traffic = state
         .repo
         .list_traffic_accounting_for_client_ids(&client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "traffic_accounting_unavailable",
+            "Traffic accounting could not be loaded.",
+        ))?
         .into_iter()
         .map(|row| (row.client_id.clone(), row))
         .collect::<HashMap<_, _>>();
@@ -984,12 +1088,22 @@ async fn monitoring_cards_for_agents(
                 VPS_RULE_KEY_NETWORK_PORT_SPEED,
             ],
         )
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_rules_unavailable",
+            "VPS display rules could not be loaded.",
+        ))?
     {
         if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED {
             port_speeds.insert(
                 row.client_id,
-                monitoring_port_speed(&row.value_json).map_err(ApiError::from)?,
+                monitoring_port_speed(&row.value_json).map_err(|error| {
+                    ApiError::internal(
+                        "monitoring_card_projection_failed",
+                        "The VPS monitoring cards could not be prepared.",
+                        error,
+                    )
+                })?,
             );
         } else {
             billing_rules
@@ -1001,21 +1115,35 @@ async fn monitoring_cards_for_agents(
     let billing = billing_rules
         .into_iter()
         .map(|(client_id, rules)| {
-            let plan = monitoring_billing_plan(&rules).map_err(ApiError::from)?;
+            let plan = monitoring_billing_plan(&rules).map_err(|error| {
+                ApiError::internal(
+                    "monitoring_card_projection_failed",
+                    "The VPS monitoring cards could not be prepared.",
+                    error,
+                )
+            })?;
             Ok((client_id, plan))
         })
         .collect::<Result<HashMap<_, _>, ApiError>>()?;
     let primary_ping = state
         .repo
         .current_primary_ping_for_clients(&client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_ping_status_unavailable",
+            "Primary Ping status could not be loaded.",
+        ))?
         .into_iter()
         .collect::<HashMap<_, _>>();
     let mut primary_ping_history = HashMap::<String, Vec<PingRollupView>>::new();
     for row in state
         .repo
         .list_raw_primary_ping_results_for_clients(&client_ids, history_start, history_end, 16, 60)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_ping_history_unavailable",
+            "Primary Ping history could not be loaded.",
+        ))?
     {
         primary_ping_history
             .entry(row.client_id.clone())
@@ -1027,9 +1155,11 @@ async fn monitoring_cards_for_agents(
         .map(|client| {
             let client_id = client.id.clone();
             let traffic = traffic.get(&client_id).cloned().ok_or_else(|| {
-                ApiError::from(anyhow::anyhow!(
-                    "monitoring traffic projection missing for {client_id}"
-                ))
+                ApiError::internal(
+                    "monitoring_card_projection_failed",
+                    "The VPS monitoring cards could not be prepared.",
+                    anyhow::anyhow!("traffic projection missing for {client_id}"),
+                )
             })?;
             Ok(MonitoringCardView {
                 client,
@@ -1128,18 +1258,30 @@ async fn client_monitoring_view(
     let network_rate_selection = state
         .repo
         .network_rate_interface_selection_for_clients(&client_ids)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_interface_selection_unavailable",
+            "Network-interface selection could not be loaded.",
+        ))?;
     let client = state
         .repo
         .list_agents_for_client_ids(&client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("monitoring_client_not_found"))?;
     let system_information = state
         .repo
         .monitoring_system_information_for_clients(&client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_system_information_unavailable",
+            "VPS system information could not be loaded.",
+        ))?
         .remove(client_id);
     let range = monitoring_range(state, &client_ids, query).await?;
     let resources = if range.source == "raw" {
@@ -1152,7 +1294,11 @@ async fn client_monitoring_view(
                 range.step_secs,
                 &client_ids,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_resource_history_unavailable",
+                "VPS resource history could not be loaded.",
+            ))?
     } else {
         state
             .repo
@@ -1164,7 +1310,11 @@ async fn client_monitoring_view(
                 range.step_secs,
                 &client_ids,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_resource_history_unavailable",
+                "VPS resource history could not be loaded.",
+            ))?
     };
     let network = if range.source == "raw" {
         state
@@ -1176,7 +1326,11 @@ async fn client_monitoring_view(
                 range.step_secs,
                 &network_rate_selection,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_network_history_unavailable",
+                "VPS network history could not be loaded.",
+            ))?
     } else {
         state
             .repo
@@ -1188,7 +1342,11 @@ async fn client_monitoring_view(
                 range.step_secs,
                 &network_rate_selection,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_network_history_unavailable",
+                "VPS network history could not be loaded.",
+            ))?
     };
     let ping = if range.source == "raw" {
         state
@@ -1200,7 +1358,11 @@ async fn client_monitoring_view(
                 range.points,
                 range.step_secs,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_ping_history_unavailable",
+                "Ping history could not be loaded.",
+            ))?
     } else {
         state
             .repo
@@ -1211,9 +1373,21 @@ async fn client_monitoring_view(
                 range.points,
                 range.step_secs,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "monitoring_ping_history_unavailable",
+                "Ping history could not be loaded.",
+            ))?
     };
-    let traffic = state.repo.get_traffic_accounting(client_id).await?;
+    let traffic =
+        state
+            .repo
+            .get_traffic_accounting(client_id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "traffic_accounting_unavailable",
+                "Traffic accounting could not be loaded.",
+            ))?;
     let traffic_history = state
         .repo
         .list_traffic_history(
@@ -1223,15 +1397,27 @@ async fn client_monitoring_view(
             range.step_secs,
             range.source == "raw",
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "traffic_history_unavailable",
+            "Traffic history could not be loaded.",
+        ))?;
     let ping_targets = state
         .repo
         .current_ping_targets_for_client(client_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_ping_targets_unavailable",
+            "Assigned Ping targets could not be loaded.",
+        ))?;
     let primary_ping = state
         .repo
         .current_primary_ping_for_clients(&client_ids)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "monitoring_ping_status_unavailable",
+            "Primary Ping status could not be loaded.",
+        ))?
         .into_iter()
         .next()
         .map(|(_, ping)| ping);
@@ -1283,10 +1469,20 @@ async fn monitoring_range(
             let mut first = state
                 .repo
                 .dashboard_telemetry_start_unix(client_ids)
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "monitoring_history_range_unavailable",
+                    "The available monitoring-history range could not be loaded.",
+                ))?;
             for client_id in client_ids {
-                if let Some(traffic_start) =
-                    state.repo.traffic_history_start_unix(client_id).await?
+                if let Some(traffic_start) = state
+                    .repo
+                    .traffic_history_start_unix(client_id)
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "traffic_history_unavailable",
+                        "Traffic history could not be loaded.",
+                    ))?
                 {
                     first = Some(first.map_or(traffic_start, |current| current.min(traffic_start)));
                 }
@@ -1316,7 +1512,11 @@ async fn monitoring_range(
     let raw_retention_days = state
         .repo
         .list_history_retention_policies()
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "history_retention_policies_unavailable",
+            "History-retention policies could not be loaded.",
+        ))?
         .into_iter()
         .find(|policy| policy.domain == "telemetry_samples")
         .map(|policy| policy.retention_days.max(1) as u64)
@@ -1332,7 +1532,11 @@ async fn monitoring_range(
             && state
                 .repo
                 .raw_telemetry_covers_range_start(client_ids, start_unix)
-                .await?
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "monitoring_history_coverage_unavailable",
+                    "Monitoring-history coverage could not be determined.",
+                ))?
     };
     let source = if raw_covers_start { "raw" } else { "minute" };
     Ok(MonitoringRangeView {
@@ -1365,7 +1569,13 @@ fn public_monitoring_card(
     let visibility = &share.visibility;
     let client_key = share
         .public_client_key(&card.client.id)
-        .ok_or_else(|| ApiError::from(anyhow::anyhow!("monitoring share target key missing")))?
+        .ok_or_else(|| {
+            ApiError::internal(
+                "monitoring_share_projection_failed",
+                "The shared monitoring view could not be prepared.",
+                anyhow::anyhow!("monitoring share target key missing"),
+            )
+        })?
         .to_string();
     Ok(PublicMonitoringCardView {
         client_key,
@@ -1451,7 +1661,13 @@ fn public_monitoring_detail(
     let visibility = &share.visibility;
     let client_key = share
         .public_client_key(&detail.client.id)
-        .ok_or_else(|| ApiError::from(anyhow::anyhow!("monitoring share target key missing")))?
+        .ok_or_else(|| {
+            ApiError::internal(
+                "monitoring_share_projection_failed",
+                "The shared monitoring view could not be prepared.",
+                anyhow::anyhow!("monitoring share target key missing"),
+            )
+        })?
         .to_string();
     Ok(PublicMonitoringDetailView {
         client_key,
@@ -1710,7 +1926,11 @@ async fn resolve_selector(
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: selector_expression.to_string(),
         })
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "selector_targets_unavailable",
+            "Selector targets could not be resolved.",
+        ))?
         .targets
         .into_iter()
         .map(|agent| agent.id)
@@ -1732,7 +1952,15 @@ async fn enrich_ping_target_evidence(
         .map(|target| target.id)
         .collect::<BTreeSet<_>>();
     let mut assignments = HashMap::<Uuid, Vec<String>>::new();
-    for assignment in state.repo.list_ping_target_assignment_records(None).await? {
+    for assignment in state
+        .repo
+        .list_ping_target_assignment_records(None)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "ping_target_assignments_unavailable",
+            "Ping-target assignments could not be loaded.",
+        ))?
+    {
         if target_ids.contains(&assignment.target_id) {
             assignments
                 .entry(assignment.target_id)
@@ -1743,7 +1971,11 @@ async fn enrich_ping_target_evidence(
     let applies = state
         .repo
         .list_runtime_config_apply_records(None)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "runtime_config_apply_records_unavailable",
+            "Runtime-config application evidence could not be loaded.",
+        ))?
         .into_iter()
         .map(|apply| (apply.client_id.clone(), apply))
         .collect::<HashMap<_, _>>();
@@ -1950,9 +2182,11 @@ fn ping_assignment_preview_hash(
     serde_json::to_vec(changes)
         .map(|payload| payload_hash(&payload))
         .map_err(|error| {
-            ApiError::from(anyhow::anyhow!(
-                "ping preview serialization failed: {error}"
-            ))
+            ApiError::internal(
+                "ping_target_preview_failed",
+                "The Ping target update preview could not be prepared.",
+                anyhow::anyhow!(error),
+            )
         })
 }
 
@@ -1962,9 +2196,11 @@ fn monitoring_share_target_preview_hash(
     serde_json::to_vec(changes)
         .map(|payload| payload_hash(&payload))
         .map_err(|error| {
-            ApiError::from(anyhow::anyhow!(
-                "monitoring share preview serialization failed: {error}"
-            ))
+            ApiError::internal(
+                "monitoring_share_preview_failed",
+                "The shared-view target preview could not be prepared.",
+                anyhow::anyhow!(error),
+            )
         })
 }
 
@@ -1983,7 +2219,11 @@ fn monitoring_repository_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("invalid") || message.contains("required") {
         ApiError::bad_request_with_message("ping_target_invalid", message)
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "ping_target_mutation_failed",
+            "The Ping target change could not be completed.",
+            error,
+        )
     }
 }
 
@@ -2006,7 +2246,11 @@ fn share_repository_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::bad_request_with_message("monitoring_share_invalid", message)
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "monitoring_share_mutation_failed",
+            "The shared monitoring view change could not be completed.",
+            error,
+        )
     }
 }
 

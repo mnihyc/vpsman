@@ -33,7 +33,12 @@ pub(crate) async fn bootstrap_status(
     State(state): State<AppState>,
 ) -> Result<Json<BootstrapStatusResponse>, ApiError> {
     Ok(Json(BootstrapStatusResponse {
-        bootstrap_required: state.repo.operator_count().await? == 0,
+        bootstrap_required: state.repo.operator_count().await.map_err(
+            ApiError::internal_mapper(
+                "operator_bootstrap_status_unavailable",
+                "The operator bootstrap status could not be loaded.",
+            ),
+        )? == 0,
     }))
 }
 
@@ -44,7 +49,16 @@ pub(crate) async fn bootstrap_operator(
     Json(request): Json<BootstrapOperatorRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
     validate_operator_credentials(&request.username, &request.password)?;
-    if state.repo.operator_count().await? > 0 {
+    if state
+        .repo
+        .operator_count()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_bootstrap_status_unavailable",
+            "The operator bootstrap status could not be loaded.",
+        ))?
+        > 0
+    {
         return Err(ApiError::conflict("operator_already_bootstrapped"));
     }
     let remote_ip = state.operator_client_ip(peer, &headers);
@@ -63,7 +77,11 @@ pub(crate) async fn bootstrap_operator(
         Err(error) if error.to_string() == "operator_already_bootstrapped" => {
             Err(ApiError::conflict("operator_already_bootstrapped"))
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(ApiError::internal(
+            "operator_bootstrap_failed",
+            "The initial operator could not be created.",
+            error,
+        )),
     }
 }
 
@@ -85,8 +103,11 @@ pub(crate) async fn login_operator(
                 .and_then(|value| value.to_str().ok()),
             &state.operator_auth_throttle_config(),
         )
-        .await?
-    {
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_login_failed",
+            "The operator login could not be completed.",
+        ))? {
         OperatorLoginAttempt::Authenticated(response) => Ok(Json(*response)),
         OperatorLoginAttempt::InvalidCredentials => {
             Err(ApiError::unauthorized("invalid_operator_credentials"))
@@ -104,7 +125,11 @@ pub(crate) async fn refresh_operator_session(
     state
         .repo
         .refresh_operator_session(&request.refresh_token)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_session_refresh_failed",
+            "The operator session could not be refreshed.",
+        ))?
         .map(Json)
         .ok_or_else(|| ApiError::unauthorized("invalid_refresh_token"))
 }
@@ -123,7 +148,11 @@ pub(crate) async fn logout_operator_session(
     if !state
         .repo
         .logout_operator_session(access_token, &remote_ip, user_agent)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_session_logout_failed",
+            "The operator session could not be logged out.",
+        ))?
     {
         return Err(ApiError::unauthorized("invalid_operator_session"));
     }
@@ -145,13 +174,20 @@ pub(crate) async fn setup_operator_totp(
     match state
         .repo
         .setup_operator_totp(&operator, &request.password)
-        .await?
-    {
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_totp_setup_failed",
+            "Authenticator setup could not be completed.",
+        ))? {
         TotpSetupOutcome::Created(response) => {
             state
                 .repo
                 .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "operator_auth_throttle_clear_failed",
+                    "The authenticator security state could not be cleared.",
+                ))?;
             Ok(Json(response))
         }
         TotpSetupOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
@@ -179,13 +215,20 @@ pub(crate) async fn confirm_operator_totp(
     match state
         .repo
         .confirm_operator_totp(&operator, &request.password, &request.code)
-        .await?
-    {
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_totp_confirmation_failed",
+            "Authenticator confirmation could not be completed.",
+        ))? {
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
                 .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "operator_auth_throttle_clear_failed",
+                    "The authenticator security state could not be cleared.",
+                ))?;
             Ok(Json(*updated))
         }
         TotpUpdateOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
@@ -214,13 +257,20 @@ pub(crate) async fn disable_operator_totp(
     match state
         .repo
         .disable_operator_totp(&operator, &request.password, &request.code)
-        .await?
-    {
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_totp_disable_failed",
+            "Authenticator removal could not be completed.",
+        ))? {
         TotpUpdateOutcome::Updated(updated) => {
             state
                 .repo
                 .clear_operator_auth_management_success(&operator.operator.username, &remote_ip)
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "operator_auth_throttle_clear_failed",
+                    "The authenticator security state could not be cleared.",
+                ))?;
             Ok(Json(*updated))
         }
         TotpUpdateOutcome::AlreadyEnabled => Err(ApiError::conflict("totp_already_enabled")),
@@ -251,7 +301,11 @@ async fn ensure_totp_management_not_locked(
     if state
         .repo
         .operator_auth_identity_locked(&operator.operator.username, remote_ip)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_auth_throttle_unavailable",
+            "The authenticator security state could not be loaded.",
+        ))?
     {
         return Err(ApiError::too_many_requests("operator_auth_throttled"));
     }
@@ -270,7 +324,11 @@ async fn record_totp_management_failure(
             remote_ip,
             &state.operator_auth_throttle_config(),
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_auth_failure_record_failed",
+            "The authenticator failure could not be recorded.",
+        ))?;
     Ok(())
 }
 
@@ -285,7 +343,11 @@ pub(crate) async fn update_operator_preferences(
         state
             .repo
             .update_operator_preferences(&operator, request.normalized())
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_preferences_update_failed",
+                "The operator preferences could not be saved.",
+            ))?,
     ))
 }
 
@@ -570,7 +632,12 @@ pub(crate) async fn list_operators(
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperatorView>>, ApiError> {
     let _operator = state.require_operator_role(&headers, "admin").await?;
-    Ok(Json(state.repo.list_operators().await?))
+    Ok(Json(state.repo.list_operators().await.map_err(
+        ApiError::internal_mapper(
+            "operators_unavailable",
+            "The operator accounts could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn create_operator(
@@ -593,7 +660,11 @@ pub(crate) async fn create_operator(
     if state
         .repo
         .operator_by_username(&request.username)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_unavailable",
+            "The operator account could not be loaded.",
+        ))?
         .is_some()
     {
         return Err(ApiError::conflict("operator_username_exists"));
@@ -611,7 +682,16 @@ pub(crate) async fn create_operator(
         request.privilege_assertion.clone(),
     )
     .await?;
-    Ok(Json(state.repo.create_operator(&request, &operator).await?))
+    Ok(Json(
+        state
+            .repo
+            .create_operator(&request, &operator)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_create_failed",
+                "The operator account could not be created.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn update_operator(
@@ -628,7 +708,11 @@ pub(crate) async fn update_operator(
     let target = state
         .repo
         .operator_by_id(operator_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_unavailable",
+            "The operator account could not be loaded.",
+        ))?
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(
@@ -698,7 +782,11 @@ async fn set_operator_lifecycle_status(
     let target = state
         .repo
         .operator_by_id(operator_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_unavailable",
+            "The operator account could not be loaded.",
+        ))?
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
@@ -743,7 +831,11 @@ pub(crate) async fn reset_operator_password(
     let target = state
         .repo
         .operator_by_id(operator_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_unavailable",
+            "The operator account could not be loaded.",
+        ))?
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
@@ -764,7 +856,11 @@ pub(crate) async fn reset_operator_password(
     state
         .repo
         .reset_operator_password(operator_id, &request.password, &actor)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_password_reset_failed",
+            "The operator password could not be reset.",
+        ))?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_not_found"))
 }
@@ -780,7 +876,11 @@ pub(crate) async fn clear_operator_totp(
     let target = state
         .repo
         .operator_by_id(operator_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_unavailable",
+            "The operator account could not be loaded.",
+        ))?
         .filter(|operator| operator.status != "deleted")
         .ok_or_else(|| ApiError::not_found("operator_not_found"))?;
     require_admin_risk_if_needed(&target.role, None, request.admin_risk_acknowledged)?;
@@ -801,7 +901,11 @@ pub(crate) async fn clear_operator_totp(
     state
         .repo
         .clear_operator_totp(operator_id, &actor)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_totp_clear_failed",
+            "The operator authenticator could not be cleared.",
+        ))?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_not_found"))
 }
@@ -817,7 +921,16 @@ pub(crate) async fn list_operator_auth_events(
             return Err(ApiError::bad_request("invalid_operator_auth_event_result"));
         }
     }
-    Ok(Json(state.repo.list_operator_auth_events(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .list_operator_auth_events(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_auth_events_unavailable",
+                "The operator authentication events could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn list_operator_sessions(
@@ -833,7 +946,11 @@ pub(crate) async fn list_operator_sessions(
         state
             .repo
             .list_operator_sessions(query.limit.unwrap_or(50), current_session_id)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "operator_sessions_unavailable",
+                "The operator sessions could not be loaded.",
+            ))?,
     ))
 }
 
@@ -851,7 +968,11 @@ pub(crate) async fn revoke_operator_session(
     let target_session = state
         .repo
         .operator_session_by_id(session_id, current_session_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_session_unavailable",
+            "The operator session could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("operator_session_not_found"))?;
     require_admin_risk_if_needed(
         &target_session.operator_role,
@@ -875,7 +996,11 @@ pub(crate) async fn revoke_operator_session(
     state
         .repo
         .revoke_operator_session(session_id, &operator)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "operator_session_revoke_failed",
+            "The operator session could not be revoked.",
+        ))?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("operator_session_not_found"))
 }
@@ -919,7 +1044,13 @@ async fn verify_operator_management_privilege(
         status,
         admin_risk_acknowledged,
     })
-    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    .map_err(|error| {
+        ApiError::internal(
+            "operator_privilege_intent_failed",
+            "The operator privilege request could not be prepared.",
+            anyhow::Error::from(error),
+        )
+    })?;
     let targets = vec![target.to_string()];
     let intent = DbPrivilegeIntent::new(action, target, None, &targets, true, Some(&payload_hash));
     verify_privilege_intent(state, &intent, assertion).await
@@ -941,7 +1072,11 @@ fn operator_management_error(error: anyhow::Error) -> ApiError {
     if error.to_string().contains("last_active_admin_required") {
         ApiError::conflict("last_active_admin_required")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "operator_management_failed",
+            "The operator account change could not be completed.",
+            error,
+        )
     }
 }
 

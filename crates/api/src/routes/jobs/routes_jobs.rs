@@ -60,14 +60,24 @@ pub(crate) async fn cancel_job(
     if !request.confirmed {
         return Err(ApiError::conflict("job_cancel_requires_confirmation"));
     }
-    if state.repo.get_job(job_id).await?.is_none() {
+    if state
+        .repo
+        .get_job(job_id)
+        .await
+        .map_err(job_unavailable)?
+        .is_none()
+    {
         return Err(ApiError::not_found("job_not_found"));
     }
     let reason = bounded_cancel_reason(request.reason.as_deref());
     let plan = state
         .repo
         .request_job_cancel(job_id, &operator, reason.as_deref())
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_cancel_request_failed",
+            "The job cancellation could not be requested.",
+        ))?;
     if plan.pending_canceled > 0 {
         if let Err(error) =
             record_network_routing_terminal_result(&state, job_id, "", TARGET_STATUS_CANCELED, None)
@@ -81,7 +91,11 @@ pub(crate) async fn cancel_job(
         state
             .repo
             .record_job_target_cancel_sent(job_id, client_id)
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_cancel_delivery_record_failed",
+                "The job cancellation delivery could not be recorded.",
+            ))?;
         let result = state
             .gateway
             .cancel(
@@ -104,7 +118,11 @@ pub(crate) async fn cancel_job(
                         cancel.applied,
                         &cancel.message,
                     )
-                    .await?;
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "job_cancel_result_record_failed",
+                        "The job cancellation result could not be recorded.",
+                    ))?;
                 cancel_acks.push(CancelJobTargetResult {
                     client_id: client_id.clone(),
                     acked: cancel.acked,
@@ -121,7 +139,11 @@ pub(crate) async fn cancel_job(
                     .record_job_target_cancel_result(
                         job_id, client_id, false, false, false, &message,
                     )
-                    .await?;
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "job_cancel_result_record_failed",
+                        "The job cancellation result could not be recorded.",
+                    ))?;
                 cancel_acks.push(CancelJobTargetResult {
                     client_id: client_id.clone(),
                     acked: false,
@@ -132,7 +154,11 @@ pub(crate) async fn cancel_job(
             }
         }
     }
-    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
+    let refreshed = state
+        .repo
+        .refresh_job_status_from_targets(job_id)
+        .await
+        .map_err(job_status_refresh_failed)?;
     state
         .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed.clone())
         .await?;
@@ -156,7 +182,12 @@ pub(crate) async fn list_job_approvals(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
-    Ok(Json(state.repo.query_job_approvals(&query).await?))
+    Ok(Json(state.repo.query_job_approvals(&query).await.map_err(
+        ApiError::internal_mapper(
+            "job_approvals_unavailable",
+            "Job approvals could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn create_job_approval(
@@ -193,7 +224,11 @@ pub(crate) async fn approve_job_approval(
     let (approval, frozen_request) = state
         .repo
         .get_job_approval_request(approval_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_approval_unavailable",
+            "The job approval could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
     if approval.status == "rejected" {
         return Err(ApiError::conflict("job_approval_not_pending"));
@@ -321,16 +356,24 @@ async fn prepare_job_approval(
     if !job.privileged {
         return Err(ApiError::forbidden("job_approval_requires_privileged_job"));
     }
-    if state.repo.get_job(job_id).await?.is_some() {
+    if state
+        .repo
+        .get_job(job_id)
+        .await
+        .map_err(job_unavailable)?
+        .is_some()
+    {
         return Err(ApiError::conflict("job_approval_job_id_already_exists"));
     }
     bind_declared_network_plan(state, &mut job).await?;
     let job_command = job.job_command()?;
     validate_job_command_source(&job_command, &JobPrivilegeSource::RequestAssertion)?;
     let command_payload = encode_json(&job_command).map_err(|error| {
-        ApiError::from(anyhow!(
-            "failed to encode job command for approval authorization: {error}"
-        ))
+        ApiError::internal(
+            "job_approval_prepare_failed",
+            "The job approval request could not be prepared.",
+            anyhow!(error),
+        )
     })?;
     let command_hash = payload_hash(&command_payload);
     let fixed_target_ids = job.fixed_target_ids()?;
@@ -338,7 +381,11 @@ async fn prepare_job_approval(
     let resolved_agents = state
         .repo
         .resolve_bulk_targets(&target_selection)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_targets_resolution_failed",
+            "Job targets could not be resolved.",
+        ))?
         .targets;
     let missing_fixed_targets = fixed_target_ids
         .iter()
@@ -439,9 +486,11 @@ async fn create_job_inner(
         return Err(ApiError::conflict(confirmation_error_code(&job_command)));
     }
     let command_payload = encode_json(&job_command).map_err(|error| {
-        ApiError::from(anyhow!(
-            "failed to encode job command for authorization: {error}"
-        ))
+        ApiError::internal(
+            "job_dispatch_prepare_failed",
+            "The job dispatch request could not be prepared.",
+            anyhow!(error),
+        )
     })?;
     let command_hash = payload_hash(&command_payload);
     let fixed_target_ids = request.fixed_target_ids()?;
@@ -449,7 +498,11 @@ async fn create_job_inner(
     let resolved_agents = state
         .repo
         .resolve_bulk_targets(&target_selection)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_targets_resolution_failed",
+            "Job targets could not be resolved.",
+        ))?
         .targets;
     let resolved_targets = fixed_target_ids;
     validate_job_rollout(request.rollout.as_ref(), &job_command, &resolved_targets)?;
@@ -721,7 +774,11 @@ async fn create_job_inner(
             done: true,
         });
     }
-    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
+    let refreshed = state
+        .repo
+        .refresh_job_status_from_targets(job_id)
+        .await
+        .map_err(job_status_refresh_failed)?;
     let status = state
         .terminal_job_status_after_refresh(job_id, refreshed)
         .await?
@@ -784,7 +841,11 @@ pub(crate) async fn bind_declared_network_plan(
     let declared = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_diagnostic_plan_unavailable",
+            "The network diagnostic plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("network_diagnostic_plan_not_found"))?;
     if !declared.enabled && !status_only {
         return Err(ApiError::conflict("network_diagnostic_plan_disabled"));
@@ -906,7 +967,11 @@ async fn busy_update_skip_targets(
     let active_clients = state
         .repo
         .active_job_target_client_ids(dispatch_targets, job_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "active_job_targets_unavailable",
+            "Active job targets could not be loaded.",
+        ))?;
     Ok(dispatch_targets
         .iter()
         .filter(|client_id| active_clients.contains(*client_id))
@@ -953,7 +1018,11 @@ pub(crate) async fn validate_restore_archive_binding(
     let source_backup = state
         .repo
         .find_backup_request(*source_backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "restore_source_backup_unavailable",
+            "The restore source backup could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("restore_source_backup_not_found"))?;
     let artifact_id = source_backup
         .artifact_id
@@ -961,7 +1030,11 @@ pub(crate) async fn validate_restore_archive_binding(
     let artifact = state
         .repo
         .find_backup_artifact(artifact_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "restore_source_backup_artifact_unavailable",
+            "The restore source backup artifact could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::conflict("restore_source_backup_artifact_not_found"))?;
     if artifact.client_id != source_backup.client_id {
         return Err(ApiError::conflict(
@@ -980,7 +1053,11 @@ pub(crate) async fn validate_restore_archive_binding(
             Some(target_client_id),
             Some(*archive_transfer_session_id),
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "restore_archive_transfer_unavailable",
+            "The restore archive transfer could not be loaded.",
+        ))?;
     let transfer = transfers
         .into_iter()
         .next()
@@ -1138,7 +1215,13 @@ pub(crate) fn request_fingerprint_for_job(
         "source_schedule_id": source_schedule_id,
         "rollout": request.rollout,
     }))
-    .map_err(|error| ApiError::from(anyhow!("failed to encode job fingerprint: {error}")))?;
+    .map_err(|error| {
+        ApiError::internal(
+            "job_fingerprint_failed",
+            "The job request fingerprint could not be prepared.",
+            anyhow!(error),
+        )
+    })?;
     Ok(payload_hash(&bytes))
 }
 
@@ -1211,7 +1294,11 @@ fn job_rollout_policy_hash(
             encode_json(rollout)
                 .map(|payload| payload_hash(&payload))
                 .map_err(|error| {
-                    ApiError::from(anyhow!("failed to encode rollout policy: {error}"))
+                    ApiError::internal(
+                        "job_rollout_prepare_failed",
+                        "The job rollout policy could not be prepared.",
+                        anyhow!(error),
+                    )
                 })
         })
         .transpose()
@@ -1224,7 +1311,7 @@ async fn existing_job_response_for_id(
     request_fingerprint: &str,
     allow_approved_request_actor_mismatch: bool,
 ) -> Result<Option<CreateJobResponse>, ApiError> {
-    let Some(existing) = state.repo.get_job(job_id).await? else {
+    let Some(existing) = state.repo.get_job(job_id).await.map_err(job_unavailable)? else {
         return Ok(None);
     };
     if !allow_approved_request_actor_mismatch && existing.actor_id != Some(operator.operator.id) {
@@ -1233,7 +1320,11 @@ async fn existing_job_response_for_id(
     let stored_fingerprint = state
         .repo
         .get_job_request_fingerprint(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_request_fingerprint_unavailable",
+            "The stored job fingerprint could not be loaded.",
+        ))?
         .unwrap_or_default();
     if stored_fingerprint != request_fingerprint {
         return Err(ApiError::conflict("job_id_reused_with_different_request"));
@@ -1264,7 +1355,11 @@ async fn validate_approved_job_binding(
     let (approval, _) = state
         .repo
         .get_job_approval_request(approval_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_approval_unavailable",
+            "The job approval could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("job_approval_not_found"))?;
     if approval.status != "approved" {
         return Err(ApiError::conflict("job_approval_not_pending"));
@@ -1282,7 +1377,14 @@ pub(crate) async fn create_job_target_counts(
     state: &AppState,
     job_id: Uuid,
 ) -> Result<CreateJobTargetCounts, ApiError> {
-    let targets = state.repo.list_job_targets(job_id).await?;
+    let targets = state
+        .repo
+        .list_job_targets(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_targets_unavailable",
+            "Job targets could not be loaded.",
+        ))?;
     let mut counts = CreateJobTargetCounts {
         total: targets.len(),
         queued: 0,
@@ -1334,14 +1436,26 @@ async fn agent_update_release_policy_allows(
             .repo
             .agent_update_release_exists_for_artifact(sha256_hex)
             .await
-            .map_err(ApiError::from),
+            .map_err(|error| {
+                ApiError::internal(
+                    "agent_update_release_unavailable",
+                    "The agent update release could not be verified.",
+                    error,
+                )
+            }),
         JobCommand::AgentUpdateRollback {
             rollback_sha256_hex: Some(sha256_hex),
         } => state
             .repo
             .agent_update_release_exists_for_rollback_artifact(sha256_hex)
             .await
-            .map_err(ApiError::from),
+            .map_err(|error| {
+                ApiError::internal(
+                    "agent_update_release_unavailable",
+                    "The agent rollback release could not be verified.",
+                    error,
+                )
+            }),
         JobCommand::AgentUpdateRollback {
             rollback_sha256_hex: None,
         } => Ok(false),
@@ -1505,7 +1619,7 @@ fn capability_degraded_outcome(
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            data: encode_job_status(&status)?,
             exit_code: Some(0),
             done: true,
         }],
@@ -1537,7 +1651,7 @@ fn busy_update_skip_outcome(
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            data: encode_job_status(&status)?,
             exit_code: Some(0),
             done: true,
         }],
@@ -1571,7 +1685,7 @@ fn network_speed_peer_skip_outcome(
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            data: encode_job_status(&status)?,
             exit_code: Some(0),
             done: true,
         }],
@@ -1603,7 +1717,7 @@ fn never_connected_skip_outcome(
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            data: encode_job_status(&status)?,
             exit_code: Some(0),
             done: true,
         }],
@@ -1636,7 +1750,7 @@ fn fixed_target_unavailable_skip_outcome(
         outputs: vec![CommandOutput {
             job_id,
             stream: OutputStream::Status,
-            data: serde_json::to_vec(&status).map_err(|error| ApiError::from(anyhow!(error)))?,
+            data: encode_job_status(&status)?,
             exit_code: Some(0),
             done: true,
         }],
@@ -1666,12 +1780,20 @@ async fn reject_job(
             status,
             reason,
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_rejection_record_failed",
+            "The rejected job could not be recorded.",
+        ))?;
     let status = status.to_string();
     let target_count = state
         .repo
         .get_job(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_unavailable",
+            "The job could not be loaded.",
+        ))?
         .map(|job| job.target_count.max(0) as usize)
         .unwrap_or_default();
     warn!(
@@ -1775,7 +1897,11 @@ fn map_job_approval_repo_error(error: anyhow::Error) -> ApiError {
     } else if message.starts_with("job_approval_decision_invalid") {
         ApiError::bad_request("job_approval_decision_invalid")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "job_approval_mutation_failed",
+            "The job approval decision could not be recorded.",
+            error,
+        )
     }
 }
 
@@ -1786,8 +1912,34 @@ fn map_job_recording_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::conflict("job_target_no_longer_available")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "job_recording_failed",
+            "The job could not be recorded for dispatch.",
+            error,
+        )
     }
+}
+
+fn job_unavailable(error: anyhow::Error) -> ApiError {
+    ApiError::internal("job_unavailable", "The job could not be loaded.", error)
+}
+
+fn job_status_refresh_failed(error: anyhow::Error) -> ApiError {
+    ApiError::internal(
+        "job_status_refresh_failed",
+        "The job status could not be refreshed.",
+        error,
+    )
+}
+
+fn encode_job_status(status: &serde_json::Value) -> Result<Vec<u8>, ApiError> {
+    serde_json::to_vec(status).map_err(|error| {
+        ApiError::internal(
+            "job_status_prepare_failed",
+            "The job status could not be prepared.",
+            anyhow!(error),
+        )
+    })
 }
 
 #[derive(Clone, Debug)]

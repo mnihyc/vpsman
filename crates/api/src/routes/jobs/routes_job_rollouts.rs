@@ -30,7 +30,11 @@ pub(crate) async fn list_job_rollouts(
         state
             .repo
             .list_job_rollouts(query.limit.unwrap_or(100))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "job_rollouts_unavailable",
+                "Job rollouts could not be loaded.",
+            ))?,
     ))
 }
 
@@ -45,7 +49,11 @@ pub(crate) async fn get_job_rollout(
     state
         .repo
         .get_job_rollout(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "job_rollout_unavailable",
+            "The job rollout could not be loaded.",
+        ))?
         .map(Json)
         .ok_or_else(|| ApiError::not_found("job_rollout_not_found"))
 }
@@ -98,5 +106,9 @@ fn map_rollout_error(error: anyhow::Error) -> ApiError {
     if message.contains("job_rollout_terminal") {
         return ApiError::conflict("job_rollout_terminal");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "job_rollout_mutation_failed",
+        "The job rollout change could not be completed.",
+        error,
+    )
 }

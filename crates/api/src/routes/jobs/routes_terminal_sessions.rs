@@ -186,18 +186,30 @@ pub(crate) async fn list_terminal_sessions(
     let sessions = state
         .repo
         .list_terminal_sessions(limit_or_default(query.limit), client_id, query.session_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_sessions_unavailable",
+            "Terminal sessions could not be loaded.",
+        ))?;
     for session in &sessions {
         state
             .repo
             .reconcile_terminal_job_by_id(session.job_id)
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "terminal_session_reconcile_failed",
+                "Terminal session state could not be reconciled.",
+            ))?;
     }
     Ok(Json(
         state
             .repo
             .list_terminal_sessions(limit_or_default(query.limit), client_id, query.session_id)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "terminal_sessions_unavailable",
+                "Terminal sessions could not be loaded.",
+            ))?,
     ))
 }
 
@@ -214,14 +226,22 @@ pub(crate) async fn terminal_session_replay(
     let sessions = state
         .repo
         .list_terminal_sessions(1, Some(&client_id), Some(session_id))
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_session_unavailable",
+            "The terminal session could not be loaded.",
+        ))?;
     let session = sessions
         .first()
         .ok_or_else(|| ApiError::not_found("terminal_session_not_found"))?;
     state
         .repo
         .reconcile_terminal_job_by_id(session.job_id)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_session_reconcile_failed",
+            "Terminal session state could not be reconciled.",
+        ))?;
     let replay = state
         .repo
         .terminal_session_replay(
@@ -235,7 +255,11 @@ pub(crate) async fn terminal_session_replay(
                 .clamp(1, MAX_TERMINAL_REPLAY_BYTES),
             query.include_data.unwrap_or(true),
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_session_replay_unavailable",
+            "Terminal session replay could not be loaded.",
+        ))?;
     Ok(Json(replay))
 }
 
@@ -279,7 +303,11 @@ pub(crate) async fn control_terminal_session(
         state
             .repo
             .reconcile_terminal_job_by_id(session.job_id)
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "terminal_session_reconcile_failed",
+                "Terminal session state could not be reconciled.",
+            ))?;
     }
     let authority =
         authorize_terminal_socket_context(&state, &client_id, session_id, operator).await?;
@@ -723,7 +751,11 @@ async fn load_current_terminal_session(
     state
         .repo
         .list_terminal_sessions(1, Some(client_id), Some(session_id))
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_session_unavailable",
+            "The terminal session could not be loaded.",
+        ))?
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("terminal_session_not_found"))
@@ -803,7 +835,11 @@ async fn dispatch_bound_terminal_control(
                 &action_hash,
                 &gateway_result.ack,
             )
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "terminal_control_evidence_record_failed",
+                "Terminal control evidence could not be recorded.",
+            ))?;
         let terminal = (gateway_result.ack.accepted
             && matches!(action, TerminalControlAction::Close { .. }))
             || (!gateway_result.ack.accepted
@@ -866,16 +902,29 @@ async fn authorize_terminal_socket_context(
         .repo
         .authorize_terminal_control(client_id, session_id, &operator)
         .await?;
-    let agent = state
-        .repo
-        .agent_by_id(client_id)
-        .await
-        .map_err(|_| ApiError::not_found("terminal_agent_not_found"))?;
+    let agent = state.repo.agent_by_id(client_id).await.map_err(|error| {
+        if error.to_string().contains("agent_not_found") {
+            ApiError::not_found("terminal_agent_not_found")
+        } else {
+            ApiError::internal(
+                "terminal_agent_unavailable",
+                "The terminal VPS state could not be loaded.",
+                error,
+            )
+        }
+    })?;
     let process_incarnation_id = agent
         .process_incarnation_id
         .filter(|_| agent.status == "online")
         .ok_or_else(|| ApiError::conflict("terminal_agent_not_online"))?;
-    let targets = state.repo.list_job_targets(job_id).await?;
+    let targets = state
+        .repo
+        .list_job_targets(job_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "terminal_job_targets_unavailable",
+            "Terminal job targets could not be loaded.",
+        ))?;
     let target = targets
         .iter()
         .find(|target| target.client_id == client_id)
@@ -910,7 +959,10 @@ async fn load_terminal_socket_replay(
             true,
         )
         .await
-        .map_err(ApiError::from)
+        .map_err(ApiError::internal_mapper(
+            "terminal_session_replay_unavailable",
+            "Terminal session replay could not be loaded.",
+        ))
 }
 
 async fn stream_terminal_replay(

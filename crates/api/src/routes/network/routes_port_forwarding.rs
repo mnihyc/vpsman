@@ -29,7 +29,16 @@ pub(crate) async fn list_port_forward_rules(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    Ok(Json(state.repo.list_port_forward_rule_items().await?))
+    Ok(Json(
+        state
+            .repo
+            .list_port_forward_rule_items()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "port_forward_rules_unavailable",
+                "Port-forwarding rules could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn create_port_forward_rule(
@@ -54,7 +63,11 @@ pub(crate) async fn create_port_forward_rule(
     let rule = state
         .repo
         .get_port_forward_rule(created.id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .unwrap_or(created);
     Ok((
         StatusCode::CREATED,
@@ -75,7 +88,11 @@ pub(crate) async fn update_port_forward_rule(
     let existing = state
         .repo
         .get_port_forward_rule_identity(rule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .filter(|rule| rule.deleted_at.is_none())
         .ok_or_else(|| ApiError::not_found("port_forward_rule_not_found"))?;
     if existing.revision != request.expected_revision {
@@ -102,7 +119,11 @@ pub(crate) async fn update_port_forward_rule(
     let rule = state
         .repo
         .get_port_forward_rule(rule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .unwrap_or(changed);
     Ok(Json(PortForwardMutationResponse {
         rule: rule.into(),
@@ -139,18 +160,34 @@ pub(crate) async fn delete_port_forward_rule(
     let identity = state
         .repo
         .get_port_forward_rule_identity(rule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .filter(|rule| rule.deleted_at.is_none())
         .ok_or_else(|| ApiError::not_found("port_forward_rule_not_found"))?;
     if identity.revision != request.expected_revision {
         return Err(ApiError::conflict("port_forward_rule_snapshot_stale"));
     }
-    let existing = state.repo.get_port_forward_rule(rule_id).await?;
+    let existing =
+        state
+            .repo
+            .get_port_forward_rule(rule_id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "port_forward_rule_unavailable",
+                "The port-forwarding rule could not be loaded.",
+            ))?;
     if existing.is_none() {
         let configuration_error = state
             .repo
             .port_forward_rule_configuration_error(rule_id)
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "port_forward_rule_configuration_lookup_failed",
+                "The port-forwarding rule configuration could not be checked.",
+            ))?
             .ok_or_else(|| ApiError::conflict("port_forward_rule_configuration_unavailable"))?;
         let deleted = state
             .repo
@@ -204,7 +241,11 @@ pub(crate) async fn delete_port_forward_rule(
     let rule = state
         .repo
         .get_port_forward_rule(rule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .unwrap_or(deleted);
     Ok(Json(PortForwardMutationResponse {
         rule: rule.into(),
@@ -274,7 +315,14 @@ pub(crate) async fn bulk_mutate_port_forward_rules(
     if request.items.is_empty() || request.items.len() > vpsman_common::MAX_PORT_FORWARD_RULES {
         return Err(ApiError::bad_request("port_forward_bulk_items_invalid"));
     }
-    let before = state.repo.list_port_forward_rules().await?;
+    let before = state
+        .repo
+        .list_port_forward_rules()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rules_unavailable",
+            "Port-forwarding rules could not be loaded.",
+        ))?;
     let selected_ids = request
         .items
         .iter()
@@ -419,7 +467,11 @@ async fn mutate_enabled(
     let rule = state
         .repo
         .get_port_forward_rule(rule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .unwrap_or(changed);
     Ok(Json(PortForwardMutationResponse {
         rule: rule.into(),
@@ -437,7 +489,11 @@ async fn required_rule(state: &AppState, id: Uuid) -> Result<PortForwardRuleView
     state
         .repo
         .get_port_forward_rule(id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "port_forward_rule_unavailable",
+            "The port-forwarding rule could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("port_forward_rule_not_found"))
 }
 
@@ -458,7 +514,11 @@ async fn require_agent(
     let agent = state
         .repo
         .list_agents()
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?
         .into_iter()
         .find(|agent| agent.id == client_id)
         .ok_or_else(|| ApiError::bad_request("port_forward_agent_not_found"))?;
@@ -582,6 +642,10 @@ fn port_forward_repository_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::bad_request_with_message("port_forward_rule_invalid", message)
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "port_forward_rule_mutation_failed",
+            "The port-forwarding rule change could not be completed.",
+            error,
+        )
     }
 }

@@ -130,7 +130,11 @@ pub(crate) async fn update_suite_config(
             request_id,
             &toml_payload_hash,
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "suite_config_update_failed",
+            "The suite configuration update could not be recorded; no configuration was written.",
+        ))?;
     if let Err(write_error) = write_suite_config_atomically(&state, &request.toml) {
         if let Err(audit_error) = state
             .repo
@@ -233,7 +237,13 @@ fn redacted_toml_json(text: &str) -> Result<Value, ApiError> {
 fn toml_json(text: &str) -> Result<Value, ApiError> {
     let value = toml::from_str::<toml::Value>(text)
         .map_err(|_| ApiError::bad_request("suite_config_invalid_toml"))?;
-    serde_json::to_value(value).map_err(|error| ApiError::from(anyhow::anyhow!(error)))
+    serde_json::to_value(value).map_err(|error| {
+        ApiError::internal(
+            "suite_config_projection_failed",
+            "The suite configuration could not be displayed.",
+            anyhow::anyhow!(error),
+        )
+    })
 }
 
 fn changed_json_paths(old: &Value, new: &Value) -> Vec<String> {

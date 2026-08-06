@@ -1,6 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 use vpsman_common::{
@@ -22,10 +25,41 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TopologyGraphStageError {
+    Agents,
+    Plans,
+    Observations,
+    RuntimeTelemetry,
+    OspfRecommendations,
+    Contract,
+}
+
+impl fmt::Display for TopologyGraphStageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Agents => "topology graph agents",
+            Self::Plans => "topology graph plans",
+            Self::Observations => "topology graph observations",
+            Self::RuntimeTelemetry => "topology graph runtime telemetry",
+            Self::OspfRecommendations => "topology graph OSPF recommendations",
+            Self::Contract => "topology graph contract",
+        })
+    }
+}
+
+impl std::error::Error for TopologyGraphStageError {}
+
 impl Repository {
     pub(crate) async fn topology_graph(&self, limit: i64) -> Result<TopologyGraphView> {
-        let agents = self.list_agents().await?;
-        let plans = self.list_tunnel_plans().await?;
+        let agents = self
+            .list_agents()
+            .await
+            .context(TopologyGraphStageError::Agents)?;
+        let plans = self
+            .list_tunnel_plans()
+            .await
+            .context(TopologyGraphStageError::Plans)?;
         let plan_ids = plans.iter().map(|plan| plan.id).collect::<Vec<_>>();
         let plan_topologies = plans
             .iter()
@@ -48,11 +82,13 @@ impl Repository {
         endpoint_client_ids.dedup();
         let observations = self
             .list_network_observations_for_topology(&plan_topologies, limit.clamp(1, 24) as usize)
-            .await?;
+            .await
+            .context(TopologyGraphStageError::Observations)?;
         let trends = summarize_network_observation_trends(&observations);
         let mut telemetry = self
             .list_declared_telemetry_tunnels_for_clients(&endpoint_client_ids)
-            .await?;
+            .await
+            .context(TopologyGraphStageError::RuntimeTelemetry)?;
         telemetry.retain(|record| {
             record
                 .plan_id
@@ -60,7 +96,8 @@ impl Repository {
         });
         let recommendations = self
             .list_network_ospf_recommendations_for_plans(&plans)
-            .await?;
+            .await
+            .context(TopologyGraphStageError::OspfRecommendations)?;
 
         let agent_status = agents
             .iter()
@@ -201,7 +238,7 @@ impl Repository {
                 .then_with(|| right.health.cmp(&left.health))
                 .then_with(|| left.plan_name.cmp(&right.plan_name))
         });
-        validate_topology_contract(&nodes, &edges)?;
+        validate_topology_contract(&nodes, &edges).context(TopologyGraphStageError::Contract)?;
 
         Ok(TopologyGraphView {
             nodes,

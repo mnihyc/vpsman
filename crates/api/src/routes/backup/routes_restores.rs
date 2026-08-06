@@ -29,7 +29,12 @@ pub(crate) async fn list_restore_plans(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.query_restore_plans(&query).await?))
+    Ok(Json(state.repo.query_restore_plans(&query).await.map_err(
+        ApiError::internal_mapper(
+            "restore_plans_unavailable",
+            "The restore plans could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn create_restore_plan(
@@ -45,12 +50,21 @@ pub(crate) async fn create_restore_plan(
     let source_backup = state
         .repo
         .find_backup_request(request.source_backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The source backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("restore_source_backup_not_found"))?;
 
     let command = restore_command(&request);
-    let payload = encode_json(&command)
-        .map_err(|error| ApiError::from(anyhow!("failed to encode restore command: {error}")))?;
+    let payload = encode_json(&command).map_err(|error| {
+        ApiError::internal(
+            "restore_job_prepare_failed",
+            "The restore job could not be prepared.",
+            anyhow!(error),
+        )
+    })?;
     let command_hash = payload_hash(&payload);
     let resolved_targets = vec![request.target_client_id.clone()];
     let selector_expression = id_selector_expression(&request.target_client_id);
@@ -79,7 +93,11 @@ pub(crate) async fn create_restore_plan(
                 &operator,
                 "restore_privilege_verification_failed",
             )
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "restore_plan_rejection_record_failed",
+                "The rejected restore plan could not be recorded.",
+            ))?;
         return Err(error);
     }
     let command_scope = format!("client:{}", request.target_client_id);
@@ -97,7 +115,11 @@ pub(crate) async fn create_restore_plan(
                     &operator,
                     RestorePlanStatus::PlannedMetadataOnly,
                 )
-                .await?,
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "restore_plan_create_failed",
+                    "The restore plan could not be created.",
+                ))?,
         ),
     ))
 }
@@ -158,7 +180,11 @@ async fn ensure_single_restore_target(
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: id_selector_expression(&request.target_client_id),
         })
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "restore_target_unavailable",
+            "The restore target could not be resolved.",
+        ))?;
     if resolved.target_count == 1 && resolved.targets[0].id == request.target_client_id {
         Ok(())
     } else {

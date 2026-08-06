@@ -82,7 +82,11 @@ pub(crate) async fn list_server_jobs(
         state
             .repo
             .list_server_jobs(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "server_jobs_unavailable",
+                "Server jobs could not be loaded.",
+            ))?,
     ))
 }
 
@@ -103,7 +107,11 @@ pub(crate) async fn cancel_server_job(
     let job = state
         .repo
         .cancel_server_job(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "server_job_cancel_failed",
+            "The server job could not be canceled.",
+        ))?
         .ok_or_else(|| ApiError::not_found("server_job_not_found_or_not_queued"))?;
     Ok(Json(job))
 }
@@ -134,7 +142,11 @@ fn artifact_cleanup_error(error: anyhow::Error) -> ApiError {
     if message.contains("expression") || message.contains("unexpected") {
         return ApiError::bad_request("artifact_cleanup_expression_invalid");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "artifact_cleanup_failed",
+        "The artifact cleanup could not be completed.",
+        error,
+    )
 }
 
 fn normalize_artifact_cleanup_domains(raw: &[String]) -> Result<Vec<String>, ApiError> {

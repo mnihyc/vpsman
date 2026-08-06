@@ -92,17 +92,17 @@ struct LiveSources {
 async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
     let (summary, agents, telemetry_rollups, telemetry_network_rates, telemetry_tunnels) = tokio::join!(
-        load_source("fleet summary", fleet_read, state.repo.fleet_summary()),
+        load_source("summary", fleet_read, state.repo.fleet_summary()),
         load_source("agents", fleet_read, state.repo.list_agents()),
         load_source(
-            "telemetry rollups",
+            "telemetry_rollups",
             fleet_read,
             state
                 .repo
                 .list_latest_telemetry_rollups(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
         ),
         load_source(
-            "telemetry network rates",
+            "telemetry_network_rates",
             fleet_read,
             state.repo.list_latest_telemetry_network_rates(
                 FLEET_NETWORK_RATE_SNAPSHOT_LIMIT,
@@ -112,7 +112,7 @@ async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {
             ),
         ),
         load_source(
-            "telemetry tunnels",
+            "telemetry_tunnels",
             fleet_read,
             state
                 .repo
@@ -172,7 +172,7 @@ async fn load_full_sources(
         webhook_rule_deliveries,
     ) = tokio::join!(
         load_source(
-            "fleet alerts",
+            "fleet_alerts",
             fleet_read && backups_read,
             state.list_fleet_alerts(FleetAlertQuery {
                 limit: Some(FLEET_DETAIL_LIMIT),
@@ -184,19 +184,19 @@ async fn load_full_sources(
             }),
         ),
         load_source(
-            "fleet alert states",
+            "fleet_alert_states",
             fleet_read,
             state.repo.list_fleet_alert_states(FLEET_DETAIL_LIMIT, None),
         ),
         load_source(
-            "fleet alert policies",
+            "fleet_alert_policies",
             fleet_read,
             state
                 .repo
                 .list_fleet_alert_policies(FLEET_DETAIL_LIMIT, None, None, None,),
         ),
         load_source(
-            "VPS rules",
+            "vps_rule_values",
             config_read,
             state.repo.list_vps_rules(&VpsRuleQuery {
                 limit: Some(FLEET_VPS_RULE_SNAPSHOT_LIMIT),
@@ -207,7 +207,7 @@ async fn load_full_sources(
             }),
         ),
         load_source(
-            "traffic accounting",
+            "traffic_accounting",
             fleet_read,
             state.repo.list_traffic_accounting(&TrafficAccountingQuery {
                 selector_expression: None,
@@ -217,7 +217,7 @@ async fn load_full_sources(
             }),
         ),
         load_source(
-            "policy alerts",
+            "policy_alerts",
             fleet_read,
             state.repo.list_policy_alerts(&PolicyAlertQuery {
                 limit: Some(FLEET_DETAIL_LIMIT),
@@ -228,7 +228,7 @@ async fn load_full_sources(
             }),
         ),
         load_source(
-            "fleet alert notification channels",
+            "fleet_alert_notification_channels",
             integrations_read,
             state.repo.list_fleet_alert_notification_channels(
                 FLEET_DETAIL_LIMIT,
@@ -239,7 +239,7 @@ async fn load_full_sources(
             ),
         ),
         load_source(
-            "fleet alert notifications",
+            "fleet_alert_notifications",
             integrations_read,
             state.repo.list_fleet_alert_notification_deliveries(
                 FLEET_DETAIL_LIMIT,
@@ -249,12 +249,12 @@ async fn load_full_sources(
             ),
         ),
         load_source(
-            "webhook rules",
+            "webhook_rules",
             integrations_read,
             state.repo.list_webhook_rules(FLEET_DETAIL_LIMIT, None),
         ),
         load_source(
-            "webhook deliveries",
+            "webhook_rule_deliveries",
             integrations_read,
             state
                 .repo
@@ -290,7 +290,7 @@ where
         Ok(data) => FleetSnapshotSource::available(data),
         Err(error) => {
             tracing::warn!(source, %error, "fleet snapshot source failed");
-            FleetSnapshotSource::unavailable("internal_server_error")
+            FleetSnapshotSource::unavailable(format!("fleet_snapshot_{source}_unavailable"))
         }
     }
 }

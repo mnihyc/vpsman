@@ -26,6 +26,22 @@ use crate::{
 
 const RETENTION_DAY_SECS: u64 = 86_400;
 
+fn history_retention_policies_unavailable(error: anyhow::Error) -> ApiError {
+    ApiError::internal(
+        "history_retention_policies_unavailable",
+        "History-retention policies could not be loaded.",
+        error,
+    )
+}
+
+fn history_export_unavailable(error: anyhow::Error) -> ApiError {
+    ApiError::internal(
+        "history_export_unavailable",
+        "The requested history export could not be loaded.",
+        error,
+    )
+}
+
 pub(crate) async fn list_history_retention_policies(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -33,7 +49,13 @@ pub(crate) async fn list_history_retention_policies(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_history_retention_policies().await?))
+    Ok(Json(
+        state
+            .repo
+            .list_history_retention_policies()
+            .await
+            .map_err(history_retention_policies_unavailable)?,
+    ))
 }
 
 pub(crate) async fn upsert_history_retention_policy(
@@ -57,7 +79,11 @@ pub(crate) async fn upsert_history_retention_policy(
             state
                 .repo
                 .upsert_history_retention_policy(request, &operator)
-                .await?,
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "history_retention_policy_update_failed",
+                    "The history-retention policy could not be saved.",
+                ))?,
         ),
     ))
 }
@@ -138,7 +164,11 @@ pub(crate) async fn prune_history_retention(
             request.metadata_only,
             &audit_domains,
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "history_retention_prune_audit_failed",
+            "History cleanup finished, but its audit evidence could not be recorded.",
+        ))?;
     Ok(Json(HistoryRetentionPruneResponse {
         dry_run: false,
         metadata_only_requested: request.metadata_only,
@@ -164,7 +194,11 @@ async fn history_retention_prune_plan(
         .as_deref()
         .map(parse_history_domain)
         .transpose()?;
-    let policies = state.repo.list_history_retention_policies().await?;
+    let policies = state
+        .repo
+        .list_history_retention_policies()
+        .await
+        .map_err(history_retention_policies_unavailable)?;
     let mut plan = Vec::new();
     for policy in policies {
         let domain = parse_history_domain(&policy.domain)?;
@@ -183,7 +217,11 @@ async fn history_retention_prune_plan(
                 state
                     .repo
                     .list_history_retention_object_candidates(&prune_plan, cutoff_unix)
-                    .await?,
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "history_retention_candidates_unavailable",
+                        "History-retention cleanup candidates could not be loaded.",
+                    ))?,
             )
         } else {
             None
@@ -221,7 +259,11 @@ async fn history_retention_prune_preview_outputs(
             state
                 .repo
                 .prune_history_domain(&domain_plan.prune_plan, domain_plan.cutoff_unix, true)
-                .await?
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "history_retention_preview_failed",
+                    "The history-retention cleanup preview could not be prepared.",
+                ))?
         };
         let status = if !domain_plan.policy.enabled {
             "disabled"
@@ -276,7 +318,11 @@ async fn execute_history_retention_prune_plan(
                 pruned_rows = state
                     .repo
                     .prune_history_retention_object_candidates(&candidates)
-                    .await?;
+                    .await
+                    .map_err(ApiError::internal_mapper(
+                        "history_retention_prune_failed",
+                        "History-retention cleanup could not be completed.",
+                    ))?;
             } else if !candidates.is_empty() {
                 object_delete_attempted = true;
                 if let Some(store) = state.backup_object_store.as_ref() {
@@ -285,13 +331,21 @@ async fn execute_history_retention_prune_plan(
                             pruned_rows += state
                                 .repo
                                 .prune_history_retention_object_candidate(candidate)
-                                .await?;
+                                .await
+                                .map_err(ApiError::internal_mapper(
+                                    "history_retention_prune_failed",
+                                    "History-retention cleanup could not be completed.",
+                                ))?;
                             continue;
                         };
                         if !state
                             .repo
                             .begin_history_retention_object_delete(candidate)
-                            .await?
+                            .await
+                            .map_err(ApiError::internal_mapper(
+                                "history_retention_prune_failed",
+                                "History-retention cleanup could not be completed.",
+                            ))?
                         {
                             continue;
                         }
@@ -301,7 +355,11 @@ async fn execute_history_retention_prune_plan(
                                 pruned_rows += state
                                     .repo
                                     .finalize_history_retention_object_delete(candidate)
-                                    .await?;
+                                    .await
+                                    .map_err(ApiError::internal_mapper(
+                                        "history_retention_prune_failed",
+                                        "History-retention cleanup could not be completed.",
+                                    ))?;
                             }
                             Err(error) => {
                                 let error_text = error.to_string();
@@ -311,7 +369,11 @@ async fn execute_history_retention_prune_plan(
                                         candidate,
                                         &error_text,
                                     )
-                                    .await?;
+                                    .await
+                                    .map_err(ApiError::internal_mapper(
+                                        "history_retention_prune_failed",
+                                        "History-retention cleanup could not be completed.",
+                                    ))?;
                                 object_delete_errors.push(format!("{object_key}: {error_text}"));
                                 break;
                             }
@@ -328,7 +390,11 @@ async fn execute_history_retention_prune_plan(
             state
                 .repo
                 .prune_history_domain(&domain_plan.prune_plan, domain_plan.cutoff_unix, false)
-                .await?
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "history_retention_prune_failed",
+                    "History-retention cleanup could not be completed.",
+                ))?
         };
         let status = if !domain_plan.policy.enabled {
             "disabled"
@@ -363,9 +429,11 @@ fn history_retention_prune_preview_hash(
     outputs: &[HistoryRetentionPruneDomainView],
 ) -> Result<String, ApiError> {
     if plan.len() != outputs.len() {
-        return Err(ApiError::from(anyhow::anyhow!(
-            "history_retention_preview_hash_failed: plan_output_length_mismatch"
-        )));
+        return Err(ApiError::internal(
+            "history_retention_preview_failed",
+            "The history-retention preview could not be prepared.",
+            anyhow::anyhow!("plan and output lengths differ"),
+        ));
     }
     let payload = serde_json::to_vec(&json!({
         "version": 1,
@@ -389,9 +457,11 @@ fn history_retention_prune_preview_hash(
         }).collect::<Vec<_>>(),
     }))
     .map_err(|error| {
-        ApiError::from(anyhow::anyhow!(
-            "history_retention_preview_hash_failed: {error}"
-        ))
+        ApiError::internal(
+            "history_retention_preview_failed",
+            "The history-retention preview could not be prepared.",
+            anyhow::anyhow!(error),
+        )
     })?;
     Ok(payload_hash(&payload))
 }
@@ -450,7 +520,11 @@ pub(crate) async fn export_history(
         }
     }
     let limit = limit_or_default(query.limit);
-    let policies = state.repo.list_history_retention_policies().await?;
+    let policies = state
+        .repo
+        .list_history_retention_policies()
+        .await
+        .map_err(history_retention_policies_unavailable)?;
     let mut exported_domains = Vec::new();
     let mut data = Map::new();
     for domain in selected {
@@ -466,85 +540,83 @@ pub(crate) async fn export_history(
             HistoryDomain::AuditLogs => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state.repo.list_audit_logs(limit).await?),
+                    json!(state
+                        .repo
+                        .list_audit_logs(limit)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TelemetrySamples => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .list_telemetry_samples(
-                                limit,
-                                query.client_id.as_deref(),
-                                None,
-                                None,
-                                false,
-                            )
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .list_telemetry_samples(
+                            limit,
+                            query.client_id.as_deref(),
+                            None,
+                            None,
+                            false,
+                        )
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TelemetryRollups => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .list_telemetry_rollups(limit, query.client_id.as_deref(), None, false,)
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .list_telemetry_rollups(limit, query.client_id.as_deref(), None, false,)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TelemetryNetworkRates => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .list_telemetry_network_rates(
-                                limit,
-                                query.client_id.as_deref(),
-                                None,
-                                None,
-                                false,
-                            )
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .list_telemetry_network_rates(
+                            limit,
+                            query.client_id.as_deref(),
+                            None,
+                            None,
+                            false,
+                        )
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TelemetryPingRollups => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .list_ping_rollups_for_export(query.client_id.as_deref(), limit,)
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .list_ping_rollups_for_export(query.client_id.as_deref(), limit,)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TrafficCounterSamples => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .export_traffic_counter_samples(limit, query.client_id.as_deref())
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .export_traffic_counter_samples(limit, query.client_id.as_deref())
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::SystemMetricRollups => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(
-                        state
-                            .repo
-                            .list_system_metric_rollups(0, unix_now(), limit)
-                            .await?
-                    ),
+                    json!(state
+                        .repo
+                        .list_system_metric_rollups(0, unix_now(), limit)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::JobOutputs => {
@@ -554,28 +626,37 @@ pub(crate) async fn export_history(
                         state
                             .repo
                             .export_job_outputs(limit, query.client_id.as_deref(), query.job_id)
-                            .await?,
+                            .await
+                            .map_err(history_export_unavailable)?,
                     ),
                 );
             }
             HistoryDomain::BackupArtifacts => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state.repo.list_backup_artifacts(limit).await?),
+                    json!(state
+                        .repo
+                        .list_backup_artifacts(limit)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::NetworkObservations => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state.repo.list_network_observations(limit, false).await?),
+                    json!(state
+                        .repo
+                        .list_network_observations(limit, false)
+                        .await
+                        .map_err(history_export_unavailable)?),
                 );
             }
             HistoryDomain::TopologyHistory => {
                 data.insert(
                     domain.as_str().to_string(),
                     json!({
-                        "graph": state.repo.topology_graph(limit).await?,
-                        "trends": state.repo.list_network_observation_trends(limit, false).await?,
+                        "graph": state.repo.topology_graph(limit).await.map_err(history_export_unavailable)?,
+                        "trends": state.repo.list_network_observation_trends(limit, false).await.map_err(history_export_unavailable)?,
                     }),
                 );
             }
@@ -586,7 +667,8 @@ pub(crate) async fn export_history(
                         state
                             .repo
                             .export_client_status_history(limit, query.client_id.as_deref())
-                            .await?,
+                            .await
+                            .map_err(history_export_unavailable)?,
                     ),
                 );
             }
@@ -597,7 +679,8 @@ pub(crate) async fn export_history(
                         state
                             .repo
                             .export_gateway_sessions(limit, query.client_id.as_deref())
-                            .await?,
+                            .await
+                            .map_err(history_export_unavailable)?,
                     ),
                 );
             }

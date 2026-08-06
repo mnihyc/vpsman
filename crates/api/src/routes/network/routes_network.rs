@@ -28,6 +28,7 @@ use crate::{
     model_topology::TopologyGraphView,
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_configuration_presets::validate_network_adapter_definition_view,
+    repository_topology_graph::TopologyGraphStageError,
     routes_jobs::create_job_from_internal_operator_mutation,
     runtime_config::{dispatch_runtime_config_for_clients, operator_dispatch_error},
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
@@ -50,7 +51,12 @@ pub(crate) async fn list_tunnel_plans(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    Ok(Json(state.repo.list_tunnel_plan_items().await?))
+    Ok(Json(state.repo.list_tunnel_plan_items().await.map_err(
+        ApiError::internal_mapper(
+            "tunnel_plans_unavailable",
+            "Tunnel plans could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn create_tunnel_plan(
@@ -73,7 +79,11 @@ pub(crate) async fn create_tunnel_plan(
     if state
         .repo
         .list_tunnel_plans()
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plans_unavailable",
+            "Tunnel plans could not be loaded.",
+        ))?
         .iter()
         .any(|plan| plan.name == request.input.name)
     {
@@ -105,7 +115,12 @@ pub(crate) async fn create_tunnel_plan(
     } else {
         Vec::new()
     };
-    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    let plan = state
+        .repo
+        .get_tunnel_plan(view.id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+        .unwrap_or(view);
     Ok((
         StatusCode::CREATED,
         Json(TunnelPlanMutationResponse { plan, sync }),
@@ -125,7 +140,11 @@ pub(crate) async fn update_tunnel_plan(
     let identity = state
         .repo
         .get_tunnel_plan_identity(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
     if identity.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
@@ -152,7 +171,7 @@ pub(crate) async fn update_tunnel_plan(
                 "allowing reviewed full replacement of malformed tunnel configuration"
             );
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(tunnel_plan_unavailable(error)),
     }
     require_tunnel_endpoint_agents(
         &state,
@@ -198,7 +217,12 @@ pub(crate) async fn update_tunnel_plan(
     } else {
         Vec::new()
     };
-    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    let plan = state
+        .repo
+        .get_tunnel_plan(view.id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+        .unwrap_or(view);
     Ok(Json(TunnelPlanMutationResponse { plan, sync }))
 }
 
@@ -211,7 +235,15 @@ pub(crate) async fn allocate_tunnel_endpoints(
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
     let mut reserved_addresses = request.reserved_addresses.clone();
-    for plan in state.repo.list_tunnel_plans().await? {
+    for plan in state
+        .repo
+        .list_tunnel_plans()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plans_unavailable",
+            "Tunnel plans could not be loaded.",
+        ))?
+    {
         if let Some(pair) = plan.plan.ipv4_tunnel {
             reserved_addresses.push(pair.left);
             reserved_addresses.push(pair.right);
@@ -274,7 +306,12 @@ pub(crate) async fn export_tunnel_plan(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    let Some(view) = state.repo.get_tunnel_plan(plan_id).await? else {
+    let Some(view) = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+    else {
         return Err(ApiError::not_found("tunnel_plan_not_found"));
     };
     Ok(Json(view.plan))
@@ -312,7 +349,11 @@ pub(crate) async fn rotate_tunnel_plan_credentials(
     let plan = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .unwrap_or(rotated);
     Ok(Json(TunnelPlanMutationResponse { plan, sync }))
 }
@@ -348,7 +389,11 @@ pub(crate) async fn delete_tunnel_plan(
     let existing = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
@@ -413,7 +458,11 @@ pub(crate) async fn update_tunnel_connection_assessment(
     let existing = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
@@ -450,7 +499,11 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
     let existing = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
     require_tunnel_ospf_enabled(&existing)?;
     if existing.revision != request.plan_revision {
@@ -528,7 +581,12 @@ pub(crate) async fn update_tunnel_plan_ospf_cost(
         )),
     )
     .await;
-    let plan = state.repo.get_tunnel_plan(plan.id).await?.unwrap_or(plan);
+    let plan = state
+        .repo
+        .get_tunnel_plan(plan.id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+        .unwrap_or(plan);
     Ok(Json(TunnelPlanOspfJobsResponse {
         plan,
         jobs,
@@ -548,7 +606,11 @@ pub(crate) async fn refresh_tunnel_plan_ospf_status(
     let existing = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("tunnel_plan_not_found"))?;
     require_tunnel_ospf_enabled(&existing)?;
     require_tunnel_endpoint_agents(&state, &existing.left_client_id, &existing.right_client_id)
@@ -581,7 +643,12 @@ pub(crate) async fn refresh_tunnel_plan_ospf_status(
         None,
     )
     .await;
-    let plan = state.repo.get_tunnel_plan(plan.id).await?.unwrap_or(plan);
+    let plan = state
+        .repo
+        .get_tunnel_plan(plan.id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+        .unwrap_or(plan);
     Ok(Json(TunnelPlanOspfJobsResponse {
         plan,
         jobs,
@@ -603,7 +670,11 @@ async fn mutate_tunnel_plan_enabled(
     let existing = state
         .repo
         .get_tunnel_plan(plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "tunnel_plan_unavailable",
+            "The tunnel plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("tunnel_plan_not_found"))?;
     if existing.revision != request.expected_revision {
         return Err(ApiError::conflict("tunnel_plan_snapshot_stale"));
@@ -634,7 +705,12 @@ async fn mutate_tunnel_plan_enabled(
         reason,
     )
     .await;
-    let plan = state.repo.get_tunnel_plan(view.id).await?.unwrap_or(view);
+    let plan = state
+        .repo
+        .get_tunnel_plan(view.id)
+        .await
+        .map_err(tunnel_plan_unavailable)?
+        .unwrap_or(view);
     Ok(Json(TunnelPlanMutationResponse { plan, sync }))
 }
 
@@ -653,7 +729,14 @@ async fn require_tunnel_endpoint_agents(
     left_client_id: &str,
     right_client_id: &str,
 ) -> Result<(), ApiError> {
-    let agents = state.repo.list_agents().await?;
+    let agents = state
+        .repo
+        .list_agents()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?;
     let has_left = agents.iter().any(|agent| agent.id == left_client_id);
     let has_right = agents.iter().any(|agent| agent.id == right_client_id);
     if !has_left || !has_right {
@@ -741,7 +824,15 @@ async fn validate_ospf_recommendation_contract(
     plan_id: Uuid,
     request: &UpdateTunnelPlanOspfCostRequest,
 ) -> Result<(), ApiError> {
-    let Some(plan) = state.repo.network_ospf_update_plan_by_id(plan_id).await? else {
+    let Some(plan) = state
+        .repo
+        .network_ospf_update_plan_by_id(plan_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "network_ospf_update_plan_unavailable",
+            "The OSPF update plan could not be loaded.",
+        ))?
+    else {
         return Err(ApiError::conflict(
             "tunnel_plan_ospf_recommendation_missing",
         ));
@@ -779,8 +870,20 @@ fn tunnel_plan_mutation_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("tunnel_plan_ospf_disabled") {
         ApiError::conflict("tunnel_plan_ospf_disabled")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "tunnel_plan_ospf_update_failed",
+            "The OSPF cost update could not be completed.",
+            error,
+        )
     }
+}
+
+fn tunnel_plan_unavailable(error: anyhow::Error) -> ApiError {
+    ApiError::internal(
+        "tunnel_plan_unavailable",
+        "The tunnel plan could not be loaded.",
+        error,
+    )
 }
 
 fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
@@ -818,7 +921,11 @@ fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("tunnel_plan_not_found") {
         ApiError::not_found("tunnel_plan_not_found")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "tunnel_plan_mutation_failed",
+            "The tunnel plan change could not be completed.",
+            error,
+        )
     }
 }
 
@@ -888,7 +995,13 @@ async fn resolve_routing_adapters_for_tunnel_plan(
         .repo
         .effective_ospf_command_sources_for_clients(&fallback_clients)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|error| {
+            ApiError::internal(
+                "ospf_command_sources_unavailable",
+                "The OSPF command configuration could not be loaded.",
+                error,
+            )
+        })?;
     let left = if let Some(definition_id) = ospf.left_adapter_definition_id.as_deref() {
         resolve_routing_adapter(state, definition_id).await?
     } else {
@@ -919,7 +1032,11 @@ async fn resolve_routing_adapter(
     let definition = state
         .repo
         .network_adapter_definition_by_id(definition_id, Some("routing_cost"))
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "routing_cost_adapter_unavailable",
+            "The routing-cost adapter could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::conflict("routing_cost_adapter_definition_not_found"))?;
     validate_network_adapter_definition_view(&definition)
         .map_err(|_| ApiError::conflict("routing_cost_adapter_definition_invalid"))?;
@@ -938,8 +1055,13 @@ async fn resolve_routing_adapter(
     }
     let status = routing_adapter_command(&definition.definition, "status_command")?;
     let update = routing_adapter_command(&definition.definition, "update_command")?;
-    let definition_json = serde_json::to_vec(&definition.definition)
-        .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
+    let definition_json = serde_json::to_vec(&definition.definition).map_err(|error| {
+        ApiError::internal(
+            "routing_cost_adapter_projection_failed",
+            "The routing-cost adapter could not be prepared.",
+            anyhow::Error::from(error),
+        )
+    })?;
     Ok(RoutingCostAdapterCommands {
         source: vpsman_common::RoutingCostCommandSource::PlanOverride,
         definition_id: definition.id.to_string(),
@@ -1188,7 +1310,11 @@ pub(crate) async fn list_network_ospf_recommendations(
         state
             .repo
             .list_network_ospf_recommendations(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_ospf_recommendations_unavailable",
+                "OSPF recommendations could not be loaded.",
+            ))?,
     ))
 }
 
@@ -1204,7 +1330,11 @@ pub(crate) async fn list_network_ospf_update_plans(
         state
             .repo
             .list_network_ospf_update_plans(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "network_ospf_update_plans_unavailable",
+                "OSPF update plans could not be loaded.",
+            ))?,
     ))
 }
 
@@ -1220,6 +1350,41 @@ pub(crate) async fn get_topology_graph(
         state
             .repo
             .topology_graph(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(topology_graph_error)?,
     ))
+}
+
+pub(crate) fn topology_graph_error(error: anyhow::Error) -> ApiError {
+    let (code, message) = match error.downcast_ref::<TopologyGraphStageError>() {
+        Some(TopologyGraphStageError::Agents) => (
+            "topology_graph_agents_unavailable",
+            "Topology could not load the VPS inventory.",
+        ),
+        Some(TopologyGraphStageError::Plans) => (
+            "topology_graph_plans_unavailable",
+            "Topology could not load tunnel plans.",
+        ),
+        Some(TopologyGraphStageError::Observations) => (
+            "topology_graph_observations_unavailable",
+            "Topology could not load network-test evidence.",
+        ),
+        Some(TopologyGraphStageError::RuntimeTelemetry) => (
+            "topology_graph_runtime_telemetry_unavailable",
+            "Topology could not load tunnel runtime evidence.",
+        ),
+        Some(TopologyGraphStageError::OspfRecommendations) => (
+            "topology_graph_ospf_recommendations_unavailable",
+            "Topology could not load OSPF recommendations.",
+        ),
+        Some(TopologyGraphStageError::Contract) => (
+            "topology_graph_contract_invalid",
+            "Topology evidence did not satisfy the current display contract.",
+        ),
+        None => (
+            "topology_graph_unavailable",
+            "Topology could not be loaded.",
+        ),
+    };
+    ApiError::internal(code, message, error)
 }

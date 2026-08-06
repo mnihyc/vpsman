@@ -39,7 +39,11 @@ pub(crate) async fn list_command_templates(
                 query.command_type.as_deref(),
                 query.display_group.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "command_templates_unavailable",
+                "The command templates could not be loaded.",
+            ))?,
     ))
 }
 
@@ -67,7 +71,11 @@ pub(crate) async fn upsert_command_template(
         state
             .repo
             .upsert_command_template(&request, &operator)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "command_template_upsert_failed",
+                "The command template could not be saved.",
+            ))?,
     ))
 }
 
@@ -110,7 +118,11 @@ fn command_template_delete_error(error: anyhow::Error) -> ApiError {
     if message.contains("command_template_builtin_immutable") {
         return ApiError::conflict("command_template_builtin_immutable");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "command_template_delete_failed",
+        "The command template could not be deleted.",
+        error,
+    )
 }
 
 fn validate_template_query(query: &CommandTemplateQuery) -> Result<(), ApiError> {

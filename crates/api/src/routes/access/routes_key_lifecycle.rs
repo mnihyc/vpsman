@@ -95,7 +95,11 @@ pub(crate) async fn list_client_key_revocations(
         state
             .repo
             .list_client_key_revocations(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "client_key_revocations_unavailable",
+                "The VPS key revocations could not be loaded.",
+            ))?,
     ))
 }
 
@@ -113,7 +117,11 @@ pub(crate) async fn revoke_current_client_key(
     if state
         .repo
         .client_public_key_sha256_hex(&client_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "client_public_key_unavailable",
+            "The VPS public-key state could not be loaded.",
+        ))?
         .is_none()
     {
         return Err(ApiError::not_found("client_public_key_not_found"));
@@ -125,7 +133,11 @@ pub(crate) async fn revoke_current_client_key(
     let record = state
         .repo
         .revoke_current_client_key(&client_id, request.reason.as_deref(), &operator)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "client_key_revoke_failed",
+            "The VPS key could not be revoked.",
+        ))?;
     let gateway_disconnect = gateway_disconnect_outcome(
         state
             .disconnect_gateway_session_for_lifecycle(&client_id, "client_key_revoked")
@@ -171,7 +183,11 @@ fn agent_identity_mutation_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("agent_identity_key_revoked") {
         ApiError::conflict("agent_identity_key_revoked")
     } else {
-        error.into()
+        ApiError::internal(
+            "agent_identity_mutation_failed",
+            "The VPS identity change could not be completed.",
+            error,
+        )
     }
 }
 
@@ -180,7 +196,12 @@ pub(crate) async fn key_lifecycle_report(
     headers: HeaderMap,
 ) -> Result<Json<KeyLifecycleReportView>, ApiError> {
     let _operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(state.repo.key_lifecycle_report().await?))
+    Ok(Json(state.repo.key_lifecycle_report().await.map_err(
+        ApiError::internal_mapper(
+            "key_lifecycle_report_unavailable",
+            "The key lifecycle report could not be loaded.",
+        ),
+    )?))
 }
 
 fn validate_agent_identity_request(request: &UpsertAgentIdentityRequest) -> Result<(), ApiError> {

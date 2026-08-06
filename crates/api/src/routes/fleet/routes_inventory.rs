@@ -41,7 +41,12 @@ pub(crate) async fn fleet_summary(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.fleet_summary().await?))
+    Ok(Json(state.repo.fleet_summary().await.map_err(
+        ApiError::internal_mapper(
+            "fleet_summary_unavailable",
+            "The fleet summary could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn list_agents(
@@ -51,7 +56,12 @@ pub(crate) async fn list_agents(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_agents().await?))
+    Ok(Json(state.repo.list_agents().await.map_err(
+        ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn update_agent_alias(
@@ -141,7 +151,11 @@ pub(crate) async fn list_gateway_sessions(
         state
             .repo
             .list_gateway_sessions(limit_or_default(query.limit))
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "gateway_sessions_unavailable",
+                "Gateway sessions could not be loaded.",
+            ))?,
     ))
 }
 
@@ -162,7 +176,11 @@ pub(crate) async fn list_telemetry_rollups(
                 query.client_id.as_deref(),
                 query.bucket_secs,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_rollups_unavailable",
+                "Telemetry rollups could not be loaded.",
+            ))?
     } else {
         state
             .repo
@@ -172,7 +190,11 @@ pub(crate) async fn list_telemetry_rollups(
                 query.bucket_secs,
                 true,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_rollups_unavailable",
+                "Telemetry rollups could not be loaded.",
+            ))?
     };
     Ok(Json(rows))
 }
@@ -196,7 +218,11 @@ pub(crate) async fn list_telemetry_samples(
                 query.end_unix,
                 true,
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_samples_unavailable",
+                "Telemetry samples could not be loaded.",
+            ))?,
     ))
 }
 
@@ -218,7 +244,11 @@ pub(crate) async fn list_telemetry_network_rates(
                 query.interface.as_deref(),
                 query.bucket_secs,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_network_rates_unavailable",
+                "Telemetry network rates could not be loaded.",
+            ))?
     } else {
         state
             .repo
@@ -229,7 +259,11 @@ pub(crate) async fn list_telemetry_network_rates(
                 query.bucket_secs,
                 true,
             )
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_network_rates_unavailable",
+                "Telemetry network rates could not be loaded.",
+            ))?
     };
     Ok(Json(rows))
 }
@@ -251,7 +285,11 @@ pub(crate) async fn list_telemetry_tunnels(
                 query.client_id.as_deref(),
                 query.interface.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "telemetry_tunnels_unavailable",
+                "Tunnel telemetry could not be loaded.",
+            ))?,
     ))
 }
 
@@ -262,7 +300,9 @@ pub(crate) async fn list_tags(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_tags().await?))
+    Ok(Json(state.repo.list_tags().await.map_err(
+        ApiError::internal_mapper("tags_unavailable", "Tags could not be loaded."),
+    )?))
 }
 
 pub(crate) async fn update_tag_order(
@@ -273,7 +313,17 @@ pub(crate) async fn update_tag_order(
     let _operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    validate_tag_order_request(&request, &state.repo.list_tags().await?)?;
+    validate_tag_order_request(
+        &request,
+        &state
+            .repo
+            .list_tags()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "tags_unavailable",
+                "Tags could not be loaded.",
+            ))?,
+    )?;
     Ok(Json(
         state
             .repo
@@ -291,7 +341,14 @@ pub(crate) async fn list_runtime_config_patch_generators(
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
     Ok(Json(
-        state.repo.list_runtime_config_patch_generators().await?,
+        state
+            .repo
+            .list_runtime_config_patch_generators()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "runtime_config_patch_generators_unavailable",
+                "Runtime-config patch generators could not be loaded.",
+            ))?,
     ))
 }
 
@@ -370,7 +427,14 @@ pub(crate) async fn list_runtime_config_apply_states(
         .require_operator_scope(&headers, SCOPE_CONFIG_READ)
         .await?;
     Ok(Json(
-        state.repo.list_runtime_config_apply_states(None).await?,
+        state
+            .repo
+            .list_runtime_config_apply_states(None)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "runtime_config_apply_states_unavailable",
+                "Runtime-config apply states could not be loaded.",
+            ))?,
     ))
 }
 
@@ -398,7 +462,11 @@ pub(crate) async fn create_server_runtime_config_patch_request(
             .resolve_bulk_targets(&BulkResolveRequest {
                 selector_expression: request.selector_expression.trim().to_string(),
             })
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "runtime_config_patch_targets_resolve_failed",
+                "Runtime-config patch targets could not be resolved.",
+            ))?
             .targets
             .into_iter()
             .map(|agent| agent.id)
@@ -477,7 +545,9 @@ pub(crate) async fn create_tag(
     let targets = Vec::<String>::new();
     let intent = DbPrivilegeIntent::new("tag.create", &request.name, None, &targets, true, None);
     verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    Ok(Json(state.repo.create_tag(request).await?))
+    Ok(Json(state.repo.create_tag(request).await.map_err(
+        ApiError::internal_mapper("tag_create_failed", "The tag could not be created."),
+    )?))
 }
 
 pub(crate) async fn bulk_mutate_tags(
@@ -509,7 +579,14 @@ pub(crate) async fn bulk_mutate_tags(
         preview_request.confirmed = false;
         preview_request.preview_hash = None;
         preview_request.privilege_assertion = None;
-        let preview = state.repo.bulk_mutate_tags(&preview_request).await?;
+        let preview = state
+            .repo
+            .bulk_mutate_tags(&preview_request)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "tag_mutation_preview_failed",
+                "The tag-mutation preview could not be prepared.",
+            ))?;
         require_matching_preview_hash(
             request.preview_hash.as_deref(),
             &preview.preview_hash,
@@ -530,7 +607,12 @@ pub(crate) async fn bulk_mutate_tags(
         );
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
-    Ok(Json(state.repo.bulk_mutate_tags(&request).await?))
+    Ok(Json(state.repo.bulk_mutate_tags(&request).await.map_err(
+        ApiError::internal_mapper(
+            "tag_mutation_failed",
+            "The tag mutation could not be completed.",
+        ),
+    )?))
 }
 
 pub(crate) async fn delete_tag(
@@ -544,7 +626,15 @@ pub(crate) async fn delete_tag(
         .await?;
     validate_legacy_tag_name_for_cleanup(&tag)?;
     if request.confirmed {
-        let preview = state.repo.delete_tag(&tag, false).await?;
+        let preview =
+            state
+                .repo
+                .delete_tag(&tag, false)
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "tag_delete_preview_failed",
+                    "The tag-deletion preview could not be prepared.",
+                ))?;
         require_matching_preview_hash(
             request.preview_hash.as_deref(),
             &preview.preview_hash,
@@ -560,7 +650,16 @@ pub(crate) async fn delete_tag(
             DbPrivilegeIntent::new("tag.delete", &tag, None, &affected_targets, true, None);
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
-    Ok(Json(state.repo.delete_tag(&tag, request.confirmed).await?))
+    Ok(Json(
+        state
+            .repo
+            .delete_tag(&tag, request.confirmed)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "tag_delete_failed",
+                "The tag could not be deleted.",
+            ))?,
+    ))
 }
 
 fn require_matching_preview_hash(
@@ -617,7 +716,11 @@ fn runtime_config_patch_generator_error(error: anyhow::Error) -> ApiError {
     } else if message.contains("runtime_config_patch_generator_delete_review_stale") {
         ApiError::conflict("runtime_config_patch_generator_delete_review_stale")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "runtime_config_patch_generator_mutation_failed",
+            "The runtime-config patch generator change could not be completed.",
+            error,
+        )
     }
 }
 
@@ -689,7 +792,11 @@ fn runtime_config_override_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::conflict("runtime_config_target_no_longer_available")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "runtime_config_override_mutation_failed",
+            "The runtime configuration override could not be completed.",
+            error,
+        )
     }
 }
 
@@ -702,7 +809,11 @@ async fn verified_fixed_target_ids(
     let resolved = state
         .repo
         .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fixed_targets_unavailable",
+            "The selected VPS targets could not be loaded.",
+        ))?
         .targets
         .into_iter()
         .map(|agent| agent.id)
@@ -736,7 +847,11 @@ pub(crate) async fn assign_agent_tag(
         state
             .repo
             .assign_agent_tag_mutation(&client_id, &request.tag, request.confirmed)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "tag_assignment_failed",
+                "The VPS tag assignment could not be completed.",
+            ))?,
     ))
 }
 
@@ -749,7 +864,16 @@ pub(crate) async fn resolve_bulk_targets(
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
     validate_bulk_selector_expression(&request.selector_expression)?;
-    Ok(Json(state.repo.resolve_bulk_targets(&request).await?))
+    Ok(Json(
+        state
+            .repo
+            .resolve_bulk_targets(&request)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "selector_targets_unavailable",
+                "Selector targets could not be resolved.",
+            ))?,
+    ))
 }
 
 fn validate_bulk_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
@@ -848,7 +972,11 @@ fn tag_order_error(error: anyhow::Error) -> ApiError {
     match error.to_string().as_str() {
         "unknown_tag" => ApiError::bad_request("unknown_tag"),
         "duplicate_tag" => ApiError::bad_request("duplicate_tag"),
-        _ => error.into(),
+        _ => ApiError::internal(
+            "tag_order_update_failed",
+            "The tag order could not be updated.",
+            error,
+        ),
     }
 }
 
@@ -910,7 +1038,11 @@ fn agent_mutation_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::conflict("display_name_already_exists")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "vps_identity_mutation_failed",
+            "The VPS identity change could not be completed.",
+            error,
+        )
     }
 }
 

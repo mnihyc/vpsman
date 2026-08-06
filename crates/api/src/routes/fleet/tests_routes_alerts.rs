@@ -63,8 +63,11 @@ fn vps_rule_billing_and_port_speed_errors_are_bad_requests() {
         unknown.status,
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     );
-    assert_eq!(unknown.code, "internal_server_error");
-    assert!(unknown.public_message.is_none());
+    assert_eq!(unknown.code, "vps_rules_mutation_failed");
+    assert_eq!(
+        unknown.public_message.as_deref(),
+        Some("The VPS rule change could not be completed.")
+    );
 }
 
 #[test]
@@ -121,7 +124,14 @@ fn notification_channel_rejects_unsafe_targets_and_maps_name_conflicts() {
         unexpected.status,
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     );
-    assert_eq!(unexpected.code, "internal_server_error");
+    assert_eq!(
+        unexpected.code,
+        "fleet_alert_notification_channel_mutation_failed"
+    );
+    assert_eq!(
+        unexpected.public_message.as_deref(),
+        Some("The notification channel change could not be completed.")
+    );
 }
 
 #[test]

@@ -8,7 +8,11 @@ fn webhook_rule_upsert_maps_name_conflicts_only() {
 
     let unexpected = webhook_rule_upsert_error(anyhow::anyhow!("storage_unavailable"));
     assert_eq!(unexpected.status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(unexpected.code, "internal_server_error");
+    assert_eq!(unexpected.code, "webhook_rule_upsert_failed");
+    assert_eq!(
+        unexpected.public_message.as_deref(),
+        Some("The webhook rule could not be saved.")
+    );
 }
 
 #[test]

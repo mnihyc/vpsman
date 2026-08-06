@@ -35,7 +35,16 @@ pub(crate) async fn list_migration_links(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.query_migration_links(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .query_migration_links(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "migration_links_unavailable",
+                "Migration links could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn create_migration_link(
@@ -50,7 +59,11 @@ pub(crate) async fn create_migration_link(
     let restore_plan = state
         .repo
         .find_restore_plan(request.restore_plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "migration_restore_plan_unavailable",
+            "The migration restore plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("migration_restore_plan_not_found"))?;
     validate_migration_route(&restore_plan)?;
     if restore_plan.status != RestorePlanStatus::PlannedMetadataOnly.as_str() {
@@ -80,7 +93,11 @@ pub(crate) async fn create_migration_run(
     let restore_plan = state
         .repo
         .find_restore_plan(request.link.restore_plan_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "migration_restore_plan_unavailable",
+            "The migration restore plan could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::bad_request("migration_restore_plan_not_found"))?;
     validate_migration_route(&restore_plan)?;
     if restore_plan.status != RestorePlanStatus::PlannedMetadataOnly.as_str() {
@@ -116,7 +133,11 @@ pub(crate) async fn create_migration_run(
             {
                 ApiError::conflict("job_id_reused_with_different_request")
             } else {
-                ApiError::from(error)
+                ApiError::internal(
+                    "migration_run_create_failed",
+                    "The migration run could not be created.",
+                    error,
+                )
             }
         })?;
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
@@ -157,7 +178,11 @@ async fn record_migration_link_or_conflict(
             if error.to_string().contains("migration_link_already_exists") {
                 ApiError::conflict("migration_link_already_exists")
             } else {
-                ApiError::from(error)
+                ApiError::internal(
+                    "migration_link_create_failed",
+                    "The migration link could not be created.",
+                    error,
+                )
             }
         })
 }
@@ -180,7 +205,15 @@ async fn preflight_migration_restore_job(
         effective_job_max_timeout_secs(request.job.max_timeout_secs, state.max_job_timeout_secs())?;
     request.job.max_timeout_secs = Some(effective_max_timeout_secs);
     let selection = request.job.target_selection()?;
-    let resolved_agents = state.repo.resolve_bulk_targets(&selection).await?.targets;
+    let resolved_agents = state
+        .repo
+        .resolve_bulk_targets(&selection)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "migration_targets_resolve_failed",
+            "Migration targets could not be resolved.",
+        ))?
+        .targets;
     let targets = request.job.fixed_target_ids()?;
     if targets
         .iter()
@@ -201,9 +234,11 @@ async fn preflight_migration_restore_job(
     }
     validate_restore_archive_binding(state, &command, &targets).await?;
     let command_payload = encode_json(&command).map_err(|error| {
-        ApiError::from(anyhow::anyhow!(
-            "failed to encode migration restore job command: {error}"
-        ))
+        ApiError::internal(
+            "migration_restore_job_prepare_failed",
+            "The migration restore job could not be prepared.",
+            anyhow::anyhow!(error),
+        )
     })?;
     let command_hash = payload_hash(&command_payload);
     let request_fingerprint =
@@ -360,9 +395,11 @@ async fn verify_migration_link_privilege(
         "note": request.note,
     }))
     .map_err(|error| {
-        ApiError::from(anyhow::anyhow!(
-            "migration_link_payload_hash_failed: {error}"
-        ))
+        ApiError::internal(
+            "migration_link_prepare_failed",
+            "The migration link review could not be prepared.",
+            anyhow::anyhow!(error),
+        )
     })?;
     let payload_hash = payload_hash(&payload);
     let targets = vec![

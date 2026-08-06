@@ -42,11 +42,22 @@ pub(crate) async fn get_host_process_inventory(
         if error.to_string().contains("agent_not_found") {
             ApiError::not_found("agent_not_found")
         } else {
-            ApiError::from(error)
+            ApiError::internal(
+                "host_process_inventory_unavailable",
+                "The host process inventory could not be loaded.",
+                error,
+            )
         }
     })?;
 
-    let evidence = state.repo.host_process_job_evidence(client_id).await?;
+    let evidence = state
+        .repo
+        .host_process_job_evidence(client_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "host_process_evidence_unavailable",
+            "Host process evidence could not be loaded.",
+        ))?;
     let Some(job_id) = evidence.latest_success_job_id else {
         return Ok(Json(HostProcessInventoryView {
             client_id: client_id.to_string(),
@@ -92,10 +103,21 @@ pub(crate) async fn get_host_service_inventory(
         if error.to_string().contains("agent_not_found") {
             ApiError::not_found("agent_not_found")
         } else {
-            ApiError::from(error)
+            ApiError::internal(
+                "host_service_inventory_unavailable",
+                "The host service inventory could not be loaded.",
+                error,
+            )
         }
     })?;
-    let evidence = state.repo.host_service_job_evidence(client_id).await?;
+    let evidence = state
+        .repo
+        .host_service_job_evidence(client_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "host_service_evidence_unavailable",
+            "Host service evidence could not be loaded.",
+        ))?;
     let Some(job_id) = evidence.latest_success_job_id else {
         return Ok(Json(HostServiceInventoryView {
             client_id: client_id.to_string(),
@@ -140,10 +162,21 @@ pub(crate) async fn get_host_storage_inventory(
         if error.to_string().contains("agent_not_found") {
             ApiError::not_found("agent_not_found")
         } else {
-            ApiError::from(error)
+            ApiError::internal(
+                "host_storage_inventory_unavailable",
+                "The host storage inventory could not be loaded.",
+                error,
+            )
         }
     })?;
-    let evidence = state.repo.host_storage_job_evidence(client_id).await?;
+    let evidence = state
+        .repo
+        .host_storage_job_evidence(client_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "host_storage_evidence_unavailable",
+            "Host storage evidence could not be loaded.",
+        ))?;
     let Some(job_id) = evidence.latest_success_job_id else {
         return Ok(Json(HostStorageInventoryView {
             client_id: client_id.to_string(),
@@ -194,7 +227,11 @@ pub(crate) async fn get_host_package_update_plan(
         if error.to_string().contains("agent_not_found") {
             ApiError::not_found("agent_not_found")
         } else {
-            ApiError::from(error)
+            ApiError::internal(
+                "package_update_plan_unavailable",
+                "The package update plan could not be loaded.",
+                error,
+            )
         }
     })?;
     Ok(Json(package_update_plan_view(&state, client_id).await?))
@@ -207,7 +244,14 @@ pub(crate) async fn list_host_package_update_plans(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_JOBS_READ)
         .await?;
-    let mut agents = state.repo.list_agents().await?;
+    let mut agents = state
+        .repo
+        .list_agents()
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_inventory_unavailable",
+            "The VPS inventory could not be loaded.",
+        ))?;
     agents.sort_by(|left, right| {
         left.display_name
             .cmp(&right.display_name)
@@ -240,7 +284,14 @@ async fn package_update_plan_view(
     state: &AppState,
     client_id: &str,
 ) -> Result<HostPackageUpdatePlanView, ApiError> {
-    let evidence = state.repo.host_package_plan_job_evidence(client_id).await?;
+    let evidence = state
+        .repo
+        .host_package_plan_job_evidence(client_id)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "host_package_plan_evidence_unavailable",
+            "Host package-plan evidence could not be loaded.",
+        ))?;
     let Some(job_id) = evidence.latest_success_job_id else {
         return Ok(HostPackageUpdatePlanView {
             client_id: client_id.to_string(),
@@ -284,7 +335,11 @@ async fn materialize_job_stdout_payload(
     let mut outputs = state
         .repo
         .list_job_outputs(job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "host_inventory_outputs_unavailable",
+            "Host inventory output could not be loaded.",
+        ))?
         .into_iter()
         .filter(|output| output.client_id == client_id && output.stream == "stdout")
         .collect::<Vec<_>>();

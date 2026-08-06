@@ -36,7 +36,11 @@ pub(crate) async fn list_webhook_rules(
         state
             .repo
             .list_webhook_rules(limit_or_default(query.limit), query.enabled)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "webhook_rules_unavailable",
+                "The webhook rules could not be loaded.",
+            ))?,
     ))
 }
 
@@ -62,7 +66,11 @@ fn webhook_rule_upsert_error(error: anyhow::Error) -> ApiError {
     if error.to_string().contains("webhook_rule_name_conflict") {
         return ApiError::conflict("webhook_rule_name_conflict");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "webhook_rule_upsert_failed",
+        "The webhook rule could not be saved.",
+        error,
+    )
 }
 
 pub(crate) async fn delete_webhook_rule(
@@ -100,7 +108,11 @@ fn webhook_rule_delete_error(error: anyhow::Error) -> ApiError {
     if message.contains("webhook_rule_delete_review_stale") {
         return ApiError::conflict("webhook_rule_delete_review_stale");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "webhook_rule_delete_failed",
+        "The webhook rule could not be deleted.",
+        error,
+    )
 }
 
 pub(crate) async fn dry_run_webhook_rule(
@@ -112,7 +124,15 @@ pub(crate) async fn dry_run_webhook_rule(
         .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
         .await?;
     validate_webhook_rule_dry_run_request(&request)?;
-    Ok(Json(state.dry_run_webhook_rule(&request, &operator).await?))
+    Ok(Json(
+        state
+            .dry_run_webhook_rule(&request, &operator)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "webhook_rule_dry_run_failed",
+                "The webhook-rule dry run could not be completed.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn dispatch_webhook_rules(
@@ -168,7 +188,11 @@ pub(crate) async fn list_webhook_rule_deliveries(
                 query.event_kind.as_deref(),
                 query.status.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "webhook_rule_deliveries_unavailable",
+                "The webhook delivery history could not be loaded.",
+            ))?,
     ))
 }
 
@@ -200,7 +224,11 @@ fn webhook_delivery_error(error: anyhow::Error) -> ApiError {
     if message.contains("webhook_delivery_rotation_changed_during_confirmation") {
         return ApiError::conflict("webhook_delivery_rotation_confirmation_stale");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "webhook_delivery_operation_failed",
+        "The webhook delivery operation could not be completed.",
+        error,
+    )
 }
 
 fn validate_webhook_rule_query(query: &WebhookRuleQuery) -> Result<(), ApiError> {

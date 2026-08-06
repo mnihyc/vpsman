@@ -78,7 +78,16 @@ pub(crate) async fn list_backup_requests(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.query_backup_requests(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .query_backup_requests(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_requests_unavailable",
+                "The backup requests could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn list_backup_artifacts(
@@ -89,7 +98,16 @@ pub(crate) async fn list_backup_artifacts(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.query_backup_artifacts(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .query_backup_artifacts(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_artifacts_unavailable",
+                "The backup artifacts could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn list_backup_policies(
@@ -100,7 +118,16 @@ pub(crate) async fn list_backup_policies(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(state.repo.list_backup_policies(&query).await?))
+    Ok(Json(
+        state
+            .repo
+            .list_backup_policies(&query)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_policies_unavailable",
+                "The backup policies could not be loaded.",
+            ))?,
+    ))
 }
 
 pub(crate) async fn create_backup_policy(
@@ -134,7 +161,16 @@ pub(crate) async fn create_backup_policy(
     .await?;
     Ok((
         StatusCode::CREATED,
-        Json(state.repo.create_backup_policy(request, &operator).await?),
+        Json(
+            state
+                .repo
+                .create_backup_policy(request, &operator)
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "backup_policy_create_failed",
+                    "The backup policy could not be created.",
+                ))?,
+        ),
     ))
 }
 
@@ -163,7 +199,11 @@ pub(crate) async fn update_backup_policy(
     let current = state
         .repo
         .backup_policy_by_schedule_id(schedule_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_policy_unavailable",
+            "The backup policy could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_policy_not_found"))?;
     require_backup_policy_snapshot(&current, &expectation)?;
     let selector_unchanged =
@@ -240,7 +280,11 @@ async fn verify_backup_policy_privilege(
     };
     let operation = backup_policy_command(request);
     let operation_payload = encode_json(&operation).map_err(|error| {
-        ApiError::from(anyhow!("failed to encode backup policy command: {error}"))
+        ApiError::internal(
+            "backup_policy_privilege_intent_failed",
+            "The backup policy privilege request could not be prepared.",
+            anyhow!(error),
+        )
     })?;
     let operation_payload_hash = payload_hash(&operation_payload);
     let command_type = job_command_type_label(&operation);
@@ -277,7 +321,11 @@ async fn resolved_backup_policy_targets(
     let resolved = state
         .repo
         .resolve_bulk_targets(&fixed_target_selection(&target_client_ids)?)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_policy_targets_unavailable",
+            "The backup policy targets could not be resolved.",
+        ))?
         .targets
         .into_iter()
         .map(|agent| agent.id)
@@ -367,7 +415,11 @@ pub(crate) async fn prune_backup_policies(
             request.metadata_only,
             &outputs,
         )
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_policy_prune_audit_failed",
+            "The backup-policy cleanup result could not be recorded.",
+        ))?;
     Ok(Json(BackupPolicyPruneResponse {
         dry_run: false,
         metadata_only_requested: request.metadata_only,
@@ -390,7 +442,11 @@ async fn backup_policy_prune_plan(
         vec![state
             .repo
             .backup_policy_by_schedule_id(schedule_id)
-            .await?
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_policy_unavailable",
+                "The backup policy could not be loaded.",
+            ))?
             .ok_or_else(|| ApiError::bad_request("backup_policy_not_found"))?]
     } else {
         let policies = state
@@ -399,7 +455,11 @@ async fn backup_policy_prune_plan(
                 limit: Some(1000),
                 ..ListQuery::default()
             })
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_policy_unavailable",
+                "The backup policy could not be loaded.",
+            ))?;
         let overflow = state
             .repo
             .list_backup_policies(&ListQuery {
@@ -407,7 +467,11 @@ async fn backup_policy_prune_plan(
                 offset: Some(1000),
                 ..ListQuery::default()
             })
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_policy_unavailable",
+                "The backup policy could not be loaded.",
+            ))?;
         if !overflow.is_empty() {
             return Err(ApiError::bad_request(
                 "backup_policy_prune_schedule_id_required_at_scale",
@@ -424,7 +488,11 @@ async fn backup_policy_prune_plan(
         let candidates = state
             .repo
             .list_backup_policy_prune_candidates(&policy, cutoff_unix)
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_policy_prune_candidates_unavailable",
+                "The backup-policy cleanup candidates could not be loaded.",
+            ))?;
         plan.push(BackupPolicyPrunePlan {
             policy,
             cutoff_unix,
@@ -490,7 +558,11 @@ async fn execute_backup_policy_prune_plan(
             pruned_rows = state
                 .repo
                 .prune_backup_policy_candidates_metadata(&policy_plan.candidates)
-                .await?;
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "backup_policy_prune_failed",
+                    "The backup-policy cleanup could not be completed.",
+                ))?;
         } else if !policy_plan.candidates.is_empty() {
             object_delete_attempted = true;
             if let Some(store) = state.backup_object_store.as_ref() {
@@ -498,7 +570,11 @@ async fn execute_backup_policy_prune_plan(
                     if !state
                         .repo
                         .begin_backup_policy_candidate_object_delete(candidate)
-                        .await?
+                        .await
+                        .map_err(ApiError::internal_mapper(
+                            "backup_policy_prune_failed",
+                            "The backup-policy cleanup could not be completed.",
+                        ))?
                     {
                         continue;
                     }
@@ -508,7 +584,11 @@ async fn execute_backup_policy_prune_plan(
                             let rows = state
                                 .repo
                                 .finalize_backup_policy_candidate_object_delete(candidate)
-                                .await?;
+                                .await
+                                .map_err(ApiError::internal_mapper(
+                                    "backup_policy_prune_failed",
+                                    "The backup-policy cleanup could not be completed.",
+                                ))?;
                             pruned_rows += rows;
                         }
                         Err(error) => {
@@ -516,7 +596,11 @@ async fn execute_backup_policy_prune_plan(
                             state
                                 .repo
                                 .mark_backup_policy_candidate_delete_failed(candidate, &error_text)
-                                .await?;
+                                .await
+                                .map_err(ApiError::internal_mapper(
+                                    "backup_policy_prune_failed",
+                                    "The backup-policy cleanup could not be completed.",
+                                ))?;
                             object_delete_errors
                                 .push(format!("{}: {error_text}", candidate.object_key));
                             break;
@@ -555,9 +639,11 @@ fn backup_policy_prune_preview_hash(
     outputs: &[crate::model::BackupPolicyPrunePolicyView],
 ) -> Result<String, ApiError> {
     if plan.len() != outputs.len() {
-        return Err(ApiError::from(anyhow!(
-            "backup_policy_prune_preview_hash_failed: plan_output_length_mismatch"
-        )));
+        return Err(ApiError::internal(
+            "backup_policy_prune_preview_failed",
+            "The backup-policy cleanup preview could not be prepared.",
+            anyhow!("plan and output lengths differ"),
+        ));
     }
     let payload = serde_json::to_vec(&serde_json::json!({
         "version": 1,
@@ -577,7 +663,13 @@ fn backup_policy_prune_preview_hash(
             })
         }).collect::<Vec<_>>(),
     }))
-    .map_err(|error| ApiError::from(anyhow!("backup_policy_prune_preview_hash_failed: {error}")))?;
+    .map_err(|error| {
+        ApiError::internal(
+            "backup_policy_prune_preview_failed",
+            "The backup-policy cleanup preview could not be prepared.",
+            anyhow!(error),
+        )
+    })?;
     Ok(payload_hash(&payload))
 }
 
@@ -615,8 +707,13 @@ pub(crate) async fn create_backup_request(
     ensure_single_backup_client(&state, &request).await?;
 
     let command = backup_command(&request);
-    let payload = encode_json(&command)
-        .map_err(|error| ApiError::from(anyhow!("failed to encode backup command: {error}")))?;
+    let payload = encode_json(&command).map_err(|error| {
+        ApiError::internal(
+            "backup_job_prepare_failed",
+            "The backup job could not be prepared.",
+            anyhow!(error),
+        )
+    })?;
     let command_hash = payload_hash(&payload);
     let resolved_targets = vec![request.client_id.clone()];
     let selector_expression = id_selector_expression(&request.client_id);
@@ -645,7 +742,11 @@ pub(crate) async fn create_backup_request(
                 &operator,
                 "backup_privilege_verification_failed",
             )
-            .await?;
+            .await
+            .map_err(ApiError::internal_mapper(
+                "backup_request_rejection_record_failed",
+                "The rejected backup request could not be recorded.",
+            ))?;
         return Err(error);
     }
     let command_scope = format!("client:{}", request.client_id);
@@ -662,7 +763,11 @@ pub(crate) async fn create_backup_request(
                     &operator,
                     BackupRequestStatus::RequestedMetadataOnly,
                 )
-                .await?,
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "backup_request_create_failed",
+                    "The backup request could not be created.",
+                ))?,
         ),
     ))
 }
@@ -680,7 +785,11 @@ pub(crate) async fn record_backup_artifact_metadata(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
@@ -710,7 +819,11 @@ pub(crate) async fn record_backup_artifact_metadata(
             {
                 return Err(ApiError::conflict("backup_artifact_already_recorded"));
             }
-            return Err(ApiError::from(error));
+            return Err(ApiError::internal(
+                "backup_artifact_record_failed",
+                "The backup artifact could not be recorded.",
+                error,
+            ));
         }
     };
     state.publish(WsEvent::BackupArtifactRecorded {
@@ -738,7 +851,11 @@ pub(crate) async fn upload_backup_artifact(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
@@ -767,7 +884,11 @@ pub(crate) async fn upload_backup_artifact(
             if error_text.contains("object already exists") || error_text.contains("File exists") {
                 ApiError::conflict("backup_artifact_object_exists")
             } else {
-                ApiError::from(error)
+                ApiError::internal(
+                    "backup_artifact_store_failed",
+                    "The backup artifact could not be stored.",
+                    error,
+                )
             }
         });
     }
@@ -799,7 +920,11 @@ pub(crate) async fn upload_backup_artifact(
             {
                 Err(ApiError::conflict("backup_artifact_already_recorded"))
             } else {
-                Err(ApiError::from(error))
+                Err(ApiError::internal(
+                    "backup_artifact_record_failed",
+                    "The backup artifact could not be recorded.",
+                    error,
+                ))
             }
         }
     }
@@ -821,7 +946,11 @@ pub(crate) async fn create_backup_artifact_upload_session(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
@@ -874,7 +1003,11 @@ pub(crate) async fn commit_backup_artifact_upload_session(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
@@ -918,7 +1051,11 @@ pub(crate) async fn commit_backup_artifact_upload_session(
                 {
                     ApiError::conflict("backup_artifact_object_exists")
                 } else {
-                    ApiError::from(error)
+                    ApiError::internal(
+                        "backup_artifact_store_failed",
+                        "The backup artifact could not be stored.",
+                        error,
+                    )
                 },
             );
         }
@@ -952,7 +1089,11 @@ pub(crate) async fn commit_backup_artifact_upload_session(
             {
                 Err(ApiError::conflict("backup_artifact_already_recorded"))
             } else {
-                Err(ApiError::from(error))
+                Err(ApiError::internal(
+                    "backup_artifact_record_failed",
+                    "The backup artifact could not be recorded.",
+                    error,
+                ))
             }
         }
     }
@@ -995,7 +1136,11 @@ pub(crate) async fn create_backup_artifact_handoff(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     if backup_request.artifact_id.is_some() {
         return Err(ApiError::conflict("backup_artifact_already_recorded"));
@@ -1003,7 +1148,11 @@ pub(crate) async fn create_backup_artifact_handoff(
     let candidate = state
         .repo
         .find_backup_artifact_output_candidate(&backup_request, request.job_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_artifact_handoff_source_unavailable",
+            "The retained backup output could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::conflict("backup_artifact_handoff_source_missing"))?;
     let prepared = stage_retained_backup_artifact_stdout(&state, &candidate.outputs).await?;
     if let Err(error) = validate_plain_backup_artifact_file_with_limit(
@@ -1039,7 +1188,11 @@ pub(crate) async fn create_backup_artifact_handoff(
         Err(error) => {
             release_server_artifact_reservation(&state, &object_key).await;
             let _ = tokio::fs::remove_file(&prepared.staging_path).await;
-            return Err(ApiError::from(error));
+            return Err(ApiError::internal(
+                "backup_artifact_store_failed",
+                "The backup artifact could not be stored.",
+                error,
+            ));
         }
     };
     let result = match state
@@ -1078,7 +1231,11 @@ pub(crate) async fn create_backup_artifact_handoff(
             {
                 Err(ApiError::conflict("backup_artifact_already_recorded"))
             } else {
-                Err(ApiError::from(error))
+                Err(ApiError::internal(
+                    "backup_artifact_record_failed",
+                    "The backup artifact could not be recorded.",
+                    error,
+                ))
             }
         }
     };
@@ -1101,7 +1258,11 @@ pub(crate) async fn download_backup_artifact(
     let backup_request = state
         .repo
         .find_backup_request(backup_request_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_request_unavailable",
+            "The backup request could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_request_not_found"))?;
     let artifact_id = backup_request
         .artifact_id
@@ -1109,7 +1270,11 @@ pub(crate) async fn download_backup_artifact(
     let artifact = state
         .repo
         .find_backup_artifact(artifact_id)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_artifact_unavailable",
+            "The backup artifact could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("backup_artifact_not_found"))?;
     if !artifact.content_available {
         return Err(ApiError::conflict("backup_artifact_not_available"));
@@ -1148,18 +1313,33 @@ pub(crate) async fn download_backup_artifact(
     );
     response.headers_mut().insert(
         "x-vpsman-backup-artifact-id",
-        HeaderValue::from_str(&artifact.id.to_string())
-            .map_err(|error| ApiError::from(anyhow!("invalid artifact id header: {error}")))?,
+        HeaderValue::from_str(&artifact.id.to_string()).map_err(|error| {
+            ApiError::internal(
+                "backup_artifact_download_response_failed",
+                "The backup artifact download could not be prepared.",
+                anyhow!(error),
+            )
+        })?,
     );
     response.headers_mut().insert(
         "x-vpsman-backup-artifact-sha256",
-        HeaderValue::from_str(&artifact.sha256_hex)
-            .map_err(|error| ApiError::from(anyhow!("invalid artifact sha header: {error}")))?,
+        HeaderValue::from_str(&artifact.sha256_hex).map_err(|error| {
+            ApiError::internal(
+                "backup_artifact_download_response_failed",
+                "The backup artifact download could not be prepared.",
+                anyhow!(error),
+            )
+        })?,
     );
     response.headers_mut().insert(
         "content-length",
-        HeaderValue::from_str(&expected_size.to_string())
-            .map_err(|error| ApiError::from(anyhow!("invalid artifact size header: {error}")))?,
+        HeaderValue::from_str(&expected_size.to_string()).map_err(|error| {
+            ApiError::internal(
+                "backup_artifact_download_response_failed",
+                "The backup artifact download could not be prepared.",
+                anyhow!(error),
+            )
+        })?,
     );
     Ok(response)
 }
@@ -1372,7 +1552,11 @@ fn map_backup_artifact_reservation_error(error: anyhow::Error) -> ApiError {
     {
         ApiError::conflict("backup_artifact_object_exists")
     } else {
-        ApiError::from(error)
+        ApiError::internal(
+            "backup_artifact_reservation_failed",
+            "The backup artifact could not be reserved.",
+            error,
+        )
     }
 }
 
@@ -1425,7 +1609,11 @@ async fn ensure_single_backup_client(
         .resolve_bulk_targets(&BulkResolveRequest {
             selector_expression: id_selector_expression(&request.client_id),
         })
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "backup_target_unavailable",
+            "The backup target could not be resolved.",
+        ))?;
     if resolved.target_count == 1 && resolved.targets[0].id == request.client_id {
         Ok(())
     } else {

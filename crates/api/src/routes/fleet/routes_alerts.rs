@@ -50,7 +50,12 @@ pub(crate) async fn list_fleet_alerts(
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
     validate_alert_query(&query)?;
-    Ok(Json(state.list_fleet_alerts(query).await?))
+    Ok(Json(state.list_fleet_alerts(query).await.map_err(
+        ApiError::internal_mapper(
+            "fleet_alerts_unavailable",
+            "Fleet alerts could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn export_fleet_alerts(
@@ -73,7 +78,13 @@ pub(crate) async fn export_fleet_alerts(
         "operator_state": &query.operator_state,
         "include_muted": query.include_muted,
     });
-    let alerts = state.list_fleet_alerts(query).await?;
+    let alerts = state
+        .list_fleet_alerts(query)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alerts_unavailable",
+            "Fleet alerts could not be loaded.",
+        ))?;
     Ok(Json(FleetAlertExportView {
         generated_at: unix_now().to_string(),
         query: query_summary,
@@ -97,7 +108,11 @@ pub(crate) async fn list_fleet_alert_states(
                 query.limit.unwrap_or(50).clamp(1, 1000),
                 query.state.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "fleet_alert_states_unavailable",
+                "Fleet alert states could not be loaded.",
+            ))?,
     ))
 }
 
@@ -114,7 +129,11 @@ pub(crate) async fn update_fleet_alert_state(
         state
             .repo
             .update_fleet_alert_state(&request, &operator)
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "fleet_alert_state_update_failed",
+                "The fleet alert state could not be updated.",
+            ))?,
     ))
 }
 
@@ -334,7 +353,11 @@ pub(crate) async fn get_traffic_accounting(
                 if error.to_string().contains("traffic_accounting_not_found") {
                     ApiError::not_found("traffic_accounting_not_found")
                 } else {
-                    ApiError::from(error)
+                    ApiError::internal(
+                        "traffic_accounting_unavailable",
+                        "Traffic accounting could not be loaded.",
+                        error,
+                    )
                 }
             })?,
     ))
@@ -348,7 +371,12 @@ pub(crate) async fn list_policy_alerts(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(state.repo.list_policy_alerts(&query).await?))
+    Ok(Json(state.repo.list_policy_alerts(&query).await.map_err(
+        ApiError::internal_mapper(
+            "policy_alerts_unavailable",
+            "Policy alerts could not be loaded.",
+        ),
+    )?))
 }
 
 pub(crate) async fn list_fleet_alert_notification_channels(
@@ -370,7 +398,11 @@ pub(crate) async fn list_fleet_alert_notification_channels(
                 query.scope_value.as_deref(),
                 query.delivery_kind.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "alert_notification_channels_unavailable",
+                "Alert notification channels could not be loaded.",
+            ))?,
     ))
 }
 
@@ -433,7 +465,11 @@ pub(crate) async fn list_fleet_alert_notifications(
                 query.alert_id.as_deref(),
                 query.status.as_deref(),
             )
-            .await?,
+            .await
+            .map_err(ApiError::internal_mapper(
+                "alert_notification_deliveries_unavailable",
+                "Alert notification deliveries could not be loaded.",
+            ))?,
     ))
 }
 
@@ -479,7 +515,11 @@ fn alert_notification_delivery_error(error: anyhow::Error) -> ApiError {
     if message.contains("fleet_alert_notification_dispatch_channel_limit_exceeded") {
         return ApiError::conflict("fleet_alert_notification_dispatch_channel_limit_exceeded");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "fleet_alert_notification_dispatch_failed",
+        "The alert notification dispatch could not be completed.",
+        error,
+    )
 }
 
 fn validate_alert_query(query: &FleetAlertQuery) -> Result<(), ApiError> {
@@ -840,7 +880,11 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
     if message.contains("invalid selector expression") || message.contains("selector expression") {
         return ApiError::bad_request("vps_rules_selector_invalid");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "vps_rules_mutation_failed",
+        "The VPS rule change could not be completed.",
+        error,
+    )
 }
 
 fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
@@ -913,7 +957,11 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     if message.contains("notes are too long") {
         return ApiError::bad_request("fleet_alert_policy_notes_too_long");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "fleet_alert_policy_mutation_failed",
+        "The fleet alert policy change could not be completed.",
+        error,
+    )
 }
 
 fn fleet_alert_notification_channel_error(error: anyhow::Error) -> ApiError {
@@ -927,7 +975,11 @@ fn fleet_alert_notification_channel_error(error: anyhow::Error) -> ApiError {
     if message.contains("fleet_alert_notification_channel_delete_review_stale") {
         return ApiError::conflict("fleet_alert_notification_channel_delete_review_stale");
     }
-    ApiError::from(error)
+    ApiError::internal(
+        "fleet_alert_notification_channel_mutation_failed",
+        "The notification channel change could not be completed.",
+        error,
+    )
 }
 
 fn validate_alert_severity(severity: &str, error: &'static str) -> Result<(), ApiError> {

@@ -203,3 +203,19 @@ async fn snapshot_requires_authentication_and_an_explicit_valid_mode() {
         assert_eq!(error.code, expected);
     }
 }
+
+#[tokio::test]
+async fn snapshot_source_failures_name_the_failed_source_without_leaking_the_cause() {
+    let source: FleetSnapshotSource<Vec<String>> =
+        load_source("telemetry_network_rates", true, async {
+            Err(anyhow::anyhow!("private database address and query"))
+        })
+        .await;
+
+    assert!(source.data.is_none());
+    assert_eq!(
+        source.error.as_deref(),
+        Some("fleet_snapshot_telemetry_network_rates_unavailable")
+    );
+    assert!(!source.error.unwrap().contains("database"));
+}

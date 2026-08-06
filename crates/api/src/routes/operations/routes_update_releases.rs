@@ -31,7 +31,11 @@ pub(crate) async fn list_agent_update_releases(
     let releases = state
         .repo
         .list_agent_update_releases(limit_or_default(query.limit))
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "agent_update_releases_unavailable",
+            "Agent update releases could not be loaded.",
+        ))?;
     Ok(Json(releases))
 }
 
@@ -64,7 +68,11 @@ pub(crate) async fn latest_agent_update_release(
     let release = state
         .repo
         .latest_agent_update_release(query.name.trim(), &channel)
-        .await?
+        .await
+        .map_err(ApiError::internal_mapper(
+            "agent_update_release_lookup_failed",
+            "The agent update release could not be loaded.",
+        ))?
         .ok_or_else(|| ApiError::not_found("agent_update_release_not_found"))?;
     Ok(Json(release))
 }
@@ -90,7 +98,11 @@ pub(crate) async fn create_agent_update_release(
             {
                 ApiError::conflict("agent_update_release_already_exists")
             } else {
-                ApiError::from(error)
+                ApiError::internal(
+                    "agent_update_release_create_failed",
+                    "The agent update release could not be created.",
+                    error,
+                )
             }
         })?;
     Ok((StatusCode::CREATED, Json(release)))

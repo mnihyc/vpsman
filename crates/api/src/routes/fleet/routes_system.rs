@@ -43,11 +43,21 @@ pub(crate) async fn system_dashboard(
         .clamp(1, MAX_CHART_POINTS);
     let now = unix_now();
     let start = now.saturating_sub(window_seconds(window));
-    let collected = collect_system_dashboard_snapshot(&state).await?;
+    let collected =
+        collect_system_dashboard_snapshot(&state)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "system_dashboard_unavailable",
+                "The system dashboard could not be loaded.",
+            ))?;
     let rollups = state
         .repo
         .list_system_metric_rollups(start, now, chart_points)
-        .await?;
+        .await
+        .map_err(ApiError::internal_mapper(
+            "system_metrics_unavailable",
+            "System metric history could not be loaded.",
+        ))?;
     Ok(Json(SystemDashboardView {
         generated_at: Utc::now().to_rfc3339(),
         window: window.to_string(),

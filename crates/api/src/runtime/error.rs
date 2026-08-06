@@ -16,6 +16,29 @@ pub(crate) struct ApiError {
 }
 
 impl ApiError {
+    pub(crate) fn internal(
+        code: &'static str,
+        public_message: impl Into<String>,
+        error: anyhow::Error,
+    ) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+            error,
+            public_message: Some(public_message.into()),
+        }
+    }
+
+    pub(crate) fn internal_mapper<E>(
+        code: &'static str,
+        public_message: &'static str,
+    ) -> impl FnOnce(E) -> Self
+    where
+        E: Into<anyhow::Error>,
+    {
+        move |error| Self::internal(code, public_message, error.into())
+    }
+
     pub(crate) fn unauthorized(code: &'static str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -103,7 +126,7 @@ impl IntoResponse for ApiError {
         warn!(
             status = %self.status,
             code = self.code,
-            error = %self.error,
+            error = ?self.error,
             "api request failed"
         );
         (
