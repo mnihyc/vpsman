@@ -119,6 +119,11 @@ Every update must keep these boundaries explicit:
   events. The REST terminal-control endpoint remains the one-shot `vpsctl`
   transport and must share the same authorization, gateway-ACK binding, and
   evidence semantics rather than becoming a second control model.
+- Keep periodic fleet refreshes on `/api/v1/fleet/snapshot`: `live` carries the
+  five frequently refreshed sources and `full` adds the existing detail
+  sources. Preserve the global 15-second cadence and its existing triggers,
+  keep each source in an independent data/error envelope, and do not
+  reintroduce browser-side request fan-out for these refreshes.
 
 ### Tunnel ownership changes
 

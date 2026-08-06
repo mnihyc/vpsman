@@ -4761,7 +4761,11 @@ export async function installConsoleApiMock(
           __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
         };
         trackedWindow.__vpsmanFetchRequests ??= [];
-        trackedWindow.__vpsmanFetchRequests.push({ method, url });
+        const fixtureInternalRequest =
+          new Headers(init?.headers).get("x-vpsman-fixture-internal") === "1";
+        if (!fixtureInternalRequest) {
+          trackedWindow.__vpsmanFetchRequests.push({ method, url });
+        }
         if (pathname === "/api/v1/dashboard/overview") {
           const params = new URL(url, window.location.href).searchParams;
           const requestedWindow = params.get("window") ?? "1d";
@@ -4976,6 +4980,107 @@ export async function installConsoleApiMock(
             },
             validation: suiteConfigValidationFixture,
           });
+        }
+        if (pathname === "/api/v1/fleet/snapshot" && method === "GET") {
+          const mode = new URL(url, window.location.href).searchParams.get(
+            "mode",
+          );
+          if (mode !== "live" && mode !== "full") {
+            return jsonResponse(
+              {
+                error: "fleet_snapshot_mode_invalid",
+                message: "fleet snapshot mode must be live or full",
+              },
+              400,
+            );
+          }
+          const loadSnapshotSource = async (path: string) => {
+            const response = await window.fetch(path, {
+              headers: { "x-vpsman-fixture-internal": "1" },
+            });
+            const body = await response.json();
+            if (response.ok) {
+              return { data: body, error: null };
+            }
+            const failure = body as { error?: string; message?: string };
+            return {
+              data: null,
+              error:
+                failure.message ??
+                failure.error ??
+                `snapshot source returned ${response.status}`,
+            };
+          };
+          const [
+            summary,
+            agents,
+            telemetryRollups,
+            telemetryNetworkRates,
+            telemetryTunnels,
+          ] = await Promise.all([
+            loadSnapshotSource("/api/v1/fleet/summary"),
+            loadSnapshotSource("/api/v1/agents"),
+            loadSnapshotSource(
+              "/api/v1/telemetry/rollups?latest=true&limit=1000",
+            ),
+            loadSnapshotSource(
+              "/api/v1/telemetry/network-rates?latest=true&limit=5000",
+            ),
+            loadSnapshotSource("/api/v1/telemetry/tunnels?limit=1000"),
+          ]);
+          const snapshot: Record<string, unknown> = {
+            agents,
+            generated_at: "2026-06-02T10:02:00Z",
+            mode,
+            summary,
+            telemetry_network_rates: telemetryNetworkRates,
+            telemetry_rollups: telemetryRollups,
+            telemetry_tunnels: telemetryTunnels,
+          };
+          if (mode === "full") {
+            const [
+              fleetAlerts,
+              fleetAlertStates,
+              fleetAlertPolicies,
+              vpsRuleValues,
+              trafficAccounting,
+              policyAlerts,
+              notificationChannels,
+              notifications,
+              webhookRules,
+              webhookDeliveries,
+            ] = await Promise.all([
+              loadSnapshotSource(
+                "/api/v1/fleet-alerts?limit=200&include_muted=true",
+              ),
+              loadSnapshotSource("/api/v1/fleet-alert-states?limit=200"),
+              loadSnapshotSource("/api/v1/fleet-alert-policies?limit=200"),
+              loadSnapshotSource("/api/v1/vps-rules?limit=5000"),
+              loadSnapshotSource("/api/v1/traffic-accounting?limit=200"),
+              loadSnapshotSource("/api/v1/policy-alerts?limit=200"),
+              loadSnapshotSource(
+                "/api/v1/fleet-alert-notification-channels?limit=200",
+              ),
+              loadSnapshotSource(
+                "/api/v1/fleet-alert-notifications?limit=200",
+              ),
+              loadSnapshotSource("/api/v1/webhook-rules?limit=200"),
+              loadSnapshotSource("/api/v1/webhook-deliveries?limit=200"),
+            ]);
+            Object.assign(snapshot, {
+              fleet_alert_notification_channels: notificationChannels,
+              fleet_alert_notifications: notifications,
+              fleet_alert_policies: fleetAlertPolicies,
+              fleet_alert_states: fleetAlertStates,
+              fleet_alerts: fleetAlerts,
+              policy_alerts: policyAlerts,
+              traffic_accounting: trafficAccounting,
+              vps_rule_values: vpsRuleValues,
+              webhook_rule_deliveries: webhookDeliveries,
+              webhook_rules: webhookRules,
+            });
+          }
+          return jsonResponse(snapshot);
         }
         if (pathname === "/api/v1/fleet/summary") {
           const currentAgents = visibleAgents();

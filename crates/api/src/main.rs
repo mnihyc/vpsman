@@ -54,6 +54,8 @@ mod model_configuration_presets;
 mod model_dashboard;
 #[path = "model/model_file_transfer.rs"]
 mod model_file_transfer;
+#[path = "model/model_fleet_snapshot.rs"]
+mod model_fleet_snapshot;
 #[path = "model/model_history.rs"]
 mod model_history;
 #[path = "model/model_host_management.rs"]
@@ -181,6 +183,8 @@ mod routes_configuration_presets;
 mod routes_dashboard;
 #[path = "routes/jobs/routes_file_transfers.rs"]
 mod routes_file_transfers;
+#[path = "routes/fleet/routes_fleet_snapshot.rs"]
+mod routes_fleet_snapshot;
 #[path = "routes/fleet/routes_history.rs"]
 mod routes_history;
 #[path = "routes/operations/routes_host_management.rs"]

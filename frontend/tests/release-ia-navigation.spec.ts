@@ -2226,7 +2226,7 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
     .toBeGreaterThanOrEqual(savedScrollTop - 2);
 });
 
-test("steady-state fleet polling refreshes latest telemetry without reloading operational tables", async ({
+test("steady-state fleet polling uses one live snapshot without reloading operational tables", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -2249,22 +2249,20 @@ test("steady-state fleet polling refreshes latest telemetry without reloading op
     return trackedWindow.__vpsmanFetchRequests ?? [];
   });
   const urls = requests.map((request) => request.url);
-  expect(urls.some((url) => url.includes("/api/v1/fleet/summary"))).toBe(true);
-  expect(urls.some((url) => url.includes("/api/v1/agents"))).toBe(true);
-  expect(
-    urls.some(
-      (url) =>
-        url.includes("/api/v1/telemetry/rollups") &&
-        url.includes("latest=true"),
-    ),
-  ).toBe(true);
-  expect(
-    urls.some(
-      (url) =>
-        url.includes("/api/v1/telemetry/network-rates") &&
-        url.includes("latest=true"),
-    ),
-  ).toBe(true);
+  const liveSnapshots = urls.filter(
+    (url) =>
+      url.includes("/api/v1/fleet/snapshot") && url.includes("mode=live"),
+  );
+  expect(liveSnapshots).toHaveLength(1);
+  for (const replacedPath of [
+    "/api/v1/fleet/summary",
+    "/api/v1/agents",
+    "/api/v1/telemetry/rollups",
+    "/api/v1/telemetry/network-rates",
+    "/api/v1/telemetry/tunnels",
+  ]) {
+    expect(urls.some((url) => url.includes(replacedPath))).toBe(false);
+  }
   for (const operationalPath of [
     "/api/v1/fleet-alert-policies",
     "/api/v1/fleet-alert-notification-channels",
@@ -2289,16 +2287,25 @@ test("fleet telemetry refresh keeps successful domains current when one domain f
   });
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Fleet", "Monitor");
-  const networkValue = page
-    .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
-    .locator(".vpsMonitorFlowFact", { hasText: "Network TX" })
-    .locator("strong");
-  await expect(networkValue).toBeVisible();
   await expect(
     page.locator(".fleetMonitorWorkspace").getByRole("alert"),
   ).toContainText("Some live fleet sources are unavailable: tunnel telemetry");
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const grid = page.getByLabel("VPS instance records data grid");
+  const row = grid
+    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+    .first();
+  await activate(row.getByLabel("Expand VPS instance records row"));
+  const detail = grid
+    .locator(".gridExpandedRow", { hasText: "edge-sfo-01" })
+    .first();
+  await activate(detail.getByRole("tab", { name: "Telemetry" }));
+  const networkValue = detail
+    .locator(".timeline")
+    .filter({ hasText: /^Network rate/ });
+  await expect(networkValue).toContainText("RX");
   const initialValue = await networkValue.textContent();
-  expect(initialValue).not.toBe("n/a");
+  expect(initialValue).toContain("TX");
   await expect
     .poll(() => networkValue.textContent(), { timeout: 20_000 })
     .not.toBe(initialValue);

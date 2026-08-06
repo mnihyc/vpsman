@@ -673,6 +673,31 @@ async function installTwentyFourVpsExpertMock(page: Page) {
       const method = (
         init?.method ?? (input instanceof Request ? input.method : "GET")
       ).toUpperCase();
+      if (pathname === "/api/v1/fleet/snapshot" && method === "GET") {
+        const baseResponse = await previousFetch(input, init);
+        const snapshot = (await baseResponse.json()) as Record<string, unknown>;
+        const available = (data: unknown) => ({ data, error: null });
+        return jsonResponse({
+          ...snapshot,
+          agents: available(agents),
+          summary: available({
+            never: agents.filter((agent) => agent.status === "never").length,
+            offline: agents.filter((agent) => agent.status === "offline")
+              .length,
+            online: agents.filter((agent) => agent.status === "online").length,
+            revoked: agents.filter((agent) => agent.status === "revoked")
+              .length,
+            running_jobs: 7,
+            stale: agents.filter((agent) => agent.status === "stale").length,
+            total: agents.length,
+            unknown: 0,
+            warnings: 3,
+          }),
+          telemetry_network_rates: available(telemetryNetworkRates),
+          telemetry_rollups: available(telemetryRollups),
+          telemetry_tunnels: available([]),
+        });
+      }
       if (pathname === "/api/v1/agents" && method === "GET") {
         return jsonResponse(agents);
       }

@@ -51,6 +51,7 @@ use crate::{
         list_file_transfer_source_artifacts, upload_file_transfer_source_artifact,
         MAX_FILE_TRANSFER_SOURCE_UPLOAD_BODY_BYTES,
     },
+    routes_fleet_snapshot::fleet_snapshot,
     routes_history::{
         export_history, list_history_retention_policies, prune_history_retention,
         upsert_history_retention_policy,
@@ -227,6 +228,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/dashboard/overview", get(dashboard_overview))
         .route("/api/v1/system/dashboard", get(system_dashboard))
         .route("/api/v1/fleet/summary", get(fleet_summary))
+        .route("/api/v1/fleet/snapshot", get(fleet_snapshot))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
         .route("/api/v1/fleet-alerts/export", get(export_fleet_alerts))
         .route(

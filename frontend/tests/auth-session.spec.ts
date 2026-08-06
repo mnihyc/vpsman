@@ -391,6 +391,69 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
       },
     });
   });
+  await page.route("**/api/v1/fleet/snapshot**", async (route) => {
+    if (!isAuthorized(route.request())) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
+      return;
+    }
+    const mode = new URL(route.request().url()).searchParams.get("mode");
+    const available = <T,>(data: T) => ({ data, error: null });
+    const response: Record<string, unknown> = {
+      agents: available([
+        {
+          capabilities: {
+            can_apply_process_limits: true,
+            can_attempt_privileged_ops: true,
+            can_manage_runtime_tunnels: true,
+            effective_uid: 0,
+            privilege_mode: "root",
+            unprivileged_hint: null,
+          },
+          display_name: "session-edge-01",
+          id: "session-agent-01",
+          status: "online",
+          tags: ["edge"],
+        },
+      ]),
+      generated_at: "2026-06-05T20:44:58Z",
+      mode,
+      summary: available({
+        never: 0,
+        offline: 0,
+        online: 1,
+        revoked: 0,
+        running_jobs: 0,
+        stale: 0,
+        total: 1,
+        unknown: 0,
+        warnings: 0,
+      }),
+      telemetry_network_rates: available([]),
+      telemetry_rollups: available([]),
+      telemetry_tunnels: available([]),
+    };
+    if (mode === "full") {
+      for (const key of [
+        "fleet_alert_notification_channels",
+        "fleet_alert_notifications",
+        "fleet_alert_policies",
+        "fleet_alert_states",
+        "fleet_alerts",
+        "policy_alerts",
+        "traffic_accounting",
+        "vps_rule_values",
+        "webhook_rule_deliveries",
+        "webhook_rules",
+      ]) {
+        response[key] = available([]);
+      }
+    }
+    await route.fulfill({ contentType: "application/json", json: response });
+  });
   await page.route("**/api/v1/fleet/summary", async (route) => {
     if (!isAuthorized(route.request())) {
       await route.fulfill({
