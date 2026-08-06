@@ -67,6 +67,10 @@ test("dispatches and operates a durable staged rollout", async ({
   await expect(
     composer.getByText(/Staged rollout accepted with 1 canary/),
   ).toBeVisible();
+  await expect(composer.getByLabel("Execution result")).toHaveCount(0);
+  await expect(composer).toContainText(
+    "Open staged rollout for authoritative live progress",
+  );
   await activate(
     composer.getByRole("button", { name: "Open staged rollout" }),
   );

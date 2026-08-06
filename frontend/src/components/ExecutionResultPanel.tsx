@@ -103,7 +103,7 @@ export function ExecutionResultPanel({
         </span>
         <span>
           <strong>{progress.terminal}/{progress.total}</strong>
-          targets
+          {hasMultipleJobs ? "target actions" : "targets"}
         </span>
         <span>
           <strong>{progress.in_progress}</strong>

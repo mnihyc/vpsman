@@ -4,7 +4,7 @@ import {
   buildBulkJobProgress,
   createJobTargetCount,
   formatTargetAvailabilitySummary,
-  waitForBulkJobTargets,
+  waitForBulkJobSet,
   type BulkJobProgress,
 } from "../../bulkJobProgress";
 import { ActionFeedback } from "../../components/ActionFeedback";
@@ -34,6 +34,7 @@ import {
   buildNetworkSpeedTestOperation,
   buildNetworkStatusOperation,
   renderTunnelEndpointConfig,
+  type NetworkSpeedDirection,
 } from "../../topologyNetworkJobs";
 import { runtimeManagerLabel } from "../../topologyRuntime";
 import type {
@@ -67,6 +68,7 @@ export function TopologyNetworkTestControls({
   onLoadOutputs,
   onLoadTargets,
   onOpenJobDetails,
+  onOpenJobHistory,
   onOpenPrivilegeUnlock,
   onOpenTunnelPlans,
   privilegeMaterial,
@@ -81,6 +83,7 @@ export function TopologyNetworkTestControls({
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
+  onOpenJobHistory?: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenTunnelPlans: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
@@ -101,6 +104,8 @@ export function TopologyNetworkTestControls({
   const [probeCount, setProbeCount] = useState(5);
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
   const [speedDurationSecs, setSpeedDurationSecs] = useState(10);
+  const [speedDirection, setSpeedDirection] =
+    useState<NetworkSpeedSelection>("both");
   const [speedMaxBytesMiB, setSpeedMaxBytesMiB] = useState("");
   const [speedRateLimitMbps, setSpeedRateLimitMbps] = useState("");
   const [speedPort, setSpeedPort] = useState(5201);
@@ -113,6 +118,8 @@ export function TopologyNetworkTestControls({
   const [lastJobProgress, setLastJobProgress] =
     useState<BulkJobProgress | null>(null);
   const [lastOutputs, setLastOutputs] = useState<JobOutputRecord[]>([]);
+  const [executionPhase, setExecutionPhase] =
+    useState<NetworkExecutionPhase | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
@@ -150,47 +157,37 @@ export function TopologyNetworkTestControls({
         : [],
     [networkTrends, selectedPlan],
   );
-  const recentProbeTrend = useMemo(
-    () =>
-      latestTrend(
-        selectedPlanTrends.filter((trend) => trend.kind === "network_probe"),
-      ),
-    [selectedPlanTrends],
-  );
-  const recentSpeedTrend = useMemo(
-    () =>
-      latestTrend(
-        selectedPlanTrends.filter(
-          (trend) => trend.kind === "network_speed_test",
-        ),
-      ),
-    [selectedPlanTrends],
-  );
-  const evidenceSummary = formatRecentEvidence(
-    recentProbeTrend,
-    recentSpeedTrend,
-  );
   const networkHeaderStatus =
     selectedPlan && !selectedPlan.enabled
       ? "Plan disabled; inspect only"
       : privilegeMaterial
         ? "Dispatch ready"
         : "Inspect available; unlock for probe/speed";
+  const executionHasStarted =
+    executionPhase !== null ||
+    visibleJobProgress !== null ||
+    lastOutputs.length > 0;
+  const topActionError =
+    actionError && networkSnapshot === null && !executionHasStarted
+      ? actionError
+      : null;
+  const executionActionError =
+    actionError && executionHasStarted ? actionError : null;
   const networkTestFeedbackMessage =
-    actionError ??
+    topActionError ??
     (reviewPending && reviewAction
       ? `Preparing ${actionLabel(reviewAction).toLowerCase()} review`
       : null);
 
   useEffect(() => {
-    if (!actionError) return;
+    if (!topActionError) return;
     const frame = window.requestAnimationFrame(() => {
       if (feedbackRef.current) {
         scrollIntoViewWithMotion(feedbackRef.current, { block: "nearest" });
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [actionError]);
+  }, [topActionError]);
 
   useEffect(() => {
     if (!visibleJobProgress || networkSnapshot) return;
@@ -335,6 +332,7 @@ export function TopologyNetworkTestControls({
     const buildSubmission = async (
       planRecord: TunnelPlanRecord,
       planSide: TunnelEndpointSide,
+      direction: NetworkSpeedDirection | null,
     ): Promise<NetworkJobSubmission> => {
       const builtOperation =
         mode === "status"
@@ -354,7 +352,7 @@ export function TopologyNetworkTestControls({
             : buildNetworkSpeedTestOperation(
                 planRecord.id,
                 planRecord.plan,
-                planSide,
+                direction!,
                 speedLimits!.durationSecs,
                 speedLimits!.maxBytes,
                 speedLimits!.rateLimitKbps,
@@ -363,10 +361,7 @@ export function TopologyNetworkTestControls({
               );
       const targetClientIds =
         mode === "speed_test"
-          ? [
-              builtOperation.endpoint.localClientId,
-              builtOperation.endpoint.peerClientId,
-            ]
+          ? planClientIds(planRecord)
           : [builtOperation.endpoint.localClientId];
       const selectorExpression =
         selectorExpressionForClientIds(targetClientIds);
@@ -395,13 +390,18 @@ export function TopologyNetworkTestControls({
         privileged: needsPrivilege,
         selectorExpression,
         side: planSide,
+        speedDirectionLabel:
+          direction === null
+            ? null
+            : speedDirectionLabel(direction, planRecord, clientLabel),
         targetClientIds,
-        targets: resolveAgentsById(agents, targetClientIds),
       };
     };
+    const speedDirections =
+      mode === "speed_test" ? selectedSpeedDirections(speedDirection) : [null];
     const submissions = await Promise.all(
-      [{ plan: selectedPlan, side }].map((candidate) =>
-        buildSubmission(candidate.plan, candidate.side),
+      speedDirections.map((direction) =>
+        buildSubmission(selectedPlan, side, direction),
       ),
     );
     if (!submissions.length) {
@@ -419,61 +419,54 @@ export function TopologyNetworkTestControls({
         submissions.flatMap((submission) => submission.targetClientIds),
       ),
     );
-    const scopeLabel =
-      mode === "speed_test" ? "Selected plan endpoints" : "Selected endpoint";
     const planLabel = submissions[0]?.planName ?? "unknown";
+    const directionSummary =
+      mode === "speed_test"
+        ? speedDirectionSelectionLabel(speedDirection)
+        : null;
     return {
       action: mode,
-      detail: `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} on ${vpsCountLabel(snapshotTargets.length)}.`,
-      items: [
-        { label: "Operation", value: actionLabel(mode) },
-        { label: "Scope", value: scopeLabel },
-        {
-          label: "Targets",
-          value: formatTargetAvailabilitySummary(snapshotTargets),
-        },
-        { label: "Plans", value: planLabel },
-        {
-          label: "Endpoint",
-          value:
-            mode === "speed_test" || submissions.length > 1
-              ? "Both endpoints"
-              : side,
-        },
-        { label: "Baseline", value: formatPlanBaseline(selectedPlan) },
-        { label: "Recent evidence", value: evidenceSummary },
-        ...(mode === "probe"
+      detail: `${actionLabel(mode)} ${submissions[0]?.planName ?? "selected plan"} across ${vpsCountLabel(snapshotTargets.length)}.`,
+      items:
+        mode === "speed_test"
           ? [
+              { label: "Plan", value: planLabel },
               {
-                label: "Probe cadence",
-                value: `${probeLimits!.count} packets, ${probeLimits!.intervalMs} ms interval`,
+                label: "Targets",
+                value: formatTargetAvailabilitySummary(snapshotTargets),
+              },
+              { label: "Direction", value: directionSummary! },
+              {
+                label: "Transfer limit",
+                value: `${speedLimits!.durationSecs}s per direction · ${formatDataLimit(speedLimits!.maxBytes)} · ${formatRateLimit(speedLimits!.rateLimitKbps)}`,
+              },
+              {
+                label: "Listener",
+                value: `TCP ${speedLimits!.port} · ${speedLimits!.connectTimeoutMs} ms connect timeout`,
+              },
+              {
+                label: "Job deadline",
+                value: `${boundedMaxTimeoutSecs}s per direction`,
               },
             ]
-          : []),
-        ...(mode === "speed_test"
-          ? [
+          : [
+              { label: "Plan", value: planLabel },
               {
-                label: "Test limits",
-                value: formatSpeedTestLimits(
-                  speedLimits!.durationSecs,
-                  speedLimits!.maxBytes / (1024 * 1024),
-                  speedLimits!.rateLimitKbps,
-                  speedLimits!.port,
-                  speedLimits!.connectTimeoutMs,
-                ),
+                label: "Targets",
+                value: formatTargetAvailabilitySummary(snapshotTargets),
               },
-            ]
-          : []),
-        { label: "Max timeout", value: `${boundedMaxTimeoutSecs}s` },
-        {
-          label: "Required privilege",
-          value: needsPrivilege
-            ? `${commandName(mode)} unlocked locally`
-            : "No local privilege required",
-        },
-      ],
+              { label: "Endpoint", value: side },
+              ...(mode === "probe"
+                ? [
+                    {
+                      label: "Probe cadence",
+                      value: `${probeLimits!.count} packets · ${probeLimits!.intervalMs} ms interval`,
+                    },
+                  ]
+                : []),
+              { label: "Job deadline", value: `${boundedMaxTimeoutSecs}s` },
+            ],
       submissions,
-      targets: snapshotTargets,
     };
   }
 
@@ -481,22 +474,23 @@ export function TopologyNetworkTestControls({
     setJobProgress(null);
     setLastJobProgress(null);
     setLastOutputs([]);
+    setExecutionPhase(null);
   }
 
   async function submitNetworkChange(snapshot: NetworkActionSnapshot) {
     await runPanelAction(setPending, setActionError, async () => {
       await executeNetworkSnapshot(snapshot);
-      setNetworkSnapshot(null);
     });
   }
 
   async function executeNetworkSnapshot(snapshot: NetworkActionSnapshot) {
-    const jobs: Array<{
-      job: CreateJobResponse;
-      submission: NetworkJobSubmission;
-    }> = [];
-    const outputs: JobOutputRecord[] = [];
-    for (const submission of snapshot.submissions) {
+    const jobs: NetworkCreatedJob[] = [];
+    clearExecutionResults();
+    const lastSubmission =
+      snapshot.submissions[snapshot.submissions.length - 1] ?? null;
+    setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
+    setLastAction(snapshot.action);
+    for (const [index, submission] of snapshot.submissions.entries()) {
       const job = await onCreateJob({
         argv: [],
         selector_expression: submission.selectorExpression,
@@ -511,22 +505,16 @@ export function TopologyNetworkTestControls({
         privilege_assertion: submission.privilegeAssertion,
         max_timeout_secs: submission.maxTimeoutSecs,
       });
+      if (index === 0) {
+        setNetworkSnapshot(null);
+      }
       jobs.push({ job, submission });
-    }
-    clearExecutionResults();
-    const lastSubmission =
-      snapshot.submissions[snapshot.submissions.length - 1] ?? null;
-    setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
-    setLastAction(snapshot.action);
-    for (const { job, submission } of jobs) {
-      outputs.push(
-        ...(await trackNetworkProgress(
-          job,
-          submission.targets,
-          submission.maxTimeoutSecs,
-        )),
-      );
-      setLastOutputs(outputs.slice());
+      setExecutionPhase({
+        current: index + 1,
+        label: submission.speedDirectionLabel,
+        total: snapshot.submissions.length,
+      });
+      setLastOutputs(await trackNetworkProgress(jobs));
     }
     try {
       await onLoadNetworkTrends();
@@ -538,15 +526,28 @@ export function TopologyNetworkTestControls({
   }
 
   async function trackNetworkProgress(
-    job: CreateJobResponse,
-    targets: AgentView[],
-    maxTimeoutSecsForSnapshot: number,
+    jobs: NetworkCreatedJob[],
   ): Promise<JobOutputRecord[]> {
-    const targetCount = createJobTargetCount(job);
+    const jobIds = jobs.map(({ job }) => job.job_id);
+    const operationId = jobIds[0];
+    const targetCount = jobs.reduce(
+      (count, { job }) => count + createJobTargetCount(job),
+      0,
+    );
+    const targets = resolveAgentsById(
+      agents,
+      uniqueClientIds(
+        jobs.flatMap(({ submission }) => submission.targetClientIds),
+      ),
+    );
+    const maxTimeoutSecsForSnapshot = Math.max(
+      ...jobs.map(({ submission }) => submission.maxTimeoutSecs),
+    );
     setLastJobProgress(null);
     setJobProgress(
       buildBulkJobProgress({
-        jobId: job.job_id,
+        jobId: operationId,
+        jobIds,
         targetCount,
         targetRecords: [],
         targets,
@@ -554,7 +555,8 @@ export function TopologyNetworkTestControls({
       }),
     );
     try {
-      const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
+      const result = await waitForBulkJobSet(jobIds, onLoadTargets, {
+        operationId,
         onLoadOutputs,
         onProgress: setJobProgress,
         targetCount,
@@ -562,7 +564,12 @@ export function TopologyNetworkTestControls({
         maxTimeoutSecs: maxTimeoutSecsForSnapshot,
       });
       setLastJobProgress(result.progress);
-      return await loadCompletedNetworkOutputs(job.job_id, onLoadOutputs);
+      const outputs = await Promise.all(
+        jobIds.map((jobId) =>
+          loadCompletedNetworkOutputs(jobId, onLoadOutputs),
+        ),
+      );
+      return outputs.flat();
     } finally {
       setJobProgress(null);
     }
@@ -626,7 +633,7 @@ export function TopologyNetworkTestControls({
           className="localActionFeedback"
           message={networkTestFeedbackMessage}
           ref={feedbackRef}
-          tone={actionError ? "danger" : "progress"}
+          tone={topActionError ? "danger" : "progress"}
         />
         <div className="topologyNetworkTestGroups">
           <section
@@ -782,7 +789,7 @@ export function TopologyNetworkTestControls({
           </section>
 
           <section
-            className="topologyNetworkTestGroup"
+            className="topologyNetworkTestGroup topologyNetworkSpeedTestGroup"
             title="Speed tests coordinate both selected plan endpoints. Duration always bounds a run; byte and rate limits are optional."
           >
             <div className="topologyNetworkTestGroupHeader">
@@ -790,6 +797,23 @@ export function TopologyNetworkTestControls({
               <small>Paired endpoints</small>
             </div>
             <div className="dispatchControls">
+              <label title="Traffic direction. Both runs the two directions sequentially so they do not compete for the same tunnel or TCP port.">
+                <span>Direction</span>
+                <select
+                  aria-label="Network speed test direction"
+                  onChange={(event) => {
+                    clearNetworkReview();
+                    setSpeedDirection(
+                      event.target.value as NetworkSpeedSelection,
+                    );
+                  }}
+                  value={speedDirection}
+                >
+                  <option value="both">Both directions</option>
+                  <option value="left_to_right">Left → Right</option>
+                  <option value="right_to_left">Right → Left</option>
+                </select>
+              </label>
               <label title="Maximum speed-test duration.">
                 <span>Duration s</span>
                 <input
@@ -880,7 +904,7 @@ export function TopologyNetworkTestControls({
                   !selectedPlan?.enabled
                     ? "Enable this plan before running a speed test"
                     : privilegeMaterial
-                      ? "Review speed test against both selected plan endpoints"
+                      ? "Review the selected directional speed test against both plan endpoints"
                       : "Unlock privilege before reviewing the speed test"
                 }
                 type="button"
@@ -920,15 +944,22 @@ export function TopologyNetworkTestControls({
         />
         {networkSnapshot === null && visibleJobProgress && (
           <div ref={resultRef} tabIndex={-1}>
+            <ActionFeedback
+              className="localActionFeedback"
+              message={executionActionError}
+              tone="danger"
+            />
             <ExecutionResultPanel
-              context={`Network ${actionLabel(lastAction).toLowerCase()}`}
+              context={networkExecutionContext(lastAction, executionPhase)}
               loading={jobProgress !== null}
               onClearResults={clearExecutionResults}
               onOpenJobDetails={onOpenJobDetails}
+              onOpenJobHistory={onOpenJobHistory}
               progress={visibleJobProgress}
             >
               <NetworkExecutionEvidence
                 clientLabel={clientLabel}
+                loading={jobProgress !== null}
                 outputs={lastOutputs}
               />
             </ExecutionResultPanel>
@@ -975,12 +1006,16 @@ async function loadCompletedNetworkOutputs(
 
 function NetworkExecutionEvidence({
   clientLabel,
+  loading,
   outputs,
 }: {
   clientLabel: (clientId: string) => string;
+  loading: boolean;
   outputs: JobOutputRecord[];
 }) {
   const rows = networkExecutionRows(outputs, clientLabel);
+  const speedCards = networkSpeedEvidenceCards(outputs, clientLabel);
+  const retainedResultCount = rows.length + speedCards.length;
   return (
     <div
       className="topologyNetworkResultEvidence"
@@ -989,12 +1024,19 @@ function NetworkExecutionEvidence({
       <div className="topologyNetworkResultHeader">
         <strong>Endpoint evidence</strong>
         <span>
-          {rows.length > 0
-            ? `${rows.length} retained result${rows.length === 1 ? "" : "s"}`
+          {retainedResultCount > 0
+            ? `${retainedResultCount} retained result${retainedResultCount === 1 ? "" : " groups"}`
             : "No retained status output"}
         </span>
       </div>
-      {rows.length > 0 ? (
+      {speedCards.length > 0 && (
+        <div className="topologyNetworkSpeedEvidence">
+          {speedCards.map((card) => (
+            <NetworkSpeedEvidenceCard card={card} key={card.direction} />
+          ))}
+        </div>
+      )}
+      {rows.length > 0 &&
         rows.map((row) => (
           <div className="topologyNetworkResultRow" key={row.id}>
             <span className="historyPrimary">
@@ -1009,16 +1051,102 @@ function NetworkExecutionEvidence({
               {row.status}
             </ConsoleStatusBadge>
           </div>
-        ))
-      ) : (
+        ))}
+      {retainedResultCount === 0 && (
         <span className="topologyNetworkResultEmpty">
-          The job is terminal, but no structured status output is retained. Open
-          job details for target state and raw output evidence.
+          {loading
+            ? "Waiting for structured endpoint evidence while the accepted job runs."
+            : "The job is terminal, but no structured status output is retained. Open job details for target state and raw output evidence."}
         </span>
       )}
     </div>
   );
 }
+
+function NetworkSpeedEvidenceCard({ card }: { card: NetworkSpeedEvidence }) {
+  const chartTimes = speedIntervalTimes(card);
+  const chartLines: TimeSeriesChartLine[] = [
+    {
+      color:
+        card.direction === "left_to_right"
+          ? consolePalette.chart.blue
+          : consolePalette.chart.purple,
+      label:
+        card.measurementRole === "receiver"
+          ? "Receiver throughput"
+          : "Sender throughput",
+      values: card.intervals.map((interval) => interval.throughputMbps),
+    },
+  ];
+  return (
+    <article className="topologyNetworkSpeedCard">
+      <div className="topologyNetworkSpeedHeader">
+        <span className="historyPrimary">
+          <strong title={card.label}>{card.label}</strong>
+          <small title={card.detail}>{card.detail}</small>
+        </span>
+        <ConsoleStatusBadge tone={card.tone}>{card.status}</ConsoleStatusBadge>
+      </div>
+      <dl className="topologyNetworkSpeedMetrics">
+        <div>
+          <dt>Min</dt>
+          <dd title={formatThroughput(card.minimumMbps)}>
+            {formatThroughput(card.minimumMbps)}
+          </dd>
+        </div>
+        <div>
+          <dt>Avg</dt>
+          <dd title={formatThroughput(card.averageMbps)}>
+            {formatThroughput(card.averageMbps)}
+          </dd>
+        </div>
+        <div>
+          <dt>Max</dt>
+          <dd title={formatThroughput(card.maximumMbps)}>
+            {formatThroughput(card.maximumMbps)}
+          </dd>
+        </div>
+      </dl>
+      {card.intervals.length > 0 && (
+        <div className="topologyNetworkSpeedCurve">
+          <TimeSeriesChart
+            ariaLabel={`${card.label} per-second ${card.measurementRole} throughput`}
+            emptyLabel="No interval throughput evidence"
+            height={118}
+            lines={chartLines}
+            times={chartTimes}
+            valueFormatter={(value) =>
+              value === null ? "-" : `${formatMetric(value)} Mbps`
+            }
+          />
+        </div>
+      )}
+    </article>
+  );
+}
+
+type NetworkSpeedInterval = {
+  bytes: number;
+  endMs: number;
+  startMs: number;
+  throughputMbps: number;
+};
+
+type NetworkSpeedEvidence = {
+  averageMbps: number | null;
+  bytes: number | null;
+  detail: string;
+  direction: NetworkSpeedDirection;
+  elapsedMs: number | null;
+  intervals: NetworkSpeedInterval[];
+  label: string;
+  maximumMbps: number | null;
+  measurementRole: "receiver" | "sender";
+  minimumMbps: number | null;
+  observedAt: string;
+  status: string;
+  tone: "ok" | "warning" | "critical";
+};
 
 type NetworkExecutionRow = {
   detail: string;
@@ -1034,98 +1162,250 @@ function networkExecutionRows(
   outputs: JobOutputRecord[],
   clientLabel: (clientId: string) => string,
 ): NetworkExecutionRow[] {
-  return outputs.flatMap<NetworkExecutionRow>((output, index) => {
-    if (output.stream !== "status") return [];
-    let parsed: Record<string, unknown>;
-    try {
-      const value = JSON.parse(decodeOutputPreview(output.data_base64));
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        return [];
-      parsed = value as Record<string, unknown>;
-    } catch {
-      return [];
-    }
-    const type = stringValue(parsed.type) ?? "network_result";
-    const clientId = stringValue(parsed.client_id) ?? output.client_id;
-    const peerId = stringValue(parsed.peer_client_id);
-    const target = peerId
-      ? `${clientLabel(clientId)} -> ${clientLabel(peerId)}`
-      : clientLabel(clientId);
-    if (type === "network_status") {
-      const runtime = recordValue(parsed.runtime);
-      const summary = recordValue(runtime.summary);
-      const reasons = stringArrayValue(summary.reasons);
-      const status = stringValue(summary.status) ?? "unknown";
-      const healthy = summary.healthy === true;
+  return parsedNetworkStatusOutputs(outputs).flatMap<NetworkExecutionRow>(
+    ({ index, output, parsed }) => {
+      const type = stringValue(parsed.type) ?? "network_result";
+      const clientId = stringValue(parsed.client_id) ?? output.client_id;
+      const peerId = stringValue(parsed.peer_client_id);
+      const target = peerId
+        ? `${clientLabel(clientId)} -> ${clientLabel(peerId)}`
+        : clientLabel(clientId);
+      if (type === "network_status") {
+        const runtime = recordValue(parsed.runtime);
+        const summary = recordValue(runtime.summary);
+        const reasons = stringArrayValue(summary.reasons);
+        const status = stringValue(summary.status) ?? "unknown";
+        const healthy = summary.healthy === true;
+        return [
+          {
+            detail:
+              reasons.length > 0
+                ? reasons.map(readableNetworkToken).join(", ")
+                : `Interface ${stringValue(parsed.interface) ?? "unknown"}; no runtime drift reason reported`,
+            id: `${output.client_id}:${type}:${index}`,
+            kind: "Runtime status",
+            metric: `${stringValue(parsed.interface) ?? "interface"} · ${readableNetworkToken(status)}`,
+            status: healthy ? "Healthy" : readableNetworkToken(status),
+            target,
+            tone: healthy ? "ok" : "warning",
+          },
+        ];
+      }
+      if (type === "network_probe") {
+        const probe = recordValue(parsed.parsed);
+        const latencyMin = numberValue(probe.latency_min_ms);
+        const latencyAvg = numberValue(probe.latency_avg_ms);
+        const latencyMax = numberValue(probe.latency_max_ms);
+        const received = numberValue(probe.received);
+        const transmitted = numberValue(probe.transmitted);
+        const loss = numberValue(probe.packet_loss_ratio);
+        const healthy = probe.healthy === true || parsed.success === true;
+        const packets =
+          received === null || transmitted === null
+            ? "Packet count unavailable"
+            : `${formatMetric(received)}/${formatMetric(transmitted)} received`;
+        const lossLabel =
+          loss === null
+            ? "loss unavailable"
+            : `${formatMetric(loss * 100)}% loss`;
+        return [
+          {
+            detail: `${packets}; ${lossLabel}; target ${stringValue(parsed.target) ?? "peer tunnel address"}`,
+            id: `${output.client_id}:${type}:${index}`,
+            kind: "Probe · min / avg / max",
+            metric:
+              latencyMin === null || latencyAvg === null || latencyMax === null
+                ? "Latency unavailable"
+                : `${formatMetric(latencyMin)} / ${formatMetric(latencyAvg)} / ${formatMetric(latencyMax)} ms`,
+            status: healthy ? "Healthy" : "Probe failed",
+            target,
+            tone: healthy ? "ok" : "critical",
+          },
+        ];
+      }
+      if (type === "network_speed_test") return [];
       return [
         {
           detail:
-            reasons.length > 0
-              ? reasons.map(readableNetworkToken).join(", ")
-              : `Interface ${stringValue(parsed.interface) ?? "unknown"}; no runtime drift reason reported`,
+            stringValue(parsed.message) ??
+            "Structured network status output retained",
           id: `${output.client_id}:${type}:${index}`,
-          kind: "Runtime status",
-          metric: `${stringValue(parsed.interface) ?? "interface"} · ${readableNetworkToken(status)}`,
-          status: healthy ? "Healthy" : readableNetworkToken(status),
+          kind: readableNetworkToken(type),
+          metric: "Result retained",
+          status: output.exit_code === 0 ? "Completed" : "Needs review",
           target,
-          tone: healthy ? "ok" : "warning",
+          tone: output.exit_code === 0 ? "ok" : "warning",
         },
       ];
+    },
+  );
+}
+
+type ParsedNetworkStatusOutput = {
+  index: number;
+  output: JobOutputRecord;
+  parsed: Record<string, unknown>;
+};
+
+function parsedNetworkStatusOutputs(
+  outputs: JobOutputRecord[],
+): ParsedNetworkStatusOutput[] {
+  return outputs.flatMap<ParsedNetworkStatusOutput>((output, index) => {
+    if (output.stream !== "status") return [];
+    try {
+      const value = JSON.parse(decodeOutputPreview(output.data_base64));
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? [{ index, output, parsed: value as Record<string, unknown> }]
+        : [];
+    } catch {
+      return [];
     }
-    if (type === "network_probe") {
-      const probe = recordValue(parsed.parsed);
-      const latency = numberValue(probe.latency_avg_ms);
-      const loss = numberValue(probe.packet_loss_ratio);
-      const healthy = probe.healthy === true || parsed.success === true;
-      return [
-        {
-          detail: `${loss === null ? "Loss unavailable" : `${formatMetric(loss * 100)}% loss`}; target ${stringValue(parsed.target) ?? "peer tunnel address"}`,
-          id: `${output.client_id}:${type}:${index}`,
-          kind: "Probe",
-          metric:
-            latency === null
-              ? "Latency unavailable"
-              : `${formatMetric(latency)} ms average`,
-          status: healthy ? "Healthy" : "Probe failed",
-          target,
-          tone: healthy ? "ok" : "critical",
-        },
-      ];
+  });
+}
+
+function networkSpeedEvidenceCards(
+  outputs: JobOutputRecord[],
+  clientLabel: (clientId: string) => string,
+): NetworkSpeedEvidence[] {
+  const groups = new Map<NetworkSpeedDirection, ParsedNetworkStatusOutput[]>();
+  for (const entry of parsedNetworkStatusOutputs(outputs)) {
+    if (stringValue(entry.parsed.type) !== "network_speed_test") continue;
+    const direction = networkSpeedDirection(entry.parsed);
+    if (!direction) continue;
+    const entries = groups.get(direction) ?? [];
+    entries.push(entry);
+    groups.set(direction, entries);
+  }
+  return (["left_to_right", "right_to_left"] as const).flatMap((direction) => {
+    const entries = groups.get(direction);
+    if (!entries?.length) return [];
+    const receiver = entries.find(
+      (entry) => stringValue(entry.parsed.role) === "server",
+    );
+    const sender = entries.find(
+      (entry) => stringValue(entry.parsed.role) === "client",
+    );
+    const headline = receiver ?? sender ?? entries[0];
+    const senderClientId =
+      stringValue(headline.parsed.sender_client_id) ??
+      (sender
+        ? (stringValue(sender.parsed.client_id) ?? sender.output.client_id)
+        : stringValue(receiver?.parsed.peer_client_id));
+    const receiverClientId =
+      stringValue(headline.parsed.receiver_client_id) ??
+      (receiver
+        ? (stringValue(receiver.parsed.client_id) ?? receiver.output.client_id)
+        : stringValue(sender?.parsed.peer_client_id));
+    const succeeded = entries.filter(
+      (entry) => entry.parsed.success === true,
+    ).length;
+    const completed =
+      Boolean(receiver) && Boolean(sender) && succeeded === entries.length;
+    const headlineStats = headline.parsed;
+    const measurementRole = receiver ? "receiver" : "sender";
+    const averageMbps = numberValue(headlineStats.throughput_mbps);
+    const minimumMbps = numberValue(headlineStats.throughput_min_mbps);
+    const maximumMbps = numberValue(headlineStats.throughput_max_mbps);
+    const bytes = numberValue(headlineStats.bytes);
+    const elapsedMs = numberValue(headlineStats.elapsed_ms);
+    const intervals = speedIntervals(headlineStats.throughput_intervals);
+    const messages = Array.from(
+      new Set(
+        entries.flatMap((entry) => {
+          const message = stringValue(entry.parsed.message);
+          return message ? [message] : [];
+        }),
+      ),
+    );
+    const senderLabel = senderClientId
+      ? clientLabel(senderClientId)
+      : "Unknown sender";
+    const receiverLabel = receiverClientId
+      ? clientLabel(receiverClientId)
+      : "Unknown receiver";
+    const detailParts = [
+      bytes === null
+        ? "Transferred bytes unavailable"
+        : `${formatNetworkBytes(bytes)} ${measurementRole === "receiver" ? "received" : "sent"}`,
+      elapsedMs === null
+        ? "elapsed time unavailable"
+        : `${formatMetric(elapsedMs / 1000)}s measured`,
+    ];
+    const senderAverage = sender
+      ? numberValue(sender.parsed.throughput_mbps)
+      : null;
+    if (senderAverage !== null && receiver) {
+      detailParts.push(`${formatMetric(senderAverage)} Mbps sender evidence`);
     }
-    if (type === "network_speed_test") {
-      const throughput = numberValue(parsed.throughput_mbps);
-      const bytes = numberValue(parsed.bytes);
-      const success = parsed.success === true;
-      const message = stringValue(parsed.message);
-      return [
-        {
-          detail: `${readableNetworkToken(stringValue(parsed.role) ?? "endpoint")} role; ${bytes === null ? "bytes unavailable" : `${formatNetworkBytes(bytes)} transferred`}${message ? `; ${message}` : ""}`,
-          id: `${output.client_id}:${type}:${index}`,
-          kind: "Speed test",
-          metric:
-            throughput === null
-              ? "Throughput unavailable"
-              : `${formatMetric(throughput)} Mbps`,
-          status: success ? "Completed" : "Failed",
-          target,
-          tone: success ? "ok" : "critical",
-        },
-      ];
+    if (!receiver) {
+      detailParts.push("Receiver evidence unavailable");
     }
+    detailParts.push(...messages);
     return [
       {
-        detail:
-          stringValue(parsed.message) ??
-          "Structured network status output retained",
-        id: `${output.client_id}:${type}:${index}`,
-        kind: readableNetworkToken(type),
-        metric: "Result retained",
-        status: output.exit_code === 0 ? "Completed" : "Needs review",
-        target,
-        tone: output.exit_code === 0 ? "ok" : "warning",
+        averageMbps,
+        bytes,
+        detail: detailParts.join(" · "),
+        direction,
+        elapsedMs,
+        intervals,
+        label: `${senderLabel} → ${receiverLabel}`,
+        maximumMbps,
+        measurementRole,
+        minimumMbps,
+        observedAt: headline.output.received_at ?? headline.output.created_at,
+        status: completed ? "Completed" : succeeded > 0 ? "Partial" : "Failed",
+        tone: completed ? "ok" : succeeded > 0 ? "warning" : "critical",
       },
     ];
   });
+}
+
+function networkSpeedDirection(
+  parsed: Record<string, unknown>,
+): NetworkSpeedDirection | null {
+  const direction = stringValue(parsed.direction);
+  if (direction === "left_to_right" || direction === "right_to_left") {
+    return direction;
+  }
+  const serverSide = stringValue(parsed.server_side);
+  if (serverSide === "right") return "left_to_right";
+  if (serverSide === "left") return "right_to_left";
+  return null;
+}
+
+function speedIntervals(value: unknown): NetworkSpeedInterval[] {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 30).flatMap<NetworkSpeedInterval>((candidate) => {
+    const interval = recordValue(candidate);
+    const startMs = numberValue(interval.start_ms);
+    const endMs = numberValue(interval.end_ms);
+    const bytes = numberValue(interval.bytes);
+    const throughputMbps = numberValue(interval.throughput_mbps);
+    return startMs !== null &&
+      endMs !== null &&
+      endMs > startMs &&
+      bytes !== null &&
+      bytes >= 0 &&
+      throughputMbps !== null &&
+      throughputMbps >= 0
+      ? [{ bytes, endMs, startMs, throughputMbps }]
+      : [];
+  });
+}
+
+function speedIntervalTimes(card: NetworkSpeedEvidence): string[] {
+  const observedAt = Date.parse(card.observedAt);
+  const base = Number.isFinite(observedAt)
+    ? observedAt - (card.elapsedMs ?? card.intervals.length * 1000)
+    : Date.UTC(2000, 0, 1);
+  return card.intervals.map((interval, index) =>
+    new Date(base + Math.max(interval.endMs, (index + 1) * 1000)).toISOString(),
+  );
+}
+
+function formatThroughput(value: number | null): string {
+  return value === null ? "Unavailable" : `${formatMetric(value)} Mbps`;
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -1347,6 +1627,13 @@ function NetworkTrendChartCard({
 }
 
 type NetworkAction = "status" | "probe" | "speed_test";
+type NetworkSpeedSelection = NetworkSpeedDirection | "both";
+
+type NetworkExecutionPhase = {
+  current: number;
+  label: string | null;
+  total: number;
+};
 
 type NetworkJobSubmission = {
   command: string;
@@ -1362,8 +1649,13 @@ type NetworkJobSubmission = {
   privileged: boolean;
   selectorExpression: string;
   side: TunnelEndpointSide;
+  speedDirectionLabel: string | null;
   targetClientIds: string[];
-  targets: AgentView[];
+};
+
+type NetworkCreatedJob = {
+  job: CreateJobResponse;
+  submission: NetworkJobSubmission;
 };
 
 type NetworkActionSnapshot = {
@@ -1371,7 +1663,6 @@ type NetworkActionSnapshot = {
   detail: string;
   items: Array<{ label: string; value: string }>;
   submissions: NetworkJobSubmission[];
-  targets: AgentView[];
 };
 
 function commandName(mode: NetworkAction) {
@@ -1436,12 +1727,50 @@ function planClientIds(plan: TunnelPlanRecord): string[] {
   return [plan.left_client_id, plan.right_client_id];
 }
 
+function selectedSpeedDirections(
+  selection: NetworkSpeedSelection,
+): NetworkSpeedDirection[] {
+  return selection === "both"
+    ? ["left_to_right", "right_to_left"]
+    : [selection];
+}
+
+function speedDirectionSelectionLabel(
+  selection: NetworkSpeedSelection,
+): string {
+  if (selection === "both") {
+    return "Left → right; then right → left (sequential)";
+  }
+  return selection === "left_to_right" ? "Left → right" : "Right → left";
+}
+
+function speedDirectionLabel(
+  direction: NetworkSpeedDirection,
+  plan: TunnelPlanRecord,
+  clientLabel: (clientId: string) => string,
+): string {
+  const left = clientLabel(plan.left_client_id);
+  const right = clientLabel(plan.right_client_id);
+  return direction === "left_to_right"
+    ? `${left} → ${right}`
+    : `${right} → ${left}`;
+}
+
+function networkExecutionContext(
+  action: NetworkAction,
+  phase: NetworkExecutionPhase | null,
+): string {
+  const base = `Network ${actionLabel(action).toLowerCase()}`;
+  if (action !== "speed_test" || !phase) return base;
+  const direction = phase.label ? ` · ${phase.label}` : "";
+  return `${base} · phase ${phase.current}/${phase.total}${direction}`;
+}
+
 function runtimeOwnershipHint(plan: TunnelPlanRecord | null): string {
   if (!plan) {
     return "No tunnel plan selected";
   }
-  const manager =
-    plan.plan.runtime_control?.manager ?? "agent_builtin";
+  const manager = plan.plan.runtime_control?.manager ?? "agent_builtin";
   return `Runtime ownership: ${runtimeManagerLabel(manager)}`;
 }
 
@@ -1526,45 +1855,10 @@ function throughputBaselineSummary(
   };
 }
 
-function formatPlanBaseline(plan: TunnelPlanRecord): string {
-  const bandwidth = plan.plan.bandwidth_mbps ?? plan.input.bandwidth_mbps;
-  const ospf = plan.plan.ospf ?? plan.input.ospf;
-  if (!ospf) {
-    return `${formatBandwidthMbps(bandwidth)}, OSPF off`;
-  }
-  const ospfCost =
-    plan.plan.recommended_ospf_cost ?? plan.recommended_ospf_cost;
-  return `${formatBandwidthMbps(bandwidth)}, ${formatMetric(ospf.planned_latency_ms)} ms target, ${formatLossRatio(ospf.planned_packet_loss_ratio)} loss, OSPF ${ospfCost ?? "unverified"}`;
-}
-
-function formatRecentEvidence(
-  probeTrend: NetworkObservationTrendRecord | null,
-  speedTrend: NetworkObservationTrendRecord | null,
-): string {
-  const parts: string[] = [];
-  if (probeTrend) {
-    parts.push(
-      `Probe ${formatNullableMetric(probeTrend.latency_avg_ms, "ms avg")}, ${formatLossRatio(probeTrend.packet_loss_avg_ratio)} loss`,
-    );
-  }
-  if (speedTrend) {
-    parts.push(
-      `Throughput ${formatNullableMetric(speedTrend.throughput_avg_mbps, "Mbps avg")}, ${formatNullableMetric(speedTrend.throughput_max_mbps, "Mbps max")}`,
-    );
-  }
-  return parts.length > 0 ? parts.join("; ") : "No persisted evidence yet";
-}
-
-function formatSpeedTestLimits(
-  durationSecs: number,
-  maxBytesMiB: number,
-  rateLimitKbps: number,
-  port: number,
-  connectTimeoutMs: number,
-): string {
-  const dataLimit =
-    maxBytesMiB === 0 ? "unlimited data" : `${formatMetric(maxBytesMiB)} MiB cap`;
-  return `${durationSecs}s, ${dataLimit}, ${formatRateLimit(rateLimitKbps)}, TCP ${port}, timeout ${connectTimeoutMs} ms`;
+function formatDataLimit(maxBytes: number): string {
+  return maxBytes === 0
+    ? "unlimited data"
+    : `${formatMetric(maxBytes / (1024 * 1024))} MiB cap`;
 }
 
 function formatBandwidthMbps(value: number): string {

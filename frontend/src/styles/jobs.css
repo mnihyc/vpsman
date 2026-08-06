@@ -1995,7 +1995,7 @@
   min-width: 0;
 }
 
-.executionResultActions {
+.executionResultHeader > .executionResultActions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
@@ -2050,6 +2050,22 @@
   text-overflow: ellipsis;
   text-transform: none;
   white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .executionResultHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .executionResultActions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .executionResultActions button {
+    flex: 1 1 120px;
+  }
 }
 
 .executionFailureReasons {
@@ -4033,6 +4049,11 @@
 .transferProgress span {
   color: var(--muted);
   font-size: 13px;
+}
+
+.transferProgress .transferProgressFeedback.localActionFeedback {
+  margin: 4px 0 0;
+  max-width: 100%;
 }
 
 .privilegeManager {

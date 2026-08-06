@@ -66,16 +66,30 @@ export function buildBulkJobProgress({
   const normalizedJobIds = Array.from(
     new Set((jobIds ?? [jobId]).map((value) => value.trim()).filter(Boolean)),
   );
-  const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
+  const targetRecordIdentities = new Set(
+    targetRecords.map((target) =>
+      jobTargetIdentity(target.job_id, target.client_id),
+    ),
+  );
   const targetByClient = new Map(targets.map((target) => [target.id, target]));
-  const outputClientIds = new Set(outputs.filter((output) => output.done).map((output) => output.client_id));
-  const outputsByClient = new Map<string, JobOutputRecord[]>();
+  const outputTargetIdentities = new Set(
+    outputs
+      .filter((output) => output.done)
+      .map((output) => jobTargetIdentity(output.job_id, output.client_id)),
+  );
+  const outputsByTargetIdentity = new Map<string, JobOutputRecord[]>();
   for (const output of outputs) {
-    const clientOutputs = outputsByClient.get(output.client_id) ?? [];
-    clientOutputs.push(output);
-    outputsByClient.set(output.client_id, clientOutputs);
+    const identity = jobTargetIdentity(output.job_id, output.client_id);
+    const targetOutputs = outputsByTargetIdentity.get(identity) ?? [];
+    targetOutputs.push(output);
+    outputsByTargetIdentity.set(identity, targetOutputs);
   }
-  const total = Math.max(0, targetCount ?? targets.length, targets.length, targetRecords.length);
+  const total = Math.max(
+    0,
+    targetCount ?? targets.length,
+    targets.length,
+    targetRecords.length,
+  );
   const jobMaxTimeoutMs = Number.isFinite(maxTimeoutSecs ?? NaN)
     ? Math.ceil(Math.max(1, maxTimeoutSecs ?? 1)) * 1000
     : null;
@@ -103,6 +117,10 @@ export function buildBulkJobProgress({
   }
 
   for (const targetRecord of targetRecords) {
+    const targetIdentity = jobTargetIdentity(
+      targetRecord.job_id,
+      targetRecord.client_id,
+    );
     const target = targetByClient.get(targetRecord.client_id) ?? {
       display_name: targetRecord.client_id,
       id: targetRecord.client_id,
@@ -152,20 +170,30 @@ export function buildBulkJobProgress({
         targetFailureReason(
           target,
           targetRecord,
-          targetOutputFailureReason(outputsByClient.get(targetRecord.client_id) ?? []),
+          targetOutputFailureReason(
+            outputsByTargetIdentity.get(targetIdentity) ?? [],
+          ),
         ),
       );
     }
-    if (targetRecordTerminal(targetRecord.status) || outputClientIds.has(targetRecord.client_id)) {
+    if (
+      targetRecordTerminal(targetRecord.status) ||
+      outputTargetIdentities.has(targetIdentity)
+    ) {
       retrieved += 1;
     }
     if (
       jobMaxTimeoutMs !== null &&
-      (targetRecord.status === "dispatching" || targetRecord.status === "running")
+      (targetRecord.status === "dispatching" ||
+        targetRecord.status === "running")
     ) {
       const startedAtMs = parseBackendTimestampMs(targetRecord.started_at);
       const deadlineAtMs = parseBackendTimestampMs(targetRecord.deadline_at);
-      if (startedAtMs !== null && deadlineAtMs !== null && nowMs >= startedAtMs + jobMaxTimeoutMs) {
+      if (
+        startedAtMs !== null &&
+        deadlineAtMs !== null &&
+        nowMs >= startedAtMs + jobMaxTimeoutMs
+      ) {
         if (nowMs >= deadlineAtMs) {
           deadline_overdue += 1;
         } else {
@@ -175,8 +203,8 @@ export function buildBulkJobProgress({
     }
   }
 
-  for (const clientId of outputClientIds) {
-    if (!targetRecordByClient.has(clientId)) {
+  for (const targetIdentity of outputTargetIdentities) {
+    if (!targetRecordIdentities.has(targetIdentity)) {
       retrieved += 1;
     }
   }
@@ -184,7 +212,8 @@ export function buildBulkJobProgress({
   queued += Math.max(0, total - targetRecords.length);
   const in_progress = queued + dispatching + running;
   const successful = completed;
-  const unsuccessful = rejected + failed + agent_lost + agent_timeout + control_timeout + canceled;
+  const unsuccessful =
+    rejected + failed + agent_lost + agent_timeout + control_timeout + canceled;
   const terminal = successful + skipped + unsuccessful;
   return {
     agent_timeout,
@@ -213,32 +242,51 @@ export function buildBulkJobProgress({
   };
 }
 
-export function createJobTargetCount(job: { target_count: number; target_counts: { total: number } }): number {
+export function createJobTargetCount(job: {
+  target_count: number;
+  target_counts: { total: number };
+}): number {
   return Math.max(0, job.target_counts.total);
 }
 
-export function targetRecordCompleted(status: GeneratedJobTargetStatus | undefined): boolean {
+export function targetRecordCompleted(
+  status: GeneratedJobTargetStatus | undefined,
+): boolean {
   return targetRecordStatusClass(status) === "successful";
 }
 
-export function targetRecordSkipped(status: GeneratedJobTargetStatus | undefined): boolean {
+export function targetRecordSkipped(
+  status: GeneratedJobTargetStatus | undefined,
+): boolean {
   return targetRecordStatusClass(status) === "skipped";
 }
 
-export function targetRecordFailed(status: GeneratedJobTargetStatus | undefined): boolean {
+export function targetRecordFailed(
+  status: GeneratedJobTargetStatus | undefined,
+): boolean {
   return targetRecordStatusClass(status) === "unsuccessful";
 }
 
-export function targetRecordTerminal(status: GeneratedJobTargetStatus | undefined): boolean {
+export function targetRecordTerminal(
+  status: GeneratedJobTargetStatus | undefined,
+): boolean {
   return status !== undefined && TARGET_TERMINAL_STATUS_SET.has(status);
 }
 
-function targetRecordStatusClass(status: GeneratedJobTargetStatus | undefined): GeneratedJobTargetStatusClass | undefined {
-  return status !== undefined && TARGET_STATUS_SET.has(status) ? JOB_TARGET_STATUS_CLASS_BY_STATUS[status] : undefined;
+function targetRecordStatusClass(
+  status: GeneratedJobTargetStatus | undefined,
+): GeneratedJobTargetStatusClass | undefined {
+  return status !== undefined && TARGET_STATUS_SET.has(status)
+    ? JOB_TARGET_STATUS_CLASS_BY_STATUS[status]
+    : undefined;
 }
 
-const TARGET_STATUS_SET = new Set<GeneratedJobTargetStatus>(JOB_TARGET_STATUSES);
-const TARGET_TERMINAL_STATUS_SET = new Set<GeneratedJobTargetStatus>(JOB_TARGET_TERMINAL_STATUSES);
+const TARGET_STATUS_SET = new Set<GeneratedJobTargetStatus>(
+  JOB_TARGET_STATUSES,
+);
+const TARGET_TERMINAL_STATUS_SET = new Set<GeneratedJobTargetStatus>(
+  JOB_TARGET_TERMINAL_STATUSES,
+);
 
 export async function waitForBulkJobTargets(
   jobId: string,
@@ -260,7 +308,8 @@ export async function waitForBulkJobTargets(
     targets: options.targets,
     maxTimeoutSecs: options.maxTimeoutSecs,
   });
-  const intervalMs = options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
+  const intervalMs =
+    options.intervalMs ?? DEFAULT_BULK_PROGRESS_POLL_INTERVAL_MS;
   for (;;) {
     try {
       lastTargets = await onLoadTargets(jobId);
@@ -387,8 +436,10 @@ export async function waitForBulkJobSet(
 }
 
 export function bulkProgressLabel(progress: BulkJobProgress): string {
+  const targetUnit =
+    progress.jobIds.length > 1 ? "target actions" : "targets";
   return [
-    `targets ${progress.terminal}/${progress.total}`,
+    `${targetUnit} ${progress.terminal}/${progress.total}`,
     `in progress ${progress.in_progress}`,
     `reported ${progress.retrieved}`,
     `completed ${progress.completed}`,
@@ -400,14 +451,22 @@ export function bulkProgressLabel(progress: BulkJobProgress): string {
     progress.rejected > 0 ? `rejected ${progress.rejected}` : "",
     progress.failed > 0 ? `failed ${progress.failed}` : "",
     progress.control_grace > 0 ? `control grace ${progress.control_grace}` : "",
-    progress.deadline_overdue > 0 ? `deadline overdue ${progress.deadline_overdue}` : "",
+    progress.deadline_overdue > 0
+      ? `deadline overdue ${progress.deadline_overdue}`
+      : "",
     progress.agent_lost > 0 ? `agent_lost ${progress.agent_lost}` : "",
     progress.agent_timeout > 0 ? `agent_timeout ${progress.agent_timeout}` : "",
-    progress.control_timeout > 0 ? `control_timeout ${progress.control_timeout}` : "",
+    progress.control_timeout > 0
+      ? `control_timeout ${progress.control_timeout}`
+      : "",
     progress.canceled > 0 ? `canceled ${progress.canceled}` : "",
   ]
     .filter(Boolean)
     .join(" · ");
+}
+
+function jobTargetIdentity(jobId: string, clientId: string): string {
+  return `${jobId}\0${clientId}`;
 }
 
 export function targetPreflightUnavailable(target: AgentView): boolean {
@@ -420,7 +479,11 @@ export function targetPreflightUnavailable(target: AgentView): boolean {
   );
 }
 
-export function targetAvailabilityCounts(targets: AgentView[]): { online: number; stale: number; unavailable: number } {
+export function targetAvailabilityCounts(targets: AgentView[]): {
+  online: number;
+  stale: number;
+  unavailable: number;
+} {
   const displayStates = targets.map((target) => agentDisplayState(target));
   return {
     online: displayStates.filter((state) => state.label === "Online").length,
@@ -445,7 +508,14 @@ export function formatTargetAvailabilitySummary(targets: AgentView[]): string {
 }
 
 export function bulkOutcomeSummary(progress: BulkJobProgress): string {
-  if (progress.completed > 0 && (progress.unsuccessful > 0 || progress.skipped > 0)) {
+  const countLabel = (count: number) =>
+    progress.jobIds.length > 1
+      ? `${count} target action${count === 1 ? "" : "s"}`
+      : vpsCountLabel(count);
+  if (
+    progress.completed > 0 &&
+    (progress.unsuccessful > 0 || progress.skipped > 0)
+  ) {
     return [
       `partial success: ${progress.completed} completed`,
       progress.unsuccessful > 0 ? `${progress.unsuccessful} unsuccessful` : "",
@@ -454,17 +524,25 @@ export function bulkOutcomeSummary(progress: BulkJobProgress): string {
       .filter(Boolean)
       .join(", ");
   }
-  if (progress.skipped > 0 && progress.unsuccessful === 0 && progress.terminal >= progress.total) {
+  if (
+    progress.skipped > 0 &&
+    progress.unsuccessful === 0 &&
+    progress.terminal >= progress.total
+  ) {
     return `partial success: ${progress.skipped} skipped`;
   }
   if (progress.unsuccessful > 0 && progress.skipped > 0) {
-    return `unsuccessful on ${vpsCountLabel(progress.unsuccessful)}, ${progress.skipped} skipped`;
+    return `unsuccessful on ${countLabel(progress.unsuccessful)}, ${progress.skipped} skipped`;
   }
   if (progress.unsuccessful > 0) {
-    return `unsuccessful on ${vpsCountLabel(progress.unsuccessful)}`;
+    return `unsuccessful on ${countLabel(progress.unsuccessful)}`;
   }
-  if (progress.completed === progress.total && progress.total > 0 && progress.in_progress === 0) {
-    return `completed on ${vpsCountLabel(progress.completed)}`;
+  if (
+    progress.completed === progress.total &&
+    progress.total > 0 &&
+    progress.in_progress === 0
+  ) {
+    return `completed on ${countLabel(progress.completed)}`;
   }
   return bulkProgressLabel(progress);
 }
@@ -473,7 +551,9 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function parseBackendTimestampMs(value: string | null | undefined): number | null {
+function parseBackendTimestampMs(
+  value: string | null | undefined,
+): number | null {
   const trimmed = value?.trim();
   if (!trimmed) {
     return null;
@@ -495,7 +575,8 @@ function targetFailureReason(
   outputReason: string | null,
 ): BulkFailureReason {
   const message = outputReason ?? targetRecord.message?.trim();
-  const status = targetRecord.status?.trim().replace(/_/g, " ") || "unsuccessful";
+  const status =
+    targetRecord.status?.trim().replace(/_/g, " ") || "unsuccessful";
   const rawReason =
     message ||
     `Target ended ${status} without retained output detail. Open job ${targetRecord.job_id} and inspect target evidence before retrying.`;
@@ -527,7 +608,12 @@ function targetOutputFailureReason(outputs: JobOutputRecord[]): string | null {
         }
         continue;
       }
-      if (stream === "stderr" || /\b(error|fail(?:ed|ure)?|not found|missing|denied|invalid)\b/i.test(text)) {
+      if (
+        stream === "stderr" ||
+        /\b(error|fail(?:ed|ure)?|not found|missing|denied|invalid)\b/i.test(
+          text,
+        )
+      ) {
         return text.replace(/\s+/g, " ").slice(0, 500);
       }
     }

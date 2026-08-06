@@ -56,6 +56,7 @@ export type ResumableUploadRequest = {
   sessionId?: string;
   maxTimeoutSecs: number;
   maxTimeoutOverrideSecs?: number;
+  onJobAccepted?: (job: CreateJobResponse) => void;
   onProgress: (progress: ResumableUploadProgress) => void;
 };
 
@@ -87,6 +88,7 @@ export type ResumableDownloadRequest = {
   sessionId?: string;
   maxTimeoutSecs: number;
   maxTimeoutOverrideSecs?: number;
+  onJobAccepted?: (job: CreateJobResponse) => void;
   onProgress: (progress: ResumableDownloadProgress) => void;
 };
 
@@ -141,6 +143,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
   const resumeTokenHash = await sha256Hex(new TextEncoder().encode(resumeToken));
   const sizeBytes = request.file.size;
   const initialTargetOffsets = Object.fromEntries(request.clientIds.map((clientId) => [clientId, 0]));
+  const submitStep = firstAcceptedTransferStep(request);
 
   request.onProgress({
     event: "ready",
@@ -152,7 +155,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
     sizeBytes,
     targetOffsets: initialTargetOffsets,
   });
-  const start = await submitTransferStep(request, "file_transfer_start", {
+  const start = await submitStep("file_transfer_start", {
     type: "file_transfer_start",
     session_id: sessionId,
     path: remotePath,
@@ -218,7 +221,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
         },
         resume_token_hash: resumeTokenHash,
       };
-      const chunkJob = await submitTransferStep(request, "file_transfer_chunk", operation, activeClientIds);
+      const chunkJob = await submitStep("file_transfer_chunk", operation, activeClientIds);
       const chunkStatuses = await waitForTransferStatus(
         request,
         chunkJob.job_id,
@@ -246,7 +249,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
       });
     }
 
-    const commit = await submitTransferStep(request, "file_transfer_commit", {
+    const commit = await submitStep("file_transfer_commit", {
       type: "file_transfer_commit",
       session_id: sessionId,
       resume_token_hash: resumeTokenHash,
@@ -305,7 +308,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
         },
         resume_token_hash: resumeTokenHash,
       };
-      const chunkJob = await submitTransferStep(request, "file_transfer_chunk", operation, targetClientIds);
+      const chunkJob = await submitStep("file_transfer_chunk", operation, targetClientIds);
       const chunkStatuses = await waitForTransferStatus(
         request,
         chunkJob.job_id,
@@ -336,7 +339,7 @@ export async function runBrowserResumableUpload(request: ResumableUploadRequest)
     }
   }
 
-  const commit = await submitTransferStep(request, "file_transfer_commit", {
+  const commit = await submitStep("file_transfer_commit", {
     type: "file_transfer_commit",
     session_id: sessionId,
     resume_token_hash: resumeTokenHash,
@@ -384,9 +387,10 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
   const resumeTokenHash = await sha256Hex(new TextEncoder().encode(resumeToken));
   const clientId = request.clientIds[0];
   const downloadSinkMode = request.downloadSink ?? "browser-download";
+  const submitStep = firstAcceptedTransferStep(request);
 
   request.onProgress({ event: "ready", downloadSink: downloadSinkMode, jobId: null, nextOffset: 0, resumeToken, sessionId, sizeBytes: 0 });
-  const start = await submitTransferStep(request, "file_transfer_download_start", {
+  const start = await submitStep("file_transfer_download_start", {
     type: "file_transfer_download_start",
     session_id: sessionId,
     path: remotePath,
@@ -423,7 +427,7 @@ export async function runBrowserResumableDownload(request: ResumableDownloadRequ
 
   try {
     while (nextOffset < sizeBytes) {
-      const chunkJob = await submitTransferStep(request, "file_transfer_download_chunk", {
+      const chunkJob = await submitStep("file_transfer_download_chunk", {
         type: "file_transfer_download_chunk",
         session_id: sessionId,
         offset: nextOffset,
@@ -496,7 +500,7 @@ async function submitTransferStep(
     selectorExpression,
     maxTimeoutSecs,
   });
-  return request.createJob({
+  const job = await request.createJob({
     argv: [],
     selector_expression: selectorExpression,
     target_client_ids: targetClientIds,
@@ -510,6 +514,30 @@ async function submitTransferStep(
     privileged: true,
     privilege_assertion: built.privilegeAssertion,
   });
+  return job;
+}
+
+function firstAcceptedTransferStep(
+  request: ResumableUploadRequest | ResumableDownloadRequest,
+): (
+  command: string,
+  operation: JobOperation,
+  targetClientIds?: string[],
+) => Promise<CreateJobResponse> {
+  let acceptanceReported = false;
+  return async (command, operation, targetClientIds) => {
+    const job = await submitTransferStep(
+      request,
+      command,
+      operation,
+      targetClientIds,
+    );
+    if (!acceptanceReported) {
+      acceptanceReported = true;
+      request.onJobAccepted?.(job);
+    }
+    return job;
+  };
 }
 
 async function waitForTransferStatus(

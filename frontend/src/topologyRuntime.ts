@@ -204,6 +204,15 @@ export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
   }
 }
 
+export function isDerivedAgentTunnelMtu(
+  kind: TunnelKind,
+  mtu: number | null | undefined,
+): boolean {
+  if (mtu == null) return true;
+  const defaultMtu = defaultAgentTunnelMtu(kind);
+  return defaultMtu !== null && mtu === defaultMtu;
+}
+
 export function calculateOspfCostPreview({
   bandwidthMbps,
   latencyMs,

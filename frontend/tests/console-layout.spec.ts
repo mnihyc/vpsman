@@ -139,6 +139,9 @@ test.beforeEach(async ({ page }, testInfo) => {
     fleetAlertStateFailure: testInfo.tags.includes(
       "@fleet-alert-state-failure",
     ),
+    jobTargetDelayMs: testInfo.tags.includes("@job-target-delay")
+      ? 1_000
+      : undefined,
     schedulesOverride: testInfo.tags.includes("@bulk-schedule-targets")
       ? bulkTargetUpdateSchedules
       : undefined,
@@ -4244,9 +4247,7 @@ test("authors OSPF updater presets only with paired bounded commands", async ({
     .getByLabel("Preset behavior")
     .selectOption("ospf_update_command");
   await drawer.getByLabel("Preset name").fill("FRR edge updater");
-  const statusArguments = drawer.getByLabel(
-    "Read current OSPF cost arguments",
-  );
+  const statusArguments = drawer.getByLabel("Read current OSPF cost arguments");
   const updateArguments = drawer.getByLabel("Update OSPF cost arguments");
   await expect(drawer.getByLabel("OSPF updater contract version")).toHaveValue(
     "2",
@@ -4257,9 +4258,7 @@ test("authors OSPF updater presets only with paired bounded commands", async ({
   await expect(updateArguments).toHaveValue(
     "/opt/operator/routing-cost\napply\n--plan-id\n{plan_id}\n--interface\n{interface}\n--side\n{endpoint_side}\n--cost\n{desired_cost}",
   );
-  await expect(drawer).toContainText(
-    "Update reports failure by exit code",
-  );
+  await expect(drawer).toContainText("Update reports failure by exit code");
   await updateArguments.fill("");
 
   await activate(drawer.getByRole("button", { name: "Create preset" }));
@@ -4438,9 +4437,7 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   );
   await expect(drawer.getByLabel("Restart adapter command")).toHaveValue("");
   await drawer.getByLabel("Adapter definition name").fill("Custom lifecycle");
-  await drawer
-    .getByLabel("Start adapter command", { exact: true })
-    .fill("");
+  await drawer.getByLabel("Start adapter command", { exact: true }).fill("");
   await drawer
     .getByLabel("Status adapter command")
     .fill("/opt/operator/tunnel-adapter\nstatus");
@@ -6061,7 +6058,53 @@ test(
     await expect(
       page.getByRole("menuitem", { name: "Disable", exact: true }),
     ).toBeVisible();
-    await page.keyboard.press("Escape");
+    await activate(page.getByRole("menuitem", { name: "Edit", exact: true }));
+    const editComposer = page.locator(".tunnelPlanComposer");
+    const editKind = editComposer.getByLabel("Tunnel kind");
+    const editLeftMtu = editComposer.getByLabel("Left tunnel MTU");
+    const editRightMtu = editComposer.getByLabel("Right tunnel MTU");
+    await expect(editLeftMtu).toHaveValue("1476");
+    await expect(editRightMtu).toHaveValue("1476");
+    await editKind.selectOption("wireguard");
+    await expect(editLeftMtu).toHaveValue("1420");
+    await expect(editRightMtu).toHaveValue("1420");
+    await editLeftMtu.fill("1400");
+    await editKind.selectOption("ipip");
+    await expect(editLeftMtu).toHaveValue("1400");
+    await expect(editRightMtu).toHaveValue("1480");
+    await activate(
+      editComposer.getByRole("button", { name: "Close tunnel plan editor" }),
+    );
+
+    await planGrid
+      .locator(".gridBody [role=row]", {
+        hasText: "external-openvpn-observed",
+      })
+      .first()
+      .click({ button: "right" });
+    await activate(page.getByRole("menuitem", { name: "Edit", exact: true }));
+    const externalEditComposer = page.locator(".tunnelPlanComposer");
+    await expect(
+      externalEditComposer.getByLabel("Left tunnel MTU"),
+    ).toHaveCount(0);
+    await activate(
+      externalEditComposer.getByRole("button", { name: "Agent builtin" }),
+    );
+    const externalLeftMtu = externalEditComposer.getByLabel("Left tunnel MTU");
+    const externalRightMtu =
+      externalEditComposer.getByLabel("Right tunnel MTU");
+    await expect(externalLeftMtu).toHaveValue("1500");
+    await expect(externalRightMtu).toHaveValue("1500");
+    await externalEditComposer
+      .getByLabel("Tunnel kind")
+      .selectOption("wireguard");
+    await expect(externalLeftMtu).toHaveValue("1420");
+    await expect(externalRightMtu).toHaveValue("1420");
+    await activate(
+      externalEditComposer.getByRole("button", {
+        name: "Close tunnel plan editor",
+      }),
+    );
 
     await selectGridRow(page, "Tunnel plans", tunnelPlans[0].id);
     await runGridAction(page, "Tunnel plans", "Disable");
@@ -6105,9 +6148,9 @@ test(
     await expect(
       composer.getByLabel("Right local underlay source"),
     ).toHaveCount(0);
-    await expect(composer.getByLabel("WireGuard peer endpoint mode")).toHaveValue(
-      "both",
-    );
+    await expect(
+      composer.getByLabel("WireGuard peer endpoint mode"),
+    ).toHaveValue("both");
     await expect(composer.getByLabel("Left WireGuard listen port")).toHaveValue(
       "51820",
     );
@@ -6643,6 +6686,35 @@ test("shows grouped execution summaries for job output details", async ({
   });
   expect(comparisonRequest).toMatchObject({ mode: "text" });
 });
+
+test(
+  "shows accepted job progress while target evidence is still loading",
+  { tag: "@job-target-delay" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the desktop composer covers the reviewed dispatch transition",
+    );
+
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Jobs", "Dispatch");
+    const composer = page.locator(".commandComposer");
+    await composer.getByLabel("Command argv").fill("/usr/bin/uptime");
+    await composer
+      .getByLabel("Bulk target selector expression")
+      .fill("id:agent-sfo-01");
+    await dispatchWithPrompt(composer);
+
+    await expect(composer.getByLabel("Confirm job dispatch")).toBeHidden();
+    const result = composer.getByLabel("Execution result");
+    await expect(result).toBeVisible();
+    await expect(result).toContainText("Polling job status");
+    await expect(
+      result.getByRole("button", { name: "Open job details" }),
+    ).toBeVisible();
+    await expect(result).toContainText("completed on 1 VPS");
+  },
+);
 
 test("generates local privilege assertions before dispatching a privileged job", async ({
   page,
@@ -7506,9 +7578,12 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(
     page.getByLabel("Network speed test duration seconds"),
   ).toHaveValue("10");
-  await expect(
-    page.getByLabel("Network speed test max mebibytes"),
-  ).toHaveValue("");
+  await expect(page.getByLabel("Network speed test direction")).toHaveValue(
+    "both",
+  );
+  await expect(page.getByLabel("Network speed test max mebibytes")).toHaveValue(
+    "",
+  );
   await expect(
     page.getByLabel("Network speed test rate limit Mbps"),
   ).toHaveValue("");
@@ -7579,9 +7654,8 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await page.getByLabel("Network test endpoint side").selectOption("left");
   await page.getByLabel("Network test max timeout seconds").fill("90");
   const requestCountBeforeInvalidProbe = await page.evaluate(() => {
-    return (
-      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
-    ).__vpsmanTestRequests.jobs.length;
+    return (window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } })
+      .__vpsmanTestRequests.jobs.length;
   });
   await page.getByLabel("Network probe count").fill("21");
   await activate(page.getByRole("button", { name: "Run probe" }));
@@ -7653,28 +7727,58 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await activate(page.getByRole("button", { name: "Review speed test" }));
   const speedPrompt = page.locator(".confirmationPrompt").last();
   await expect(speedPrompt).toBeVisible();
-  await expect(speedPrompt).toContainText("Baseline");
-  await expect(speedPrompt).toContainText("Test limits");
+  await expect(speedPrompt.locator("dl > div")).toHaveCount(6);
+  await expect(speedPrompt).toContainText("Transfer limit");
+  await expect(speedPrompt).toContainText("Listener");
+  await expect(speedPrompt).toContainText("Job deadline");
   await expect(speedPrompt).toContainText(
-    "5s, 8 MiB cap, 1.234 Mbps cap, TCP 55201, timeout 2500 ms",
+    "Left → right; then right → left (sequential)",
   );
   await expect(speedPrompt).toContainText(
-    "network_speed_test unlocked locally",
+    "5s per direction · 8 MiB cap · 1.234 Mbps cap",
   );
+  await expect(speedPrompt).toContainText(
+    "TCP 55201 · 2500 ms connect timeout",
+  );
+  await expect(speedPrompt).not.toContainText("Required privilege");
+  await expect(speedPrompt).not.toContainText("Recent evidence");
   await activate(speedPrompt.getByRole("button", { name: "Run speed test" }));
   await expect(
     page
       .getByLabel("Execution result")
       .last()
-      .getByText(/completed on 2 VPSs/),
+      .getByText(/completed on 4 target actions/),
   ).toBeVisible();
-  const speedRequest = await page.evaluate(() => {
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "2jobs",
+  );
+  await expect(
+    page
+      .getByLabel("Execution result")
+      .last()
+      .locator(".executionResultStats"),
+  ).toContainText("target actions");
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "phase 2/2",
+  );
+  await expect(page.getByLabel("Execution result").last()).toContainText("Min");
+  await expect(page.getByLabel("Execution result").last()).toContainText("Avg");
+  await expect(page.getByLabel("Execution result").last()).toContainText("Max");
+  const speedRequests = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
     ).__vpsmanTestRequests;
-    return requests.jobs.at(-1);
+    return requests.jobs.slice(-2);
   });
-  expect(JSON.stringify(speedRequest)).not.toContain("local-super-password");
+  expect(speedRequests).toHaveLength(2);
+  expect(JSON.stringify(speedRequests)).not.toContain("local-super-password");
+  expect(speedRequests[0]).toMatchObject({
+    operation: {
+      server_side: "right",
+      type: "network_speed_test",
+    },
+  });
+  const speedRequest = speedRequests[1];
   expect(speedRequest).toMatchObject({
     argv: [],
     selector_expression: "id:agent-sfo-01 || id:agent-fra-02",
@@ -7698,7 +7802,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   expectPrivilegeAssertion(speedRequest);
   await expect(page.getByLabel("Execution result").last()).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Open job details" }).last(),
+    page.getByRole("button", { name: "Open job history" }).last(),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Network", "OSPF");

@@ -1238,7 +1238,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
-  padding: 0 18px 16px;
+  padding: 16px 18px;
 }
 
 .topologyGraphViewportControls {
@@ -1861,6 +1861,12 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.topologyNetworkTestForm .confirmationPromptBody dd {
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .topologyNetworkResultEvidence {
   border-top: 1px solid var(--border-subtle);
   display: grid;
@@ -1898,6 +1904,84 @@
   min-width: 0;
 }
 
+.topologyNetworkResultMetric strong {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.topologyNetworkSpeedEvidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 10px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+
+.topologyNetworkSpeedCard {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.topologyNetworkSpeedHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.topologyNetworkSpeedMetrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border-block: 1px solid var(--border-subtle);
+}
+
+.topologyNetworkSpeedMetrics > div {
+  min-width: 0;
+  padding: 7px 8px;
+}
+
+.topologyNetworkSpeedMetrics > div + div {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.topologyNetworkSpeedMetrics dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.topologyNetworkSpeedMetrics dd {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topologyNetworkSpeedCurve {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .topologyNetworkSpeedMetrics > div {
+    padding-inline: 2px;
+  }
+
+  .topologyNetworkSpeedMetrics dd {
+    font-size: 11px;
+  }
+}
+
 .topologyNetworkResultEmpty {
   border-top: 1px solid var(--border-subtle);
   padding: 10px 0 2px;
@@ -1908,6 +1992,10 @@
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 12px;
   min-width: 0;
+}
+
+.topologyNetworkSpeedTestGroup > .dispatchControls {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .ospfRecommendationObject {
@@ -2586,6 +2674,10 @@
 
   .topologyNetworkTrendChartsHeader {
     display: grid;
+  }
+
+  .topologyNetworkSpeedTestGroup > .dispatchControls {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .topologyNetworkTestActionRow {

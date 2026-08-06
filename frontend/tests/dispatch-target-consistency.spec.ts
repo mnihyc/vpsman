@@ -437,12 +437,20 @@ test("affected schedule review keeps its navigation action above the evidence ta
   } else {
     await expect(impactHeader).toBeVisible();
   }
-  await expect(table.getByRole("columnheader", { name: "Manual action" })).toHaveCount(0);
-  await expect(table.getByRole("button", { name: "Open schedules" })).toHaveCount(0);
-  const openSchedules = confirmation.getByRole("button", { name: "Open schedules" });
+  await expect(
+    table.getByRole("columnheader", { name: "Manual action" }),
+  ).toHaveCount(0);
+  await expect(
+    table.getByRole("button", { name: "Open schedules" }),
+  ).toHaveCount(0);
+  const openSchedules = confirmation.getByRole("button", {
+    name: "Open schedules",
+  });
   await expect(openSchedules).toHaveCount(1);
   await activate(openSchedules);
-  await expect(page.getByRole("heading", { name: "Schedules", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Schedules", exact: true }),
+  ).toBeVisible();
 });
 
 test("job dispatch async review preparation ignores stale edits", async ({
@@ -1184,12 +1192,18 @@ test("topology network test confirmation closes on edit and submits a fresh snap
   await activate(page.getByRole("button", { name: "Review speed test" }));
   await expect(page.getByText("Confirm speed test")).toBeVisible();
   await expect(page.locator(".confirmationPrompt")).toContainText(
-    "10s, unlimited data, unlimited rate, TCP 5201, timeout 5000 ms",
+    "10s per direction · unlimited data · unlimited rate",
+  );
+  await expect(page.locator(".confirmationPrompt")).toContainText(
+    "TCP 5201 · 5000 ms connect timeout",
   );
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
       name: "Run speed test",
     }),
+  );
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "phase 2/2",
   );
 
   const request = await page.evaluate(() => {
@@ -1238,6 +1252,9 @@ test("topology async review preparation ignores stale edits", async ({
     page.locator(".confirmationPrompt").getByRole("button", {
       name: "Run speed test",
     }),
+  );
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "phase 2/2",
   );
 
   const speedRequest = await page.evaluate(() => {
@@ -1289,6 +1306,36 @@ test("topology async review preparation ignores stale edits", async ({
     },
   });
   expectPrivilegeAssertion((ospfRequest as { body: unknown }).body);
+});
+
+test("bidirectional speed test preserves accepted evidence when reverse dispatch fails", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the partial bidirectional dispatch lifecycle is covered on desktop",
+  );
+  await installConsoleApiMock(page, {
+    networkSpeedSecondDispatchFailure: true,
+  });
+  await page.goto("/");
+  await openConsoleSubpage(page, "Network", "Tests");
+  await unlockPrivilegeFor(page, "Network", "Tests");
+
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  const prompt = page.locator(".confirmationPrompt");
+  await activate(prompt.getByRole("button", { name: "Run speed test" }));
+
+  await expect(page.getByText("Confirm speed test")).toBeHidden();
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "phase 1/2",
+  );
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "Completed",
+  );
+  await expect(
+    page.locator(".topologyNetworkTestForm .localActionFeedback"),
+  ).toContainText("reverse-direction speed-test job could not be queued");
 });
 
 test("privileged confirmation closes when the local assertion expires", async ({

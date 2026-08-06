@@ -2595,6 +2595,7 @@ export function App() {
           onOpenCreateTunnelPlan={openCreateTunnelPlan}
           onOpenConfigurationSources={() => selectView("Config", "sources")}
           onOpenJobDetails={openJobDetails}
+          onOpenJobHistory={() => selectView("Jobs", "history")}
           onOpenPrivilegeUnlock={openPrivilegeUnlock}
           onOpenAdapterDefinitions={(kind) => {
             setNetworkAdapterWorkflowIntent(kind);

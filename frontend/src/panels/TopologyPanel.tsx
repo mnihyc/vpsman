@@ -43,6 +43,7 @@ import {
   DEFAULT_RUNTIME_OPENVPN_OPTIONS,
   DEFAULT_RUNTIME_WIREGUARD_OPTIONS,
   defaultAgentTunnelMtu,
+  isDerivedAgentTunnelMtu,
   MAX_TUNNEL_MTU,
   MAX_TUNNEL_BANDWIDTH_MBPS,
   MIN_IPV6_TUNNEL_MTU,
@@ -174,6 +175,7 @@ export function TopologyPanel({
   onLoadTargets,
   onLoadTopologyGraph,
   onOpenJobDetails,
+  onOpenJobHistory,
   onOpenCreateTunnelPlan,
   onOpenConfigurationSources,
   onOpenPrivilegeUnlock,
@@ -325,6 +327,7 @@ export function TopologyPanel({
         onLoadOutputs={onLoadOutputs}
         onLoadTargets={onLoadTargets}
         onOpenJobDetails={onOpenJobDetails}
+        onOpenJobHistory={onOpenJobHistory}
         onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
         onOpenTunnelPlans={() => onSelectSubpage("tunnel_plans")}
         privilegeMaterial={privilegeMaterial}
@@ -1913,9 +1916,25 @@ function TunnelPlanComposer({
   );
   const [autoFillOwnership, setAutoFillOwnership] = useState(() => ({
     bandwidth: !initialPlan,
-    leftMtu: !initialPlan || initialPlan.input.left_mtu == null,
+    leftMtu:
+      !initialPlan ||
+      initialPlan.input.left_mtu == null ||
+      ((initialPlan.input.runtime_control?.manager ?? "agent_builtin") ===
+        "agent_builtin" &&
+        isDerivedAgentTunnelMtu(
+          initialPlan.input.kind,
+          initialPlan.input.left_mtu,
+        )),
     leftRemote: !initialPlan,
-    rightMtu: !initialPlan || initialPlan.input.right_mtu == null,
+    rightMtu:
+      !initialPlan ||
+      initialPlan.input.right_mtu == null ||
+      ((initialPlan.input.runtime_control?.manager ?? "agent_builtin") ===
+        "agent_builtin" &&
+        isDerivedAgentTunnelMtu(
+          initialPlan.input.kind,
+          initialPlan.input.right_mtu,
+        )),
     rightRemote: !initialPlan,
   }));
   const portSpeedClientIds = useMemo(
@@ -2066,6 +2085,7 @@ function TunnelPlanComposer({
     );
   }, [autoFillOwnership.bandwidth, bandwidthSuggestion.value, initialPlan]);
   useEffect(() => {
+    if (form.runtimeManager !== "agent_builtin") return;
     const kindMtu = defaultAgentTunnelMtu(form.kind);
     if (kindMtu === null) return;
     const suggestedMtu = String(kindMtu);
@@ -2082,7 +2102,12 @@ function TunnelPlanComposer({
       }
       return { ...current, leftMtu, rightMtu };
     });
-  }, [autoFillOwnership.leftMtu, autoFillOwnership.rightMtu, form.kind]);
+  }, [
+    autoFillOwnership.leftMtu,
+    autoFillOwnership.rightMtu,
+    form.kind,
+    form.runtimeManager,
+  ]);
   const runtimeDefinitions = networkAdapterDefinitions.filter(
     (definition) => definition.adapter_kind === "runtime_tunnel",
   );
@@ -5557,6 +5582,7 @@ type TopologyPanelProps = {
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadTopologyGraph: () => Promise<void>;
   onOpenJobDetails?: (jobId: string) => void;
+  onOpenJobHistory?: () => void;
   onOpenCreateTunnelPlan: () => void;
   onOpenConfigurationSources: () => void;
   onOpenPrivilegeUnlock: () => void;

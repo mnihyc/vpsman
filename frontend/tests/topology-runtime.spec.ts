@@ -4,8 +4,10 @@ import {
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
   defaultAgentTunnelMtu,
+  isDerivedAgentTunnelMtu,
   runtimeManagerLabel,
 } from "../src/topologyRuntime";
+import { networkSpeedServerSide } from "../src/topologyNetworkJobs";
 
 const runtimeControlValues = {
   burstKb: "",
@@ -172,6 +174,18 @@ test("Agent builtin tunnel MTU defaults account for encapsulation", () => {
   expect(defaultAgentTunnelMtu("openvpn")).toBe(1500);
   expect(defaultAgentTunnelMtu("tun_tap")).toBeNull();
   expect(defaultAgentTunnelMtu("custom")).toBeNull();
+});
+
+test("only absent or kind-default Agent builtin MTUs remain derived", () => {
+  expect(isDerivedAgentTunnelMtu("gre", null)).toBe(true);
+  expect(isDerivedAgentTunnelMtu("gre", 1476)).toBe(true);
+  expect(isDerivedAgentTunnelMtu("gre", 1400)).toBe(false);
+  expect(isDerivedAgentTunnelMtu("wireguard", 1476)).toBe(false);
+});
+
+test("network speed directions map to the receiving endpoint", () => {
+  expect(networkSpeedServerSide("left_to_right")).toBe("right");
+  expect(networkSpeedServerSide("right_to_left")).toBe("left");
 });
 
 test("WireGuard runtime accepts zero keepalive without relaxing port validation", () => {

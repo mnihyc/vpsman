@@ -661,7 +661,16 @@ export function JobDispatchPanel({
       null,
       preserveHistoryState,
     );
+  const [transferAccepted, setTransferAccepted] = useState(
+    () => transferProgress !== null,
+  );
   const [actionError, setActionError] = useState<string | null>(null);
+  const transferProgressSessionId = transferProgress?.sessionId ?? null;
+  const transferFocusKey = transferProgressSessionId
+    ? `${transferProgressSessionId}:${actionError ? "error" : "progress"}`
+    : null;
+  const transferProgressRef = useRef<HTMLDivElement | null>(null);
+  const focusedTransferSessionRef = useRef<string | null>(null);
   const [dispatchPromptOpen, setDispatchPromptOpen] = useState(false);
   const [dispatchConfirmation, setDispatchConfirmation] =
     useState<DispatchConfirmationSnapshot | null>(null);
@@ -687,6 +696,28 @@ export function JobDispatchPanel({
     [normalizedSelectorExpression],
   );
   const terminalSurface = surface === "terminal";
+
+  useEffect(() => {
+    if (!transferFocusKey) {
+      focusedTransferSessionRef.current = null;
+      return;
+    }
+    if (
+      !transferAccepted ||
+      dispatchPromptOpen ||
+      focusedTransferSessionRef.current === transferFocusKey
+    ) {
+      return;
+    }
+    focusedTransferSessionRef.current = transferFocusKey;
+    const frame = window.requestAnimationFrame(() => {
+      const progress = transferProgressRef.current;
+      if (!progress) return;
+      scrollIntoViewWithMotion(progress, { block: "nearest" });
+      progress.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [dispatchPromptOpen, transferAccepted, transferFocusKey]);
 
   function setMode(nextMode: DispatchMode) {
     setModeState(fixedMode ?? nextMode);
@@ -1177,10 +1208,16 @@ export function JobDispatchPanel({
     },
   ];
   const dispatchHeaderStatus = privilegeMaterial ? "Ready" : "Locked";
+  const transferActionError =
+    transferAccepted && transferProgress ? actionError : null;
   const dispatchFeedbackMessage =
-    actionError ?? selectorVerificationError ?? reviewStatus;
+    (transferActionError ? null : actionError) ??
+    selectorVerificationError ??
+    reviewStatus;
   const dispatchFeedbackTone =
-    actionError || selectorVerificationError ? "danger" : "progress";
+    (actionError && !transferActionError) || selectorVerificationError
+      ? "danger"
+      : "progress";
 
   function clearExecutionResults() {
     setDispatchProgress(null);
@@ -1188,6 +1225,7 @@ export function JobDispatchPanel({
     setLastDispatchContext(null);
     setLastRolloutJobId(null);
     setTransferProgress(null);
+    setTransferAccepted(false);
   }
 
   function clearDispatchReview() {
@@ -1696,6 +1734,11 @@ export function JobDispatchPanel({
           sessionId: confirmed.sessionId,
           maxTimeoutSecs: confirmed.maxTimeoutSecs,
           maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
+          onJobAccepted: () => {
+            setTransferAccepted(true);
+            setDispatchPromptOpen(false);
+            setDispatchConfirmation(null);
+          },
           onProgress: (progress) => {
             setTransferProgress(visibleTransferProgress(progress));
             setFileTransferSessionId(progress.sessionId);
@@ -1708,7 +1751,6 @@ export function JobDispatchPanel({
           confirmed.targets,
           confirmed.maxTimeoutSecs,
         );
-        setDispatchPromptOpen(false);
         return;
       }
       if (confirmed.kind === "transfer_download") {
@@ -1731,6 +1773,11 @@ export function JobDispatchPanel({
           sessionId: confirmed.sessionId,
           maxTimeoutSecs: confirmed.maxTimeoutSecs,
           maxTimeoutOverrideSecs: confirmed.maxTimeoutOverrideSecs,
+          onJobAccepted: () => {
+            setTransferAccepted(true);
+            setDispatchPromptOpen(false);
+            setDispatchConfirmation(null);
+          },
           onProgress: (progress) => {
             setTransferProgress(visibleTransferProgress(progress));
             setFileTransferSessionId(progress.sessionId);
@@ -1743,27 +1790,18 @@ export function JobDispatchPanel({
           confirmed.targets,
           confirmed.maxTimeoutSecs,
         );
-        setDispatchPromptOpen(false);
         return;
       }
       const nextJob = await onCreateJob(
         jobRequestFromConfirmation(confirmed, confirmed.destructive),
       );
       setLastPayloadHash(confirmed.payloadHashHex);
+      setDispatchPromptOpen(false);
+      setDispatchConfirmation(null);
       if (confirmed.rollout) {
         setLastRolloutJobId(nextJob.job_id);
-        const targetRecords = await onLoadTargets(nextJob.job_id);
-        setLastDispatchProgress(
-          buildBulkJobProgress({
-            jobId: nextJob.job_id,
-            maxTimeoutSecs: confirmed.maxTimeoutSecs,
-            targetCount: createJobTargetCount(nextJob),
-            targetRecords,
-            targets: confirmed.targets,
-          }),
-        );
         setReviewStatus(
-          `Staged rollout accepted with ${confirmed.rollout.canary_client_ids.length} canary and ${confirmed.rollout.batch_size}-VPS batches.`,
+          `Staged rollout accepted with ${confirmed.rollout.canary_client_ids.length} canary and ${confirmed.rollout.batch_size}-VPS batches. Open staged rollout for authoritative live progress.`,
         );
       } else {
         await trackDispatchProgress(
@@ -1772,7 +1810,6 @@ export function JobDispatchPanel({
           confirmed.maxTimeoutSecs,
         );
       }
-      setDispatchPromptOpen(false);
     });
   }
 
@@ -1785,16 +1822,15 @@ export function JobDispatchPanel({
     const boundedJobTimeoutSecs = clampJobMaxTimeoutSecs(
       jobMaxTimeoutSecs ?? effectiveJobMaxTimeoutSecs(maxTimeoutSecs),
     );
-    setLastDispatchProgress(null);
-    setDispatchProgress(
-      buildBulkJobProgress({
-        jobId: job.job_id,
-        targetCount,
-        targetRecords: [],
-        targets,
-        maxTimeoutSecs: boundedJobTimeoutSecs,
-      }),
-    );
+    const acceptedProgress = buildBulkJobProgress({
+      jobId: job.job_id,
+      targetCount,
+      targetRecords: [],
+      targets,
+      maxTimeoutSecs: boundedJobTimeoutSecs,
+    });
+    setLastDispatchProgress(acceptedProgress);
+    setDispatchProgress(acceptedProgress);
     try {
       const result = await waitForBulkJobTargets(job.job_id, onLoadTargets, {
         onLoadOutputs,
@@ -2316,7 +2352,7 @@ export function JobDispatchPanel({
           tone={dispatchConfirmationDestructive ? "danger" : "normal"}
         />
 
-        {!dispatchPromptOpen && visibleDispatchProgress && (
+        {!dispatchPromptOpen && !lastRolloutJobId && visibleDispatchProgress && (
           <ExecutionResultPanel
             context={
               lastDispatchContext
@@ -2330,11 +2366,50 @@ export function JobDispatchPanel({
           />
         )}
 
+        {!dispatchPromptOpen && transferAccepted && transferProgress && (
+          <div
+            aria-label={
+              transferProgress.event === "downloaded"
+                ? "Resumable download progress"
+                : "Resumable upload progress"
+            }
+            className="transferProgress"
+            ref={transferProgressRef}
+            tabIndex={-1}
+          >
+            <strong>
+              {transferProgress.event === "downloaded"
+                ? "Download complete"
+                : transferProgress.event === "committed"
+                  ? "Upload complete"
+                  : transferActionError
+                    ? "Transfer stopped"
+                    : "Transfer in progress"}
+            </strong>
+            <span>
+              {transferProgress.nextOffset}/{transferProgress.sizeBytes} bytes ·
+              session {shortId(transferProgress.sessionId)}
+              {"multiTargetPolicy" in transferProgress
+                ? ` · ${transferProgress.multiTargetPolicy}`
+                : ""}
+              {"downloadSink" in transferProgress
+                ? ` · ${transferProgress.downloadSink}`
+                : ""}
+            </span>
+            <ActionFeedback
+              className="transferProgressFeedback localActionFeedback"
+              message={transferActionError}
+              tone="danger"
+            />
+          </div>
+        )}
+
         {!dispatchPromptOpen && lastRolloutJobId && onOpenRollout && (
           <div className="dispatchResultActions">
             <button
               className="secondaryAction compactAction"
               onClick={() => onOpenRollout(lastRolloutJobId)}
+              title="Open the authoritative staged-rollout progress and controls"
               type="button"
             >
               <ShieldCheck size={14} />
@@ -2360,34 +2435,6 @@ export function JobDispatchPanel({
               <Play size={17} />
               Dispatch
             </button>
-          </div>
-        )}
-        {transferProgress && (
-          <div
-            className="transferProgress"
-            aria-label={
-              transferProgress.event === "downloaded"
-                ? "Resumable download progress"
-                : "Resumable upload progress"
-            }
-          >
-            <strong>
-              {transferProgress.event === "downloaded"
-                ? "Download complete"
-                : transferProgress.event === "committed"
-                  ? "Upload complete"
-                  : "Transfer in progress"}
-            </strong>
-            <span>
-              {transferProgress.nextOffset}/{transferProgress.sizeBytes} bytes ·
-              session {shortId(transferProgress.sessionId)}
-              {"multiTargetPolicy" in transferProgress
-                ? ` · ${transferProgress.multiTargetPolicy}`
-                : ""}
-              {"downloadSink" in transferProgress
-                ? ` · ${transferProgress.downloadSink}`
-                : ""}
-            </span>
           </div>
         )}
       </form>

@@ -2957,8 +2957,9 @@ const networkJobOutputs = {
       data_base64: statusOutput({
         bytes: 4194304,
         client_id: "agent-sfo-01",
+        direction: "right_to_left",
         duration_secs: 3,
-        elapsed_ms: 3300,
+        elapsed_ms: 3000,
         interface: "tunab",
         max_bytes: 16777216,
         peer_client_id: "agent-fra-02",
@@ -2966,11 +2967,20 @@ const networkJobOutputs = {
         port: 5201,
         probe: "tcp_throughput",
         rate_limit_kbps: 100000,
+        receiver_client_id: "agent-sfo-01",
         role: "server",
+        sender_client_id: "agent-fra-02",
         server_address: "10.255.0.0",
         server_side: "left",
         success: true,
-        throughput_mbps: 10.1,
+        throughput_intervals: [
+          { bytes: 1310720, end_ms: 1000, start_ms: 0, throughput_mbps: 10.49 },
+          { bytes: 1441792, end_ms: 2000, start_ms: 1000, throughput_mbps: 11.53 },
+          { bytes: 1441792, end_ms: 3000, start_ms: 2000, throughput_mbps: 11.53 },
+        ],
+        throughput_max_mbps: 11.53,
+        throughput_min_mbps: 10.49,
+        throughput_mbps: 11.18,
         type: "network_speed_test",
       }),
       done: true,
@@ -2985,8 +2995,9 @@ const networkJobOutputs = {
       data_base64: statusOutput({
         bytes: 4194304,
         client_id: "agent-fra-02",
+        direction: "right_to_left",
         duration_secs: 3,
-        elapsed_ms: 3300,
+        elapsed_ms: 3000,
         interface: "tunab",
         max_bytes: 16777216,
         peer_client_id: "agent-sfo-01",
@@ -2994,11 +3005,20 @@ const networkJobOutputs = {
         port: 5201,
         probe: "tcp_throughput",
         rate_limit_kbps: 100000,
+        receiver_client_id: "agent-sfo-01",
         role: "client",
+        sender_client_id: "agent-fra-02",
         server_address: "10.255.0.0",
         server_side: "left",
         success: true,
-        throughput_mbps: 10.1,
+        throughput_intervals: [
+          { bytes: 1310720, end_ms: 1000, start_ms: 0, throughput_mbps: 10.49 },
+          { bytes: 1441792, end_ms: 2000, start_ms: 1000, throughput_mbps: 11.53 },
+          { bytes: 1441792, end_ms: 3000, start_ms: 2000, throughput_mbps: 11.53 },
+        ],
+        throughput_max_mbps: 11.53,
+        throughput_min_mbps: 10.49,
+        throughput_mbps: 11.18,
         type: "network_speed_test",
       }),
       done: true,
@@ -3425,6 +3445,8 @@ export async function installConsoleApiMock(
     hostStorageInventoryOverride?: ReturnType<typeof hostStorageInventory>;
     hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
     jobRolloutsOverride?: JobRolloutRecord[];
+    jobTargetDelayMs?: number;
+    networkSpeedSecondDispatchFailure?: boolean;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
     operatorAuthEventsOverride?: OperatorAuthEventRecord[];
@@ -3495,6 +3517,8 @@ export async function installConsoleApiMock(
       hostStorageInventoryFixture,
       jobApprovalsFixture,
       jobRolloutsFixture,
+      jobTargetDelayMsFixture,
+      networkSpeedSecondDispatchFailureFixture,
       jobOutputsFixture,
       jobsFixture,
       networkObservationsFixture,
@@ -3761,6 +3785,7 @@ export async function installConsoleApiMock(
         webhookRuleProcesses: [] as unknown[],
         webhookRules: [] as unknown[],
       };
+      let networkSpeedDispatchCount = 0;
       Object.defineProperty(window, "__vpsmanTestRequests", {
         configurable: true,
         value: requests,
@@ -7371,6 +7396,11 @@ export async function installConsoleApiMock(
           /^\/api\/v1\/jobs\/([^/]+)\/targets$/,
         );
         if (targetMatch && method === "GET") {
+          if (jobTargetDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, jobTargetDelayMsFixture),
+            );
+          }
           return jsonResponse(jobTargetsFor(targetMatch[1]));
         }
         const comparisonMatch = pathname.match(
@@ -8687,6 +8717,25 @@ export async function installConsoleApiMock(
           const targets = resolveBulkTargets(body);
           const commandType =
             (body as { command?: string } | null)?.command ?? "job";
+          if (commandType === "network_speed_test") {
+            networkSpeedDispatchCount += 1;
+            if (
+              networkSpeedSecondDispatchFailureFixture &&
+              networkSpeedDispatchCount === 2
+            ) {
+              return jsonResponse(
+                {
+                  error: "network_speed_test_dispatch_failed",
+                  message:
+                    "The reverse-direction speed-test job could not be queued; completed forward evidence remains valid.",
+                  recovery:
+                    "Inspect the accepted phase, then retry only the failed direction.",
+                  status: 500,
+                },
+                500,
+              );
+            }
+          }
           const rolloutPolicy = (
             body as {
               rollout?: {
@@ -8721,7 +8770,13 @@ export async function installConsoleApiMock(
                   ? "control_timeout"
                   : "completed",
           }));
-          const jobId = "11111111-2222-4333-8444-555555555555";
+          const requestedJobId = (body as { job_id?: unknown } | null)?.job_id;
+          const jobId =
+            commandType === "network_speed_test" &&
+            typeof requestedJobId === "string" &&
+            requestedJobId.length > 0
+              ? requestedJobId
+              : "11111111-2222-4333-8444-555555555555";
           if (commandType === "storage_inventory") {
             const operation = (
               body as {
@@ -8913,6 +8968,119 @@ export async function installConsoleApiMock(
                       target.client_id +
                       '"\n\n[update]\nunmanaged_enabled = false\nunmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"\nunmanaged_interval_secs = 86400\nunmanaged_jitter_secs = 86400\nunmanaged_activate = true\nunmanaged_restart_agent = true\n',
                     type: "config_read",
+                  }),
+                ),
+                done: true,
+                exit_code: 0,
+                job_id: jobId,
+                seq: index,
+                stream: "status",
+              })),
+            );
+          }
+          if (commandType === "network_speed_test") {
+            const operation = (
+              body as {
+                operation?: {
+                  duration_secs?: number;
+                  max_bytes?: number;
+                  plan?: {
+                    bandwidth_mbps?: number;
+                    interface_name?: string;
+                    left_client_id?: string;
+                    left_tunnel_address?: string;
+                    name?: string;
+                    right_client_id?: string;
+                    right_tunnel_address?: string;
+                  };
+                  port?: number;
+                  rate_limit_kbps?: number;
+                  server_side?: "left" | "right";
+                };
+              }
+            ).operation;
+            const plan = operation?.plan;
+            const serverSide = operation?.server_side ?? "right";
+            const leftClientId = plan?.left_client_id ?? targets[0]?.id ?? "left";
+            const rightClientId = plan?.right_client_id ?? targets[1]?.id ?? "right";
+            const senderClientId =
+              serverSide === "right" ? leftClientId : rightClientId;
+            const receiverClientId =
+              serverSide === "right" ? rightClientId : leftClientId;
+            const durationSecs = Math.max(1, operation?.duration_secs ?? 10);
+            const configuredMbps =
+              (operation?.rate_limit_kbps ?? 0) > 0
+                ? (operation?.rate_limit_kbps ?? 0) / 1000
+                : Math.max(1, (plan?.bandwidth_mbps ?? 100) * 0.82);
+            const maxBytes = operation?.max_bytes ?? 0;
+            let totalBytes = 0;
+            const throughputIntervals: Array<{
+              bytes: number;
+              end_ms: number;
+              start_ms: number;
+              throughput_mbps: number;
+            }> = [];
+            for (let index = 0; index < Math.min(30, durationSecs); index += 1) {
+              const throughputMbps = configuredMbps * (index % 3 === 1 ? 0.94 : index % 3 === 2 ? 1.03 : 1);
+              const availableBytes = Math.max(
+                0,
+                maxBytes > 0 ? maxBytes - totalBytes : Number.MAX_SAFE_INTEGER,
+              );
+              const bytes = Math.min(
+                availableBytes,
+                Math.max(1, Math.round((throughputMbps * 1_000_000) / 8)),
+              );
+              if (bytes <= 0) break;
+              totalBytes += bytes;
+              throughputIntervals.push({
+                bytes,
+                end_ms: (index + 1) * 1000,
+                start_ms: index * 1000,
+                throughput_mbps: (bytes * 8) / 1_000_000,
+              });
+            }
+            const measuredDurationSecs = Math.max(1, throughputIntervals.length);
+            const throughputAverage =
+              (totalBytes * 8) / measuredDurationSecs / 1_000_000;
+            const intervalRates = throughputIntervals.map(
+              (interval) => interval.throughput_mbps,
+            );
+            createdJobOutputs.set(
+              jobId,
+              [receiverClientId, senderClientId].map((clientId, index) => ({
+                client_id: clientId,
+                created_at: "2026-06-02T10:10:00Z",
+                data_base64: btoa(
+                  JSON.stringify({
+                    bytes: totalBytes,
+                    client_id: clientId,
+                    direction:
+                      serverSide === "right"
+                        ? "left_to_right"
+                        : "right_to_left",
+                    duration_secs: durationSecs,
+                    elapsed_ms: measuredDurationSecs * 1000,
+                    interface: plan?.interface_name ?? "tunnel",
+                    peer_client_id:
+                      clientId === receiverClientId
+                        ? senderClientId
+                        : receiverClientId,
+                    plan: plan?.name ?? "selected plan",
+                    port: operation?.port ?? 5201,
+                    receiver_client_id: receiverClientId,
+                    role: index === 0 ? "server" : "client",
+                    sender_client_id: senderClientId,
+                    server_address:
+                      serverSide === "right"
+                        ? plan?.right_tunnel_address
+                        : plan?.left_tunnel_address,
+                    server_side: serverSide,
+                    success: true,
+                    throughput_intervals: throughputIntervals,
+                    throughput_max_mbps: Math.max(...intervalRates),
+                    throughput_min_mbps: Math.min(...intervalRates),
+                    throughput_mbps: throughputAverage,
+                    type: "network_speed_test",
                   }),
                 ),
                 done: true,
@@ -9300,6 +9468,9 @@ export async function installConsoleApiMock(
         hostStorageInventory("agent-sfo-01"),
       jobApprovalsFixture: jobApprovals,
       jobRolloutsFixture: options.jobRolloutsOverride ?? jobRollouts,
+      jobTargetDelayMsFixture: options.jobTargetDelayMs ?? 0,
+      networkSpeedSecondDispatchFailureFixture:
+        options.networkSpeedSecondDispatchFailure ?? false,
       jobOutputsFixture: networkJobOutputs,
       jobsFixture: networkJobs,
       networkObservationsFixture: networkObservations,

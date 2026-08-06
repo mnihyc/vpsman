@@ -28,6 +28,8 @@ const SPEED_HANDSHAKE_MAGIC: &[u8; 8] = b"VPSNST1\0";
 const SPEED_HANDSHAKE_ACK: &[u8; 2] = b"OK";
 const SPEED_HANDSHAKE_REJECT: &[u8; 2] = b"NO";
 const SPEED_NONCE_HEX_BYTES: usize = 64;
+const SPEED_INTERVAL_TARGET: Duration = Duration::from_secs(1);
+const SPEED_INTERVAL_MAX_SAMPLES: usize = NETWORK_SPEED_TEST_MAX_DURATION_SECS as usize;
 
 pub(crate) struct NetworkSpeedTestInput<'a> {
     pub(crate) job_id: uuid::Uuid,
@@ -184,6 +186,7 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
                 last_peer_addr,
                 0,
                 elapsed,
+                Vec::new(),
                 false,
                 Some(failure),
             ));
@@ -202,6 +205,7 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
                     last_peer_addr,
                     0,
                     elapsed,
+                    Vec::new(),
                     false,
                     Some(failure),
                 ));
@@ -251,7 +255,11 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
     };
     let mut buffer = vec![0_u8; SPEED_CHUNK_BYTES];
     let mut bytes_received = 0_u64;
-    let deadline = Instant::now() + input.duration;
+    // Connection and peer verification are not transfer time. Start after the
+    // acknowledged handshake so receiver and sender evidence cover payload only.
+    let transfer_started = Instant::now();
+    let deadline = transfer_started + input.duration;
+    let mut intervals = SpeedIntervalCollector::default();
     while Instant::now() < deadline {
         let read_limit = speed_chunk_limit(input.max_bytes, bytes_received);
         if read_limit == 0 {
@@ -269,14 +277,19 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
             Err(_) => break,
         };
         bytes_received = bytes_received.saturating_add(bytes as u64);
+        intervals.observe(transfer_started.elapsed(), bytes_received);
     }
-    let elapsed = started.elapsed();
+    let elapsed = transfer_started.elapsed();
+    let intervals = intervals.finish(elapsed, bytes_received);
+    let transfer_complete =
+        speed_transfer_completed(input.duration, input.max_bytes, bytes_received, elapsed);
     Ok(status_output(
         input,
         Some(peer_addr),
         bytes_received,
         elapsed,
-        bytes_received > 0,
+        intervals,
+        transfer_complete,
         None,
     ))
 }
@@ -298,6 +311,7 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
                 Some(target_addr),
                 0,
                 elapsed,
+                Vec::new(),
                 false,
                 Some(SpeedTestFailure {
                     reason: "peer_verification_rejected",
@@ -313,6 +327,7 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
                 Some(target_addr),
                 0,
                 elapsed,
+                Vec::new(),
                 false,
                 Some(SpeedTestFailure {
                     reason: "peer_verification_ack_failed",
@@ -325,6 +340,7 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
     let deadline = started + input.duration;
     let payload = vec![0_u8; SPEED_CHUNK_BYTES];
     let mut bytes_sent = 0_u64;
+    let mut intervals = SpeedIntervalCollector::default();
     while Instant::now() < deadline {
         wait_for_rate_budget(started, deadline, bytes_sent, input.rate_limit_kbps).await;
         let write_timeout = deadline.saturating_duration_since(Instant::now());
@@ -337,7 +353,10 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
         }
         match time::timeout(write_timeout, stream.write(&payload[..write_limit])).await {
             Ok(Ok(0)) => break,
-            Ok(Ok(bytes)) => bytes_sent = bytes_sent.saturating_add(bytes as u64),
+            Ok(Ok(bytes)) => {
+                bytes_sent = bytes_sent.saturating_add(bytes as u64);
+                intervals.observe(started.elapsed(), bytes_sent);
+            }
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
             Ok(Err(error)) => return Err(error).context("failed to write speed-test stream"),
             Err(_) => break,
@@ -345,12 +364,16 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
     }
     let _ = stream.shutdown().await;
     let elapsed = started.elapsed();
+    let intervals = intervals.finish(elapsed, bytes_sent);
+    let transfer_complete =
+        speed_transfer_completed(input.duration, input.max_bytes, bytes_sent, elapsed);
     Ok(status_output(
         input,
         Some(target_addr),
         bytes_sent,
         elapsed,
-        bytes_sent > 0,
+        intervals,
+        transfer_complete,
         None,
     ))
 }
@@ -487,20 +510,149 @@ struct SpeedTestFailure<'a> {
     message: &'a str,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct SpeedThroughputInterval {
+    start_ms: f64,
+    end_ms: f64,
+    bytes: u64,
+    throughput_mbps: f64,
+}
+
+#[derive(Default)]
+struct SpeedIntervalCollector {
+    interval_started_at: Duration,
+    bytes_at_interval_start: u64,
+    intervals: Vec<SpeedThroughputInterval>,
+}
+
+impl SpeedIntervalCollector {
+    fn observe(&mut self, elapsed: Duration, total_bytes: u64) {
+        while self.intervals.len() < SPEED_INTERVAL_MAX_SAMPLES {
+            let remaining = elapsed.saturating_sub(self.interval_started_at);
+            if remaining < SPEED_INTERVAL_TARGET {
+                break;
+            }
+            // No application read/write completed in the earlier full buckets.
+            // Preserve those observable stalls as zero and assign the newly
+            // observed bytes to the latest closed one-second bucket.
+            let closes_latest_full_bucket = remaining < SPEED_INTERVAL_TARGET * 2;
+            let bytes_at_end = if closes_latest_full_bucket {
+                total_bytes
+            } else {
+                self.bytes_at_interval_start
+            };
+            self.push_interval(
+                self.interval_started_at + SPEED_INTERVAL_TARGET,
+                bytes_at_end,
+            );
+        }
+    }
+
+    fn finish(mut self, elapsed: Duration, total_bytes: u64) -> Vec<SpeedThroughputInterval> {
+        self.observe(elapsed, total_bytes);
+        let remaining = elapsed.saturating_sub(self.interval_started_at);
+        let has_new_bytes = total_bytes > self.bytes_at_interval_start;
+        if self.intervals.len() < SPEED_INTERVAL_MAX_SAMPLES
+            && !remaining.is_zero()
+            && has_new_bytes
+        {
+            self.push_interval(elapsed, total_bytes);
+        }
+        self.intervals
+    }
+
+    fn push_interval(&mut self, elapsed: Duration, total_bytes: u64) {
+        let interval_elapsed = elapsed.saturating_sub(self.interval_started_at);
+        if interval_elapsed.is_zero() {
+            return;
+        }
+        let bytes = total_bytes.saturating_sub(self.bytes_at_interval_start);
+        self.intervals.push(SpeedThroughputInterval {
+            start_ms: self.interval_started_at.as_secs_f64() * 1000.0,
+            end_ms: elapsed.as_secs_f64() * 1000.0,
+            bytes,
+            throughput_mbps: throughput_mbps(bytes, interval_elapsed),
+        });
+        self.interval_started_at = elapsed;
+        self.bytes_at_interval_start = total_bytes;
+    }
+}
+
+fn throughput_mbps(bytes: u64, elapsed: Duration) -> f64 {
+    (bytes as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0
+}
+
+fn measured_throughput_mbps(bytes: u64, elapsed: Duration) -> Option<f64> {
+    (bytes > 0 && !elapsed.is_zero()).then(|| throughput_mbps(bytes, elapsed))
+}
+
+fn speed_transfer_completed(
+    requested_duration: Duration,
+    max_bytes: u64,
+    bytes: u64,
+    elapsed: Duration,
+) -> bool {
+    let byte_limit_reached =
+        max_bytes != NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES && bytes >= max_bytes;
+    // Sender/receiver clocks start on opposite sides of the acknowledgement,
+    // so allow a small proportional tail without accepting genuinely short
+    // transfers as complete.
+    let duration_threshold = requested_duration.saturating_sub(requested_duration / 20);
+    byte_limit_reached || elapsed >= duration_threshold
+}
+
 fn status_output(
     input: NetworkSpeedRoleInput<'_>,
     peer_addr: Option<SocketAddr>,
     bytes: u64,
     elapsed: Duration,
-    success: bool,
-    failure: Option<SpeedTestFailure<'_>>,
+    intervals: Vec<SpeedThroughputInterval>,
+    transfer_complete: bool,
+    mut failure: Option<SpeedTestFailure<'_>>,
 ) -> CommandOutput {
     let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
-    let mbps = if elapsed.as_secs_f64() > 0.0 {
-        (bytes as f64 * 8.0) / elapsed.as_secs_f64() / 1_000_000.0
-    } else {
-        0.0
-    };
+    let throughput = measured_throughput_mbps(bytes, elapsed);
+    let success = transfer_complete && throughput.is_some();
+    if !success && failure.is_none() {
+        failure = Some(if bytes == 0 {
+            SpeedTestFailure {
+                reason: "no_payload_transferred",
+                message: "network speed test completed without transferring payload bytes",
+            }
+        } else if elapsed.is_zero() {
+            SpeedTestFailure {
+                reason: "transfer_duration_unavailable",
+                message: "network speed test could not measure a positive transfer duration",
+            }
+        } else {
+            SpeedTestFailure {
+                reason: "transfer_incomplete",
+                message: "network speed test ended before its requested duration or byte limit",
+            }
+        });
+    }
+    let has_measurement = throughput.is_some();
+    let throughput_min = has_measurement
+        .then(|| {
+            intervals
+                .iter()
+                .map(|interval| interval.throughput_mbps)
+                .fold(f64::INFINITY, f64::min)
+        })
+        .filter(|value| value.is_finite());
+    let throughput_max = has_measurement
+        .then(|| {
+            intervals
+                .iter()
+                .map(|interval| interval.throughput_mbps)
+                .fold(f64::NEG_INFINITY, f64::max)
+        })
+        .filter(|value| value.is_finite());
+    let (direction, sender_client_id, receiver_client_id) = speed_test_direction(
+        input.server_side,
+        &input.plan.left_client_id,
+        &input.plan.right_client_id,
+    );
     let mut status = serde_json::json!({
         "type": "network_speed_test",
         "probe": "tcp_throughput",
@@ -508,6 +660,9 @@ fn status_output(
         "plan": input.plan.name,
         "interface": input.plan.interface_name,
         "server_side": side_label(input.server_side),
+        "direction": direction,
+        "sender_client_id": sender_client_id,
+        "receiver_client_id": receiver_client_id,
         "client_id": input.client_id,
         "peer_client_id": input.peer_client_id,
         "server_address": input.server_address,
@@ -519,7 +674,10 @@ fn status_output(
         "rate_limit_kbps": input.rate_limit_kbps,
         "bytes": bytes,
         "elapsed_ms": elapsed_ms,
-        "throughput_mbps": mbps,
+        "throughput_mbps": throughput,
+        "throughput_min_mbps": throughput_min,
+        "throughput_max_mbps": throughput_max,
+        "throughput_intervals": if has_measurement { intervals } else { Vec::new() },
         "success": success,
     });
     if let Some(failure) = failure {
@@ -540,6 +698,17 @@ fn status_output(
         data: serde_json::to_vec(&status).unwrap_or_else(|_| b"{}".to_vec()),
         exit_code: Some(if success { 0 } else { 1 }),
         done: true,
+    }
+}
+
+fn speed_test_direction<'a>(
+    server_side: TunnelEndpointSide,
+    left_client_id: &'a str,
+    right_client_id: &'a str,
+) -> (&'static str, &'a str, &'a str) {
+    match server_side {
+        TunnelEndpointSide::Left => ("right_to_left", right_client_id, left_client_id),
+        TunnelEndpointSide::Right => ("left_to_right", left_client_id, right_client_id),
     }
 }
 

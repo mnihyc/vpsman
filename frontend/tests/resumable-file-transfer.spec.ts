@@ -107,6 +107,57 @@ test("bulk progress prefers retained stderr over a generic failed status", () =>
   ]);
 });
 
+test("bulk progress keeps output evidence scoped to its job and target", () => {
+  const failedTarget = (jobId: string): JobTargetRecord => ({
+    ...runningTarget("1700000000", "1700000120"),
+    completed_at: "1700000010",
+    job_id: jobId,
+    message: "failed",
+    status: "failed" as JobTargetStatus,
+  });
+  const failedOutput = (jobId: string, message: string): JobOutputRecord => ({
+    client_id: "client-a",
+    created_at: "1700000010",
+    data_base64: btoa(message),
+    done: true,
+    exit_code: 2,
+    job_id: jobId,
+    seq: 1,
+    stream: "stderr",
+  });
+
+  const progress = buildBulkJobProgress({
+    jobId: "job-a",
+    jobIds: ["job-a", "job-b"],
+    outputs: [
+      failedOutput("job-a", "forward direction failed"),
+      failedOutput("job-b", "reverse direction failed"),
+    ],
+    targetCount: 2,
+    targetRecords: [failedTarget("job-a"), failedTarget("job-b")],
+    targets: [TARGET],
+  });
+
+  expect(progress.failureReasons).toEqual([
+    { reason: "forward direction failed", target: "vps-a" },
+    { reason: "reverse direction failed", target: "vps-a" },
+  ]);
+  expect(bulkProgressLabel(progress)).toContain("target actions 2/2");
+
+  const reported = buildBulkJobProgress({
+    jobId: "job-a",
+    jobIds: ["job-a", "job-b"],
+    outputs: [failedOutput("job-a", "forward direction failed")],
+    targetCount: 2,
+    targetRecords: [
+      runningTarget("1700000000", "1700000120"),
+      { ...runningTarget("1700000000", "1700000120"), job_id: "job-b" },
+    ],
+    targets: [TARGET],
+  });
+  expect(reported.retrieved).toBe(1);
+});
+
 test("bulk progress aggregates target-specific jobs into one operation", async () => {
   const targets = [
     TARGET,

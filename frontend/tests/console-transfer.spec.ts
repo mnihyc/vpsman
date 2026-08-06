@@ -3,8 +3,12 @@ import { readFile } from "node:fs/promises";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import { openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
 
-test.beforeEach(async ({ page }) => {
-  await installConsoleApiMock(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  await installConsoleApiMock(page, {
+    jobTargetDelayMs: testInfo.tags.includes("@transfer-accept-progress")
+      ? 350
+      : undefined,
+  });
 });
 
 async function activate(locator: Locator) {
@@ -31,7 +35,7 @@ async function unlockDispatchPrivilege(page: Page) {
   await openConsoleSubpage(page, "Jobs", "Dispatch");
 }
 
-test("orchestrates browser resumable upload with ACK progress", async ({ page }, testInfo) => {
+test("orchestrates browser resumable upload with ACK progress", { tag: "@transfer-accept-progress" }, async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "browser resumable upload flow is covered in the desktop job composer");
 
   await page.goto("/");
@@ -55,8 +59,12 @@ test("orchestrates browser resumable upload with ACK progress", async ({ page },
   await composer.getByLabel("Bulk target selector expression").fill("id:agent-sfo-01");
   await dispatchWithPrompt(composer);
 
-  await expect(composer.getByLabel("Resumable upload progress")).toContainText("Upload complete");
-  await expect(composer.getByLabel("Resumable upload progress")).toContainText("independent-offsets");
+  await expect(composer.getByLabel("Confirm job dispatch")).toBeHidden();
+  const transferProgress = composer.getByLabel("Resumable upload progress");
+  await expect(transferProgress).toContainText("Transfer in progress");
+  await expect(transferProgress).toBeFocused();
+  await expect(transferProgress).toContainText("Upload complete");
+  await expect(transferProgress).toContainText("independent-offsets");
   await expect(composer.getByLabel("Resumable upload session")).toHaveValue(/[0-9a-f-]{36}/);
   await expect(composer.getByLabel("Resumable upload resume token")).toHaveValue(/^[0-9a-f]{64}$/);
 

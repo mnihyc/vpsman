@@ -22,6 +22,8 @@ type EndpointAddressPair = {
   prefixLen: number;
 };
 
+export type NetworkSpeedDirection = "left_to_right" | "right_to_left";
+
 export function renderTunnelEndpointConfig(
   plan: TunnelPlan,
   side: TunnelEndpointSide,
@@ -78,13 +80,14 @@ export function buildNetworkProbeOperation(
 export function buildNetworkSpeedTestOperation(
   planId: string,
   plan: TunnelPlan,
-  serverSide: TunnelEndpointSide,
+  direction: NetworkSpeedDirection,
   durationSecs: number,
   maxBytes: number,
   rateLimitKbps: number,
   port: number,
   connectTimeoutMs: number,
 ): { endpoint: TunnelEndpointConfig; operation: JobOperation } {
+  const serverSide = networkSpeedServerSide(direction);
   return {
     endpoint: renderTunnelEndpointConfig(plan, serverSide),
     operation: {
@@ -99,6 +102,12 @@ export function buildNetworkSpeedTestOperation(
       connect_timeout_ms: connectTimeoutMs,
     },
   };
+}
+
+export function networkSpeedServerSide(
+  direction: NetworkSpeedDirection,
+): TunnelEndpointSide {
+  return direction === "left_to_right" ? "right" : "left";
 }
 
 function endpointAddressPair(
