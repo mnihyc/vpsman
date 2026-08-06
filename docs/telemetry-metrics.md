@@ -98,9 +98,9 @@ rate_bps = (current_counter - previous_counter) * 8
 Storage, API fields, and raw CSV values keep this `bps` bit-rate contract.
 Operator-facing live RX/TX values and chart labels convert it by eight and use
 decimal transfer-rate units (`B/s`, `KB/s`, `MB/s`, `GB/s`). Declared port
-speed, tunnel bandwidth, shaping/rate limits, and bounded speed-test throughput
-remain capacity measurements in `bps`, `Kbps`, `Mbps`, or `Gbps`; they must not
-use the live-transfer formatter.
+speed, tunnel bandwidth, shaping/rate limits, and duration-bounded speed-test
+throughput remain capacity measurements in `bps`, `Kbps`, `Mbps`, or `Gbps`;
+they must not use the live-transfer formatter.
 
 The query includes one pre-window counter as a baseline when available. A
 counter reset or wrap invalidates that interval instead of inventing zero
@@ -216,11 +216,13 @@ do not become empty chart points.
 | --- | --- | --- |
 | Latency | Mean RTT reported by one bounded ICMP probe run. | Arithmetic mean of retained run averages that contain latency. |
 | Packet loss | Lost/transmitted packet ratio from one bounded ICMP probe run. | Arithmetic mean of retained run ratios that contain loss. |
-| Throughput | `bytes transferred * 8 / actual elapsed seconds / 1,000,000`; average TCP throughput over one capped test. | Arithmetic mean of retained test averages that contain throughput; maximum is the highest retained test average. |
+| Throughput | `bytes transferred * 8 / actual elapsed seconds / 1,000,000`; average TCP throughput over one duration-bounded test. | Arithmetic mean of retained test averages that contain throughput; maximum is the highest retained test average. |
 
-Throughput is not an interface line-speed sample. It is constrained by the
-test's configured duration, byte cap, rate limit, TCP path, peer verification,
-and current host/network conditions. Compare it with a plan's operator-entered
+Throughput is not an interface line-speed sample. The configured duration
+always bounds its transfer phase, and the overall job timeout bounds the full
+test workflow. Optional byte and rate limits add stricter bounds when
+configured; the TCP path, peer verification, and current host/network
+conditions also shape the result. Compare it with a plan's operator-entered
 bandwidth as evidence, not as automatic discovery of link capacity.
 
 ## Reading Evidence

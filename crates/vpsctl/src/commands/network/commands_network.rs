@@ -13,6 +13,7 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
     NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
     NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES, NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -358,7 +359,7 @@ pub(crate) struct TunnelProbeCommand {
     pub(crate) plan_id: Uuid,
     #[arg(long, value_enum)]
     pub(crate) side: TunnelEndpointSideArg,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 5)]
     pub(crate) count: u8,
     #[arg(long, default_value_t = 500)]
     pub(crate) interval_ms: u16,
@@ -378,11 +379,11 @@ pub(crate) struct TunnelSpeedTestCommand {
     pub(crate) plan_id: Uuid,
     #[arg(long, value_enum)]
     pub(crate) server_side: TunnelEndpointSideArg,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     pub(crate) duration_secs: u8,
-    #[arg(long, default_value_t = 16 * 1024 * 1024)]
+    #[arg(long, default_value_t = NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES)]
     pub(crate) max_bytes: u64,
-    #[arg(long, default_value_t = 100_000)]
+    #[arg(long, default_value_t = NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS)]
     pub(crate) rate_limit_kbps: u32,
     #[arg(long, default_value_t = 5201)]
     pub(crate) port: u16,
@@ -872,15 +873,18 @@ fn validate_speed_test_bounds(
         NETWORK_SPEED_TEST_MAX_DURATION_SECS
     );
     anyhow::ensure!(
-        (NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES).contains(&max_bytes),
-        "tunnel-speed-test --max-bytes must be between {} and {}",
+        max_bytes == NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES
+            || (NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES)
+                .contains(&max_bytes),
+        "tunnel-speed-test --max-bytes must be 0 (unlimited) or between {} and {}",
         NETWORK_SPEED_TEST_MIN_MAX_BYTES,
         NETWORK_SPEED_TEST_MAX_MAX_BYTES
     );
     anyhow::ensure!(
-        (NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
-            .contains(&rate_limit_kbps),
-        "tunnel-speed-test --rate-limit-kbps must be between {} and {}",
+        rate_limit_kbps == NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS
+            || (NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
+                .contains(&rate_limit_kbps),
+        "tunnel-speed-test --rate-limit-kbps must be 0 (unlimited) or between {} and {}",
         NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
         NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS
     );

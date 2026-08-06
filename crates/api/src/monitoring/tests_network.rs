@@ -1070,6 +1070,27 @@ fn network_status_requires_a_server_bound_runtime_adapter_snapshot() {
 }
 
 #[test]
+fn network_speed_test_accepts_duration_bounded_unlimited_transfer() {
+    let plan = plan_tunnel(&test_plan_input(
+        RuntimeTunnelManager::AgentIproute2Managed,
+        false,
+    ))
+    .unwrap();
+    let command = JobCommand::NetworkSpeedTest {
+        plan_id: Uuid::new_v4().to_string(),
+        plan: Box::new(plan),
+        server_side: TunnelEndpointSide::Left,
+        duration_secs: 10,
+        max_bytes: 0,
+        rate_limit_kbps: 0,
+        port: 5201,
+        connect_timeout_ms: 5_000,
+    };
+
+    validate_job_command(&command).unwrap();
+}
+
+#[test]
 fn network_status_side_must_match_the_only_dispatch_target() {
     let plan = plan_tunnel(&test_plan_input(
         RuntimeTunnelManager::AgentIproute2Managed,

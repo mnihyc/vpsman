@@ -48,3 +48,14 @@ fn rejects_vty_tunnel_probe_bad_bounds_or_side() {
     .is_err());
     assert!(parse_vty_tunnel_probe(&["--plan-id=00000000-0000-0000-0000-000000000001",]).is_err());
 }
+
+#[test]
+fn defaults_to_five_probe_packets() {
+    let request = parse_vty_tunnel_probe(&[
+        "--plan-id=00000000-0000-0000-0000-000000000001",
+        "--side=left",
+    ])
+    .unwrap();
+
+    assert_eq!(request.count, 5);
+}

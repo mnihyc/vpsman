@@ -883,16 +883,20 @@ function TunnelPlansWorkspace({
             <strong>{plan.plan.bandwidth_mbps} Mbps</strong>
             {isAgentManagedTunnelPlan(plan) && (
               <small
-                title={`Left MTU ${plan.plan.left_mtu} bytes · Right MTU ${plan.plan.right_mtu} bytes`}
+                title={
+                  plan.plan.left_mtu == null || plan.plan.right_mtu == null
+                    ? "Endpoint MTU missing; review and save this plan"
+                    : `Left MTU ${plan.plan.left_mtu} bytes · Right MTU ${plan.plan.right_mtu} bytes`
+                }
               >
-                L{plan.plan.left_mtu} · R{plan.plan.right_mtu}
+                {`L${plan.plan.left_mtu ?? "missing"} · R${plan.plan.right_mtu ?? "missing"}`}
               </small>
             )}
           </span>
         ),
         searchValue: (plan) =>
           isAgentManagedTunnelPlan(plan)
-            ? `${plan.plan.bandwidth_mbps} Mbps MTU ${plan.plan.left_mtu} ${plan.plan.right_mtu}`
+            ? `${plan.plan.bandwidth_mbps} Mbps MTU ${plan.plan.left_mtu ?? "missing"} ${plan.plan.right_mtu ?? "missing"}`
             : `${plan.plan.bandwidth_mbps} Mbps`,
         sortValue: (plan) => plan.plan.bandwidth_mbps,
         minSize: 130,
@@ -1604,7 +1608,7 @@ function TunnelPlanDetails({
         {isAgentManagedTunnelPlan(plan) ? (
           <PlanFact
             label="Endpoint MTU"
-            value={`Left ${plan.plan.left_mtu} · Right ${plan.plan.right_mtu}`}
+            value={`Left ${plan.plan.left_mtu ?? "missing"} · Right ${plan.plan.right_mtu ?? "missing"}`}
           />
         ) : null}
         <PlanFact

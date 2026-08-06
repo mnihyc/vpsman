@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, GitBranch, Search, ShieldCheck } from "lucide-react";
 import {
-  bulkOutcomeSummary,
   buildBulkJobProgress,
   createJobTargetCount,
   formatTargetAvailabilitySummary,
@@ -53,7 +52,6 @@ import {
   clientDisplayNameMap,
   decodeOutputPreview,
   runPanelAction,
-  shortId,
   timestampMillis,
 } from "../../utils";
 import {
@@ -103,15 +101,14 @@ export function TopologyNetworkTestControls({
   );
   const [side, setSide] = useState<TunnelEndpointSide>("left");
   const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(60);
-  const [probeCount, setProbeCount] = useState(3);
+  const [probeCount, setProbeCount] = useState(5);
   const [probeIntervalMs, setProbeIntervalMs] = useState(500);
-  const [speedDurationSecs, setSpeedDurationSecs] = useState(3);
-  const [speedMaxBytesMiB, setSpeedMaxBytesMiB] = useState(16);
-  const [speedRateLimitMbps, setSpeedRateLimitMbps] = useState(100);
+  const [speedDurationSecs, setSpeedDurationSecs] = useState(10);
+  const [speedMaxBytesMiB, setSpeedMaxBytesMiB] = useState("");
+  const [speedRateLimitMbps, setSpeedRateLimitMbps] = useState("");
   const [speedPort, setSpeedPort] = useState(5201);
   const [speedConnectTimeoutMs, setSpeedConnectTimeoutMs] = useState(5000);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
-  const [lastJob, setLastJob] = useState<CreateJobResponse | null>(null);
   const [lastAction, setLastAction] = useState<NetworkAction>("status");
   const [networkSnapshot, setNetworkSnapshot] =
     useState<NetworkActionSnapshot | null>(null);
@@ -176,21 +173,6 @@ export function TopologyNetworkTestControls({
     recentProbeTrend,
     recentSpeedTrend,
   );
-  const speedSafetySummary = formatSpeedSafety(
-    speedDurationSecs,
-    speedMaxBytesMiB,
-    Math.round(speedRateLimitMbps * 1_000),
-    speedPort,
-    speedConnectTimeoutMs,
-  );
-  const baselineSummary = selectedPlan
-    ? formatPlanBaseline(selectedPlan)
-    : "Select a tunnel plan for baseline";
-  const lastRunSummary = visibleJobProgress
-    ? `${actionLabel(lastAction)} ${shortId(visibleJobProgress.jobId)} ${jobProgress ? "in progress" : bulkOutcomeSummary(visibleJobProgress)}`
-    : lastJob
-      ? `${actionLabel(lastAction)} ${shortId(lastJob.job_id)} ${lastJob.status}; ${lastJob.target_count} target${lastJob.target_count === 1 ? "" : "s"}`
-      : "No local network test run in this view";
   const networkHeaderStatus =
     selectedPlan && !selectedPlan.enabled
       ? "Plan disabled; inspect only"
@@ -302,11 +284,12 @@ export function TopologyNetworkTestControls({
     const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
     const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
     const boundedSpeedMaxBytes =
-      clampInteger(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
-    const boundedSpeedRateLimitKbps = clampInteger(
-      Math.round(speedRateLimitMbps * 1_000),
-      64,
-      1_000_000,
+      optionalLimit(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
+    const boundedSpeedRateLimitKbps = optionalLimit(
+      speedRateLimitMbps,
+      0.064,
+      1_000,
+      1_000,
     );
     const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
     const boundedSpeedConnectTimeoutMs = clampInteger(
@@ -436,8 +419,8 @@ export function TopologyNetworkTestControls({
         ...(mode === "speed_test"
           ? [
               {
-                label: "Safety cap",
-                value: formatSpeedSafety(
+                label: "Test limits",
+                value: formatSpeedTestLimits(
                   boundedSpeedDurationSecs,
                   boundedSpeedMaxBytes / (1024 * 1024),
                   boundedSpeedRateLimitKbps,
@@ -464,7 +447,6 @@ export function TopologyNetworkTestControls({
     setJobProgress(null);
     setLastJobProgress(null);
     setLastOutputs([]);
-    setLastJob(null);
   }
 
   async function submitNetworkChange(snapshot: NetworkActionSnapshot) {
@@ -503,7 +485,6 @@ export function TopologyNetworkTestControls({
     setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
     setLastAction(snapshot.action);
     for (const { job, submission } of jobs) {
-      setLastJob(job);
       outputs.push(
         ...(await trackNetworkProgress(
           job,
@@ -613,51 +594,6 @@ export function TopologyNetworkTestControls({
           ref={feedbackRef}
           tone={actionError ? "danger" : "progress"}
         />
-        <div
-          className="topologyNetworkReviewStrip"
-          aria-label="Network test review contract"
-        >
-          <div className={privilegeMaterial ? "ready" : "attention"}>
-            <span>Required privilege</span>
-            <strong>
-              {privilegeMaterial ? "Probe/speed unlocked" : "Inspect available"}
-            </strong>
-            <p>
-              {privilegeMaterial
-                ? "Probe and speed-test jobs will bind a local assertion to the submitted payload."
-                : "Status inspection is read-only; unlock only before probe or speed-test jobs."}
-            </p>
-          </div>
-          <div>
-            <span>Expected baseline</span>
-            <strong>{baselineSummary}</strong>
-            <p>
-              Configured plan values used to judge latency, loss, and bandwidth
-              evidence.
-            </p>
-          </div>
-          <div className="attention">
-            <span>Speed safety cap</span>
-            <strong>{speedSafetySummary}</strong>
-            <p>
-              Speed tests require explicit duration, byte, rate, port, and
-              timeout caps.
-            </p>
-          </div>
-          <div>
-            <span>Recent evidence</span>
-            <strong>{evidenceSummary}</strong>
-            <p>From persisted topology observations for the selected plan.</p>
-          </div>
-          <div>
-            <span>Last local run</span>
-            <strong>{lastRunSummary}</strong>
-            <p>
-              Execution result stays on this screen and links back to Job
-              history.
-            </p>
-          </div>
-        </div>
         <NetworkTestTrendCharts
           expectedBandwidthMbps={selectedPlan?.plan.bandwidth_mbps ?? null}
           trends={selectedPlanTrends}
@@ -817,7 +753,7 @@ export function TopologyNetworkTestControls({
 
           <section
             className="topologyNetworkTestGroup"
-            title="Speed tests coordinate both selected plan endpoints and always require byte and rate safety caps."
+            title="Speed tests coordinate both selected plan endpoints. Duration always bounds a run; byte and rate limits are optional."
           >
             <div className="topologyNetworkTestGroupHeader">
               <strong>Speed test</strong>
@@ -838,7 +774,7 @@ export function TopologyNetworkTestControls({
                   value={speedDurationSecs}
                 />
               </label>
-              <label title="Required per-run byte safety cap; uncapped speed tests are not submitted.">
+              <label title="Optional per-run byte cap. Leave empty for unlimited data within the selected duration.">
                 <span>Max data MiB</span>
                 <input
                   aria-label="Network speed test max mebibytes"
@@ -846,13 +782,14 @@ export function TopologyNetworkTestControls({
                   min={1}
                   onChange={(event) => {
                     clearNetworkReview();
-                    setSpeedMaxBytesMiB(Number(event.target.value));
+                    setSpeedMaxBytesMiB(event.target.value);
                   }}
+                  placeholder="Unlimited"
                   type="number"
                   value={speedMaxBytesMiB}
                 />
               </label>
-              <label title="Required bandwidth safety cap. The job contract remains exact Kbps internally.">
+              <label title="Optional bandwidth cap. Leave empty to use available tunnel bandwidth; the job contract remains exact Kbps internally.">
                 <span>Rate limit Mbps</span>
                 <input
                   aria-label="Network speed test rate limit Mbps"
@@ -860,8 +797,9 @@ export function TopologyNetworkTestControls({
                   min={0.064}
                   onChange={(event) => {
                     clearNetworkReview();
-                    setSpeedRateLimitMbps(Number(event.target.value));
+                    setSpeedRateLimitMbps(event.target.value);
                   }}
+                  placeholder="Unlimited"
                   step="0.001"
                   type="number"
                   value={speedRateLimitMbps}
@@ -912,8 +850,8 @@ export function TopologyNetworkTestControls({
                   !selectedPlan?.enabled
                     ? "Enable this plan before running a speed test"
                     : privilegeMaterial
-                      ? "Review capped speed test against both selected plan endpoints"
-                      : "Unlock privilege before reviewing capped speed test"
+                      ? "Review speed test against both selected plan endpoints"
+                      : "Unlock privilege before reviewing the speed test"
                 }
                 type="button"
               >
@@ -1260,8 +1198,7 @@ function NetworkTestTrendCharts({
         <div>
           <strong>Trend evidence</strong>
           <span>
-            Persisted probe and capped throughput-test ranges for the selected
-            plan.
+            Persisted probe and throughput-test ranges for the selected plan.
           </span>
         </div>
       </div>
@@ -1584,14 +1521,16 @@ function formatRecentEvidence(
   return parts.length > 0 ? parts.join("; ") : "No persisted evidence yet";
 }
 
-function formatSpeedSafety(
+function formatSpeedTestLimits(
   durationSecs: number,
   maxBytesMiB: number,
   rateLimitKbps: number,
   port: number,
   connectTimeoutMs: number,
 ): string {
-  return `${durationSecs}s, ${formatMetric(maxBytesMiB)} MiB cap, ${formatRateLimit(rateLimitKbps)}, TCP ${port}, timeout ${connectTimeoutMs} ms`;
+  const dataLimit =
+    maxBytesMiB === 0 ? "unlimited data" : `${formatMetric(maxBytesMiB)} MiB cap`;
+  return `${durationSecs}s, ${dataLimit}, ${formatRateLimit(rateLimitKbps)}, TCP ${port}, timeout ${connectTimeoutMs} ms`;
 }
 
 function formatBandwidthMbps(value: number): string {
@@ -1599,10 +1538,21 @@ function formatBandwidthMbps(value: number): string {
 }
 
 function formatRateLimit(kbps: number): string {
+  if (kbps === 0) return "unlimited rate";
   if (kbps >= 1000) {
     return `${formatMetric(kbps / 1000)} Mbps cap`;
   }
   return `${formatMetric(kbps)} Kbps cap`;
+}
+
+function optionalLimit(
+  value: string,
+  min: number,
+  max: number,
+  multiplier = 1,
+): number {
+  if (value.trim() === "") return 0;
+  return Math.round(Math.min(Math.max(Number(value), min), max) * multiplier);
 }
 
 function formatNullableMetric(value: number | null, unit: string): string {

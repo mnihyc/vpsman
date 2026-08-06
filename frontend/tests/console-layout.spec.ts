@@ -7479,20 +7479,24 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   const networkTestsPanel = page.locator(".fleetPanel", {
     has: page.getByRole("heading", { level: 2, name: "Network tests" }),
   });
-  await expect(networkTestsPanel).toContainText("Required privilege");
+  await expect(page.getByLabel("Network test review contract")).toHaveCount(0);
   await expect(networkTestsPanel).toContainText("Inspect available");
-  await expect(networkTestsPanel).toContainText(
-    "100 Mbps, 14 ms target, 0% loss, OSPF 22",
-  );
-  await expect(networkTestsPanel).toContainText(
-    "3s, 16 MiB cap, 100 Mbps cap, TCP 5201, timeout 5000 ms",
-  );
-  await expect(networkTestsPanel).toContainText(
-    "Probe 12.4 ms avg, 0.25% loss",
-  );
-  await expect(networkTestsPanel).toContainText(
-    "Throughput 10.1 Mbps avg, 11.8 Mbps max",
-  );
+  await expect(page.getByLabel("Network probe count")).toHaveValue("5");
+  await expect(
+    page.getByLabel("Network speed test duration seconds"),
+  ).toHaveValue("10");
+  await expect(
+    page.getByLabel("Network speed test max mebibytes"),
+  ).toHaveValue("");
+  await expect(
+    page.getByLabel("Network speed test rate limit Mbps"),
+  ).toHaveValue("");
+  await expect(
+    page.getByLabel("Network speed test max mebibytes"),
+  ).toHaveAttribute("placeholder", "Unlimited");
+  await expect(
+    page.getByLabel("Network speed test rate limit Mbps"),
+  ).toHaveAttribute("placeholder", "Unlimited");
   const trendCharts = page.getByLabel("Network test trend charts");
   await expect(trendCharts).toContainText("Trend evidence");
   await expect(trendCharts).toContainText("Latency");
@@ -7546,7 +7550,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(
     page.getByLabel("Privilege verified for this browser"),
   ).toBeVisible();
-  await expect(networkTestsPanel).toContainText("Probe/speed unlocked");
+  await expect(networkTestsPanel).toContainText("Dispatch ready");
 
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network test endpoint side").selectOption("left");
@@ -7593,14 +7597,11 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await page
     .getByLabel("Network speed test connect timeout milliseconds")
     .fill("2500");
-  await expect(networkTestsPanel).toContainText(
-    "5s, 8 MiB cap, 25 Mbps cap, TCP 55201, timeout 2500 ms",
-  );
   await activate(page.getByRole("button", { name: "Review speed test" }));
   const speedPrompt = page.locator(".confirmationPrompt").last();
   await expect(speedPrompt).toBeVisible();
   await expect(speedPrompt).toContainText("Baseline");
-  await expect(speedPrompt).toContainText("Safety cap");
+  await expect(speedPrompt).toContainText("Test limits");
   await expect(speedPrompt).toContainText(
     "5s, 8 MiB cap, 25 Mbps cap, TCP 55201, timeout 2500 ms",
   );

@@ -1183,6 +1183,9 @@ test("topology network test confirmation closes on edit and submits a fresh snap
   await expect(page.getByText("Confirm speed test")).toBeHidden();
   await activate(page.getByRole("button", { name: "Review speed test" }));
   await expect(page.getByText("Confirm speed test")).toBeVisible();
+  await expect(page.locator(".confirmationPrompt")).toContainText(
+    "10s, unlimited data, unlimited rate, TCP 5201, timeout 5000 ms",
+  );
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", {
       name: "Run speed test",
@@ -1202,7 +1205,10 @@ test("topology network test confirmation closes on edit and submits a fresh snap
     target_client_ids: ["agent-sfo-01", "agent-fra-02"],
     max_timeout_secs: 120,
     operation: {
+      duration_secs: 10,
+      max_bytes: 0,
       plan_id: tunnelPlans[0].id,
+      rate_limit_kbps: 0,
       server_side: "left",
       type: "network_speed_test",
     },

@@ -16,7 +16,8 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
+    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
 };
 
 use crate::command_worker::{run_cancelable, CommandCancelToken};
@@ -119,13 +120,15 @@ fn validate_speed_test_budget(input: &NetworkSpeedTestInput<'_>) -> Result<()> {
         "network speed test duration is out of range"
     );
     anyhow::ensure!(
-        (NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES)
-            .contains(&input.max_bytes),
+        input.max_bytes == NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES
+            || (NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES)
+                .contains(&input.max_bytes),
         "network speed test max bytes is out of range"
     );
     anyhow::ensure!(
-        (NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
-            .contains(&input.rate_limit_kbps),
+        input.rate_limit_kbps == NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS
+            || (NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
+                .contains(&input.rate_limit_kbps),
         "network speed test rate limit is out of range"
     );
     anyhow::ensure!(
@@ -249,10 +252,11 @@ async fn receive_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandO
     let mut buffer = vec![0_u8; SPEED_CHUNK_BYTES];
     let mut bytes_received = 0_u64;
     let deadline = Instant::now() + input.duration;
-    while bytes_received < input.max_bytes && Instant::now() < deadline {
-        let remaining = input.max_bytes - bytes_received;
-        let read_limit =
-            usize::try_from(remaining.min(SPEED_CHUNK_BYTES as u64)).unwrap_or(SPEED_CHUNK_BYTES);
+    while Instant::now() < deadline {
+        let read_limit = speed_chunk_limit(input.max_bytes, bytes_received);
+        if read_limit == 0 {
+            break;
+        }
         let read_timeout = deadline.saturating_duration_since(Instant::now());
         if read_timeout.is_zero() {
             break;
@@ -321,18 +325,22 @@ async fn send_speed_test(input: NetworkSpeedRoleInput<'_>) -> Result<CommandOutp
     let deadline = started + input.duration;
     let payload = vec![0_u8; SPEED_CHUNK_BYTES];
     let mut bytes_sent = 0_u64;
-    while bytes_sent < input.max_bytes && Instant::now() < deadline {
-        wait_for_rate_budget(started, bytes_sent, input.rate_limit_kbps).await;
-        let remaining = input.max_bytes - bytes_sent;
-        let write_limit =
-            usize::try_from(remaining.min(SPEED_CHUNK_BYTES as u64)).unwrap_or(SPEED_CHUNK_BYTES);
+    while Instant::now() < deadline {
+        wait_for_rate_budget(started, deadline, bytes_sent, input.rate_limit_kbps).await;
+        let write_timeout = deadline.saturating_duration_since(Instant::now());
+        if write_timeout.is_zero() {
+            break;
+        }
+        let write_limit = speed_chunk_limit(input.max_bytes, bytes_sent);
         if write_limit == 0 {
             break;
         }
-        match stream.write_all(&payload[..write_limit]).await {
-            Ok(()) => bytes_sent = bytes_sent.saturating_add(write_limit as u64),
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
-            Err(error) => return Err(error).context("failed to write speed-test stream"),
+        match time::timeout(write_timeout, stream.write(&payload[..write_limit])).await {
+            Ok(Ok(0)) => break,
+            Ok(Ok(bytes)) => bytes_sent = bytes_sent.saturating_add(bytes as u64),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => break,
+            Ok(Err(error)) => return Err(error).context("failed to write speed-test stream"),
+            Err(_) => break,
         }
     }
     let _ = stream.shutdown().await;
@@ -427,15 +435,51 @@ fn speed_test_nonce_hex(job_id: uuid::Uuid, command_payload_hash: &str) -> Strin
     )
 }
 
-async fn wait_for_rate_budget(started: Instant, bytes_sent: u64, rate_limit_kbps: u32) {
-    let bytes_per_sec = (u64::from(rate_limit_kbps).saturating_mul(1000) / 8).max(1);
-    let allowed = started.elapsed().as_secs_f64() * bytes_per_sec as f64;
-    if bytes_sent as f64 <= allowed {
+async fn wait_for_rate_budget(
+    started: Instant,
+    deadline: Instant,
+    bytes_sent: u64,
+    rate_limit_kbps: u32,
+) {
+    if rate_limit_kbps == NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS {
         return;
+    }
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let Some(delay) = rate_budget_delay(started.elapsed(), bytes_sent, rate_limit_kbps) else {
+            return;
+        };
+        time::sleep(delay.min(remaining)).await;
+    }
+}
+
+fn rate_budget_delay(elapsed: Duration, bytes_sent: u64, rate_limit_kbps: u32) -> Option<Duration> {
+    if rate_limit_kbps == NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS {
+        return None;
+    }
+    let bytes_per_sec = (u64::from(rate_limit_kbps).saturating_mul(1000) / 8).max(1);
+    let allowed = elapsed.as_secs_f64() * bytes_per_sec as f64;
+    if bytes_sent as f64 <= allowed {
+        return None;
     }
     let excess_bytes = bytes_sent as f64 - allowed;
     let wait_secs = excess_bytes / bytes_per_sec as f64;
-    time::sleep(Duration::from_secs_f64(wait_secs.min(0.1))).await;
+    Some(Duration::from_secs_f64(wait_secs.min(0.1)))
+}
+
+fn speed_chunk_limit(max_bytes: u64, transferred: u64) -> usize {
+    if max_bytes == NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES {
+        return SPEED_CHUNK_BYTES;
+    }
+    usize::try_from(
+        max_bytes
+            .saturating_sub(transferred)
+            .min(SPEED_CHUNK_BYTES as u64),
+    )
+    .unwrap_or(SPEED_CHUNK_BYTES)
 }
 
 struct SpeedTestFailure<'a> {

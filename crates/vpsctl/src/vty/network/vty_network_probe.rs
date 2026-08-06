@@ -23,7 +23,7 @@ pub(crate) struct VtyTunnelProbeRequest {
 pub(crate) fn parse_vty_tunnel_probe(tokens: &[&str]) -> Result<VtyTunnelProbeRequest> {
     let mut plan_id = None::<Uuid>;
     let mut side = None::<TunnelEndpointSide>;
-    let mut count = 3_u8;
+    let mut count = 5_u8;
     let mut interval_ms = 500_u16;
     let mut max_timeout_secs = 60_u64;
     let mut privilege_ttl_secs = 300_u64;

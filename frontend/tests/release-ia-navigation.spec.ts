@@ -7017,7 +7017,7 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
   await expect(
     page.getByRole("heading", { level: 2, name: "Network tests" }),
   ).toBeVisible();
-  await expect(page.getByLabel("Network test review contract")).toBeVisible();
+  await expect(page.getByLabel("Network test review contract")).toHaveCount(0);
   const trendCharts = page.getByLabel("Network test trend charts");
   await expect(trendCharts).toBeVisible();
   await expect(trendCharts).toContainText("Single evidence bucket");

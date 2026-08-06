@@ -65,3 +65,17 @@ fn rejects_vty_tunnel_speed_test_bad_bounds_or_side() {
     ])
     .is_err());
 }
+
+#[test]
+fn defaults_to_a_ten_second_unlimited_speed_test() {
+    let request = parse_vty_tunnel_speed_test(&[
+        "--plan-id=00000000-0000-0000-0000-000000000001",
+        "--server-side=left",
+        "--confirmed",
+    ])
+    .unwrap();
+
+    assert_eq!(request.duration_secs, 10);
+    assert_eq!(request.max_bytes, 0);
+    assert_eq!(request.rate_limit_kbps, 0);
+}

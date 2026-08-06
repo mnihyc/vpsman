@@ -1941,7 +1941,6 @@
   font-size: 13px;
 }
 
-.topologyNetworkReviewStrip,
 .ospfCostReviewStrip,
 .topologyEvidenceTimeline,
 .tunnelPlanWizardStrip {
@@ -1985,7 +1984,6 @@
   line-height: 1.4;
 }
 
-.topologyNetworkReviewStrip > div,
 .ospfCostReviewStrip > div,
 .topologyEvidenceTimeline > div,
 .tunnelPlanWizardStrip > div {
@@ -1998,7 +1996,6 @@
   padding: 10px;
 }
 
-.topologyNetworkReviewStrip > div.ready,
 .ospfCostReviewStrip > div.ready,
 .topologyEvidenceTimeline > div.ready,
 .tunnelPlanWizardStrip > div.ready {
@@ -2006,7 +2003,6 @@
   background: var(--success-soft);
 }
 
-.topologyNetworkReviewStrip > div.attention,
 .ospfCostReviewStrip > div.attention,
 .topologyEvidenceTimeline > div.attention,
 .tunnelPlanWizardStrip > div.attention {
@@ -2014,7 +2010,6 @@
   background: var(--warning-soft);
 }
 
-.topologyNetworkReviewStrip span,
 .ospfCostReviewStrip span,
 .topologyEvidenceTimeline span,
 .tunnelPlanWizardStrip span {
@@ -2024,7 +2019,6 @@
   text-transform: uppercase;
 }
 
-.topologyNetworkReviewStrip strong,
 .ospfCostReviewStrip strong,
 .topologyEvidenceTimeline strong,
 .tunnelPlanWizardStrip strong {
@@ -2035,21 +2029,18 @@
   line-height: 1.3;
 }
 
-.topologyNetworkReviewStrip > div.ready strong,
 .ospfCostReviewStrip > div.ready strong,
 .topologyEvidenceTimeline > div.ready strong,
 .tunnelPlanWizardStrip > div.ready strong {
   color: var(--success-text);
 }
 
-.topologyNetworkReviewStrip > div.attention strong,
 .ospfCostReviewStrip > div.attention strong,
 .topologyEvidenceTimeline > div.attention strong,
 .tunnelPlanWizardStrip > div.attention strong {
   color: var(--warning-text);
 }
 
-.topologyNetworkReviewStrip p,
 .ospfCostReviewStrip p,
 .topologyEvidenceTimeline p,
 .tunnelPlanWizardStrip p {
@@ -2350,6 +2341,22 @@
   padding: 12px;
 }
 
+.topologyNetworkTestGroup > .targetImpactPreview {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.topologyNetworkTestGroup > .targetImpactPreview .targetImpactHeader {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.topologyNetworkTestGroup > .targetImpactPreview .targetImpactHeader > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .topologyNetworkTestGroupHeader {
   display: flex;
   align-items: center;
@@ -2392,20 +2399,23 @@
 }
 
 .compactTopologyNote {
-  display: flex;
+  display: grid;
   align-items: center;
-  justify-content: space-between;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
 }
 
-.compactTopologyNote strong,
+.compactTopologyNote strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .compactTopologyNote span {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 @media (max-width: 760px) {

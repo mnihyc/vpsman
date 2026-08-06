@@ -7,7 +7,8 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
+    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -32,9 +33,9 @@ pub(crate) struct VtyTunnelSpeedTestRequest {
 pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSpeedTestRequest> {
     let mut plan_id = None::<Uuid>;
     let mut server_side = None::<TunnelEndpointSide>;
-    let mut duration_secs = 3_u8;
-    let mut max_bytes = 16 * 1024 * 1024_u64;
-    let mut rate_limit_kbps = 100_000_u32;
+    let mut duration_secs = 10_u8;
+    let mut max_bytes = NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES;
+    let mut rate_limit_kbps = NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS;
     let mut port = 5201_u16;
     let mut connect_timeout_ms = 5_000_u16;
     let mut max_timeout_secs = DEFAULT_MAX_JOB_TIMEOUT_SECS;
@@ -82,7 +83,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 index += 1;
             }
             "--max-bytes" => {
-                max_bytes = parse_bounded_u64(
+                max_bytes = parse_unlimited_or_bounded_u64(
                     next_value(tokens, index, "--max-bytes")?,
                     "--max-bytes",
                     NETWORK_SPEED_TEST_MIN_MAX_BYTES,
@@ -91,7 +92,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 index += 2;
             }
             value if value.starts_with("--max-bytes=") => {
-                max_bytes = parse_bounded_u64(
+                max_bytes = parse_unlimited_or_bounded_u64(
                     flag_value(value, "--max-bytes="),
                     "--max-bytes",
                     NETWORK_SPEED_TEST_MIN_MAX_BYTES,
@@ -100,7 +101,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 index += 1;
             }
             "--rate-limit-kbps" => {
-                rate_limit_kbps = parse_bounded_u32(
+                rate_limit_kbps = parse_unlimited_or_bounded_u32(
                     next_value(tokens, index, "--rate-limit-kbps")?,
                     "--rate-limit-kbps",
                     NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
@@ -109,7 +110,7 @@ pub(crate) fn parse_vty_tunnel_speed_test(tokens: &[&str]) -> Result<VtyTunnelSp
                 index += 2;
             }
             value if value.starts_with("--rate-limit-kbps=") => {
-                rate_limit_kbps = parse_bounded_u32(
+                rate_limit_kbps = parse_unlimited_or_bounded_u32(
                     flag_value(value, "--rate-limit-kbps="),
                     "--rate-limit-kbps",
                     NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
@@ -338,9 +339,9 @@ fn parse_bounded_u16(value: &str, flag: &str, min: u16, max: u16) -> Result<u16>
     Ok(parsed)
 }
 
-fn parse_bounded_u32(value: &str, flag: &str, min: u32, max: u32) -> Result<u32> {
+fn parse_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64> {
     let parsed = value
-        .parse::<u32>()
+        .parse::<u64>()
         .with_context(|| format!("{flag} must be an integer"))?;
     anyhow::ensure!(
         (min..=max).contains(&parsed),
@@ -349,13 +350,24 @@ fn parse_bounded_u32(value: &str, flag: &str, min: u32, max: u32) -> Result<u32>
     Ok(parsed)
 }
 
-fn parse_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64> {
+fn parse_unlimited_or_bounded_u32(value: &str, flag: &str, min: u32, max: u32) -> Result<u32> {
+    let parsed = value
+        .parse::<u32>()
+        .with_context(|| format!("{flag} must be an integer"))?;
+    anyhow::ensure!(
+        parsed == 0 || (min..=max).contains(&parsed),
+        "{flag} must be 0 (unlimited) or between {min} and {max}"
+    );
+    Ok(parsed)
+}
+
+fn parse_unlimited_or_bounded_u64(value: &str, flag: &str, min: u64, max: u64) -> Result<u64> {
     let parsed = value
         .parse::<u64>()
         .with_context(|| format!("{flag} must be an integer"))?;
     anyhow::ensure!(
-        (min..=max).contains(&parsed),
-        "{flag} must be between {min} and {max}"
+        parsed == 0 || (min..=max).contains(&parsed),
+        "{flag} must be 0 (unlimited) or between {min} and {max}"
     );
     Ok(parsed)
 }

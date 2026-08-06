@@ -10,7 +10,8 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
-    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
+    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -802,13 +803,17 @@ fn validate_network_speed_test_operation(
             "network_speed_test_duration_secs_out_of_range",
         ));
     }
-    if !(NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES).contains(&max_bytes) {
+    if max_bytes != NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES
+        && !(NETWORK_SPEED_TEST_MIN_MAX_BYTES..=NETWORK_SPEED_TEST_MAX_MAX_BYTES)
+            .contains(&max_bytes)
+    {
         return Err(ApiError::bad_request(
             "network_speed_test_max_bytes_out_of_range",
         ));
     }
-    if !(NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
-        .contains(&rate_limit_kbps)
+    if rate_limit_kbps != NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS
+        && !(NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS..=NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS)
+            .contains(&rate_limit_kbps)
     {
         return Err(ApiError::bad_request(
             "network_speed_test_rate_limit_kbps_out_of_range",
