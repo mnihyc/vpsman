@@ -2014,10 +2014,13 @@ h2 {
 .gridToolbarActions {
   display: flex;
   align-items: center;
-  flex: 0 0 auto;
+  justify-content: flex-end;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   gap: 6px;
+  margin-inline-start: auto;
   min-width: 0;
+  max-width: 100%;
 }
 
 .gridPageSize {
@@ -2258,6 +2261,8 @@ h2 {
 
   .gridToolbarActions {
     flex-wrap: wrap;
+    justify-content: flex-start;
+    margin-inline-start: 0;
   }
 
   .gridToolbarActions .columnChooserButton span {
