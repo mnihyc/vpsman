@@ -134,6 +134,18 @@ test("uses retained session actions and sends exact xterm input without creating
   await expect(page.getByText("Active session - accepted").first()).toBeVisible();
   await expect(page.getByText("Closed session - operator").first()).toBeVisible();
   await expect(page.getByText("Idle timeout 10m; 64.0 KiB flow window").first()).toBeVisible();
+  const sessionContext = page.getByLabel("Active terminal session context");
+  const terminalEmulator = page.getByLabel("Active terminal emulator");
+  const [sessionContextBox, terminalEmulatorBox] = await Promise.all([
+    sessionContext.boundingBox(),
+    terminalEmulator.boundingBox(),
+  ]);
+  expect(sessionContextBox).not.toBeNull();
+  expect(terminalEmulatorBox).not.toBeNull();
+  expect(
+    terminalEmulatorBox!.y -
+      (sessionContextBox!.y + sessionContextBox!.height),
+  ).toBeGreaterThanOrEqual(12);
   await expect(page.getByText("1 -> 4")).toHaveCount(0);
   await expect(page.getByText("4 -> 5")).toHaveCount(0);
   await openTerminalActionMenu(page, activeTerminalRow);
