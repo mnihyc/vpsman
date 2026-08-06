@@ -1447,4 +1447,3 @@ else
     "$state_dir" "$agent_bin" "$config_file"
   log "start in foreground: $foreground_command"
 fi
-log "gateway public key: $VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX"

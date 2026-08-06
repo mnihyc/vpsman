@@ -37,8 +37,8 @@ The updater accepts only release v0.2.0 or newer. Before payload activation it
 verifies any existing migration history against the target release and saves a
 PostgreSQL archive under runtime/update-backups/. Updates and rollbacks stop
 application writers before taking that archive. A successful first-start prints
-the generated privilege salt that operators must save for browser and CLI
-privilege unlock.
+the generated gateway public key for agent installation and the privilege salt
+that operators must save for browser and CLI privilege unlock.
 USAGE
 }
 
@@ -55,6 +55,7 @@ transaction_can_cleanup=0
 mode="update"
 target="${1:-latest}"
 operator_privilege_salt=""
+gateway_public_key_hex=""
 
 if [[ "$target" == "first-start" ]]; then
   mode="first-start"
@@ -230,6 +231,17 @@ read_operator_privilege_salt() {
   (( ${#salt} % 2 == 0 )) ||
     fail "operator privilege salt file is invalid: VPSMAN_SUPER_SALT_HEX must contain whole bytes"
   printf '%s\n' "$salt"
+}
+
+read_gateway_public_key() {
+  local path key
+  path="$script_dir/config/secrets/vpsman_gateway_public_key_hex"
+  [[ -f "$path" && ! -L "$path" ]] ||
+    fail "gateway public key file must be a regular file: ./config/secrets/vpsman_gateway_public_key_hex"
+  key="$(<"$path")"
+  [[ "$key" =~ ^[0-9A-Fa-f]{64}$ ]] ||
+    fail "gateway public key file must contain exactly 32 bytes of hex"
+  printf '%s\n' "$key"
 }
 
 report_operator_privilege_salt() {
@@ -1171,6 +1183,7 @@ cp "$transaction/downloads/version.json" \
 if [[ "$mode" == "first-start" ]]; then
   prepare_first_start_secrets "$transaction/staged-cli/vpsctl"
   operator_privilege_salt="$(read_operator_privilege_salt)"
+  gateway_public_key_hex="$(read_gateway_public_key)"
   wait_for_postgres || fail "PostgreSQL did not become ready for first-start preflight"
   if [[ "$(database_migration_ledger_status)" == "t" ]]; then
     verify_database_compatible_with \
@@ -1206,6 +1219,9 @@ activate_transaction "$transaction" "$mode" "$resolved_tag"
 if [[ "$mode" == "first-start" ]]; then
   log "started vpsman deployment at $resolved_tag"
   log "pre-start database backup: runtime/update-backups/$backup_name"
+  log "gateway public key for agent installation:"
+  log "VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=$gateway_public_key_hex"
+  log "persistent copy: ./config/secrets/vpsman_gateway_public_key_hex"
   report_operator_privilege_salt "$operator_privilege_salt"
 else
   log "updated vpsman deployment to $resolved_tag"

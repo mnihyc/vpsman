@@ -389,11 +389,11 @@ EOF
   for secret in \
     vpsman_internal_token \
     vpsman_gateway_private_key_hex \
-    vpsman_privilege_verifier_key_hex \
-    vpsman_gateway_public_key_hex
+    vpsman_privilege_verifier_key_hex
   do
     printf 'updater-smoke-secret\n' >"$destination/config/secrets/$secret"
   done
+  printf '%064d\n' 3 >"$destination/config/secrets/vpsman_gateway_public_key_hex"
   printf '%s\n' \
     'export VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
     >"$destination/config/secrets/operator-privilege.env"
@@ -519,6 +519,10 @@ grep -Fq 'pg_restore --list' "$FIRST_START/docker.log" ||
   fail "first-start left an active transaction"
 grep -Fq 'started vpsman deployment at v9.8.7' "$FIRST_START/update.log" ||
   fail "first-start did not report the activated release"
+grep -Fq \
+  "VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX=$(printf '%064d' 3)" \
+  "$FIRST_START/update.log" ||
+  fail "first-start did not print its generated gateway public key"
 grep -Fq \
   'VPSMAN_SUPER_SALT_HEX=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
   "$FIRST_START/update.log" ||
@@ -1099,4 +1103,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_privilege_salt_output","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_gateway_public_key_output","first_start_privilege_salt_output","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
