@@ -11,7 +11,7 @@ use crate::{
 };
 
 fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
-    let kind = if manager == RuntimeTunnelManager::AgentIproute2Managed {
+    let kind = if manager == RuntimeTunnelManager::AgentBuiltin {
         TunnelKind::Gre
     } else {
         TunnelKind::Wireguard
@@ -22,9 +22,9 @@ fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
         kind,
         runtime_control: crate::RuntimeTunnelControl {
             manager,
-            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
             ..crate::RuntimeTunnelControl::default()
         },
@@ -46,8 +46,12 @@ fn explicit_plan(manager: RuntimeTunnelManager) -> crate::TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
-        left_mtu: crate::default_tunnel_mtu(kind),
-        right_mtu: crate::default_tunnel_mtu(kind),
+        left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| crate::default_tunnel_mtu(kind))
+            .flatten(),
+        right_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| crate::default_tunnel_mtu(kind))
+            .flatten(),
         ospf: None,
     })
     .unwrap()
@@ -184,12 +188,13 @@ fn runtime_config_ignores_additive_future_fields() {
 }
 
 #[test]
-fn explicit_agent_managed_plan_needs_no_adapter_snapshot() {
+fn explicit_agent_builtin_plan_needs_no_adapter_snapshot() {
     let mut config = AgentConfig::default();
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
-        plan: explicit_plan(RuntimeTunnelManager::AgentIproute2Managed),
+        plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
         traffic_command: None,
@@ -199,13 +204,63 @@ fn explicit_agent_managed_plan_needs_no_adapter_snapshot() {
 }
 
 #[test]
-fn external_managed_plan_requires_the_bound_adapter_snapshot() {
+fn stateful_builtin_runtime_plans_require_uuid_identity() {
     let mut config = AgentConfig::default();
-    let plan = explicit_plan(RuntimeTunnelManager::ExternalManagedAdapter);
+    let mut plan = explicit_plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.kind = TunnelKind::Wireguard;
+    config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+        plan_id: None,
+        endpoint_side: TunnelEndpointSide::Left,
+        plan,
+        builtin_credentials: None,
+        runtime_adapter: None,
+        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
+        traffic_command: None,
+        latency_monitoring_enabled: true,
+    }];
+
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_required"
+    );
+    config.network.runtime_status_telemetry_plans[0].plan_id = Some("not-a-uuid".to_string());
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_plan_id_invalid"
+    );
+}
+
+#[test]
+fn runtime_config_rejects_driver_options_on_the_wrong_tunnel_kind() {
+    let mut config = AgentConfig::default();
+    let mut plan = explicit_plan(RuntimeTunnelManager::AgentBuiltin);
+    plan.runtime_control.wireguard.left_listen_port = 51_821;
+    config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
+        plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
+        endpoint_side: TunnelEndpointSide::Left,
+        plan,
+        builtin_credentials: None,
+        runtime_adapter: None,
+        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
+        traffic_command: None,
+        latency_monitoring_enabled: true,
+    }];
+
+    assert_eq!(
+        validate_agent_config_shape(&config).unwrap_err(),
+        "network_runtime_status_telemetry_control_invalid"
+    );
+}
+
+#[test]
+fn custom_adapter_plan_requires_the_bound_adapter_snapshot() {
+    let mut config = AgentConfig::default();
+    let plan = explicit_plan(RuntimeTunnelManager::CustomAdapter);
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
         plan: plan.clone(),
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
         traffic_command: None,
@@ -237,6 +292,7 @@ fn observed_plan_rejects_an_adapter_snapshot() {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
+        builtin_credentials: None,
         runtime_adapter: Some(runtime_adapter()),
         traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
         traffic_command: None,
@@ -256,6 +312,7 @@ fn observed_plan_reconcile_does_not_require_mutation() {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
         traffic_command: None,
@@ -272,7 +329,8 @@ fn managed_plan_reconcile_requires_mutation() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
-        plan: explicit_plan(RuntimeTunnelManager::AgentIproute2Managed),
+        plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
         traffic_command: None,
@@ -291,7 +349,8 @@ fn custom_traffic_command_is_explicit_and_bounded() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         endpoint_side: TunnelEndpointSide::Left,
-        plan: explicit_plan(RuntimeTunnelManager::AgentIproute2Managed),
+        plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: AgentRuntimeTrafficSource::CustomCommand,
         traffic_command: Some(command("traffic")),

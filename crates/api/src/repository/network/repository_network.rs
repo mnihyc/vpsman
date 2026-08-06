@@ -3,7 +3,7 @@ use std::{
     net::IpAddr,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::{types::Json as SqlJson, Row};
 use tracing::warn;
 use uuid::Uuid;
@@ -17,6 +17,10 @@ use crate::{
     repository::Repository,
     repository_key_lifecycle::{
         require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+    },
+    repository_tunnel_credentials::{
+        generate_tunnel_builtin_credentials, next_credential_generation,
+        reconcile_tunnel_builtin_credentials,
     },
     unix_now,
 };
@@ -118,7 +122,7 @@ impl Repository {
                     r#"
                     SELECT
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
-                        input, plan, recommended_ospf_cost,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
                         desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
@@ -285,7 +289,7 @@ impl Repository {
                     r#"
                     SELECT
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
-                        input, plan, recommended_ospf_cost,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
                         desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
@@ -468,7 +472,7 @@ impl Repository {
                     r#"
                     SELECT
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
-                        input, plan, recommended_ospf_cost,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
                         desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
@@ -520,8 +524,10 @@ impl Repository {
         } else {
             "disabled"
         };
+        let plan_id = Uuid::new_v4();
+        let builtin_credentials = generate_tunnel_builtin_credentials(plan_id, plan, 1)?;
         let view = TunnelPlanView {
-            id: Uuid::new_v4(),
+            id: plan_id,
             name: plan.name.clone(),
             kind: plan.kind,
             enabled,
@@ -545,6 +551,7 @@ impl Repository {
             right_runtime_config: untracked_tunnel_runtime_config(&plan.right_client_id, enabled),
             input: input.clone(),
             plan: plan.clone(),
+            builtin_credentials,
             created_at: unix_now().to_string(),
             updated_at: unix_now().to_string(),
             deleted_at: None,
@@ -592,11 +599,11 @@ impl Repository {
                     INSERT INTO tunnel_plans (
                         id, actor_id, name, kind, enabled,
                         left_client_id, right_client_id, input, plan,
-                        recommended_ospf_cost,
+                        builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                            $11, $11, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                            $12, $12, $12)
                     ON CONFLICT (name) WHERE deleted_at IS NULL DO NOTHING
                     RETURNING id, revision, created_at::text AS created_at, updated_at::text AS updated_at
                     "#,
@@ -610,6 +617,7 @@ impl Repository {
                 .bind(&view.right_client_id)
                 .bind(SqlJson(input))
                 .bind(SqlJson(plan))
+                .bind(view.builtin_credentials.as_ref().map(SqlJson))
                 .bind(view.recommended_ospf_cost)
                 .bind(&view.ospf_status)
                 .fetch_optional(&mut *tx)
@@ -684,6 +692,12 @@ impl Repository {
                 if existing.name != plan.name {
                     anyhow::bail!("tunnel_plan_name_is_immutable");
                 }
+                let builtin_credentials = reconcile_tunnel_builtin_credentials(
+                    plan_id,
+                    Some(&existing.plan),
+                    existing.builtin_credentials.as_ref(),
+                    plan,
+                )?;
                 validate_memory_tunnel_plan_resource_conflicts(plan, &plans, Some(plan_id))?;
                 {
                     let definitions = memory.network_adapter_definitions.read().await;
@@ -721,6 +735,7 @@ impl Repository {
                     ),
                     input: input.clone(),
                     plan: plan.clone(),
+                    builtin_credentials,
                     created_at: existing.created_at.clone(),
                     updated_at: unix_now().to_string(),
                     deleted_at: None,
@@ -733,15 +748,51 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_tunnel_plan_write(&mut tx).await?;
-                validate_postgres_tunnel_plan_resource_conflicts(&mut tx, plan, Some(plan_id))
-                    .await?;
-                validate_postgres_tunnel_plan_adapter_references(&mut tx, plan).await?;
                 lock_visible_postgres_tunnel_endpoints(
                     &mut tx,
                     &plan.left_client_id,
                     &plan.right_client_id,
                 )
                 .await?;
+                let existing_row = sqlx::query(
+                    r#"
+                    SELECT name, revision, plan, builtin_credentials
+                    FROM tunnel_plans
+                    WHERE id = $1 AND deleted_at IS NULL
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(plan_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                let persisted_name: String = existing_row.try_get("name")?;
+                let persisted_revision: i64 = existing_row.try_get("revision")?;
+                if persisted_revision != expected_revision {
+                    anyhow::bail!("tunnel_plan_snapshot_stale");
+                }
+                if persisted_name != plan.name {
+                    anyhow::bail!("tunnel_plan_name_is_immutable");
+                }
+                let previous_plan: SqlJson<serde_json::Value> = existing_row.try_get("plan")?;
+                let previous_plan = serde_json::from_value::<TunnelPlan>(previous_plan.0)
+                    .context("invalid persisted tunnel plan")?;
+                let previous_credentials = existing_row
+                    .try_get::<Option<SqlJson<serde_json::Value>>, _>("builtin_credentials")?
+                    .map(|value| {
+                        serde_json::from_value(value.0)
+                            .context("invalid persisted tunnel builtin credentials")
+                    })
+                    .transpose()?;
+                let builtin_credentials = reconcile_tunnel_builtin_credentials(
+                    plan_id,
+                    Some(&previous_plan),
+                    previous_credentials.as_ref(),
+                    plan,
+                )?;
+                validate_postgres_tunnel_plan_resource_conflicts(&mut tx, plan, Some(plan_id))
+                    .await?;
+                validate_postgres_tunnel_plan_adapter_references(&mut tx, plan).await?;
                 let row = sqlx::query(
                     r#"
                     UPDATE tunnel_plans
@@ -752,10 +803,11 @@ impl Repository {
                         right_client_id = $5,
                         input = $6,
                         plan = $7,
-                        recommended_ospf_cost = $8,
-                        ospf_status = $9,
-                        left_ospf_status = $9,
-                        right_ospf_status = $9,
+                        builtin_credentials = $8,
+                        recommended_ospf_cost = $9,
+                        ospf_status = $10,
+                        left_ospf_status = $10,
+                        right_ospf_status = $10,
                         desired_ospf_cost = NULL,
                         left_current_ospf_cost = NULL,
                         right_current_ospf_cost = NULL,
@@ -767,10 +819,10 @@ impl Repository {
                         connection_assessed_by = NULL,
                         revision = revision + 1,
                         updated_at = now()
-                    WHERE id = $10
+                    WHERE id = $11
                       AND deleted_at IS NULL
-                      AND name = $11
-                      AND revision = $12
+                      AND name = $12
+                      AND revision = $13
                     RETURNING revision, created_at::text AS created_at, updated_at::text AS updated_at
                     "#,
                 )
@@ -781,6 +833,7 @@ impl Repository {
                 .bind(&plan.right_client_id)
                 .bind(SqlJson(input))
                 .bind(SqlJson(plan))
+                .bind(builtin_credentials.as_ref().map(SqlJson))
                 .bind(plan.recommended_ospf_cost.map(i32::from))
                 .bind(ospf_endpoint_status)
                 .bind(plan_id)
@@ -820,6 +873,7 @@ impl Repository {
                     ),
                     input: input.clone(),
                     plan: plan.clone(),
+                    builtin_credentials,
                     created_at: row.try_get("created_at")?,
                     updated_at: row.try_get("updated_at")?,
                     deleted_at: None,
@@ -927,7 +981,7 @@ impl Repository {
                     WHERE id = $1 AND deleted_at IS NULL AND revision = $5
                     RETURNING
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
-                        input, plan, recommended_ospf_cost,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
                         desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
@@ -970,6 +1024,103 @@ impl Repository {
                 self.get_tunnel_plan(plan_id)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
+            }
+        }
+    }
+
+    pub(crate) async fn rotate_tunnel_plan_credentials(
+        &self,
+        plan_id: Uuid,
+        expected_revision: i64,
+        operator: &AuthContext,
+    ) -> Result<TunnelPlanView> {
+        let existing = self
+            .get_tunnel_plan_record(plan_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+        if existing.revision != expected_revision {
+            anyhow::bail!("tunnel_plan_snapshot_stale");
+        }
+        if existing.plan.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin
+            || !matches!(existing.kind, TunnelKind::Wireguard | TunnelKind::Openvpn)
+        {
+            anyhow::bail!("tunnel_plan_builtin_credentials_not_supported");
+        }
+        let generation = existing
+            .builtin_credentials
+            .as_ref()
+            .map(next_credential_generation)
+            .transpose()?
+            .context("tunnel_plan_builtin_credentials_required")?;
+        let credentials = generate_tunnel_builtin_credentials(plan_id, &existing.plan, generation)?
+            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_builtin_credentials_not_supported"))?;
+
+        match self {
+            Self::Memory(memory) => {
+                let now = unix_now().to_string();
+                let rotated = {
+                    let mut plans = memory.tunnel_plans.write().await;
+                    let plan = plans
+                        .iter_mut()
+                        .find(|plan| plan.id == plan_id && plan.deleted_at.is_none())
+                        .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                    if plan.revision != expected_revision {
+                        anyhow::bail!("tunnel_plan_snapshot_stale");
+                    }
+                    plan.revision += 1;
+                    plan.builtin_credentials = Some(credentials);
+                    plan.updated_at = now.clone();
+                    plan.clone()
+                };
+                memory.audits.write().await.push(AuditLogView {
+                    id: Uuid::new_v4(),
+                    actor_id: persisted_actor_id(operator),
+                    action: "network.tunnel_plan_credentials_rotated".to_string(),
+                    target: format!("tunnel_plan:{plan_id}"),
+                    command_hash: None,
+                    metadata: tunnel_plan_metadata(&rotated, operator),
+                    created_at: now,
+                });
+                Ok(rotated)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query(
+                    r#"
+                    UPDATE tunnel_plans
+                    SET actor_id = $2,
+                        builtin_credentials = $3,
+                        revision = revision + 1,
+                        updated_at = now()
+                    WHERE id = $1
+                      AND deleted_at IS NULL
+                      AND revision = $4
+                    RETURNING revision, updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(plan_id)
+                .bind(persisted_actor_id(operator))
+                .bind(SqlJson(&credentials))
+                .bind(expected_revision)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
+                let rotated = TunnelPlanView {
+                    revision: row.try_get("revision")?,
+                    builtin_credentials: Some(credentials),
+                    updated_at: row.try_get("updated_at")?,
+                    ..existing
+                };
+                insert_tunnel_audit(
+                    &mut tx,
+                    operator,
+                    "network.tunnel_plan_credentials_rotated",
+                    &rotated,
+                    tunnel_plan_metadata(&rotated, operator),
+                )
+                .await?;
+                tx.commit().await?;
+                Ok(rotated)
             }
         }
     }
@@ -1097,6 +1248,7 @@ impl Repository {
                     }
                     plan.revision += 1;
                     plan.enabled = false;
+                    plan.builtin_credentials = None;
                     plan.left_runtime_config = retired_tunnel_runtime_config(
                         plan.left_runtime_config.clone(),
                         was_enabled,
@@ -1130,6 +1282,7 @@ impl Repository {
                     SET actor_id = $2,
                         revision = revision + 1,
                         enabled = FALSE,
+                        builtin_credentials = NULL,
                         deleted_at = now(),
                         deleted_by = $2,
                         deleted_reason = 'operator_retired',
@@ -1149,6 +1302,7 @@ impl Repository {
                 .ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
                 let deleted = TunnelPlanView {
                     enabled: false,
+                    builtin_credentials: None,
                     left_runtime_config: retired_tunnel_runtime_config(
                         existing.left_runtime_config.clone(),
                         was_enabled,
@@ -1256,7 +1410,7 @@ impl Repository {
                       AND right_ospf_status <> 'pending'
                     RETURNING
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
-                        input, plan, recommended_ospf_cost,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
                         ospf_status, left_ospf_status, right_ospf_status,
                         desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
                         left_ospf_job_id, right_ospf_job_id,
@@ -1390,6 +1544,12 @@ impl Repository {
 fn tunnel_plan_from_row(row: &sqlx::postgres::PgRow) -> Result<TunnelPlanView> {
     let input: SqlJson<serde_json::Value> = row.try_get("input")?;
     let plan: SqlJson<serde_json::Value> = row.try_get("plan")?;
+    let builtin_credentials = row
+        .try_get::<Option<SqlJson<serde_json::Value>>, _>("builtin_credentials")?
+        .map(|value| {
+            serde_json::from_value(value.0).context("invalid persisted tunnel builtin credentials")
+        })
+        .transpose()?;
     let input = serde_json::from_value::<TunnelPlanInput>(input.0)
         .map_err(|error| anyhow::anyhow!("invalid persisted tunnel input: {error}"))?;
     let plan = serde_json::from_value::<TunnelPlan>(plan.0)
@@ -1425,6 +1585,7 @@ fn tunnel_plan_from_row(row: &sqlx::postgres::PgRow) -> Result<TunnelPlanView> {
         ),
         input,
         plan,
+        builtin_credentials,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         deleted_at: row.try_get("deleted_at")?,
@@ -1595,7 +1756,64 @@ fn validate_tunnel_plan_resource_pair(
         requested_addresses.is_disjoint(&tunnel_plan_addresses(existing)?),
         "tunnel_plan_address_conflict"
     );
+    let existing_ports = tunnel_plan_listener_resources(existing)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    anyhow::ensure!(
+        tunnel_plan_listener_resources(requested)
+            .into_iter()
+            .all(|resource| !existing_ports.contains(&resource)),
+        "tunnel_plan_listener_port_conflict"
+    );
     Ok(())
+}
+
+fn tunnel_plan_listener_resources(plan: &TunnelPlan) -> Vec<(String, &'static str, u16)> {
+    if plan.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin {
+        return Vec::new();
+    }
+    match plan.kind {
+        TunnelKind::Fou => vec![
+            (
+                plan.left_client_id.clone(),
+                "udp",
+                plan.runtime_control.fou.port,
+            ),
+            (
+                plan.right_client_id.clone(),
+                "udp",
+                plan.runtime_control.fou.port,
+            ),
+        ],
+        TunnelKind::Wireguard => vec![
+            (
+                plan.left_client_id.clone(),
+                "udp",
+                plan.runtime_control.wireguard.left_listen_port,
+            ),
+            (
+                plan.right_client_id.clone(),
+                "udp",
+                plan.runtime_control.wireguard.right_listen_port,
+            ),
+        ],
+        TunnelKind::Openvpn => {
+            let client_id = match plan.runtime_control.openvpn.listener_side {
+                TunnelEndpointSide::Left => &plan.left_client_id,
+                TunnelEndpointSide::Right => &plan.right_client_id,
+            };
+            let transport = match plan.runtime_control.openvpn.transport {
+                vpsman_common::RuntimeTunnelOpenvpnTransport::Udp => "udp",
+                vpsman_common::RuntimeTunnelOpenvpnTransport::Tcp => "tcp",
+            };
+            vec![(
+                client_id.clone(),
+                transport,
+                plan.runtime_control.openvpn.port,
+            )]
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn validate_memory_tunnel_plan_resource_conflicts(
@@ -1701,7 +1919,7 @@ fn tunnel_plan_adapter_references(plan: &TunnelPlan) -> Result<Vec<TunnelPlanAda
         Ok(())
     };
 
-    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+    if plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
         let left_id = plan
             .runtime_control
             .left_adapter_definition_id
@@ -2145,8 +2363,8 @@ fn parse_tunnel_kind(value: &str) -> Result<TunnelKind> {
 
 fn runtime_manager_name(manager: RuntimeTunnelManager) -> &'static str {
     match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => "agent_iproute2_managed",
+        RuntimeTunnelManager::AgentBuiltin => "agent_builtin",
         RuntimeTunnelManager::ExternalObserved => "external_observed",
-        RuntimeTunnelManager::ExternalManagedAdapter => "external_managed_adapter",
+        RuntimeTunnelManager::CustomAdapter => "custom_adapter",
     }
 }

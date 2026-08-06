@@ -13,9 +13,10 @@ pub enum TunnelKind {
     Custom,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TunnelEndpointSide {
+    #[default]
     Left,
     Right,
 }
@@ -32,9 +33,9 @@ pub enum TunnelAddressFamily {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeTunnelManager {
     #[default]
-    AgentIproute2Managed,
+    AgentBuiltin,
     ExternalObserved,
-    ExternalManagedAdapter,
+    CustomAdapter,
 }
 
 impl TunnelKind {
@@ -56,17 +57,17 @@ pub const ROUTING_COST_ADAPTER_CONTRACT_VERSION: u16 = 2;
 
 /// Returns the editable endpoint MTU baseline for a 1500-byte underlay.
 ///
-/// Agent-managed kernel tunnel kinds subtract their deterministic outer
-/// headers. External and abstract kinds return `None` because MTU ownership
-/// belongs to their runtime rather than the tunnel plan.
+/// Agent builtin tunnel kinds use an editable baseline suitable for a
+/// 1500-byte underlay. External-only and custom kinds return `None` because
+/// MTU ownership belongs to their runtime rather than the tunnel plan.
 pub const fn default_tunnel_mtu(kind: TunnelKind) -> Option<u16> {
     match kind {
         TunnelKind::Gre => Some(1476),
         TunnelKind::Ipip | TunnelKind::Sit => Some(1480),
         TunnelKind::Fou => Some(1472),
-        TunnelKind::Openvpn | TunnelKind::Wireguard | TunnelKind::TunTap | TunnelKind::Custom => {
-            None
-        }
+        TunnelKind::Wireguard => Some(1420),
+        TunnelKind::Openvpn => Some(1500),
+        TunnelKind::TunTap | TunnelKind::Custom => None,
     }
 }
 
@@ -256,6 +257,113 @@ impl RuntimeTunnelFouOptions {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeTunnelWireguardOptions {
+    #[serde(default)]
+    pub endpoint_mode: RuntimeTunnelWireguardEndpointMode,
+    #[serde(default = "default_runtime_wireguard_listen_port")]
+    pub left_listen_port: u16,
+    #[serde(default = "default_runtime_wireguard_listen_port")]
+    pub right_listen_port: u16,
+    #[serde(default = "default_runtime_wireguard_keepalive_secs")]
+    pub left_keepalive_secs: u16,
+    #[serde(default = "default_runtime_wireguard_keepalive_secs")]
+    pub right_keepalive_secs: u16,
+}
+
+impl RuntimeTunnelWireguardOptions {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+
+    pub fn listen_port(&self, side: TunnelEndpointSide) -> u16 {
+        match side {
+            TunnelEndpointSide::Left => self.left_listen_port,
+            TunnelEndpointSide::Right => self.right_listen_port,
+        }
+    }
+
+    pub fn peer_listen_port(&self, side: TunnelEndpointSide) -> u16 {
+        match side {
+            TunnelEndpointSide::Left => self.right_listen_port,
+            TunnelEndpointSide::Right => self.left_listen_port,
+        }
+    }
+
+    pub fn keepalive_secs(&self, side: TunnelEndpointSide) -> u16 {
+        match side {
+            TunnelEndpointSide::Left => self.left_keepalive_secs,
+            TunnelEndpointSide::Right => self.right_keepalive_secs,
+        }
+    }
+
+    pub fn configures_peer_endpoint(&self, side: TunnelEndpointSide) -> bool {
+        match self.endpoint_mode {
+            RuntimeTunnelWireguardEndpointMode::Both => true,
+            // A roaming side points at the fixed VPS. The fixed side omits the
+            // roaming peer's destination and learns it from authenticated
+            // WireGuard traffic.
+            RuntimeTunnelWireguardEndpointMode::Left => side == TunnelEndpointSide::Right,
+            RuntimeTunnelWireguardEndpointMode::Right => side == TunnelEndpointSide::Left,
+        }
+    }
+}
+
+impl Default for RuntimeTunnelWireguardOptions {
+    fn default() -> Self {
+        Self {
+            endpoint_mode: RuntimeTunnelWireguardEndpointMode::Both,
+            left_listen_port: default_runtime_wireguard_listen_port(),
+            right_listen_port: default_runtime_wireguard_listen_port(),
+            left_keepalive_secs: default_runtime_wireguard_keepalive_secs(),
+            right_keepalive_secs: default_runtime_wireguard_keepalive_secs(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTunnelWireguardEndpointMode {
+    Left,
+    Right,
+    #[default]
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTunnelOpenvpnTransport {
+    #[default]
+    Udp,
+    Tcp,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RuntimeTunnelOpenvpnOptions {
+    #[serde(default)]
+    pub transport: RuntimeTunnelOpenvpnTransport,
+    #[serde(default)]
+    pub listener_side: TunnelEndpointSide,
+    #[serde(default = "default_runtime_openvpn_port")]
+    pub port: u16,
+}
+
+impl RuntimeTunnelOpenvpnOptions {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+impl Default for RuntimeTunnelOpenvpnOptions {
+    fn default() -> Self {
+        Self {
+            transport: RuntimeTunnelOpenvpnTransport::Udp,
+            listener_side: TunnelEndpointSide::Left,
+            port: default_runtime_openvpn_port(),
+        }
+    }
+}
+
 impl Default for RuntimeTunnelFouOptions {
     fn default() -> Self {
         Self {
@@ -325,6 +433,16 @@ pub struct RuntimeTunnelControl {
     pub traffic_limit: RuntimeTunnelTrafficLimit,
     #[serde(default, skip_serializing_if = "RuntimeTunnelFouOptions::is_default")]
     pub fou: RuntimeTunnelFouOptions,
+    #[serde(
+        default,
+        skip_serializing_if = "RuntimeTunnelWireguardOptions::is_default"
+    )]
+    pub wireguard: RuntimeTunnelWireguardOptions,
+    #[serde(
+        default,
+        skip_serializing_if = "RuntimeTunnelOpenvpnOptions::is_default"
+    )]
+    pub openvpn: RuntimeTunnelOpenvpnOptions,
 }
 
 impl RuntimeTunnelControl {
@@ -351,6 +469,113 @@ pub fn default_runtime_fou_peer_port() -> u16 {
 
 pub fn default_runtime_fou_ipproto() -> u8 {
     4
+}
+
+pub fn default_runtime_wireguard_listen_port() -> u16 {
+    51820
+}
+
+pub fn default_runtime_wireguard_keepalive_secs() -> u16 {
+    25
+}
+
+pub fn default_runtime_openvpn_port() -> u16 {
+    1194
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TunnelWireguardIdentity {
+    pub private_key_base64: String,
+    pub public_key_base64: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TunnelOpenvpnIdentity {
+    pub private_key_pem: String,
+    pub certificate_pem: String,
+    pub issuer_certificate_pem: String,
+    pub certificate_sha256_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TunnelBuiltinCredentials {
+    Wireguard {
+        generation: u64,
+        left: TunnelWireguardIdentity,
+        right: TunnelWireguardIdentity,
+    },
+    Openvpn {
+        generation: u64,
+        left: TunnelOpenvpnIdentity,
+        right: TunnelOpenvpnIdentity,
+    },
+}
+
+impl TunnelBuiltinCredentials {
+    pub fn generation(&self) -> u64 {
+        match self {
+            Self::Wireguard { generation, .. } | Self::Openvpn { generation, .. } => *generation,
+        }
+    }
+
+    pub fn endpoint(&self, side: TunnelEndpointSide) -> TunnelEndpointBuiltinCredentials {
+        match self {
+            Self::Wireguard {
+                generation,
+                left,
+                right,
+            } => {
+                let (local, peer) = match side {
+                    TunnelEndpointSide::Left => (left, right),
+                    TunnelEndpointSide::Right => (right, left),
+                };
+                TunnelEndpointBuiltinCredentials::Wireguard {
+                    generation: *generation,
+                    local_private_key_base64: local.private_key_base64.clone(),
+                    local_public_key_base64: local.public_key_base64.clone(),
+                    peer_public_key_base64: peer.public_key_base64.clone(),
+                }
+            }
+            Self::Openvpn {
+                generation,
+                left,
+                right,
+            } => {
+                let (local, peer) = match side {
+                    TunnelEndpointSide::Left => (left, right),
+                    TunnelEndpointSide::Right => (right, left),
+                };
+                TunnelEndpointBuiltinCredentials::Openvpn {
+                    generation: *generation,
+                    local_private_key_pem: local.private_key_pem.clone(),
+                    local_certificate_pem: local.certificate_pem.clone(),
+                    peer_issuer_certificate_pem: peer.issuer_certificate_pem.clone(),
+                    peer_certificate_sha256_fingerprint: peer
+                        .certificate_sha256_fingerprint
+                        .clone(),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TunnelEndpointBuiltinCredentials {
+    Wireguard {
+        generation: u64,
+        local_private_key_base64: String,
+        local_public_key_base64: String,
+        peer_public_key_base64: String,
+    },
+    Openvpn {
+        generation: u64,
+        local_private_key_pem: String,
+        local_certificate_pem: String,
+        peer_issuer_certificate_pem: String,
+        peer_certificate_sha256_fingerprint: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

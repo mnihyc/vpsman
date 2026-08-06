@@ -177,6 +177,73 @@ fn update_commands_keep_the_legacy_dispatch_protocol() {
 }
 
 #[test]
+fn unchanged_read_commands_keep_the_legacy_dispatch_protocol() {
+    for command in [JobCommand::ConfigRead, JobCommand::NetworkInterfaces] {
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            super::MIN_COMMAND_PROTOCOL_VERSION
+        );
+        assert!(
+            super::job_command_protocol_version(&command)
+                > super::job_command_dispatch_protocol_version(&command)
+        );
+    }
+}
+
+#[test]
+fn runtime_config_sync_keeps_the_current_dispatch_protocol() {
+    let command = JobCommand::RuntimeConfigSync {
+        desired_version: 2,
+        reason: "protocol-dispatch-test".to_string(),
+        config: Box::default(),
+    };
+
+    assert_eq!(
+        super::job_command_dispatch_protocol_version(&command),
+        super::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
+}
+
+#[test]
+fn network_plan_operations_keep_the_current_dispatch_protocol() {
+    let command = JobCommand::NetworkStatus {
+        plan_id: "00000000-0000-0000-0000-000000000001".to_string(),
+        plan: Box::new(crate::TunnelPlan {
+            name: "protocol-dispatch-test".to_string(),
+            interface_name: "vpsman-test".to_string(),
+            kind: crate::TunnelKind::Gre,
+            runtime_control: Default::default(),
+            runtime_topology: Default::default(),
+            left_client_id: "left".to_string(),
+            right_client_id: "right".to_string(),
+            left_remote_underlay: "192.0.2.10".to_string(),
+            left_local_underlay: None,
+            right_remote_underlay: "198.51.100.20".to_string(),
+            right_local_underlay: None,
+            left_tunnel_address: "10.0.0.0".to_string(),
+            right_tunnel_address: "10.0.0.1".to_string(),
+            tunnel_prefix_len: 31,
+            ipv4_tunnel: None,
+            ipv6_tunnel: None,
+            latency_primary_family: Default::default(),
+            bandwidth_mbps: 100,
+            left_mtu: Some(1476),
+            right_mtu: Some(1476),
+            ospf: None,
+            recommended_ospf_cost: None,
+            conflicts: Vec::new(),
+        }),
+        side: crate::TunnelEndpointSide::Left,
+        runtime_adapter: None,
+    };
+
+    assert_eq!(
+        super::job_command_dispatch_protocol_version(&command),
+        super::NETWORK_COMMAND_PROTOCOL_VERSION
+    );
+}
+
+#[test]
 fn update_command_wire_shape_rejects_unversioned_field_drift() {
     let command = serde_json::from_value::<JobCommand>(serde_json::json!({
         "type": "agent_update",

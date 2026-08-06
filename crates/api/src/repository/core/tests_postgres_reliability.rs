@@ -1806,7 +1806,7 @@ async fn postgres_audited_mutations_roll_back_when_audit_insert_fails() {
     tunnel_input.left_client_id = "atomic-a".to_string();
     tunnel_input.right_client_id = "atomic-b".to_string();
     tunnel_input.runtime_control = RuntimeTunnelControl {
-        manager: RuntimeTunnelManager::AgentIproute2Managed,
+        manager: RuntimeTunnelManager::AgentBuiltin,
         ..Default::default()
     };
     tunnel_input.ospf = Some(vpsman_common::TunnelOspfConfig {
@@ -3784,8 +3784,8 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
         )
         VALUES (
             'alert-target-a', '2020-01-01T00:00:00Z', 'gre42', 'gre',
-            'external_managed_adapter', 'adapter_owned', 'telemetry',
-            $1, $2, 'external_managed_adapter', 'left', 'alert-target-b',
+            'custom_adapter', 'adapter_owned', 'telemetry',
+            $1, $2, 'custom_adapter', 'left', 'alert-target-b',
             '{"status":"failed"}'::jsonb
         )
         "#,
@@ -3803,7 +3803,7 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
         )
         SELECT
             'alert-filler', now() + value * interval '1 second',
-            'filler' || value::text, 'gre', 'external_managed_adapter',
+            'filler' || value::text, 'gre', 'custom_adapter',
             'adapter_owned', 'telemetry', '{"status":"ok","success":true}'::jsonb
         FROM generate_series(1, 5000) AS generated(value)
         "#,
@@ -3969,16 +3969,16 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
 }
 
 #[tokio::test]
-async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() {
+async fn postgres_tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
     };
     let operator = postgres_network_operator(&db.repo).await;
     let cases = [
         (
-            RuntimeTunnelManager::AgentIproute2Managed,
-            "agent_iproute2_managed",
-            "external_managed_adapter",
+            RuntimeTunnelManager::AgentBuiltin,
+            "agent_builtin",
+            "custom_adapter",
             "skipped",
             false,
         ),
@@ -3990,9 +3990,9 @@ async fn postgres_tunnel_adapter_failures_only_degrade_external_managed_plans() 
             false,
         ),
         (
-            RuntimeTunnelManager::ExternalManagedAdapter,
-            "external_managed_adapter",
-            "agent_iproute2_managed",
+            RuntimeTunnelManager::CustomAdapter,
+            "custom_adapter",
+            "agent_builtin",
             "failed",
             true,
         ),
@@ -4910,7 +4910,7 @@ fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
         interface_name: "gre42".to_string(),
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
-            manager: RuntimeTunnelManager::ExternalManagedAdapter,
+            manager: RuntimeTunnelManager::CustomAdapter,
             left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             ..Default::default()
@@ -5254,7 +5254,7 @@ async fn postgres_tunnel_plan_conflict_checks_are_concurrency_safe() {
     let operator = postgres_network_operator(&db.repo).await;
 
     let mut first_input =
-        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     first_input.name = "concurrent-interface-a".to_string();
     first_input.address_pool_cidr = "10.96.0.0/29".to_string();
     first_input.ipv4_tunnel = Some(TunnelAddressPair {
@@ -5311,6 +5311,95 @@ async fn postgres_tunnel_plan_conflict_checks_are_concurrency_safe() {
         }
         (third, fourth) => panic!("expected one address conflict, got {third:?} and {fourth:?}"),
     }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_plan_update_locks_endpoints_before_plan_row() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "client-a", None).await;
+    insert_client(&db.pool, "client-b", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let input = crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, false, &operator)
+        .await
+        .unwrap();
+    let mut updated_input = input;
+    updated_input.bandwidth_mbps += 1;
+    let updated_plan = plan_tunnel(&updated_input).unwrap();
+
+    let mut lifecycle_blocker = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
+        .execute(&mut *lifecycle_blocker)
+        .await
+        .unwrap();
+
+    let update_repo = db.repo.clone();
+    let update_operator = operator.clone();
+    let update_task = tokio::spawn(async move {
+        update_repo
+            .update_tunnel_plan(
+                saved.id,
+                saved.revision,
+                &updated_input,
+                &updated_plan,
+                false,
+                &update_operator,
+            )
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting_for_lifecycle_lock: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%vpsman.agent_key_lifecycle%'
+                )
+                "#,
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if waiting_for_lifecycle_lock {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("tunnel plan update should wait for the endpoint lifecycle lock");
+
+    let mut row_probe = db.pool.begin().await.unwrap();
+    let locked_plan_id = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM tunnel_plans WHERE id = $1 FOR UPDATE NOWAIT",
+    )
+    .bind(saved.id)
+    .fetch_one(&mut *row_probe)
+    .await
+    .expect("waiting update must not hold the tunnel plan row lock");
+    assert_eq!(locked_plan_id, saved.id);
+    row_probe.rollback().await.unwrap();
+
+    lifecycle_blocker.rollback().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), update_task)
+        .await
+        .expect("tunnel plan update should finish after the lifecycle lock is released")
+        .expect("tunnel plan update task should not panic")
+        .expect("tunnel plan update should succeed");
 
     db.cleanup().await;
 }
@@ -5382,8 +5471,7 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
         .apply_configuration_source_override(&override_preview, &operator)
         .await
         .unwrap();
-    let input =
-        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let plan = plan_tunnel(&input).unwrap();
     db.repo
         .record_tunnel_plan(&input, &plan, true, &operator)
@@ -5638,7 +5726,7 @@ async fn postgres_tunnel_underlay_and_operator_assessment_round_trip_without_con
     insert_client(&db.pool, "client-b", None).await;
     let operator = postgres_network_operator(&db.repo).await;
     let mut input =
-        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     input.left_remote_underlay = "203.0.113.20".to_string();
     input.left_local_underlay = Some("10.0.0.10".to_string());
     input.right_remote_underlay = "198.51.100.10".to_string();
@@ -5692,7 +5780,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
     let operator = postgres_network_operator(&db.repo).await;
 
     let healthy_input =
-        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let healthy_plan = plan_tunnel(&healthy_input).unwrap();
     db.repo
         .record_tunnel_plan(&healthy_input, &healthy_plan, true, &operator)

@@ -6,8 +6,9 @@ use std::{
 use super::{
     cost::{ospf_cost, MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS},
     models::{
-        RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
-        RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit, TunnelAddressFamily,
+        RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager,
+        RuntimeTunnelOpenvpnOptions, RuntimeTunnelRoute, RuntimeTunnelTopologyIntent,
+        RuntimeTunnelTrafficLimit, RuntimeTunnelWireguardOptions, TunnelAddressFamily,
         TunnelAddressPair, TunnelEndpointConfig, TunnelEndpointSide, TunnelKind, TunnelObservation,
         TunnelOspfConfig, TunnelPlan, TunnelPlanInput, MIN_IPV6_TUNNEL_MTU, MIN_TUNNEL_MTU,
     },
@@ -45,8 +46,8 @@ pub enum NetworkPlanError {
     RuntimeTunnelAdapterCommandRequired,
     #[error("external observed tunnels cannot include mutating commands or traffic limits")]
     RuntimeTunnelObservedCannotMutate,
-    #[error("runtime topology routes and cleanup require agent iproute2 ownership")]
-    RuntimeTunnelTopologyRequiresAgentManagement,
+    #[error("runtime topology routes and cleanup require Agent builtin ownership")]
+    RuntimeTunnelTopologyRequiresAgentBuiltin,
     #[error("runtime tunnel traffic limit is invalid")]
     InvalidRuntimeTunnelTrafficLimit,
     #[error("runtime tunnel topology intent is invalid")]
@@ -57,7 +58,7 @@ pub enum NetworkPlanError {
     InvalidBandwidthMbps,
     #[error("tunnel MTU must be between 68 and 65535 bytes, and at least 1280 for SIT or IPv6")]
     InvalidTunnelMtu,
-    #[error("agent-managed tunnel requires both endpoint MTUs")]
+    #[error("Agent builtin tunnel requires both endpoint MTUs")]
     TunnelMtuRequired,
     #[error("external tunnel manager owns MTU; endpoint MTUs must be omitted")]
     TunnelMtuExternallyOwned,
@@ -70,20 +71,15 @@ pub fn plan_tunnel(input: &TunnelPlanInput) -> Result<TunnelPlan, NetworkPlanErr
     validate_interface_name(&input.interface_name)?;
     validate_bandwidth_mbps(input.bandwidth_mbps)?;
     validate_runtime_tunnel_control(&input.runtime_control)?;
-    validate_runtime_fou_options(input.kind, &input.runtime_control.fou)?;
-    if input.runtime_control.manager != RuntimeTunnelManager::AgentIproute2Managed
+    validate_runtime_tunnel_driver_options(input.kind, &input.runtime_control)?;
+    if input.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin
         && !input.runtime_topology.is_default()
     {
-        return Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement);
+        return Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentBuiltin);
     }
     validate_runtime_topology_intent(&input.runtime_topology, &input.interface_name)?;
     if let Some(ospf) = &input.ospf {
         validate_ospf_config(ospf)?;
-    }
-    if input.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
-        && input.kind.linux_tunnel_mode().is_none()
-    {
-        return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind);
     }
     let reserved_ipv4 = input
         .reserved_addresses
@@ -181,12 +177,15 @@ fn validate_plan_identity(input: &TunnelPlanInput) -> Result<(), NetworkPlanErro
         &input.left_remote_underlay,
         input.left_local_underlay.as_deref(),
         input.runtime_control.manager,
+        input.kind,
     )?;
     validate_endpoint_underlay(
         &input.right_remote_underlay,
         input.right_local_underlay.as_deref(),
         input.runtime_control.manager,
+        input.kind,
     )?;
+    validate_openvpn_underlays(input)?;
     Ok(())
 }
 
@@ -194,6 +193,7 @@ fn validate_endpoint_underlay(
     remote: &str,
     local: Option<&str>,
     manager: RuntimeTunnelManager,
+    kind: TunnelKind,
 ) -> Result<(), NetworkPlanError> {
     let remote = remote
         .parse::<IpAddr>()
@@ -204,10 +204,55 @@ fn validate_endpoint_underlay(
         .map(str::parse::<IpAddr>)
         .transpose()
         .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
-    if local.is_some_and(|local| local.is_ipv4() != remote.is_ipv4())
-        || (manager == RuntimeTunnelManager::AgentIproute2Managed && !remote.is_ipv4())
+    let builtin_iproute =
+        manager == RuntimeTunnelManager::AgentBuiltin && kind.linux_tunnel_mode().is_some();
+    let builtin_wireguard =
+        manager == RuntimeTunnelManager::AgentBuiltin && kind == TunnelKind::Wireguard;
+    let builtin_openvpn =
+        manager == RuntimeTunnelManager::AgentBuiltin && kind == TunnelKind::Openvpn;
+    if (!builtin_openvpn && local.is_some_and(|local| local.is_ipv4() != remote.is_ipv4()))
+        || (builtin_iproute && !remote.is_ipv4())
+        || (builtin_wireguard && local.is_some())
     {
         return Err(NetworkPlanError::InvalidUnderlayAddress);
+    }
+    Ok(())
+}
+
+fn validate_openvpn_underlays(input: &TunnelPlanInput) -> Result<(), NetworkPlanError> {
+    if input.runtime_control.manager != RuntimeTunnelManager::AgentBuiltin
+        || input.kind != TunnelKind::Openvpn
+    {
+        return Ok(());
+    }
+    let (listener_local, initiator_local, initiator_remote) =
+        match input.runtime_control.openvpn.listener_side {
+            TunnelEndpointSide::Left => (
+                input.left_local_underlay.as_deref(),
+                input.right_local_underlay.as_deref(),
+                input.right_remote_underlay.as_str(),
+            ),
+            TunnelEndpointSide::Right => (
+                input.right_local_underlay.as_deref(),
+                input.left_local_underlay.as_deref(),
+                input.left_remote_underlay.as_str(),
+            ),
+        };
+    let target = initiator_remote
+        .parse::<IpAddr>()
+        .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
+    for local in [listener_local, initiator_local]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|local| !local.is_empty())
+    {
+        let local = local
+            .parse::<IpAddr>()
+            .map_err(|_| NetworkPlanError::InvalidUnderlayAddress)?;
+        if local.is_ipv4() != target.is_ipv4() {
+            return Err(NetworkPlanError::InvalidUnderlayAddress);
+        }
     }
     Ok(())
 }
@@ -228,7 +273,7 @@ fn validate_tunnel_mtus(
     ipv6_enabled: bool,
 ) -> Result<(), NetworkPlanError> {
     match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
+        RuntimeTunnelManager::AgentBuiltin => {
             let (Some(left_mtu), Some(right_mtu)) = (left_mtu, right_mtu) else {
                 return Err(NetworkPlanError::TunnelMtuRequired);
             };
@@ -239,7 +284,7 @@ fn validate_tunnel_mtus(
                 }
             }
         }
-        RuntimeTunnelManager::ExternalObserved | RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::ExternalObserved | RuntimeTunnelManager::CustomAdapter => {
             if left_mtu.is_some() || right_mtu.is_some() {
                 return Err(NetworkPlanError::TunnelMtuExternallyOwned);
             }
@@ -414,7 +459,7 @@ pub fn validate_runtime_tunnel_control(
     control: &RuntimeTunnelControl,
 ) -> Result<(), NetworkPlanError> {
     match control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
+        RuntimeTunnelManager::AgentBuiltin => {
             if control.left_adapter_definition_id.is_some()
                 || control.right_adapter_definition_id.is_some()
             {
@@ -430,7 +475,7 @@ pub fn validate_runtime_tunnel_control(
                 return Err(NetworkPlanError::RuntimeTunnelObservedCannotMutate);
             }
         }
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             if !valid_definition_id(control.left_adapter_definition_id.as_deref())
                 || !valid_definition_id(control.right_adapter_definition_id.as_deref())
             {
@@ -440,6 +485,29 @@ pub fn validate_runtime_tunnel_control(
     }
 
     validate_runtime_traffic_limit(&control.traffic_limit)?;
+    Ok(())
+}
+
+pub fn validate_runtime_tunnel_driver_options(
+    kind: TunnelKind,
+    control: &RuntimeTunnelControl,
+) -> Result<(), NetworkPlanError> {
+    validate_runtime_fou_options(kind, &control.fou)?;
+    validate_runtime_wireguard_options(kind, control.manager, &control.wireguard)?;
+    validate_runtime_openvpn_options(kind, control.manager, &control.openvpn)?;
+    if control.manager == RuntimeTunnelManager::AgentBuiltin
+        && !matches!(
+            kind,
+            TunnelKind::Gre
+                | TunnelKind::Ipip
+                | TunnelKind::Sit
+                | TunnelKind::Fou
+                | TunnelKind::Wireguard
+                | TunnelKind::Openvpn
+        )
+    {
+        return Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind);
+    }
     Ok(())
 }
 
@@ -455,6 +523,44 @@ fn validate_runtime_fou_options(
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
     }
     if options.port == 0 || options.peer_port == 0 || options.ipproto == 0 {
+        return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
+    }
+    Ok(())
+}
+
+fn validate_runtime_wireguard_options(
+    kind: TunnelKind,
+    manager: RuntimeTunnelManager,
+    options: &RuntimeTunnelWireguardOptions,
+) -> Result<(), NetworkPlanError> {
+    if (kind != TunnelKind::Wireguard || manager != RuntimeTunnelManager::AgentBuiltin)
+        && !options.is_default()
+    {
+        return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
+    }
+    if kind == TunnelKind::Wireguard
+        && manager == RuntimeTunnelManager::AgentBuiltin
+        && (options.left_listen_port == 0 || options.right_listen_port == 0)
+    {
+        return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
+    }
+    Ok(())
+}
+
+fn validate_runtime_openvpn_options(
+    kind: TunnelKind,
+    manager: RuntimeTunnelManager,
+    options: &RuntimeTunnelOpenvpnOptions,
+) -> Result<(), NetworkPlanError> {
+    if (kind != TunnelKind::Openvpn || manager != RuntimeTunnelManager::AgentBuiltin)
+        && !options.is_default()
+    {
+        return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
+    }
+    if kind == TunnelKind::Openvpn
+        && manager == RuntimeTunnelManager::AgentBuiltin
+        && options.port == 0
+    {
         return Err(NetworkPlanError::InvalidRuntimeTunnelCommand);
     }
     Ok(())

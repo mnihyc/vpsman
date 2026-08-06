@@ -534,12 +534,49 @@ fn routing_jobs_require_the_direct_argv_protocol() {
         network_routing_command(false),
         network_routing_command(true),
     ] {
-        assert_eq!(vpsman_common::job_command_protocol_version(&command), 2);
+        assert_eq!(vpsman_common::job_command_protocol_version(&command), 3);
         assert_eq!(
             vpsman_common::job_command_min_supported_protocol_version(&command),
-            2
+            3
         );
     }
+}
+
+#[test]
+fn changed_network_wire_shapes_require_their_exact_protocol_generation() {
+    let routing_status = network_routing_command(false);
+    let network_status = match &routing_status {
+        JobCommand::NetworkRoutingStatus {
+            plan_id,
+            plan,
+            side,
+            ..
+        } => JobCommand::NetworkStatus {
+            plan_id: plan_id.clone(),
+            plan: plan.clone(),
+            side: *side,
+            runtime_adapter: None,
+        },
+        _ => unreachable!("test fixture must be routing status"),
+    };
+    assert_eq!(
+        vpsman_common::job_command_protocol_version(&network_status),
+        vpsman_common::NETWORK_COMMAND_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        vpsman_common::job_command_min_supported_protocol_version(&network_status),
+        vpsman_common::NETWORK_COMMAND_PROTOCOL_VERSION
+    );
+
+    let runtime_config = mutating_runtime_config_sync_command();
+    assert_eq!(
+        vpsman_common::job_command_protocol_version(&runtime_config),
+        vpsman_common::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        vpsman_common::job_command_min_supported_protocol_version(&runtime_config),
+        vpsman_common::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
 }
 
 #[test]
@@ -784,6 +821,7 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
             plan_id: Some("plan-left-right".to_string()),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
+            builtin_credentials: None,
             runtime_adapter: None,
             traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
             traffic_command: None,

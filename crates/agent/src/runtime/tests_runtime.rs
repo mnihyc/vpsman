@@ -397,6 +397,7 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
                 plan_id: Some("plan-a".to_string()),
                 endpoint_side: vpsman_common::TunnelEndpointSide::Left,
                 plan,
+                builtin_credentials: None,
                 runtime_adapter: None,
                 traffic_source: Default::default(),
                 traffic_command: None,
@@ -684,6 +685,75 @@ fn runtime_tunnel_identity_detects_immutable_plan_changes() {
     ));
 }
 
+#[test]
+fn runtime_tunnel_identity_keeps_builtin_wireguard_underlay_edits_in_place() {
+    let mut baseline = runtime_sync_test_telemetry_plan(runtime_sync_test_plan(
+        "203.0.113.20",
+        "10.255.0.0",
+        "10.255.0.1",
+    ));
+    baseline.plan.kind = vpsman_common::TunnelKind::Wireguard;
+    let mut changed_underlay = baseline.clone();
+    changed_underlay.plan.right_remote_underlay = "203.0.113.99".to_string();
+    let mut renamed = baseline.clone();
+    renamed.plan.name = "renamed-plan".to_string();
+
+    assert!(runtime_tunnel_identity_matches(
+        &baseline,
+        &changed_underlay
+    ));
+    assert!(runtime_tunnel_identity_matches(&baseline, &renamed));
+}
+
+#[test]
+fn builtin_driver_versions_are_parsed_from_their_own_markers() {
+    assert_eq!(
+        parse_marked_version("ip utility, iproute2-5.15.0, libbpf 0.5.0", "iproute2-"),
+        Some(semver::Version::new(5, 15, 0))
+    );
+    assert_eq!(
+        parse_marked_version(
+            "wireguard-tools v1.0.20210914 - https://www.wireguard.com/",
+            "wireguard-tools v"
+        ),
+        Some(semver::Version::new(1, 0, 20210914))
+    );
+    assert_eq!(
+        parse_marked_version("OpenVPN 2.4.12 x86_64-pc-linux-gnu", "OpenVPN "),
+        Some(semver::Version::new(2, 4, 12))
+    );
+}
+
+#[tokio::test]
+async fn builtin_driver_capability_requires_its_own_successful_marker() {
+    let unmarked = probe_builtin_driver(
+        &["/bin/true".to_string()],
+        &[],
+        Some("wireguard-tools v"),
+        None,
+    )
+    .await;
+    assert!(!unmarked.available);
+    assert_eq!(
+        unmarked.unavailable_reason.as_deref(),
+        Some("version probe did not identify the configured driver")
+    );
+
+    let identified = probe_builtin_driver(
+        &[
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf 'wireguard-tools v1.0.20210914\\n'".to_string(),
+        ],
+        &[],
+        Some("wireguard-tools v"),
+        None,
+    )
+    .await;
+    assert!(identified.available);
+    assert_eq!(identified.version.as_deref(), Some("1.0.20210914"));
+}
+
 #[tokio::test]
 async fn runtime_config_sync_recreates_tunnel_when_plan_identity_changes() {
     let root = std::env::temp_dir().join(format!(
@@ -894,7 +964,7 @@ async fn runtime_config_sync_blocks_status_only_adapter_removal() {
     tokio::fs::create_dir_all(&root).await.unwrap();
     let mut plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
     plan.runtime_control = vpsman_common::RuntimeTunnelControl {
-        manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+        manager: vpsman_common::RuntimeTunnelManager::CustomAdapter,
         left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
         right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
         ..Default::default()
@@ -1012,6 +1082,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
             plan_id: Some("plan-a".to_string()),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
+            builtin_credentials: None,
             runtime_adapter: None,
             traffic_source: Default::default(),
             traffic_command: None,
@@ -1143,6 +1214,7 @@ fn runtime_sync_test_telemetry_plan(
         plan_id: Some("plan-a".to_string()),
         endpoint_side: vpsman_common::TunnelEndpointSide::Left,
         plan,
+        builtin_credentials: None,
         runtime_adapter: None,
         traffic_source: Default::default(),
         traffic_command: None,

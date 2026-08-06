@@ -4472,7 +4472,7 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
       adapter_kind: "runtime_tunnel",
       name: "Custom lifecycle",
       definition: {
-        manager: "external_managed_adapter",
+        manager: "custom_adapter",
         contract_version: 1,
         status_command: {
           argv: ["/opt/operator/tunnel-adapter", "status"],
@@ -6047,7 +6047,7 @@ test(
     await openConsoleSubpage(page, "Network", "Tunnel plans");
     const planGrid = page.getByLabel("Tunnel plans data grid");
     await expect(planGrid).toBeVisible();
-    await expect(planGrid).toContainText("Agent iproute2");
+    await expect(planGrid).toContainText("Agent builtin");
     await expect(planGrid).toContainText("External observed");
     await expect(planGrid).toContainText("Tunnel only");
 
@@ -6095,7 +6095,22 @@ test(
       "Plan name is required",
     );
     const kind = composer.getByLabel("Tunnel kind");
-    await expect(kind.locator('option[value="openvpn"]')).toHaveCount(0);
+    await expect(kind.locator('option[value="openvpn"]')).toHaveCount(1);
+    await kind.selectOption("wireguard");
+    await expect(leftMtu).toHaveValue("1420");
+    await expect(rightMtu).toHaveValue("1420");
+    await expect(composer.getByLabel("Left local underlay source")).toHaveCount(
+      0,
+    );
+    await expect(
+      composer.getByLabel("Right local underlay source"),
+    ).toHaveCount(0);
+    await expect(composer.getByLabel("WireGuard peer endpoint mode")).toHaveValue(
+      "both",
+    );
+    await expect(composer.getByLabel("Left WireGuard listen port")).toHaveValue(
+      "51820",
+    );
     await kind.selectOption("ipip");
     await expect(leftMtu).toHaveValue("1480");
     await expect(rightMtu).toHaveValue("1480");
@@ -6111,7 +6126,7 @@ test(
     await expect(leftMtu).toHaveCount(0);
     await expect(rightMtu).toHaveCount(0);
     await expect(
-      composer.getByText("Agent-managed routes and cleanup"),
+      composer.getByText("Agent builtin routes and cleanup"),
     ).toHaveCount(0);
 
     await composer.getByLabel("Tunnel plan name").fill("external-openvpn-ospf");
@@ -6119,14 +6134,20 @@ test(
       .getByLabel("Tunnel interface", { exact: true })
       .fill("ovpn70");
     await kind.selectOption("openvpn");
-    await activate(composer.getByRole("button", { name: "Agent iproute2" }));
-    await expect(
-      composer.getByText(/OpenVPN cannot be agent-managed/),
-    ).toBeVisible();
+    await activate(composer.getByRole("button", { name: "Agent builtin" }));
     await expect(kind).toHaveValue("openvpn");
     await expect(
-      composer.getByRole("button", { name: "External observed" }),
+      composer.getByRole("button", { name: "Agent builtin" }),
     ).toHaveAttribute("aria-pressed", "true");
+    await expect(composer.getByLabel("Left tunnel MTU")).toHaveValue("1500");
+    await expect(composer.getByLabel("OpenVPN transport")).toHaveValue("udp");
+    await expect(composer.getByLabel("OpenVPN listener VPS")).toHaveValue(
+      "left",
+    );
+    await expect(composer.getByLabel("OpenVPN listener port")).toHaveValue(
+      "1194",
+    );
+    await activate(composer.getByRole("button", { name: "External observed" }));
     await chooseVpsBySearch(
       composer,
       "Left tunnel VPS",
@@ -7511,14 +7532,16 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network test endpoint side").selectOption("left");
   await page.getByLabel("Network test max timeout seconds").fill("90");
+  await page.getByLabel("Network probe count").fill("21");
+  await page.getByLabel("Network speed test max mebibytes").fill("1.5");
+  await page.getByLabel("Network speed test rate limit Mbps").fill("1.0001");
 
   await activate(page.getByRole("button", { name: "Inspect status" }));
+  const networkExecutionResult = page.getByLabel("Execution result").last();
   await expect(
-    page
-      .getByLabel("Execution result")
-      .last()
-      .getByText(/completed on 1 VPS/),
+    networkExecutionResult.getByText(/completed on 1 VPS/),
   ).toBeVisible();
+  await expect(networkExecutionResult).toContainText("Network status");
   const statusRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
@@ -7555,6 +7578,24 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network test endpoint side").selectOption("left");
   await page.getByLabel("Network test max timeout seconds").fill("90");
+  const requestCountBeforeInvalidProbe = await page.evaluate(() => {
+    return (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests.jobs.length;
+  });
+  await page.getByLabel("Network probe count").fill("21");
+  await activate(page.getByRole("button", { name: "Run probe" }));
+  await expect(networkTestsPanel.locator(".localActionFeedback")).toContainText(
+    "Probe count must be a whole number from 1 to 20",
+  );
+  await expect(networkExecutionResult).toContainText("Network status");
+  expect(
+    await page.evaluate(() => {
+      return (
+        window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+      ).__vpsmanTestRequests.jobs.length;
+    }),
+  ).toBe(requestCountBeforeInvalidProbe);
   await page.getByLabel("Network probe count").fill("4");
   await page.getByLabel("Network probe interval milliseconds").fill("700");
   await activate(page.getByRole("button", { name: "Run probe" }));
@@ -7564,6 +7605,9 @@ test("dispatches topology network tests and OSPF plan updates with local privile
       .last()
       .getByText(/completed on 1 VPS/),
   ).toBeVisible();
+  await expect(page.getByLabel("Execution result").last()).toContainText(
+    "Network probe",
+  );
   const probeRequest = await page.evaluate(() => {
     const requests = (
       window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
@@ -7590,9 +7634,18 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   });
   expectPrivilegeAssertion(probeRequest);
 
+  await page.getByLabel("Network probe count").fill("21");
   await page.getByLabel("Network speed test duration seconds").fill("5");
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(networkTestsPanel.locator(".localActionFeedback")).toContainText(
+    "Maximum data must be a whole number from 1 to 256, or left empty for unlimited",
+  );
   await page.getByLabel("Network speed test max mebibytes").fill("8");
-  await page.getByLabel("Network speed test rate limit Mbps").fill("25");
+  await activate(page.getByRole("button", { name: "Review speed test" }));
+  await expect(networkTestsPanel.locator(".localActionFeedback")).toContainText(
+    "Rate limit must be from 0.064 to 1000 in 0.001 Mbps increments, or left empty for unlimited",
+  );
+  await page.getByLabel("Network speed test rate limit Mbps").fill("1.234");
   await page.getByLabel("Network speed test TCP port").fill("55201");
   await page
     .getByLabel("Network speed test connect timeout milliseconds")
@@ -7603,7 +7656,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(speedPrompt).toContainText("Baseline");
   await expect(speedPrompt).toContainText("Test limits");
   await expect(speedPrompt).toContainText(
-    "5s, 8 MiB cap, 25 Mbps cap, TCP 55201, timeout 2500 ms",
+    "5s, 8 MiB cap, 1.234 Mbps cap, TCP 55201, timeout 2500 ms",
   );
   await expect(speedPrompt).toContainText(
     "network_speed_test unlocked locally",
@@ -7635,7 +7688,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
       plan_id: tunnelPlans[0].id,
       plan: tunnelPlans[0].plan,
       port: 55201,
-      rate_limit_kbps: 25000,
+      rate_limit_kbps: 1234,
       server_side: "left",
       type: "network_speed_test",
     },

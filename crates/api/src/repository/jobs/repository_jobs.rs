@@ -42,6 +42,7 @@ use crate::repository_key_lifecycle::{
 use crate::repository_runtime_config::{
     queue_runtime_config_apply_memory_state, queue_runtime_config_apply_postgres_in_tx,
 };
+use crate::runtime_config::redact_runtime_tunnel_credentials;
 use crate::util::{
     compare_timestamps_desc, limit_or_default, offset_or_default, output_stream_name,
     search_pattern, sort_descending, timestamp_in_optional_bounds,
@@ -6948,6 +6949,14 @@ impl Repository {
     ) -> Result<()> {
         let event_id = format!("job:{}:created", event.job_id);
         let predicates = job_webhook_predicates(event.command_type, event.status, true);
+        let operation = event
+            .operation
+            .map(|value| {
+                let mut value = json!(value);
+                redact_runtime_tunnel_credentials(&mut value);
+                value
+            })
+            .unwrap_or(Value::Null);
         self.record_webhook_event(WebhookEventCandidate {
             kind: "job.created".to_string(),
             event_id: event_id.clone(),
@@ -6969,9 +6978,7 @@ impl Repository {
                     "source_schedule_id": event.source_schedule_id,
                     "target_count": event.resolved_targets.len(),
                     "target_ids": event.resolved_targets,
-                    "operation": event.operation
-                        .map(|value| json!(value))
-                        .unwrap_or(serde_json::Value::Null),
+                    "operation": operation,
                 },
             }),
         })

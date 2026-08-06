@@ -3,8 +3,12 @@ import type {
   RuntimeTunnelControl,
   RuntimeTunnelFouOptions,
   RuntimeTunnelManager,
+  RuntimeTunnelOpenvpnOptions,
+  RuntimeTunnelOpenvpnTransport,
   RuntimeTunnelRoute,
   RuntimeTunnelTopologyIntent,
+  RuntimeTunnelWireguardEndpointMode,
+  RuntimeTunnelWireguardOptions,
   TunnelKind,
 } from "./types";
 
@@ -12,6 +16,18 @@ export const DEFAULT_RUNTIME_FOU_OPTIONS: RuntimeTunnelFouOptions = {
   port: 5555,
   peer_port: 5555,
   ipproto: 4,
+};
+export const DEFAULT_RUNTIME_WIREGUARD_OPTIONS: RuntimeTunnelWireguardOptions = {
+  endpoint_mode: "both",
+  left_listen_port: 51820,
+  right_listen_port: 51820,
+  left_keepalive_secs: 25,
+  right_keepalive_secs: 25,
+};
+export const DEFAULT_RUNTIME_OPENVPN_OPTIONS: RuntimeTunnelOpenvpnOptions = {
+  transport: "udp",
+  listener_side: "left",
+  port: 1194,
 };
 export const MIN_TUNNEL_BANDWIDTH_MBPS = 10;
 export const MAX_TUNNEL_BANDWIDTH_MBPS = 10000;
@@ -34,6 +50,14 @@ export type RuntimeControlFormValues = {
   fouPort?: string;
   fouPeerPort?: string;
   fouIpproto?: string;
+  wireguardEndpointMode?: RuntimeTunnelWireguardEndpointMode;
+  wireguardLeftListenPort?: string;
+  wireguardRightListenPort?: string;
+  wireguardLeftKeepaliveSecs?: string;
+  wireguardRightKeepaliveSecs?: string;
+  openvpnTransport?: RuntimeTunnelOpenvpnTransport;
+  openvpnListenerSide?: "left" | "right";
+  openvpnPort?: string;
 };
 
 export type RuntimeTopologyFormValues = {
@@ -55,19 +79,65 @@ export function buildRuntimeControl(
   };
   const fou = buildFouOptions(values);
   const fouPayload = fou ? { fou } : {};
+  const wireguard = buildWireguardOptions(values);
+  const wireguardPayload = wireguard ? { wireguard } : {};
+  const openvpn = buildOpenvpnOptions(values);
+  const openvpnPayload = openvpn ? { openvpn } : {};
   if (manager === "external_observed") {
     return { manager, traffic_limit: {} };
   }
-  if (manager === "external_managed_adapter") {
+  if (manager === "custom_adapter") {
     return {
       manager,
       left_adapter_template_id: values.leftAdapterDefinitionId?.trim() || null,
       right_adapter_template_id: values.rightAdapterDefinitionId?.trim() || null,
       traffic_limit: trafficLimit,
       ...fouPayload,
+      ...wireguardPayload,
+      ...openvpnPayload,
     };
   }
-  return { manager, traffic_limit: trafficLimit, ...fouPayload };
+  return {
+    manager,
+    traffic_limit: trafficLimit,
+    ...fouPayload,
+    ...wireguardPayload,
+    ...openvpnPayload,
+  };
+}
+
+function buildWireguardOptions(
+  values: RuntimeControlFormValues,
+): RuntimeTunnelWireguardOptions | null {
+  if (!values.wireguardEndpointMode) return null;
+  return {
+    endpoint_mode: values.wireguardEndpointMode,
+    left_listen_port:
+      numericValue(values.wireguardLeftListenPort ?? "") ??
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.left_listen_port,
+    right_listen_port:
+      numericValue(values.wireguardRightListenPort ?? "") ??
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.right_listen_port,
+    left_keepalive_secs:
+      nonNegativeIntegerValue(values.wireguardLeftKeepaliveSecs ?? "") ??
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.left_keepalive_secs,
+    right_keepalive_secs:
+      nonNegativeIntegerValue(values.wireguardRightKeepaliveSecs ?? "") ??
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.right_keepalive_secs,
+  };
+}
+
+function buildOpenvpnOptions(
+  values: RuntimeControlFormValues,
+): RuntimeTunnelOpenvpnOptions | null {
+  if (!values.openvpnTransport || !values.openvpnListenerSide) return null;
+  return {
+    transport: values.openvpnTransport,
+    listener_side: values.openvpnListenerSide,
+    port:
+      numericValue(values.openvpnPort ?? "") ??
+      DEFAULT_RUNTIME_OPENVPN_OPTIONS.port,
+  };
 }
 
 export function buildRuntimeTopology(
@@ -125,7 +195,9 @@ export function defaultAgentTunnelMtu(kind: TunnelKind): number | null {
     case "fou":
       return 1472;
     case "wireguard":
+      return 1420;
     case "openvpn":
+      return 1500;
     case "tun_tap":
     case "custom":
       return null;
@@ -185,11 +257,11 @@ export function runtimeManagerLabel(
   if (manager === "external_observed") {
     return "External observed";
   }
-  if (manager === "external_managed_adapter") {
-    return "External adapter";
+  if (manager === "custom_adapter") {
+    return "Custom adapter";
   }
-  if (manager === "agent_iproute2_managed" || !manager) {
-    return "Agent iproute2";
+  if (manager === "agent_builtin" || !manager) {
+    return "Agent builtin";
   }
   return readableTelemetryToken(manager);
 }
@@ -412,6 +484,18 @@ function numericValue(value: string): number | undefined {
     throw new Error(`Invalid numeric value ${value}`);
   }
   return Math.trunc(parsed);
+}
+
+function nonNegativeIntegerValue(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`Invalid non-negative integer value ${value}`);
+  }
+  return parsed;
 }
 
 function buildFouOptions(

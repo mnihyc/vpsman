@@ -377,15 +377,15 @@ fn parses_latency_probe_output_as_observation_only() {
 #[test]
 fn runtime_labels_do_not_imply_discovery_or_routing_mutation() {
     assert_eq!(
-        runtime_manager_label(RuntimeTunnelManager::AgentIproute2Managed),
-        "agent_iproute2_managed"
+        runtime_manager_label(RuntimeTunnelManager::AgentBuiltin),
+        "agent_builtin"
     );
     assert_eq!(
         runtime_manager_label(RuntimeTunnelManager::ExternalObserved),
         "external_observed"
     );
     assert_eq!(
-        runtime_manager_label(RuntimeTunnelManager::ExternalManagedAdapter),
-        "external_managed_adapter"
+        runtime_manager_label(RuntimeTunnelManager::CustomAdapter),
+        "custom_adapter"
     );
 }

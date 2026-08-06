@@ -35,6 +35,7 @@ import {
   buildNetworkStatusOperation,
   renderTunnelEndpointConfig,
 } from "../../topologyNetworkJobs";
+import { runtimeManagerLabel } from "../../topologyRuntime";
 import type {
   AgentView,
   CreateJobRequest,
@@ -54,11 +55,7 @@ import {
   runPanelAction,
   timestampMillis,
 } from "../../utils";
-import {
-  clampJobMaxTimeoutSecs,
-  clampInteger,
-  MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
-} from "../jobDispatchModel";
+import { MAX_CONFIGURABLE_JOB_TIMEOUT_SECS } from "../jobDispatchModel";
 import { resolveAgentsById, TargetImpactPreview } from "../TargetImpactPreview";
 
 export function TopologyNetworkTestControls({
@@ -257,7 +254,6 @@ export function TopologyNetworkTestControls({
 
   async function runImmediateNetworkAction(mode: NetworkAction) {
     setActionError(null);
-    setLastAction(mode);
     await runPanelAction(setPending, setActionError, async () => {
       const snapshot = await buildNetworkActionSnapshot(mode);
       if (snapshot) {
@@ -280,24 +276,62 @@ export function TopologyNetworkTestControls({
     if (!selectedPlan.enabled && mode !== "status") {
       throw new Error("Tunnel plan is disabled");
     }
-    const boundedProbeCount = clampInteger(probeCount, 1, 20);
-    const boundedProbeIntervalMs = clampInteger(probeIntervalMs, 200, 10_000);
-    const boundedSpeedDurationSecs = clampInteger(speedDurationSecs, 1, 30);
-    const boundedSpeedMaxBytes =
-      optionalLimit(speedMaxBytesMiB, 1, 256) * 1024 * 1024;
-    const boundedSpeedRateLimitKbps = optionalLimit(
-      speedRateLimitMbps,
-      0.064,
-      1_000,
-      1_000,
+    const probeLimits =
+      mode === "probe"
+        ? {
+            count: requiredInteger(probeCount, "Probe count", 1, 20),
+            intervalMs: requiredInteger(
+              probeIntervalMs,
+              "Probe interval",
+              200,
+              10_000,
+            ),
+          }
+        : null;
+    const speedLimits =
+      mode === "speed_test"
+        ? {
+            durationSecs: requiredInteger(
+              speedDurationSecs,
+              "Speed-test duration",
+              1,
+              30,
+            ),
+            maxBytes:
+              optionalWholeNumberLimit(
+                speedMaxBytesMiB,
+                "Maximum data",
+                1,
+                256,
+              ) *
+              1024 *
+              1024,
+            rateLimitKbps: optionalMbpsLimitKbps(
+              speedRateLimitMbps,
+              "Rate limit",
+              0.064,
+              1_000,
+            ),
+            port: requiredInteger(
+              speedPort,
+              "Speed-test TCP port",
+              1024,
+              65_535,
+            ),
+            connectTimeoutMs: requiredInteger(
+              speedConnectTimeoutMs,
+              "Speed-test connection timeout",
+              100,
+              30_000,
+            ),
+          }
+        : null;
+    const boundedMaxTimeoutSecs = requiredInteger(
+      maxTimeoutSecs,
+      "Maximum job timeout",
+      1,
+      MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
     );
-    const boundedSpeedPort = clampInteger(speedPort, 1024, 65_535);
-    const boundedSpeedConnectTimeoutMs = clampInteger(
-      speedConnectTimeoutMs,
-      100,
-      30_000,
-    );
-    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
     const buildSubmission = async (
       planRecord: TunnelPlanRecord,
       planSide: TunnelEndpointSide,
@@ -314,18 +348,18 @@ export function TopologyNetworkTestControls({
                 planRecord.id,
                 planRecord.plan,
                 planSide,
-                boundedProbeCount,
-                boundedProbeIntervalMs,
+                probeLimits!.count,
+                probeLimits!.intervalMs,
               )
             : buildNetworkSpeedTestOperation(
                 planRecord.id,
                 planRecord.plan,
                 planSide,
-                boundedSpeedDurationSecs,
-                boundedSpeedMaxBytes,
-                boundedSpeedRateLimitKbps,
-                boundedSpeedPort,
-                boundedSpeedConnectTimeoutMs,
+                speedLimits!.durationSecs,
+                speedLimits!.maxBytes,
+                speedLimits!.rateLimitKbps,
+                speedLimits!.port,
+                speedLimits!.connectTimeoutMs,
               );
       const targetClientIds =
         mode === "speed_test"
@@ -412,7 +446,7 @@ export function TopologyNetworkTestControls({
           ? [
               {
                 label: "Probe cadence",
-                value: `${boundedProbeCount} packets, ${boundedProbeIntervalMs} ms interval`,
+                value: `${probeLimits!.count} packets, ${probeLimits!.intervalMs} ms interval`,
               },
             ]
           : []),
@@ -421,11 +455,11 @@ export function TopologyNetworkTestControls({
               {
                 label: "Test limits",
                 value: formatSpeedTestLimits(
-                  boundedSpeedDurationSecs,
-                  boundedSpeedMaxBytes / (1024 * 1024),
-                  boundedSpeedRateLimitKbps,
-                  boundedSpeedPort,
-                  boundedSpeedConnectTimeoutMs,
+                  speedLimits!.durationSecs,
+                  speedLimits!.maxBytes / (1024 * 1024),
+                  speedLimits!.rateLimitKbps,
+                  speedLimits!.port,
+                  speedLimits!.connectTimeoutMs,
                 ),
               },
             ]
@@ -457,7 +491,6 @@ export function TopologyNetworkTestControls({
   }
 
   async function executeNetworkSnapshot(snapshot: NetworkActionSnapshot) {
-    clearExecutionResults();
     const jobs: Array<{
       job: CreateJobResponse;
       submission: NetworkJobSubmission;
@@ -480,6 +513,7 @@ export function TopologyNetworkTestControls({
       });
       jobs.push({ job, submission });
     }
+    clearExecutionResults();
     const lastSubmission =
       snapshot.submissions[snapshot.submissions.length - 1] ?? null;
     setLastPayloadHash(lastSubmission?.payloadHashHex ?? null);
@@ -594,10 +628,6 @@ export function TopologyNetworkTestControls({
           ref={feedbackRef}
           tone={actionError ? "danger" : "progress"}
         />
-        <NetworkTestTrendCharts
-          expectedBandwidthMbps={selectedPlan?.plan.bandwidth_mbps ?? null}
-          trends={selectedPlanTrends}
-        />
         <div className="topologyNetworkTestGroups">
           <section
             className="topologyNetworkTestGroup"
@@ -626,7 +656,7 @@ export function TopologyNetworkTestControls({
                   ))}
                 </select>
               </label>
-              <label title="Maximum wall-clock runtime included in each reviewed network job.">
+              <label title="Maximum wall-clock runtime included in each network job.">
                 <span>Max timeout</span>
                 <input
                   aria-label="Network test max timeout seconds"
@@ -740,8 +770,8 @@ export function TopologyNetworkTestControls({
                   !selectedPlan?.enabled
                     ? "Enable this plan before running a latency probe"
                     : privilegeMaterial
-                      ? "Review latency probe with bounded count and interval"
-                      : "Unlock privilege before reviewing latency probe"
+                      ? "Run a latency probe with bounded count and interval"
+                      : "Unlock privilege before running a latency probe"
                 }
                 type="button"
               >
@@ -904,6 +934,10 @@ export function TopologyNetworkTestControls({
             </ExecutionResultPanel>
           </div>
         )}
+        <NetworkTestTrendCharts
+          expectedBandwidthMbps={selectedPlan?.plan.bandwidth_mbps ?? null}
+          trends={selectedPlanTrends}
+        />
       </form>
       {!privilegeMaterial && (
         <PrivilegeVaultBox
@@ -1407,8 +1441,8 @@ function runtimeOwnershipHint(plan: TunnelPlanRecord | null): string {
     return "No tunnel plan selected";
   }
   const manager =
-    plan.plan.runtime_control?.manager ?? "agent_iproute2_managed";
-  return `Runtime ownership: ${manager.replace(/_/g, " ")}`;
+    plan.plan.runtime_control?.manager ?? "agent_builtin";
+  return `Runtime ownership: ${runtimeManagerLabel(manager)}`;
 }
 
 function latestTrend(
@@ -1540,19 +1574,67 @@ function formatBandwidthMbps(value: number): string {
 function formatRateLimit(kbps: number): string {
   if (kbps === 0) return "unlimited rate";
   if (kbps >= 1000) {
-    return `${formatMetric(kbps / 1000)} Mbps cap`;
+    const wholeMbps = Math.floor(kbps / 1000);
+    const fractionalMbps = String(kbps % 1000)
+      .padStart(3, "0")
+      .replace(/0+$/, "");
+    return `${wholeMbps}${fractionalMbps ? `.${fractionalMbps}` : ""} Mbps cap`;
   }
   return `${formatMetric(kbps)} Kbps cap`;
 }
 
-function optionalLimit(
+function optionalWholeNumberLimit(
   value: string,
+  label: string,
   min: number,
   max: number,
-  multiplier = 1,
 ): number {
   if (value.trim() === "") return 0;
-  return Math.round(Math.min(Math.max(Number(value), min), max) * multiplier);
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed) ||
+    !Number.isInteger(parsed) ||
+    parsed < min ||
+    parsed > max
+  ) {
+    throw new Error(
+      `${label} must be a whole number from ${min} to ${max}, or left empty for unlimited`,
+    );
+  }
+  return parsed;
+}
+
+function optionalMbpsLimitKbps(
+  value: string,
+  label: string,
+  min: number,
+  max: number,
+): number {
+  if (value.trim() === "") return 0;
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < min ||
+    parsed > max ||
+    Number(parsed.toFixed(3)) !== parsed
+  ) {
+    throw new Error(
+      `${label} must be from ${min} to ${max} in 0.001 Mbps increments, or left empty for unlimited`,
+    );
+  }
+  return Math.round(parsed * 1_000);
+}
+
+function requiredInteger(
+  value: number,
+  label: string,
+  min: number,
+  max: number,
+): number {
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${label} must be a whole number from ${min} to ${max}`);
+  }
+  return value;
 }
 
 function formatNullableMetric(value: number | null, unit: string): string {

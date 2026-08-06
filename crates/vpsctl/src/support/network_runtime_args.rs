@@ -2,24 +2,28 @@ use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use vpsman_common::{
     default_runtime_fou_ipproto, default_runtime_fou_peer_port, default_runtime_fou_port,
-    RuntimeTunnelControl, RuntimeTunnelFouOptions, RuntimeTunnelManager, RuntimeTunnelRoute,
-    RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
+    default_runtime_openvpn_port, default_runtime_wireguard_keepalive_secs,
+    default_runtime_wireguard_listen_port, RuntimeTunnelControl, RuntimeTunnelFouOptions,
+    RuntimeTunnelManager, RuntimeTunnelOpenvpnOptions, RuntimeTunnelOpenvpnTransport,
+    RuntimeTunnelRoute, RuntimeTunnelTopologyIntent, RuntimeTunnelTrafficLimit,
+    RuntimeTunnelWireguardEndpointMode, RuntimeTunnelWireguardOptions, TunnelEndpointSide,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 #[value(rename_all = "snake_case")]
 pub(crate) enum RuntimeManagerArg {
-    AgentIproute2Managed,
+    #[value(name = "builtin")]
+    AgentBuiltin,
     ExternalObserved,
-    ExternalManagedAdapter,
+    CustomAdapter,
 }
 
 impl From<RuntimeManagerArg> for RuntimeTunnelManager {
     fn from(value: RuntimeManagerArg) -> Self {
         match value {
-            RuntimeManagerArg::AgentIproute2Managed => Self::AgentIproute2Managed,
+            RuntimeManagerArg::AgentBuiltin => Self::AgentBuiltin,
             RuntimeManagerArg::ExternalObserved => Self::ExternalObserved,
-            RuntimeManagerArg::ExternalManagedAdapter => Self::ExternalManagedAdapter,
+            RuntimeManagerArg::CustomAdapter => Self::CustomAdapter,
         }
     }
 }
@@ -34,6 +38,14 @@ pub(crate) struct RuntimeControlArgs<'a> {
     pub(crate) fou_port: Option<u16>,
     pub(crate) fou_peer_port: Option<u16>,
     pub(crate) fou_ipproto: Option<u8>,
+    pub(crate) wireguard_left_listen_port: Option<u16>,
+    pub(crate) wireguard_right_listen_port: Option<u16>,
+    pub(crate) wireguard_left_keepalive_secs: Option<u16>,
+    pub(crate) wireguard_right_keepalive_secs: Option<u16>,
+    pub(crate) wireguard_endpoint_mode: Option<RuntimeTunnelWireguardEndpointMode>,
+    pub(crate) openvpn_transport: Option<RuntimeTunnelOpenvpnTransport>,
+    pub(crate) openvpn_listener_side: Option<TunnelEndpointSide>,
+    pub(crate) openvpn_port: Option<u16>,
 }
 
 pub(crate) struct RuntimeTopologyArgs<'a> {
@@ -61,6 +73,28 @@ pub(crate) fn build_runtime_control(args: RuntimeControlArgs<'_>) -> RuntimeTunn
                 .unwrap_or_else(default_runtime_fou_peer_port),
             ipproto: args.fou_ipproto.unwrap_or_else(default_runtime_fou_ipproto),
         },
+        wireguard: RuntimeTunnelWireguardOptions {
+            endpoint_mode: args.wireguard_endpoint_mode.unwrap_or_default(),
+            left_listen_port: args
+                .wireguard_left_listen_port
+                .unwrap_or_else(default_runtime_wireguard_listen_port),
+            right_listen_port: args
+                .wireguard_right_listen_port
+                .unwrap_or_else(default_runtime_wireguard_listen_port),
+            left_keepalive_secs: args
+                .wireguard_left_keepalive_secs
+                .unwrap_or_else(default_runtime_wireguard_keepalive_secs),
+            right_keepalive_secs: args
+                .wireguard_right_keepalive_secs
+                .unwrap_or_else(default_runtime_wireguard_keepalive_secs),
+        },
+        openvpn: RuntimeTunnelOpenvpnOptions {
+            transport: args.openvpn_transport.unwrap_or_default(),
+            listener_side: args.openvpn_listener_side.unwrap_or_default(),
+            port: args
+                .openvpn_port
+                .unwrap_or_else(default_runtime_openvpn_port),
+        },
     }
 }
 
@@ -78,13 +112,9 @@ pub(crate) fn build_runtime_topology(
 
 pub(crate) fn parse_runtime_manager(value: &str) -> Result<RuntimeTunnelManager> {
     match value {
-        "agent_iproute2_managed" | "iproute2" | "agent" => {
-            Ok(RuntimeTunnelManager::AgentIproute2Managed)
-        }
-        "external_observed" | "observed" => Ok(RuntimeTunnelManager::ExternalObserved),
-        "external_managed_adapter" | "adapter" | "external_adapter" => {
-            Ok(RuntimeTunnelManager::ExternalManagedAdapter)
-        }
+        "builtin" => Ok(RuntimeTunnelManager::AgentBuiltin),
+        "external_observed" => Ok(RuntimeTunnelManager::ExternalObserved),
+        "custom_adapter" => Ok(RuntimeTunnelManager::CustomAdapter),
         _ => bail!("invalid runtime manager {value}"),
     }
 }

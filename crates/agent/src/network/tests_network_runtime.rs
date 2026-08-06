@@ -53,16 +53,16 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
     plan_tunnel(&TunnelPlanInput {
         name: "edge-link".to_string(),
         interface_name: "tunab".to_string(),
-        kind: if manager == RuntimeTunnelManager::AgentIproute2Managed {
+        kind: if manager == RuntimeTunnelManager::AgentBuiltin {
             TunnelKind::Gre
         } else {
             TunnelKind::Wireguard
         },
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| LEFT_ADAPTER_ID.to_string()),
-            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| RIGHT_ADAPTER_ID.to_string()),
             ..RuntimeTunnelControl::default()
         },
@@ -84,16 +84,16 @@ fn plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 100,
-        left_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1476),
-        right_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1400),
+        left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin).then_some(1476),
+        right_mtu: (manager == RuntimeTunnelManager::AgentBuiltin).then_some(1400),
         ospf: None,
     })
     .unwrap()
 }
 
 #[test]
-fn external_adapter_commands_render_only_declared_plan_values() {
-    let mut plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+fn custom_adapter_commands_render_only_declared_plan_values() {
+    let mut plan = plan(RuntimeTunnelManager::CustomAdapter);
     plan.name = "edge-{kind}".to_string();
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let rendered = render_runtime_adapter_command(
@@ -118,7 +118,7 @@ fn external_adapter_commands_render_only_declared_plan_values() {
 
 #[test]
 fn iproute2_tunnel_argv_uses_only_the_endpoint_declared_source_and_destination() {
-    let plan = plan(RuntimeTunnelManager::AgentIproute2Managed);
+    let plan = plan(RuntimeTunnelManager::AgentBuiltin);
     let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
     let base = vec!["/usr/sbin/ip".to_string()];
@@ -141,7 +141,7 @@ fn iproute2_tunnel_argv_uses_only_the_endpoint_declared_source_and_destination()
 #[test]
 fn iproute2_reconcile_applies_the_local_endpoint_mtu() {
     let config = AgentConfig::default();
-    let plan = plan(RuntimeTunnelManager::AgentIproute2Managed);
+    let plan = plan(RuntimeTunnelManager::AgentBuiltin);
     let left = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
     let right = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Right).unwrap();
 
@@ -189,8 +189,8 @@ fn iproute2_link_inspection_keeps_observed_mtu() {
 }
 
 #[test]
-fn external_adapter_renders_all_declared_traffic_limit_values() {
-    let mut plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+fn custom_adapter_renders_all_declared_traffic_limit_values() {
+    let mut plan = plan(RuntimeTunnelManager::CustomAdapter);
     plan.runtime_control.traffic_limit = RuntimeTunnelTrafficLimit {
         ingress_kbps: Some(10_000),
         egress_kbps: Some(20_000),
@@ -214,10 +214,10 @@ fn external_adapter_renders_all_declared_traffic_limit_values() {
 }
 
 #[test]
-fn external_reconcile_uses_snapshot_lifecycle_then_status() {
-    let plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+fn custom_adapter_reconcile_uses_snapshot_lifecycle_then_status() {
+    let plan = plan(RuntimeTunnelManager::CustomAdapter);
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let steps = build_external_adapter_steps(&plan, &endpoint, &adapter()).unwrap();
+    let steps = build_custom_adapter_steps(&plan, &endpoint, &adapter()).unwrap();
     let labels = steps.iter().map(|step| step.label).collect::<Vec<_>>();
     assert_eq!(
         labels,
@@ -227,10 +227,10 @@ fn external_reconcile_uses_snapshot_lifecycle_then_status() {
 }
 
 #[test]
-fn external_remove_uses_stored_snapshot_even_after_plan_is_omitted() {
-    let plan = plan(RuntimeTunnelManager::ExternalManagedAdapter);
+fn custom_adapter_remove_uses_stored_snapshot_even_after_plan_is_omitted() {
+    let plan = plan(RuntimeTunnelManager::CustomAdapter);
     let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
-    let steps = build_external_adapter_remove_steps(&plan, &endpoint, &adapter()).unwrap();
+    let steps = build_custom_adapter_remove_steps(&plan, &endpoint, &adapter()).unwrap();
     let labels = steps.iter().map(|step| step.label).collect::<Vec<_>>();
     assert_eq!(
         labels,
@@ -258,7 +258,9 @@ async fn observed_plan_never_runs_mutating_commands() {
     }];
     let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
         config: &config,
+        plan_id: None,
         plan: &observed,
+        builtin_credentials: None,
         runtime_adapter: None,
         side: TunnelEndpointSide::Left,
         max_timeout_secs: 10,
@@ -281,7 +283,9 @@ async fn observed_plan_removal_is_read_only_when_mutation_is_disabled() {
     let report = execute_runtime_tunnel_remove_report_cancelable(
         NetworkRuntimeRemoveInput {
             config: &config,
+            plan_id: None,
             plan: &plan(RuntimeTunnelManager::ExternalObserved),
+            builtin_credentials: None,
             runtime_adapter: None,
             side: TunnelEndpointSide::Left,
             max_timeout_secs: 10,
@@ -296,7 +300,7 @@ async fn observed_plan_removal_is_read_only_when_mutation_is_disabled() {
 }
 
 #[tokio::test]
-async fn external_adapter_never_inherits_agent_topology_cleanup() {
+async fn custom_adapter_never_inherits_agent_topology_cleanup() {
     let mut config = AgentConfig {
         client_id: "edge-a".to_string(),
         ..AgentConfig::default()
@@ -304,9 +308,9 @@ async fn external_adapter_never_inherits_agent_topology_cleanup() {
     config.network.runtime_reconcile_enabled = true;
     config.network.apply_enabled = true;
     config.network.runtime_ip_argv = vec!["/bin/false".to_string()];
-    let mut external = plan(RuntimeTunnelManager::ExternalManagedAdapter);
-    external.runtime_topology.stale_interfaces = vec!["must-not-delete".to_string()];
-    external.runtime_topology.stale_routes = vec![vpsman_common::RuntimeTunnelRoute {
+    let mut custom = plan(RuntimeTunnelManager::CustomAdapter);
+    custom.runtime_topology.stale_interfaces = vec!["must-not-delete".to_string()];
+    custom.runtime_topology.stale_routes = vec![vpsman_common::RuntimeTunnelRoute {
         destination_cidr: "10.99.0.0/16".to_string(),
         ..Default::default()
     }];
@@ -315,7 +319,9 @@ async fn external_adapter_never_inherits_agent_topology_cleanup() {
     snapshot.status = command(&["/bin/true"]);
     let report = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
         config: &config,
-        plan: &external,
+        plan_id: None,
+        plan: &custom,
+        builtin_credentials: None,
         runtime_adapter: Some(&snapshot),
         side: TunnelEndpointSide::Left,
         max_timeout_secs: 10,
@@ -336,7 +342,7 @@ async fn external_adapter_never_inherits_agent_topology_cleanup() {
 }
 
 #[tokio::test]
-async fn external_managed_reconcile_rejects_a_missing_snapshot() {
+async fn custom_adapter_reconcile_rejects_a_missing_snapshot() {
     let mut config = AgentConfig {
         client_id: "edge-a".to_string(),
         ..AgentConfig::default()
@@ -345,7 +351,9 @@ async fn external_managed_reconcile_rejects_a_missing_snapshot() {
     config.network.apply_enabled = true;
     let error = execute_runtime_tunnel_reconcile_report(NetworkRuntimeReconcileInput {
         config: &config,
-        plan: &plan(RuntimeTunnelManager::ExternalManagedAdapter),
+        plan_id: None,
+        plan: &plan(RuntimeTunnelManager::CustomAdapter),
+        builtin_credentials: None,
         runtime_adapter: None,
         side: TunnelEndpointSide::Left,
         max_timeout_secs: 10,
@@ -354,4 +362,74 @@ async fn external_managed_reconcile_rejects_a_missing_snapshot() {
     .await
     .unwrap_err();
     assert!(error.to_string().contains("adapter snapshot is required"));
+}
+
+#[test]
+fn builtin_failure_compensation_requires_proven_link_creation() {
+    let config = AgentConfig::default();
+    let plan = plan(RuntimeTunnelManager::AgentBuiltin);
+    let endpoint = render_tunnel_endpoint_config(&plan, TunnelEndpointSide::Left).unwrap();
+
+    let (unproven, reason) =
+        build_runtime_compensation_steps(&config, &plan, &endpoint, None, false).unwrap();
+    assert!(unproven.is_empty());
+    assert_eq!(reason, Some("no_plan_owned_link_created"));
+
+    let (created, reason) =
+        build_runtime_compensation_steps(&config, &plan, &endpoint, None, true).unwrap();
+    assert_eq!(reason, None);
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].label, "runtime_compensate_link_delete");
+}
+
+#[test]
+fn builtin_traffic_limit_reconcile_clears_directions_that_are_now_unlimited() {
+    let base = vec!["/sbin/tc".to_string()];
+    let cleared =
+        build_traffic_limit_steps(&base, "wg0", &RuntimeTunnelTrafficLimit::default()).unwrap();
+    assert_eq!(
+        cleared.iter().map(|step| step.label).collect::<Vec<_>>(),
+        vec![
+            "runtime_traffic_egress_clear",
+            "runtime_traffic_ingress_clear"
+        ]
+    );
+    assert!(cleared.iter().all(|step| step.required));
+
+    let ingress_only = build_traffic_limit_steps(
+        &base,
+        "wg0",
+        &RuntimeTunnelTrafficLimit {
+            ingress_kbps: Some(10_000),
+            egress_kbps: None,
+            burst_kb: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(ingress_only[0].label, "runtime_traffic_egress_clear");
+    assert_eq!(ingress_only[1].label, "runtime_traffic_ingress_qdisc");
+    assert_eq!(ingress_only[2].label, "runtime_traffic_ingress_filter");
+}
+
+#[test]
+fn traffic_limit_clear_accepts_only_explicit_already_absent_evidence() {
+    let mut absent = serde_json::json!({
+        "success": false,
+        "timed_out": false,
+        "killed_for_output_limit": false,
+        "stderr": {"text": "Error: Cannot find specified qdisc on specified device.\n"}
+    });
+    accept_idempotent_traffic_clear("runtime_traffic_ingress_clear", &mut absent);
+    assert_eq!(absent["success"], true);
+    assert_eq!(absent["reason"], "qdisc_already_absent");
+
+    let mut denied = serde_json::json!({
+        "success": false,
+        "timed_out": false,
+        "killed_for_output_limit": false,
+        "stderr": {"text": "RTNETLINK answers: Operation not permitted\n"}
+    });
+    accept_idempotent_traffic_clear("runtime_traffic_egress_clear", &mut denied);
+    assert_eq!(denied["success"], false);
+    assert!(denied.get("reason").is_none());
 }

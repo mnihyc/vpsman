@@ -1,6 +1,9 @@
-use super::{operator_dispatch_error, runtime_config_reload_reason, runtime_config_version_after};
+use super::{
+    clear_runtime_tunnel_credentials, operator_dispatch_error, redact_runtime_tunnel_credentials,
+    runtime_config_reload_reason, runtime_config_version_after,
+};
 use crate::error::ApiError;
-use vpsman_common::{RuntimeConfigReconcileResource, RuntimeConfigReconcileScope};
+use vpsman_common::{AgentConfig, RuntimeConfigReconcileResource, RuntimeConfigReconcileScope};
 
 fn scope(
     authoritative: bool,
@@ -73,4 +76,39 @@ fn dispatch_errors_explain_impact_and_recovery_without_leaking_internal_details(
     let public_message = operator_dispatch_error(&public, "Runtime apply job");
     assert!(public_message.contains("The rendered config is invalid for this VPS"));
     assert!(public_message.contains("Desired state remains saved"));
+}
+
+#[test]
+fn operator_projections_remove_runtime_tunnel_credentials_recursively() {
+    let mut value = serde_json::json!({
+        "network": {
+            "runtime_status_telemetry_plans": [{
+                "plan_id": "plan",
+                "builtin_credentials": {"private_key": "must-not-leak"},
+                "nested": [{"builtin_credentials": {"certificate": "must-not-leak"}}]
+            }]
+        },
+        "unrelated": "retained"
+    });
+
+    redact_runtime_tunnel_credentials(&mut value);
+
+    let rendered = serde_json::to_string(&value).unwrap();
+    assert!(!rendered.contains("builtin_credentials"));
+    assert!(!rendered.contains("must-not-leak"));
+    assert_eq!(value["unrelated"], "retained");
+}
+
+#[test]
+fn typed_operator_config_projection_remains_toml_serializable() {
+    let mut config = AgentConfig::default();
+    config.noise.client_private_key_hex = None;
+    config.telemetry.hostname_file = None;
+
+    clear_runtime_tunnel_credentials(&mut config.network);
+
+    let sections = serde_json::to_value(&config).unwrap();
+    assert!(sections["noise"]["client_private_key_hex"].is_null());
+    let rendered = toml::to_string_pretty(&config).unwrap();
+    assert!(!rendered.contains("builtin_credentials"));
 }

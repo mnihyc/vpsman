@@ -441,7 +441,7 @@ assert_status_observation() {
       and .healthy == false
       and .metadata.type == "network_status"
       and .metadata.scope == "declared_plan_only"
-      and .metadata.runtime.manager == "agent_iproute2_managed")
+      and .metadata.runtime.manager == "agent_builtin")
   ' <<<"$observations_json" >/dev/null
 }
 

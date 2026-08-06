@@ -1,5 +1,8 @@
 use super::parse_vty_tunnel_plan;
-use vpsman_common::{RuntimeTunnelManager, TunnelAddressFamily, TunnelKind};
+use vpsman_common::{
+    RuntimeTunnelManager, RuntimeTunnelOpenvpnTransport, RuntimeTunnelWireguardEndpointMode,
+    TunnelAddressFamily, TunnelEndpointSide, TunnelKind,
+};
 
 #[test]
 fn parses_vty_tunnel_plan_for_local_render() {
@@ -120,7 +123,7 @@ fn parses_vty_tunnel_plan_explicit_dual_stack_endpoints() {
         "--right-tunnel-ipv6-cidr=fd7a:115c:a1e0::21/127",
         "--latency-primary-family=ipv6",
         "--bandwidth-mbps=1000",
-        "--runtime-manager=observed",
+        "--runtime-manager=external_observed",
     ])
     .unwrap();
 
@@ -142,9 +145,61 @@ fn parses_vty_tunnel_plan_explicit_dual_stack_endpoints() {
 }
 
 #[test]
-fn parses_vty_tunnel_plan_external_adapter_runtime() {
+fn parses_vty_builtin_wireguard_and_openvpn_options() {
+    let wireguard = parse_vty_tunnel_plan(&[
+        "--name=wg-roaming",
+        "--interface=wg42",
+        "--kind=wireguard",
+        "--left-client=left",
+        "--right-client=right",
+        "--left-remote-underlay=198.51.100.10",
+        "--right-remote-underlay=203.0.113.20",
+        "--left-tunnel-ipv4-cidr=10.255.22.0/31",
+        "--right-tunnel-ipv4-cidr=10.255.22.1/31",
+        "--bandwidth-mbps=500",
+        "--wireguard-endpoint-mode=right",
+        "--wireguard-left-listen-port=51821",
+        "--wireguard-right-listen-port=51822",
+        "--wireguard-left-keepalive-secs=15",
+        "--wireguard-right-keepalive-secs=30",
+    ])
+    .unwrap();
+    let options = wireguard.input.runtime_control.wireguard;
+    assert_eq!(
+        options.endpoint_mode,
+        RuntimeTunnelWireguardEndpointMode::Right
+    );
+    assert_eq!(options.left_listen_port, 51_821);
+    assert_eq!(options.right_listen_port, 51_822);
+    assert_eq!(options.left_keepalive_secs, 15);
+    assert_eq!(options.right_keepalive_secs, 30);
+
+    let openvpn = parse_vty_tunnel_plan(&[
+        "--name=ovpn-tcp",
+        "--interface=ovpn42",
+        "--kind=openvpn",
+        "--left-client=left",
+        "--right-client=right",
+        "--left-remote-underlay=198.51.100.10",
+        "--right-remote-underlay=203.0.113.20",
+        "--left-tunnel-ipv4-cidr=10.255.23.0/31",
+        "--right-tunnel-ipv4-cidr=10.255.23.1/31",
+        "--bandwidth-mbps=500",
+        "--openvpn-transport=tcp",
+        "--openvpn-listener-side=right",
+        "--openvpn-port=1195",
+    ])
+    .unwrap();
+    let options = openvpn.input.runtime_control.openvpn;
+    assert_eq!(options.transport, RuntimeTunnelOpenvpnTransport::Tcp);
+    assert_eq!(options.listener_side, TunnelEndpointSide::Right);
+    assert_eq!(options.port, 1195);
+}
+
+#[test]
+fn parses_vty_tunnel_plan_custom_adapter_runtime() {
     let request = parse_vty_tunnel_plan(&[
-        "--name=external-openvpn",
+        "--name=custom-openvpn",
         "--interface=ovpn42",
         "--kind=openvpn",
         "--left-client=left",
@@ -155,7 +210,7 @@ fn parses_vty_tunnel_plan_external_adapter_runtime() {
         "--left-tunnel-ipv4-cidr=10.255.10.0/31",
         "--right-tunnel-ipv4-cidr=10.255.10.1/31",
         "--bandwidth-mbps=100",
-        "--runtime-manager=adapter",
+        "--runtime-manager=custom_adapter",
         "--left-runtime-adapter-definition-id=11111111-1111-4111-8111-111111111111",
         "--right-runtime-adapter-definition-id=22222222-2222-4222-8222-222222222222",
         "--traffic-egress-kbps=100000",
@@ -166,7 +221,7 @@ fn parses_vty_tunnel_plan_external_adapter_runtime() {
     assert_eq!(request.input.kind, TunnelKind::Openvpn);
     assert_eq!(
         request.input.runtime_control.manager,
-        RuntimeTunnelManager::ExternalManagedAdapter
+        RuntimeTunnelManager::CustomAdapter
     );
     assert_eq!(
         request
@@ -259,7 +314,7 @@ fn rejects_vty_tunnel_plan_missing_required_or_bad_values() {
         "--left-tunnel-ipv4-cidr=10.255.10.0/31",
         "--right-tunnel-ipv4-cidr=10.255.10.1/31",
         "--bandwidth-mbps=100",
-        "--runtime-manager=observed",
+        "--runtime-manager=external_observed",
         "--topology-stale=wg-old",
     ])
     .is_err());

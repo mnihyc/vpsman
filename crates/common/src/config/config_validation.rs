@@ -7,8 +7,8 @@ use super::models::{
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control,
-    RuntimeTunnelAdapterCommands, RuntimeTunnelManager, TunnelEndpointSide,
-    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, MAX_TELEMETRY_TUNNELS,
+    validate_runtime_tunnel_driver_options, RuntimeTunnelAdapterCommands, RuntimeTunnelManager,
+    TunnelEndpointSide, TunnelKind, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, MAX_TELEMETRY_TUNNELS,
 };
 
 pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
@@ -302,6 +302,8 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     }
     validate_network_hook_argv(&config.runtime_ip_argv, "network_runtime_ip_argv")?;
     validate_network_hook_argv(&config.runtime_tc_argv, "network_runtime_tc_argv")?;
+    validate_network_hook_argv(&config.runtime_wg_argv, "network_runtime_wg_argv")?;
+    validate_network_hook_argv(&config.runtime_openvpn_argv, "network_runtime_openvpn_argv")?;
     if !(1..=120).contains(&config.runtime_command_timeout_secs) {
         return Err("network_runtime_command_timeout_secs_out_of_range".to_string());
     }
@@ -393,7 +395,18 @@ fn validate_runtime_status_telemetry_plans(
         return Err("network_runtime_status_telemetry_plans_too_many".to_string());
     }
     for plan in plans {
-        if let Some(plan_id) = &plan.plan_id {
+        let stateful_builtin = plan.plan.runtime_control.manager
+            == RuntimeTunnelManager::AgentBuiltin
+            && matches!(plan.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn);
+        if stateful_builtin {
+            let plan_id = plan
+                .plan_id
+                .as_deref()
+                .ok_or_else(|| "network_runtime_status_telemetry_plan_id_required".to_string())?;
+            if uuid::Uuid::parse_str(plan_id).is_err() {
+                return Err("network_runtime_status_telemetry_plan_id_invalid".to_string());
+            }
+        } else if let Some(plan_id) = &plan.plan_id {
             validate_identifier(plan_id, "network_runtime_status_telemetry_plan_id", 128)?;
         }
         let plan_name = plan.plan.name.trim();
@@ -405,9 +418,12 @@ fn validate_runtime_status_telemetry_plans(
         }
         validate_runtime_tunnel_control(&plan.plan.runtime_control)
             .map_err(|_| "network_runtime_status_telemetry_control_invalid".to_string())?;
+        validate_runtime_tunnel_driver_options(plan.plan.kind, &plan.plan.runtime_control)
+            .map_err(|_| "network_runtime_status_telemetry_control_invalid".to_string())?;
         validate_runtime_topology_intent(&plan.plan.runtime_topology, &plan.plan.interface_name)
             .map_err(|_| "network_runtime_status_telemetry_topology_invalid".to_string())?;
         validate_runtime_adapter_snapshot(plan)?;
+        validate_builtin_tunnel_credentials(plan)?;
         match plan.traffic_source {
             AgentRuntimeTrafficSource::InterfaceCounters => {
                 if plan.traffic_command.is_some() {
@@ -447,9 +463,97 @@ fn validate_runtime_status_telemetry_plans(
     Ok(())
 }
 
+fn validate_builtin_tunnel_credentials(
+    plan: &AgentRuntimeStatusTelemetryPlan,
+) -> Result<(), String> {
+    use crate::{TunnelEndpointBuiltinCredentials, TunnelKind};
+
+    let required_kind = match (plan.plan.runtime_control.manager, plan.plan.kind) {
+        (RuntimeTunnelManager::AgentBuiltin, TunnelKind::Wireguard) => Some("wireguard"),
+        (RuntimeTunnelManager::AgentBuiltin, TunnelKind::Openvpn) => Some("openvpn"),
+        _ => None,
+    };
+    match (required_kind, plan.builtin_credentials.as_ref()) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err("network_builtin_tunnel_credentials_forbidden".to_string()),
+        (Some(_), None) => Err("network_builtin_tunnel_credentials_required".to_string()),
+        (
+            Some("wireguard"),
+            Some(TunnelEndpointBuiltinCredentials::Wireguard {
+                generation,
+                local_private_key_base64,
+                local_public_key_base64,
+                peer_public_key_base64,
+            }),
+        ) if *generation > 0
+            && wireguard_keypair_matches(local_private_key_base64, local_public_key_base64)
+            && valid_wireguard_key(peer_public_key_base64) =>
+        {
+            Ok(())
+        }
+        (
+            Some("openvpn"),
+            Some(TunnelEndpointBuiltinCredentials::Openvpn {
+                generation,
+                local_private_key_pem,
+                local_certificate_pem,
+                peer_issuer_certificate_pem,
+                peer_certificate_sha256_fingerprint,
+            }),
+        ) if *generation > 0
+            && local_private_key_pem.contains("-----BEGIN PRIVATE KEY-----")
+            && local_private_key_pem.contains("-----END PRIVATE KEY-----")
+            && local_certificate_pem.contains("-----BEGIN CERTIFICATE-----")
+            && local_certificate_pem.contains("-----END CERTIFICATE-----")
+            && peer_issuer_certificate_pem.contains("-----BEGIN CERTIFICATE-----")
+            && peer_issuer_certificate_pem.contains("-----END CERTIFICATE-----")
+            && valid_sha256_fingerprint(peer_certificate_sha256_fingerprint) =>
+        {
+            Ok(())
+        }
+        _ => Err("network_builtin_tunnel_credentials_invalid".to_string()),
+    }
+}
+
+fn valid_wireguard_key(value: &str) -> bool {
+    decode_wireguard_key(value).is_some()
+}
+
+fn decode_wireguard_key(value: &str) -> Option<[u8; 32]> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .ok()?
+        .try_into()
+        .ok()
+}
+
+fn wireguard_keypair_matches(private_key: &str, public_key: &str) -> bool {
+    let (Some(private_key), Some(public_key)) = (
+        decode_wireguard_key(private_key),
+        decode_wireguard_key(public_key),
+    ) else {
+        return false;
+    };
+    let private_key = x25519_dalek::StaticSecret::from(private_key);
+    x25519_dalek::PublicKey::from(&private_key).as_bytes() == &public_key
+}
+
+fn valid_sha256_fingerprint(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 95
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if index % 3 == 2 {
+                *byte == b':'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
 fn validate_runtime_adapter_snapshot(plan: &AgentRuntimeStatusTelemetryPlan) -> Result<(), String> {
     match plan.plan.runtime_control.manager {
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             let adapter = plan
                 .runtime_adapter
                 .as_ref()
@@ -476,7 +580,7 @@ fn validate_runtime_adapter_snapshot(plan: &AgentRuntimeStatusTelemetryPlan) -> 
                 return Err("network_runtime_adapter_traffic_limit_command_required".to_string());
             }
         }
-        RuntimeTunnelManager::AgentIproute2Managed | RuntimeTunnelManager::ExternalObserved => {
+        RuntimeTunnelManager::AgentBuiltin | RuntimeTunnelManager::ExternalObserved => {
             if plan.runtime_adapter.is_some() {
                 return Err("network_runtime_adapter_snapshot_forbidden".to_string());
             }

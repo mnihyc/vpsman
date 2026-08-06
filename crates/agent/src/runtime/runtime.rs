@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{ensure, Context, Result};
+use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -21,6 +22,7 @@ use vpsman_common::{
     job_command_protocol_version, job_command_safety, job_command_type_label,
     maybe_compress_payload, payload_hash, runtime_config_content_hash,
     runtime_config_reconcile_scope_from_reason, validate_agent_config_shape,
+    AgentBuiltinTunnelDriverCapabilities, AgentBuiltinTunnelDriverCapability,
     AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
     AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationResult,
     CommandOutput, CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand,
@@ -45,8 +47,8 @@ use crate::{
     },
     network_runtime::{
         execute_runtime_tunnel_reconcile_report_cancelable,
-        execute_runtime_tunnel_remove_report_cancelable, NetworkRuntimeReconcileInput,
-        NetworkRuntimeRemoveInput,
+        execute_runtime_tunnel_remove_report_cancelable, probe_runtime_command,
+        NetworkRuntimeReconcileInput, NetworkRuntimeRemoveInput,
     },
     network_speed::{execute_network_speed_test_command, NetworkSpeedTestInput},
     network_status::{
@@ -237,7 +239,7 @@ async fn connect_and_stream(
             warn!(%error, "failed to read update activation heartbeat marker");
             None
         }),
-        capabilities: agent_capabilities(config, port_forwarding_capability),
+        capabilities: agent_capabilities(config, port_forwarding_capability).await,
     };
     send_json_frame(&mut stream, MessageKind::ClientHello, 0, 1, &hello).await?;
 
@@ -737,7 +739,9 @@ async fn reconcile_configured_runtime_tunnels_cancelable(
         match execute_runtime_tunnel_reconcile_report_cancelable(
             NetworkRuntimeReconcileInput {
                 config,
+                plan_id: telemetry_plan.plan_id.as_deref(),
                 plan,
+                builtin_credentials: telemetry_plan.builtin_credentials.as_ref(),
                 runtime_adapter: telemetry_plan.runtime_adapter.as_ref(),
                 side: telemetry_plan.endpoint_side,
                 max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
@@ -900,7 +904,9 @@ async fn apply_runtime_config_sync(
         match execute_runtime_tunnel_remove_report_cancelable(
             NetworkRuntimeRemoveInput {
                 config,
+                plan_id: stale.plan_id.as_deref(),
                 plan: &stale.plan,
+                builtin_credentials: stale.builtin_credentials.as_ref(),
                 runtime_adapter: stale.runtime_adapter.as_ref(),
                 side: stale.endpoint_side,
                 max_timeout_secs: config.network.runtime_command_timeout_secs.max(1),
@@ -1085,16 +1091,12 @@ fn runtime_tunnel_identity_matches(
 ) -> bool {
     left.endpoint_side == right.endpoint_side
         && left.plan_id == right.plan_id
-        && left.plan.name == right.plan.name
         && left.plan.interface_name == right.plan.interface_name
         && left.plan.kind == right.plan.kind
         && left.plan.runtime_control.manager == right.plan.runtime_control.manager
         && left.plan.left_client_id == right.plan.left_client_id
         && left.plan.right_client_id == right.plan.right_client_id
-        && left.plan.left_remote_underlay == right.plan.left_remote_underlay
-        && left.plan.left_local_underlay == right.plan.left_local_underlay
-        && left.plan.right_remote_underlay == right.plan.right_remote_underlay
-        && left.plan.right_local_underlay == right.plan.right_local_underlay
+        && runtime_tunnel_underlay_identity_matches(&left.plan, &right.plan)
         && left.plan.left_tunnel_address == right.plan.left_tunnel_address
         && left.plan.right_tunnel_address == right.plan.right_tunnel_address
         && left.plan.tunnel_prefix_len == right.plan.tunnel_prefix_len
@@ -1105,6 +1107,24 @@ fn runtime_tunnel_identity_matches(
             &left.plan.runtime_control,
             &right.plan.runtime_control,
         )
+}
+
+fn runtime_tunnel_underlay_identity_matches(
+    left: &vpsman_common::TunnelPlan,
+    right: &vpsman_common::TunnelPlan,
+) -> bool {
+    if left.runtime_control.manager == vpsman_common::RuntimeTunnelManager::AgentBuiltin
+        && matches!(
+            left.kind,
+            vpsman_common::TunnelKind::Wireguard | vpsman_common::TunnelKind::Openvpn
+        )
+    {
+        return true;
+    }
+    left.left_remote_underlay == right.left_remote_underlay
+        && left.left_local_underlay == right.left_local_underlay
+        && left.right_remote_underlay == right.right_remote_underlay
+        && left.right_local_underlay == right.right_local_underlay
 }
 
 fn runtime_config_snapshot_is_stale(
@@ -1131,9 +1151,9 @@ fn runtime_tunnel_control_identity_matches(
     right: &vpsman_common::RuntimeTunnelControl,
 ) -> bool {
     match left.manager {
-        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed => left.fou == right.fou,
+        vpsman_common::RuntimeTunnelManager::AgentBuiltin => left.fou == right.fou,
         vpsman_common::RuntimeTunnelManager::ExternalObserved => true,
-        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
+        vpsman_common::RuntimeTunnelManager::CustomAdapter => {
             left.left_adapter_definition_id == right.left_adapter_definition_id
                 && left.right_adapter_definition_id == right.right_adapter_definition_id
                 && left.traffic_limit == right.traffic_limit
@@ -1262,12 +1282,35 @@ fn unmanaged_update_jitter(config: &AgentConfig) -> Duration {
     Duration::from_secs(u64::from_le_bytes(first) % jitter_secs)
 }
 
-fn agent_capabilities(
+async fn agent_capabilities(
     config: &AgentConfig,
     port_forwarding: vpsman_common::PortForwardCapability,
 ) -> AgentCapabilitySnapshot {
     let effective_uid = unsafe { libc::geteuid() } as u32;
     let root = effective_uid == 0;
+    let builtin_tunnel_drivers = AgentBuiltinTunnelDriverCapabilities {
+        iproute2: probe_builtin_driver(
+            &config.network.runtime_ip_argv,
+            &["-Version"],
+            Some("iproute2-"),
+            None,
+        )
+        .await,
+        wireguard: probe_builtin_driver(
+            &config.network.runtime_wg_argv,
+            &["--version"],
+            Some("wireguard-tools v"),
+            None,
+        )
+        .await,
+        openvpn: probe_builtin_driver(
+            &config.network.runtime_openvpn_argv,
+            &["--version"],
+            Some("OpenVPN "),
+            Some(Version::new(2, 4, 0)),
+        )
+        .await,
+    };
     AgentCapabilitySnapshot {
         privilege_mode: if root {
             AgentPrivilegeMode::Root
@@ -1278,12 +1321,98 @@ fn agent_capabilities(
         max_job_timeout_secs: config.auth.max_job_timeout_secs.max(1),
         can_attempt_privileged_ops: true,
         can_manage_runtime_tunnels: root,
+        builtin_tunnel_drivers,
         can_apply_process_limits: root,
         port_forwarding,
         unprivileged_hint: (!root).then(|| {
             "agent is not running as root; root-only network, update, restore, and limit operations may report ineffective or require forced best-effort mode".to_string()
         }),
     }
+}
+
+async fn probe_builtin_driver(
+    base_argv: &[String],
+    version_args: &[&str],
+    version_marker: Option<&str>,
+    minimum_version: Option<Version>,
+) -> AgentBuiltinTunnelDriverCapability {
+    let Some(_executable) = base_argv.first().filter(|value| value.starts_with('/')) else {
+        return AgentBuiltinTunnelDriverCapability {
+            unavailable_reason: Some(
+                "configured executable argv is missing or not absolute".to_string(),
+            ),
+            ..AgentBuiltinTunnelDriverCapability::default()
+        };
+    };
+    let mut argv = base_argv.to_vec();
+    argv.extend(version_args.iter().map(|value| (*value).to_string()));
+    let report = match probe_runtime_command("builtin_tunnel_driver_version", &argv, 2, 4096).await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            return AgentBuiltinTunnelDriverCapability {
+                unavailable_reason: Some(format!("executable unavailable: {error}")),
+                ..AgentBuiltinTunnelDriverCapability::default()
+            }
+        }
+    };
+    let stdout = report["stdout"]["text"].as_str().unwrap_or_default();
+    let stderr = report["stderr"]["text"].as_str().unwrap_or_default();
+    let text = format!("{stdout}\n{stderr}");
+    let version = version_marker.and_then(|marker| parse_marked_version(&text, marker));
+    if report["success"].as_bool() != Some(true) {
+        let reason = if report["timed_out"].as_bool() == Some(true) {
+            "version probe timed out".to_string()
+        } else if report["killed_for_output_limit"].as_bool() == Some(true) {
+            "version probe exceeded its output limit".to_string()
+        } else {
+            format!(
+                "version probe exited with {}",
+                report["exit_code"]
+                    .as_i64()
+                    .map_or_else(|| "signal".to_string(), |code| code.to_string())
+            )
+        };
+        return AgentBuiltinTunnelDriverCapability {
+            unavailable_reason: Some(reason),
+            ..AgentBuiltinTunnelDriverCapability::default()
+        };
+    }
+    if version_marker.is_some() && version.is_none() {
+        return AgentBuiltinTunnelDriverCapability {
+            unavailable_reason: Some(
+                "version probe did not identify the configured driver".to_string(),
+            ),
+            ..AgentBuiltinTunnelDriverCapability::default()
+        };
+    }
+    if minimum_version
+        .as_ref()
+        .is_some_and(|minimum| version.as_ref().is_none_or(|version| version < minimum))
+    {
+        return AgentBuiltinTunnelDriverCapability {
+            version: version.map(|version| version.to_string()),
+            unavailable_reason: Some(format!(
+                "version {} or newer is required",
+                minimum_version.expect("minimum version exists")
+            )),
+            ..AgentBuiltinTunnelDriverCapability::default()
+        };
+    }
+    AgentBuiltinTunnelDriverCapability {
+        available: true,
+        version: version.map(|version| version.to_string()),
+        unavailable_reason: None,
+    }
+}
+
+fn parse_marked_version(output: &str, marker: &str) -> Option<Version> {
+    let remainder = output.split_once(marker)?.1;
+    let version = remainder
+        .trim_start()
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '.')
+        .next()?;
+    Version::parse(version).ok()
 }
 
 struct ActiveCommand {

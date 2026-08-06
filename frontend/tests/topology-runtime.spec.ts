@@ -1,10 +1,17 @@
 import { expect, test } from "@playwright/test";
 import {
+  buildRuntimeControl,
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
   defaultAgentTunnelMtu,
   runtimeManagerLabel,
 } from "../src/topologyRuntime";
+
+const runtimeControlValues = {
+  burstKb: "",
+  egressKbps: "",
+  ingressKbps: "",
+};
 
 function previewCost(
   bandwidthMbps: number,
@@ -151,20 +158,51 @@ test("OSPF preview sanitizes temporary numeric form states", () => {
 });
 
 test("tunnel runtime ownership uses one operator-facing vocabulary", () => {
-  expect(runtimeManagerLabel("agent_iproute2_managed")).toBe("Agent iproute2");
+  expect(runtimeManagerLabel("agent_builtin")).toBe("Agent builtin");
   expect(runtimeManagerLabel("external_observed")).toBe("External observed");
-  expect(runtimeManagerLabel("external_managed_adapter")).toBe(
-    "External adapter",
-  );
+  expect(runtimeManagerLabel("custom_adapter")).toBe("Custom adapter");
 });
 
-test("agent-managed tunnel MTU defaults account for encapsulation", () => {
+test("Agent builtin tunnel MTU defaults account for encapsulation", () => {
   expect(defaultAgentTunnelMtu("gre")).toBe(1476);
   expect(defaultAgentTunnelMtu("ipip")).toBe(1480);
   expect(defaultAgentTunnelMtu("sit")).toBe(1480);
   expect(defaultAgentTunnelMtu("fou")).toBe(1472);
-  expect(defaultAgentTunnelMtu("wireguard")).toBeNull();
-  expect(defaultAgentTunnelMtu("openvpn")).toBeNull();
+  expect(defaultAgentTunnelMtu("wireguard")).toBe(1420);
+  expect(defaultAgentTunnelMtu("openvpn")).toBe(1500);
   expect(defaultAgentTunnelMtu("tun_tap")).toBeNull();
   expect(defaultAgentTunnelMtu("custom")).toBeNull();
+});
+
+test("WireGuard runtime accepts zero keepalive without relaxing port validation", () => {
+  const control = buildRuntimeControl("agent_builtin", {
+    ...runtimeControlValues,
+    wireguardEndpointMode: "both",
+    wireguardLeftKeepaliveSecs: "0",
+    wireguardLeftListenPort: "51820",
+    wireguardRightKeepaliveSecs: "25",
+    wireguardRightListenPort: "51821",
+  });
+
+  expect(control.wireguard).toEqual({
+    endpoint_mode: "both",
+    left_keepalive_secs: 0,
+    left_listen_port: 51820,
+    right_keepalive_secs: 25,
+    right_listen_port: 51821,
+  });
+  expect(() =>
+    buildRuntimeControl("agent_builtin", {
+      ...runtimeControlValues,
+      wireguardEndpointMode: "both",
+      wireguardLeftListenPort: "0",
+    }),
+  ).toThrow("Invalid numeric value 0");
+  expect(() =>
+    buildRuntimeControl("agent_builtin", {
+      ...runtimeControlValues,
+      wireguardEndpointMode: "both",
+      wireguardLeftKeepaliveSecs: "0.5",
+    }),
+  ).toThrow("Invalid non-negative integer value 0.5");
 });

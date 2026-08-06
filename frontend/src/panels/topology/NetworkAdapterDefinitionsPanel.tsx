@@ -252,8 +252,8 @@ export function NetworkAdapterDefinitionsPanel({
           <div className="emptyState">
             <strong>No adapter definitions</strong>
             <span>
-              Agent-managed tunnels need none. Create one only for an external
-              runtime or routing daemon.
+              Agent builtin tunnels need no runtime adapter. Create one only
+              for custom tunnel or routing commands.
             </span>
           </div>
         }
@@ -614,7 +614,7 @@ function defaultAdapterDefinition(
     };
   }
   return {
-    manager: "external_managed_adapter",
+    manager: "custom_adapter",
     contract_version: 1,
     startup_command: command(
       "/opt/operator/tunnel-adapter",

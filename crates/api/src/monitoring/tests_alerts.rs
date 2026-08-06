@@ -42,6 +42,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
             max_job_timeout_secs: 3600,
             can_attempt_privileged_ops: true,
             can_manage_runtime_tunnels: false,
+            builtin_tunnel_drivers: Default::default(),
             can_apply_process_limits: false,
             port_forwarding: Default::default(),
             unprivileged_hint: Some("agent is running without root".to_string()),
@@ -70,7 +71,7 @@ async fn fleet_alerts_derive_actionable_current_status() {
                 mutation_policy: "managed".to_string(),
                 plan_id: Some(saved_tunnel.id),
                 plan_name: Some("edge-a-gre42".to_string()),
-                plan_runtime_manager: Some("agent_iproute2_managed".to_string()),
+                plan_runtime_manager: Some("agent_builtin".to_string()),
                 endpoint_side: Some("left".to_string()),
                 peer_client_id: Some("edge-b".to_string()),
                 source: "telemetry".to_string(),
@@ -219,11 +220,11 @@ async fn fleet_alerts_derive_actionable_current_status() {
 }
 
 #[tokio::test]
-async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
+async fn tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
     for (manager, manager_label, health_status, expected_degraded) in [
         (
-            vpsman_common::RuntimeTunnelManager::AgentIproute2Managed,
-            "agent_iproute2_managed",
+            vpsman_common::RuntimeTunnelManager::AgentBuiltin,
+            "agent_builtin",
             "skipped",
             false,
         ),
@@ -234,8 +235,8 @@ async fn tunnel_adapter_failures_only_degrade_external_managed_plans() {
             false,
         ),
         (
-            vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
-            "external_managed_adapter",
+            vpsman_common::RuntimeTunnelManager::CustomAdapter,
+            "custom_adapter",
             "failed",
             true,
         ),
@@ -3212,7 +3213,7 @@ fn alert_test_tunnel_input() -> vpsman_common::TunnelPlanInput {
         interface_name: "gre42".to_string(),
         kind: vpsman_common::TunnelKind::Gre,
         runtime_control: vpsman_common::RuntimeTunnelControl {
-            manager: vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+            manager: vpsman_common::RuntimeTunnelManager::CustomAdapter,
             left_adapter_definition_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             right_adapter_definition_id: Some("22222222-2222-4222-8222-222222222222".to_string()),
             ..Default::default()

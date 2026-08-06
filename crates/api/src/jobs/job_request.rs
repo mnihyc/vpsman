@@ -614,7 +614,7 @@ fn validate_network_status_operation(
         "network_status_plan_invalid",
     )?;
     match plan.runtime_control.manager {
-        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => {
+        vpsman_common::RuntimeTunnelManager::CustomAdapter => {
             let adapter = adapter
                 .ok_or_else(|| ApiError::bad_request("network_status_adapter_snapshot_required"))?;
             let expected_definition_id = match side {
@@ -635,7 +635,7 @@ fn validate_network_status_operation(
                 !plan.runtime_control.traffic_limit.is_default(),
             )
         }
-        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed
+        vpsman_common::RuntimeTunnelManager::AgentBuiltin
         | vpsman_common::RuntimeTunnelManager::ExternalObserved => {
             if adapter.is_some() {
                 return Err(ApiError::bad_request(

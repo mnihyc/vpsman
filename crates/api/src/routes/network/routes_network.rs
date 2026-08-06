@@ -280,6 +280,43 @@ pub(crate) async fn export_tunnel_plan(
     Ok(Json(view.plan))
 }
 
+pub(crate) async fn rotate_tunnel_plan_credentials(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(plan_id): Path<Uuid>,
+    Json(request): Json<TunnelPlanMutationRequest>,
+) -> Result<Json<TunnelPlanMutationResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    require_tunnel_plan_confirmed(request.confirmed)?;
+    let rotated = state
+        .repo
+        .rotate_tunnel_plan_credentials(plan_id, request.expected_revision, &operator)
+        .await
+        .map_err(tunnel_plan_repository_error)?;
+    let sync = if rotated.enabled {
+        dispatch_runtime_config_for_clients(
+            &state,
+            &operator,
+            vec![
+                rotated.left_client_id.clone(),
+                rotated.right_client_id.clone(),
+            ],
+            "tunnel_plan_credentials_rotated",
+        )
+        .await
+    } else {
+        Vec::new()
+    };
+    let plan = state
+        .repo
+        .get_tunnel_plan(plan_id)
+        .await?
+        .unwrap_or(rotated);
+    Ok(Json(TunnelPlanMutationResponse { plan, sync }))
+}
+
 pub(crate) async fn enable_tunnel_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -631,7 +668,7 @@ async fn validate_tunnel_plan_adapter_bindings(
     state: &AppState,
     plan: &TunnelPlan,
 ) -> Result<(), ApiError> {
-    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+    if plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
         let left_id = plan
             .runtime_control
             .left_adapter_definition_id
@@ -756,8 +793,14 @@ fn tunnel_plan_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::conflict("tunnel_plan_interface_conflict")
     } else if message.contains("tunnel_plan_address_conflict") {
         ApiError::conflict("tunnel_plan_address_conflict")
+    } else if message.contains("tunnel_plan_listener_port_conflict") {
+        ApiError::conflict("tunnel_plan_listener_port_conflict")
     } else if message.contains("tunnel_plan_name_is_immutable") {
         ApiError::bad_request("tunnel_plan_name_is_immutable")
+    } else if message.contains("tunnel_plan_builtin_credentials_not_supported") {
+        ApiError::conflict("tunnel_plan_builtin_credentials_not_supported")
+    } else if message.contains("tunnel_plan_builtin_credentials_required") {
+        ApiError::conflict("tunnel_plan_builtin_credentials_required")
     } else if message.contains("tunnel_plan_endpoint_agent_not_found") {
         ApiError::conflict("tunnel_plan_endpoint_agent_not_found")
     } else if message.contains("tunnel_plan_adapter_definition_id_invalid") {
@@ -1111,8 +1154,8 @@ fn tunnel_plan_error_code(error: NetworkPlanError) -> &'static str {
         | NetworkPlanError::RuntimeTunnelAdapterCommandRequired
         | NetworkPlanError::RuntimeTunnelObservedCannotMutate
         | NetworkPlanError::InvalidRuntimeTunnelTrafficLimit => "network_runtime_control_invalid",
-        NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement => {
-            "network_runtime_topology_requires_agent_iproute2"
+        NetworkPlanError::RuntimeTunnelTopologyRequiresAgentBuiltin => {
+            "network_runtime_topology_requires_agent_builtin"
         }
         NetworkPlanError::InvalidRuntimeTunnelTopology => "network_runtime_topology_invalid",
         NetworkPlanError::InvalidRuntimeTunnelRoute => "network_runtime_route_invalid",

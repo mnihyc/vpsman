@@ -2798,7 +2798,7 @@ impl Repository {
                         OR (
                             ($5::TEXT IS NULL OR $5 = 'critical')
                             AND current_plan.plan#>>'{runtime_control,manager}'
-                                = 'external_managed_adapter'
+                                = 'custom_adapter'
                             AND jsonb_typeof(telemetry.adapter_health) = 'object'
                             AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
                             AND telemetry.adapter_health->'success'
@@ -2815,7 +2815,7 @@ impl Repository {
                             WHEN $4::BOOLEAN
                              AND $5::TEXT IS NULL
                              AND current_plan.plan#>>'{runtime_control,manager}'
-                                = 'external_managed_adapter'
+                                = 'custom_adapter'
                              AND jsonb_typeof(telemetry.adapter_health) = 'object'
                              AND jsonb_typeof(telemetry.adapter_health->'status') = 'string'
                              AND telemetry.adapter_health->'success'
@@ -3638,7 +3638,7 @@ fn retain_declared_telemetry_tunnels(
 }
 
 pub(crate) fn tunnel_adapter_health_is_degraded(tunnel: &TelemetryTunnelView) -> bool {
-    tunnel.plan_runtime_manager.as_deref() == Some("external_managed_adapter")
+    tunnel.plan_runtime_manager.as_deref() == Some("custom_adapter")
         && tunnel
             .adapter_health
             .as_ref()
@@ -4028,17 +4028,17 @@ fn normalize_postgres_timestamp(value: &str) -> String {
 
 fn runtime_manager_label(manager: vpsman_common::RuntimeTunnelManager) -> &'static str {
     match manager {
-        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed => "agent_iproute2_managed",
+        vpsman_common::RuntimeTunnelManager::AgentBuiltin => "agent_builtin",
         vpsman_common::RuntimeTunnelManager::ExternalObserved => "external_observed",
-        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => "external_managed_adapter",
+        vpsman_common::RuntimeTunnelManager::CustomAdapter => "custom_adapter",
     }
 }
 
 fn matched_plan_mutation_policy(manager: vpsman_common::RuntimeTunnelManager) -> &'static str {
     match manager {
         vpsman_common::RuntimeTunnelManager::ExternalObserved => "observe_only_saved_plan",
-        vpsman_common::RuntimeTunnelManager::AgentIproute2Managed
-        | vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter => "managed_desired",
+        vpsman_common::RuntimeTunnelManager::AgentBuiltin
+        | vpsman_common::RuntimeTunnelManager::CustomAdapter => "managed_desired",
     }
 }
 

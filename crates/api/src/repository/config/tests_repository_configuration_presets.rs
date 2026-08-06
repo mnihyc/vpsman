@@ -526,7 +526,7 @@ async fn retired_tunnel_plan_releases_its_adapter_definitions() {
         .await
         .unwrap();
     let mut input = crate::tests_network::test_plan_input(
-        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+        vpsman_common::RuntimeTunnelManager::CustomAdapter,
         false,
     );
     input.runtime_control.left_adapter_definition_id = Some(left.id.to_string());
@@ -560,7 +560,7 @@ async fn tunnel_plan_persistence_rejects_missing_adapter_definitions() {
         .extend([test_agent("client-a"), test_agent("client-b")]);
     let repo = Repository::Memory(memory);
     let input = crate::tests_network::test_plan_input(
-        vpsman_common::RuntimeTunnelManager::ExternalManagedAdapter,
+        vpsman_common::RuntimeTunnelManager::CustomAdapter,
         false,
     );
     let plan = vpsman_common::plan_tunnel(&input).unwrap();
@@ -602,7 +602,7 @@ fn runtime_adapter_request(name: &str) -> UpsertNetworkAdapterDefinitionRequest 
         name: name.to_string(),
         description: None,
         definition: serde_json::json!({
-            "manager": "external_managed_adapter",
+            "manager": "custom_adapter",
             "contract_version": 1,
             "startup_command": preset_command("/usr/bin/start"),
             "cleanup_command": preset_command("/usr/bin/cleanup"),

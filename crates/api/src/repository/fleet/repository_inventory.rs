@@ -223,7 +223,7 @@ impl Repository {
                         c.display_name,
                         c.status,
                         c.registration_ip::text AS registration_ip,
-                        c.last_ip::text AS last_ip,
+                        host(c.last_ip) AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.arch,
                         c.internal_build_number,
@@ -1048,6 +1048,7 @@ impl Repository {
                         plan.deleted_by = Some(operator.operator.id);
                         plan.deleted_reason = Some(tunnel_delete_reason.clone());
                         plan.enabled = false;
+                        plan.builtin_credentials = None;
                         plan.updated_at = deleted_at.clone();
                         count += 1;
                     }
@@ -1246,6 +1247,7 @@ impl Repository {
                         deleted_by = $2,
                         deleted_reason = $3,
                         enabled = FALSE,
+                        builtin_credentials = NULL,
                         updated_at = now()
                     WHERE deleted_at IS NULL
                       AND (left_client_id = $1 OR right_client_id = $1)
@@ -1455,7 +1457,7 @@ impl Repository {
                         c.display_name,
                         c.status,
                         c.registration_ip::text AS registration_ip,
-                        c.last_ip::text AS last_ip,
+                        host(c.last_ip) AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.arch,
                         c.internal_build_number,
@@ -1535,7 +1537,7 @@ impl Repository {
                         c.display_name,
                         c.status,
                         c.registration_ip::text AS registration_ip,
-                        c.last_ip::text AS last_ip,
+                        host(c.last_ip) AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.arch,
                         c.internal_build_number,
@@ -1618,7 +1620,7 @@ impl Repository {
                         c.display_name,
                         c.status,
                         c.registration_ip::text AS registration_ip,
-                        c.last_ip::text AS last_ip,
+                        host(c.last_ip) AS last_ip,
                         c.last_seen_at::text AS last_seen_at,
                         c.arch,
                         c.internal_build_number,

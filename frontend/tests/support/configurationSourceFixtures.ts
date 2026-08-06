@@ -311,7 +311,7 @@ export const networkAdapterDefinitions: NetworkAdapterDefinitionRecord[] = [
         max_timeout_secs: 20,
       },
       contract_version: 1,
-      manager: "external_managed_adapter",
+      manager: "custom_adapter",
       startup_command: {
         argv: ["/opt/operator/tunnel-adapter", "start", "{interface}"],
         max_output_bytes: 16384,

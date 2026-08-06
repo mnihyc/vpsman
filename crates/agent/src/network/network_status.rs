@@ -371,17 +371,17 @@ async fn inspect_runtime_adapter_status(
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
     match plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => Ok(serde_json::json!({
+        RuntimeTunnelManager::AgentBuiltin => Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
-            "reason": "agent_iproute2_managed",
+            "reason": "agent_builtin",
         })),
         RuntimeTunnelManager::ExternalObserved => Ok(serde_json::json!({
             "configured": false,
             "skipped": true,
             "reason": "external_observed",
         })),
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             let Some(adapter) = runtime_adapter else {
                 return Ok(serde_json::json!({
                     "configured": false,
@@ -461,9 +461,9 @@ fn summarize_runtime_status(
         adapter,
     );
     let adapter_state = match plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => "not_applicable",
+        RuntimeTunnelManager::AgentBuiltin => "not_applicable",
         RuntimeTunnelManager::ExternalObserved => "observed_only",
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             if adapter["success"].as_bool() == Some(true) {
                 "healthy"
             } else if adapter["configured"].as_bool() == Some(false) {
@@ -532,7 +532,7 @@ fn runtime_reconcile_reasons(
     } else if interface["operstate"].as_str() == Some("down") {
         reasons.push("runtime_interface_down");
     }
-    if plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
+    if plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
         && interface["exists"].as_bool() == Some(true)
     {
         match (interface["mtu"].as_u64(), desired_mtu) {
@@ -556,7 +556,7 @@ fn runtime_reconcile_reasons(
     {
         reasons.push("stale_interface_present");
     }
-    if plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+    if plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
         if adapter["configured"].as_bool() == Some(false) {
             reasons.push("adapter_status_unconfigured");
         } else if adapter["success"].as_bool() != Some(true) {

@@ -10,7 +10,7 @@ import type {
   NetworkObservationTrendRecord,
   NetworkOspfRecommendationRecord,
   NetworkOspfUpdatePlanRecord,
-  TunnelPlan,
+  TunnelPlanExport,
   TunnelPlanCorruptRecord,
   TunnelPlanListItem,
   TopologyGraph,
@@ -346,6 +346,32 @@ export function useTopologyData(
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
+  const rotateTunnelPlanCredentials = useCallback(
+    async (target: TunnelPlanRevisionTarget) => {
+      const response = await apiPost<TunnelPlanMutationResponse>(
+        `/api/v1/tunnel-plans/${encodeURIComponent(target.plan_id)}/credentials/rotate`,
+        apiToken,
+        { confirmed: true, expected_revision: target.expected_revision },
+      );
+      await Promise.all([
+        loadTunnelPlans(),
+        loadTopologyGraph(),
+        loadOspfUpdatePlans(),
+        onAuditChanged(),
+        onRuntimeConfigChanged(),
+      ]);
+      return response;
+    },
+    [
+      apiToken,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      loadTunnelPlans,
+      onAuditChanged,
+      onRuntimeConfigChanged,
+    ],
+  );
+
   const allocateTunnelEndpoints = useCallback(
     async (request: AllocateTunnelEndpointsRequest) =>
       apiPost<AllocateTunnelEndpointsResponse>("/api/v1/tunnel-plans/allocate", apiToken, request),
@@ -354,7 +380,7 @@ export function useTopologyData(
 
   const exportTunnelPlan = useCallback(
     async (planId: string) =>
-      apiGet<TunnelPlan>(`/api/v1/tunnel-plans/${encodeURIComponent(planId)}/plan`, apiToken),
+      apiGet<TunnelPlanExport>(`/api/v1/tunnel-plans/${encodeURIComponent(planId)}/plan`, apiToken),
     [apiToken],
   );
 
@@ -509,6 +535,7 @@ export function useTopologyData(
     ospfRecommendations,
     ospfUpdatePlans,
     refreshTunnelPlanOspfStatus,
+    rotateTunnelPlanCredentials,
     setTunnelPlanEnabled,
     updateTunnelConnectionAssessment,
     updateNetworkAdapterDefinition,

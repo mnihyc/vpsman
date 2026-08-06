@@ -1212,11 +1212,11 @@ fn topology_test_tunnel(
         observed_at: crate::unix_now().to_string(),
         interface: "tunab".to_string(),
         kind: "gre".to_string(),
-        ownership_mode: "agent_iproute2_managed".to_string(),
+        ownership_mode: "agent_builtin".to_string(),
         mutation_policy: "managed_desired".to_string(),
         plan_id: Some(plan_id),
         plan_name: Some("edge-a-edge-b".to_string()),
-        plan_runtime_manager: Some("agent_iproute2_managed".to_string()),
+        plan_runtime_manager: Some("agent_builtin".to_string()),
         endpoint_side: Some(endpoint_side.to_string()),
         peer_client_id: Some(
             if endpoint_side == "left" {

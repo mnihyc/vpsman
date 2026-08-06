@@ -9,9 +9,10 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
-    validate_agent_config_shape, AgentConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan,
-    AgentRuntimeTrafficSource, JobCommand, RuntimeConfigReconcileResource,
-    RuntimeConfigReconcileScope, RuntimeTunnelManager, TunnelEndpointSide,
+    validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentRuntimeConfig,
+    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, JobCommand,
+    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelManager,
+    TunnelEndpointSide, TunnelKind,
 };
 
 use crate::{
@@ -112,6 +113,29 @@ pub(crate) fn operator_dispatch_error(error: &ApiError, operation: &str) -> Stri
         "{operation} could not be queued because the server rejected it: {}. Desired state remains saved; refresh target state, correct the reported conflict, and retry",
         error.code.replace('_', " ")
     )
+}
+
+pub(crate) fn redact_runtime_tunnel_credentials(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.remove("builtin_credentials");
+            for value in fields.values_mut() {
+                redact_runtime_tunnel_credentials(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_runtime_tunnel_credentials(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn clear_runtime_tunnel_credentials(config: &mut AgentNetworkConfig) {
+    for plan in &mut config.runtime_status_telemetry_plans {
+        plan.builtin_credentials = None;
+    }
 }
 
 fn normalized_runtime_config_clients(
@@ -370,7 +394,7 @@ async fn apply_enabled_tunnel_plans(
             TunnelEndpointSide::Right
         };
         let runtime_adapter =
-            if plan.plan.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+            if plan.plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
                 let definition_id = match endpoint_side {
                     TunnelEndpointSide::Left => plan
                         .plan
@@ -394,6 +418,21 @@ async fn apply_enabled_tunnel_plans(
             } else {
                 None
             };
+        let builtin_credentials = if plan.plan.runtime_control.manager
+            == RuntimeTunnelManager::AgentBuiltin
+            && matches!(plan.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn)
+        {
+            Some(
+                plan.builtin_credentials
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ApiError::conflict("runtime_tunnel_builtin_credentials_required")
+                    })?
+                    .endpoint(endpoint_side),
+            )
+        } else {
+            None
+        };
         effective
             .network
             .runtime_status_telemetry_plans
@@ -401,6 +440,7 @@ async fn apply_enabled_tunnel_plans(
                 plan_id: Some(plan.id.to_string()),
                 endpoint_side,
                 plan: plan.plan.clone(),
+                builtin_credentials,
                 runtime_adapter,
                 traffic_source: if effective.network.runtime_vnstat_argv.is_empty() {
                     AgentRuntimeTrafficSource::InterfaceCounters

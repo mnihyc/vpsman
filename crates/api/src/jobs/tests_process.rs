@@ -332,6 +332,7 @@ async fn process_start_with_limits_degrades_unprivileged_target_after_privilege_
                     max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
+                    builtin_tunnel_drivers: Default::default(),
                     can_apply_process_limits: false,
                     port_forwarding: Default::default(),
                     unprivileged_hint: Some("running as normal user".to_string()),

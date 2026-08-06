@@ -750,6 +750,7 @@ export function useDashboardData(activeView: ActiveView) {
       topology.deleteNetworkAdapterDefinition,
     exportTunnelPlan: topology.exportTunnelPlan,
     refreshTunnelPlanOspfStatus: topology.refreshTunnelPlanOspfStatus,
+    rotateTunnelPlanCredentials: topology.rotateTunnelPlanCredentials,
     disableTotp: access.disableTotp,
     handleAuth,
     jobs: jobs.jobs,

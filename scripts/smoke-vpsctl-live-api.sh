@@ -240,7 +240,7 @@ seed_tunnel_telemetry() {
           \"tunnels\": [{
             \"interface\": \"grecli\",
             \"kind\": \"gre\",
-            \"ownership_mode\": \"agent_iproute2_managed\",
+            \"ownership_mode\": \"agent_builtin\",
             \"mutation_policy\": \"managed_desired\",
             \"source\": \"approved_runtime_status_telemetry\",
             \"rx_bytes\": 0,
@@ -251,7 +251,7 @@ seed_tunnel_telemetry() {
             \"traffic_checked_unix\": $observed_unix,
             \"plan_id\": \"$plan_id\",
             \"plan_name\": \"cli-gre-a-b\",
-            \"plan_runtime_manager\": \"agent_iproute2_managed\",
+            \"plan_runtime_manager\": \"agent_builtin\",
             \"endpoint_side\": \"$endpoint_side\",
             \"peer_client_id\": \"$peer_client_id\"
           }]
@@ -524,7 +524,7 @@ network_status_seed_data="$(python3 -c 'import json,sys; print(json.dumps(list(j
   "peer_client_id": "cli-agent-b",
   "scope": "declared_plan_only",
   "runtime": {
-    "manager": "agent_iproute2_managed",
+    "manager": "agent_builtin",
     "summary": {
       "healthy": False,
       "state": "declared_interface_missing",

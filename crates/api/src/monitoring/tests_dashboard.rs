@@ -315,6 +315,7 @@ async fn dashboard_overview_aggregates_memory_state() {
                     max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
+                    builtin_tunnel_drivers: Default::default(),
                     can_apply_process_limits: false,
                     port_forwarding: Default::default(),
                     unprivileged_hint: Some("agent is running without root".to_string()),

@@ -5,8 +5,9 @@ use tokio::sync::broadcast;
 use vpsman_common::{
     plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RoutingCostAdapterCommands,
     RoutingCostCommandSource, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
-    RuntimeTunnelControl, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair,
-    TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelOpenvpnTransport,
+    RuntimeTunnelWireguardEndpointMode, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide,
+    TunnelKind, TunnelOspfConfig, TunnelPlanInput,
 };
 
 use crate::{
@@ -27,7 +28,7 @@ async fn ospf_updater_uses_endpoint_preset_unless_that_plan_overrides_it() {
     seed_online_agent(&repo, "client-b").await;
     let preset = assign_test_ospf_preset(&repo, "client-a", "global-left").await;
     let preset_id = preset.id.to_string();
-    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     input.ospf.as_mut().unwrap().left_adapter_definition_id = None;
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
@@ -97,7 +98,7 @@ async fn invalid_plan_ospf_override_never_falls_back_to_a_vps_preset() {
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
     assign_test_ospf_preset(&repo, "client-a", "must-not-run").await;
-    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     input.ospf.as_mut().unwrap().left_adapter_definition_id =
         Some("55555555-5555-4555-8555-555555555555".to_string());
     seed_test_plan_adapter_definitions(&repo, &input).await;
@@ -127,7 +128,7 @@ async fn unconfigured_endpoint_ospf_preset_is_an_explicit_error() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     let ospf = input.ospf.as_mut().unwrap();
     ospf.left_adapter_definition_id = None;
     ospf.right_adapter_definition_id = None;
@@ -149,7 +150,7 @@ async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let plan = plan_tunnel(&input).unwrap();
     let view = repo
         .record_tunnel_plan(&input, &plan, true, &network_test_operator())
@@ -167,11 +168,140 @@ async fn saved_plan_is_explicit_and_has_no_ospf_state_when_ospf_is_off() {
 }
 
 #[tokio::test]
+async fn wireguard_credential_generation_changes_only_on_identity_rotation() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    input.kind = TunnelKind::Wireguard;
+    input.left_mtu = vpsman_common::default_tunnel_mtu(input.kind);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(input.kind);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: input.clone(),
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let initial_credentials = created.plan.builtin_credentials.clone().unwrap();
+    assert_eq!(initial_credentials.generation(), 1);
+    let public_plan = serde_json::to_value(&created.plan).unwrap();
+    let public_credentials = &public_plan["builtin_credentials"];
+    assert_eq!(public_credentials["generation"], 1);
+    assert!(public_credentials["left"]["public_key_base64"].is_string());
+    let public_plan_text = serde_json::to_string(&public_plan).unwrap();
+    assert!(!public_plan_text.contains("private_key_base64"));
+    assert!(!public_plan_text.contains("private_key_pem"));
+    assert!(!public_plan_text.contains("certificate_pem"));
+
+    input.bandwidth_mbps += 1;
+    let Json(updated) = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created.plan.id),
+        Json(UpdateTunnelPlanRequest {
+            input,
+            expected_revision: created.plan.revision,
+            enabled: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(updated.plan.revision, created.plan.revision + 1);
+    assert_eq!(
+        updated.plan.builtin_credentials,
+        Some(initial_credentials.clone())
+    );
+
+    let Json(rotated) = crate::routes_network::rotate_tunnel_plan_credentials(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(updated.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: updated.plan.revision,
+        }),
+    )
+    .await
+    .unwrap();
+    let rotated_credentials = rotated.plan.builtin_credentials.as_ref().unwrap();
+    assert_eq!(rotated.plan.revision, updated.plan.revision + 1);
+    assert_eq!(rotated_credentials.generation(), 2);
+    assert_ne!(rotated_credentials, &initial_credentials);
+    assert_eq!(rotated.sync.len(), 2);
+    assert!(rotated
+        .sync
+        .iter()
+        .all(|outcome| outcome.status == "queued"));
+    assert!(repo
+        .list_audit_logs(10)
+        .await
+        .unwrap()
+        .iter()
+        .any(|event| event.action == "network.tunnel_plan_credentials_rotated"));
+
+    let stale = crate::routes_network::rotate_tunnel_plan_credentials(
+        State(state),
+        headers,
+        axum::extract::Path(updated.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: updated.plan.revision,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(stale.code, "tunnel_plan_snapshot_stale");
+}
+
+#[tokio::test]
+async fn credential_rotation_rejects_non_credential_tunnels_explicitly() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_online_agent(&repo, "client-a").await;
+    seed_online_agent(&repo, "client-b").await;
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input,
+            enabled: true,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = crate::routes_network::rotate_tunnel_plan_credentials(
+        State(state),
+        headers,
+        axum::extract::Path(created.plan.id),
+        Json(crate::routes_network::TunnelPlanMutationRequest {
+            confirmed: true,
+            expected_revision: created.plan.revision,
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "tunnel_plan_builtin_credentials_not_supported");
+}
+
+#[tokio::test]
 async fn memory_management_list_preserves_typed_tunnel_identity() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let plan = plan_tunnel(&input).unwrap();
     let created = repo
         .record_tunnel_plan(&input, &plan, false, &network_test_operator())
@@ -189,7 +319,7 @@ async fn connection_assessment_is_audited_revision_bound_and_cleared_by_plan_cha
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
@@ -278,7 +408,7 @@ async fn enabled_ospf_plan_starts_unverified_and_stages_exact_endpoint_jobs() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
@@ -365,7 +495,7 @@ async fn ospf_dispatch_reports_each_endpoint_when_one_target_disappears() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, true);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, true);
     seed_test_plan_adapter_definitions(&repo, &input).await;
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
@@ -429,7 +559,7 @@ async fn allocation_skips_addresses_already_owned_by_saved_plans() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let mut input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let mut input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     input.address_pool_cidr = "10.10.0.0/29".to_string();
     input.ipv4_tunnel = Some(TunnelAddressPair {
         left: "10.10.0.0".to_string(),
@@ -470,7 +600,7 @@ async fn create_plan_route_requires_confirmation_before_any_write() {
         State(state),
         headers,
         Json(CreateTunnelPlanRequest {
-            input: test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false),
+            input: test_plan_input(RuntimeTunnelManager::AgentBuiltin, false),
             enabled: false,
             confirmed: false,
         }),
@@ -488,7 +618,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -612,7 +742,7 @@ async fn tunnel_plan_repository_write_boundary_rechecks_resource_conflicts() {
     seed_online_agent(&repo, "client-b").await;
     seed_online_agent(&repo, "client-c").await;
     let operator = network_test_operator();
-    let first_input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let first_input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let first_plan = plan_tunnel(&first_input).unwrap();
     repo.record_tunnel_plan(&first_input, &first_plan, false, &operator)
         .await
@@ -716,11 +846,205 @@ async fn tunnel_plan_repository_write_boundary_rechecks_resource_conflicts() {
 }
 
 #[tokio::test]
+async fn tunnel_plan_api_rejects_per_vps_listener_port_conflicts_on_create_and_update() {
+    let repo = Repository::Memory(MemoryState::default());
+    for client_id in ["client-a", "client-b", "client-c"] {
+        seed_online_agent(&repo, client_id).await;
+    }
+    let state = test_state(repo);
+    let headers = crate::test_auth_headers(&state).await;
+
+    let mut wireguard = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    wireguard.kind = TunnelKind::Wireguard;
+    wireguard.left_mtu = vpsman_common::default_tunnel_mtu(wireguard.kind);
+    wireguard.right_mtu = vpsman_common::default_tunnel_mtu(wireguard.kind);
+    wireguard.runtime_control.wireguard.left_listen_port = 51_900;
+    wireguard.runtime_control.wireguard.right_listen_port = 51_901;
+    let (_, Json(created_wireguard)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: wireguard.clone(),
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut roaming_collision = wireguard.clone();
+    roaming_collision.name = "roaming-port-collision".to_string();
+    roaming_collision.interface_name = "wg-roaming".to_string();
+    roaming_collision.left_client_id = "client-c".to_string();
+    roaming_collision.runtime_control.wireguard.endpoint_mode =
+        RuntimeTunnelWireguardEndpointMode::Left;
+    roaming_collision.runtime_control.wireguard.left_listen_port = 51_902;
+    roaming_collision
+        .runtime_control
+        .wireguard
+        .right_listen_port = 51_901;
+    roaming_collision.address_pool_cidr = "10.21.0.0/29".to_string();
+    roaming_collision.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.21.0.0".to_string(),
+        right: "10.21.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: roaming_collision,
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_listener_port_conflict");
+
+    let mut openvpn_tcp = wireguard.clone();
+    openvpn_tcp.name = "openvpn-tcp-same-number".to_string();
+    openvpn_tcp.interface_name = "ovpn-tcp".to_string();
+    openvpn_tcp.kind = TunnelKind::Openvpn;
+    openvpn_tcp.right_client_id = "client-c".to_string();
+    openvpn_tcp.left_mtu = vpsman_common::default_tunnel_mtu(openvpn_tcp.kind);
+    openvpn_tcp.right_mtu = vpsman_common::default_tunnel_mtu(openvpn_tcp.kind);
+    openvpn_tcp.runtime_control.wireguard = Default::default();
+    openvpn_tcp.runtime_control.openvpn.transport = RuntimeTunnelOpenvpnTransport::Tcp;
+    openvpn_tcp.runtime_control.openvpn.listener_side = TunnelEndpointSide::Left;
+    openvpn_tcp.runtime_control.openvpn.port = 51_900;
+    openvpn_tcp.address_pool_cidr = "10.22.0.0/29".to_string();
+    openvpn_tcp.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.22.0.0".to_string(),
+        right: "10.22.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let (_, Json(created_openvpn)) = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: openvpn_tcp.clone(),
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut openvpn_udp = openvpn_tcp.clone();
+    openvpn_udp.runtime_control.openvpn.transport = RuntimeTunnelOpenvpnTransport::Udp;
+    let error = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created_openvpn.plan.id),
+        Json(UpdateTunnelPlanRequest {
+            input: openvpn_udp,
+            expected_revision: created_openvpn.plan.revision,
+            enabled: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_listener_port_conflict");
+
+    let mut switched_openvpn = openvpn_tcp.clone();
+    switched_openvpn.runtime_control.openvpn.listener_side = TunnelEndpointSide::Right;
+    let Json(switched_openvpn) = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created_openvpn.plan.id),
+        Json(UpdateTunnelPlanRequest {
+            input: switched_openvpn,
+            expected_revision: created_openvpn.plan.revision,
+            enabled: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        switched_openvpn.plan.revision,
+        created_openvpn.plan.revision + 1
+    );
+
+    let mut released_listener = openvpn_tcp.clone();
+    released_listener.name = "openvpn-released-listener".to_string();
+    released_listener.interface_name = "ovpn-released".to_string();
+    released_listener.right_client_id = "client-b".to_string();
+    released_listener.address_pool_cidr = "10.24.0.0/29".to_string();
+    released_listener.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.24.0.0".to_string(),
+        right: "10.24.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let _ = crate::routes_network::create_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(CreateTunnelPlanRequest {
+            input: released_listener,
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let mut self_update_input = wireguard;
+    self_update_input.bandwidth_mbps += 1;
+    let Json(self_update) = crate::routes_network::update_tunnel_plan(
+        State(state.clone()),
+        headers.clone(),
+        axum::extract::Path(created_wireguard.plan.id),
+        Json(UpdateTunnelPlanRequest {
+            input: self_update_input,
+            expected_revision: created_wireguard.plan.revision,
+            enabled: None,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        self_update.plan.revision,
+        created_wireguard.plan.revision + 1
+    );
+
+    let mut fou = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
+    fou.name = "fou-port-collision".to_string();
+    fou.interface_name = "fou-collision".to_string();
+    fou.kind = TunnelKind::Fou;
+    fou.right_client_id = "client-c".to_string();
+    fou.left_mtu = vpsman_common::default_tunnel_mtu(fou.kind);
+    fou.right_mtu = vpsman_common::default_tunnel_mtu(fou.kind);
+    fou.runtime_control.fou.port = 51_900;
+    fou.runtime_control.fou.peer_port = 51_903;
+    fou.address_pool_cidr = "10.23.0.0/29".to_string();
+    fou.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.23.0.0".to_string(),
+        right: "10.23.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let error = crate::routes_network::create_tunnel_plan(
+        State(state),
+        headers,
+        Json(CreateTunnelPlanRequest {
+            input: fou,
+            enabled: false,
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "tunnel_plan_listener_port_conflict");
+}
+
+#[tokio::test]
 async fn tunnel_plan_repository_write_boundary_rejects_invalid_addresses() {
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let mut plan = plan_tunnel(&input).unwrap();
     plan.ipv4_tunnel.as_mut().unwrap().left = "not-an-ip".to_string();
 
@@ -738,7 +1062,7 @@ async fn tunnel_plan_create_rejects_endpoint_interface_and_address_collisions() 
     seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let _ = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -795,7 +1119,7 @@ async fn tunnel_plan_can_be_revision_bound_retired_and_recreated() {
     seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -877,7 +1201,7 @@ async fn tunnel_plan_delete_commits_immediately_and_queues_absent_desired_state(
     seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -940,7 +1264,7 @@ async fn tunnel_plan_update_preserves_enabled_state_when_omitted() {
     seed_online_agent(&repo, "client-b").await;
     let state = test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
@@ -987,7 +1311,7 @@ async fn enabling_an_enabled_tunnel_plan_requeues_its_current_desired_state() {
         State(state.clone()),
         headers.clone(),
         Json(CreateTunnelPlanRequest {
-            input: test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false),
+            input: test_plan_input(RuntimeTunnelManager::AgentBuiltin, false),
             enabled: true,
             confirmed: true,
         }),
@@ -1044,11 +1368,7 @@ async fn external_observed_plan_enables_evidence_without_enabling_mutation() {
 
 #[test]
 fn network_status_requires_a_server_bound_runtime_adapter_snapshot() {
-    let plan = plan_tunnel(&test_plan_input(
-        RuntimeTunnelManager::ExternalManagedAdapter,
-        false,
-    ))
-    .unwrap();
+    let plan = plan_tunnel(&test_plan_input(RuntimeTunnelManager::CustomAdapter, false)).unwrap();
     let missing = JobCommand::NetworkStatus {
         plan_id: Uuid::new_v4().to_string(),
         plan: Box::new(plan.clone()),
@@ -1071,11 +1391,7 @@ fn network_status_requires_a_server_bound_runtime_adapter_snapshot() {
 
 #[test]
 fn network_speed_test_accepts_duration_bounded_unlimited_transfer() {
-    let plan = plan_tunnel(&test_plan_input(
-        RuntimeTunnelManager::AgentIproute2Managed,
-        false,
-    ))
-    .unwrap();
+    let plan = plan_tunnel(&test_plan_input(RuntimeTunnelManager::AgentBuiltin, false)).unwrap();
     let command = JobCommand::NetworkSpeedTest {
         plan_id: Uuid::new_v4().to_string(),
         plan: Box::new(plan),
@@ -1092,11 +1408,7 @@ fn network_speed_test_accepts_duration_bounded_unlimited_transfer() {
 
 #[test]
 fn network_status_side_must_match_the_only_dispatch_target() {
-    let plan = plan_tunnel(&test_plan_input(
-        RuntimeTunnelManager::AgentIproute2Managed,
-        false,
-    ))
-    .unwrap();
+    let plan = plan_tunnel(&test_plan_input(RuntimeTunnelManager::AgentBuiltin, false)).unwrap();
     let command = JobCommand::NetworkStatus {
         plan_id: Uuid::new_v4().to_string(),
         plan: Box::new(plan),
@@ -1120,7 +1432,7 @@ async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_p
     let repo = Repository::Memory(MemoryState::default());
     seed_online_agent(&repo, "client-a").await;
     seed_online_agent(&repo, "client-b").await;
-    let input = test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let plan = plan_tunnel(&input).unwrap();
     let saved = repo
         .record_tunnel_plan(&input, &plan, true, &network_test_operator())
@@ -1201,7 +1513,7 @@ async fn network_diagnostics_require_an_exact_declared_plan_and_limit_disabled_p
 }
 
 pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> TunnelPlanInput {
-    let kind = if manager == RuntimeTunnelManager::AgentIproute2Managed {
+    let kind = if manager == RuntimeTunnelManager::AgentBuiltin {
         TunnelKind::Gre
     } else {
         TunnelKind::Wireguard
@@ -1212,9 +1524,9 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         kind,
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| LEFT_RUNTIME_ADAPTER.to_string()),
-            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| RIGHT_RUNTIME_ADAPTER.to_string()),
             ..RuntimeTunnelControl::default()
         },
@@ -1236,8 +1548,12 @@ pub(super) fn test_plan_input(manager: RuntimeTunnelManager, ospf: bool) -> Tunn
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
-        left_mtu: vpsman_common::default_tunnel_mtu(kind),
-        right_mtu: vpsman_common::default_tunnel_mtu(kind),
+        left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| vpsman_common::default_tunnel_mtu(kind))
+            .flatten(),
+        right_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| vpsman_common::default_tunnel_mtu(kind))
+            .flatten(),
         ospf: ospf.then(|| TunnelOspfConfig {
             mode: OspfControlMode::Reviewed,
             planned_latency_ms: 18.0,
@@ -1260,7 +1576,7 @@ pub(super) async fn seed_test_plan_adapter_definitions(repo: &Repository, input:
             references.push((id, adapter_kind));
         }
     };
-    if input.runtime_control.manager == RuntimeTunnelManager::ExternalManagedAdapter {
+    if input.runtime_control.manager == RuntimeTunnelManager::CustomAdapter {
         add_reference(
             input
                 .runtime_control
@@ -1297,7 +1613,7 @@ pub(super) async fn seed_test_plan_adapter_definitions(repo: &Repository, input:
         };
         let definition = if adapter_kind == "runtime_tunnel" {
             serde_json::json!({
-                "manager": "external_managed_adapter",
+                "manager": "custom_adapter",
                 "contract_version": 1,
                 "startup_command": command("start"),
                 "cleanup_command": command("cleanup"),

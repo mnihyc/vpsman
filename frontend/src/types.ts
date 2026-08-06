@@ -738,9 +738,22 @@ export type AgentCapabilitySnapshot = {
   max_job_timeout_secs: number;
   can_attempt_privileged_ops: boolean;
   can_manage_runtime_tunnels: boolean;
+  builtin_tunnel_drivers?: AgentBuiltinTunnelDriverCapabilities;
   can_apply_process_limits: boolean;
   port_forwarding?: PortForwardCapability;
   unprivileged_hint?: string | null;
+};
+
+export type AgentBuiltinTunnelDriverCapability = {
+  available: boolean;
+  version?: string | null;
+  unavailable_reason?: string | null;
+};
+
+export type AgentBuiltinTunnelDriverCapabilities = {
+  iproute2: AgentBuiltinTunnelDriverCapability;
+  wireguard: AgentBuiltinTunnelDriverCapability;
+  openvpn: AgentBuiltinTunnelDriverCapability;
 };
 
 export type PortForwardCapabilityStatus =
@@ -1779,7 +1792,7 @@ export type TunnelKind =
   | "custom";
 export type TunnelEndpointSide = "left" | "right";
 export type RuntimeTunnelManager =
-  "agent_iproute2_managed" | "external_observed" | "external_managed_adapter";
+  "agent_builtin" | "external_observed" | "custom_adapter";
 
 export type RuntimeTunnelCommand = {
   argv: string[];
@@ -1820,13 +1833,55 @@ export type RuntimeTunnelFouOptions = {
   ipproto: number;
 };
 
+export type RuntimeTunnelWireguardEndpointMode = "left" | "right" | "both";
+
+export type RuntimeTunnelWireguardOptions = {
+  endpoint_mode: RuntimeTunnelWireguardEndpointMode;
+  left_listen_port: number;
+  right_listen_port: number;
+  left_keepalive_secs: number;
+  right_keepalive_secs: number;
+};
+
+export type RuntimeTunnelOpenvpnTransport = "udp" | "tcp";
+
+export type RuntimeTunnelOpenvpnOptions = {
+  transport: RuntimeTunnelOpenvpnTransport;
+  listener_side: TunnelEndpointSide;
+  port: number;
+};
+
 export type RuntimeTunnelControl = {
   manager: RuntimeTunnelManager;
   left_adapter_template_id?: string | null;
   right_adapter_template_id?: string | null;
   traffic_limit?: RuntimeTunnelTrafficLimit;
   fou?: RuntimeTunnelFouOptions;
+  wireguard?: RuntimeTunnelWireguardOptions;
+  openvpn?: RuntimeTunnelOpenvpnOptions;
 };
+
+export type TunnelWireguardPublicEvidence = {
+  public_key_base64: string;
+};
+
+export type TunnelOpenvpnPublicEvidence = {
+  certificate_sha256_fingerprint: string;
+};
+
+export type TunnelBuiltinCredentialEvidence =
+  | {
+      kind: "wireguard";
+      generation: number;
+      left: TunnelWireguardPublicEvidence;
+      right: TunnelWireguardPublicEvidence;
+    }
+  | {
+      kind: "openvpn";
+      generation: number;
+      left: TunnelOpenvpnPublicEvidence;
+      right: TunnelOpenvpnPublicEvidence;
+    };
 
 export type OspfControlMode = "reviewed" | "automatic";
 
@@ -1911,6 +1966,8 @@ export type TunnelPlan = TunnelPlanInput & {
   conflicts: string[];
 };
 
+export type TunnelPlanExport = TunnelPlan;
+
 export type TunnelPlanRecord = {
   id: string;
   name: string;
@@ -1936,6 +1993,7 @@ export type TunnelPlanRecord = {
   right_runtime_config: TunnelPlanEndpointRuntimeConfig;
   input: TunnelPlanInput;
   plan: TunnelPlan;
+  builtin_credentials: TunnelBuiltinCredentialEvidence | null;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;

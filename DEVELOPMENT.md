@@ -111,6 +111,52 @@ Every update must keep these boundaries explicit:
   an older one.
 - Regenerate and verify frontend protocol contracts when shared types change.
 
+### Tunnel ownership changes
+
+- Preserve three independent ownership modes. **Agent builtin** means the
+  vpsman agent's kind-specific built-in driver owns the exact declared endpoint.
+  **External observed** is read-only and never mutates its externally owned
+  tunnel. **Custom adapter** invokes bounded operator-supplied argv while the
+  adapter retains ownership of implementation, secrets, routes, and daemon
+  state. Never merge either non-builtin mode into Agent builtin or silently fall
+  back between modes.
+- Keep ownership separate from implementation. Agent builtin is not an
+  iproute2-only label: GRE, IPIP, SIT, and FOU use the iproute2 driver, while
+  WireGuard and OpenVPN use their own built-in drivers when implemented and
+  available. A missing command, kernel feature, TUN device, privilege, or peer
+  identity is explicit unavailable/degraded evidence.
+- Built-in drivers may mutate only exact plan-owned state and must verify
+  ownership before restart or cleanup. The control plane generates and stores
+  WireGuard/OpenVPN endpoint credentials separately from plan JSON and includes
+  private material only in the owning endpoint's runtime configuration. Normal
+  management responses expose only public keys or certificate fingerprints;
+  plan export remains a credential-free declaration. Effective-config previews,
+  webhooks, audit metadata, and command output must not expose private material.
+  Runtime convergence means the local declared state was applied; connectivity
+  remains separate probe/observation evidence.
+- OpenVPN Agent builtin accepts 2.4 or newer and is exercised against 2.4,
+  2.5, and 2.6 without changing its trust
+  model. Generate a distinct one-use issuer for each endpoint identity, discard
+  the issuer private key after signing, and send each endpoint only the peer's
+  issuer certificate. Detect the installed OpenVPN version explicitly: use
+  `ncp-ciphers` for 2.4 and `data-ciphers` for 2.5 or newer, with the same
+  AES-GCM baseline. Reject versions below 2.4 or malformed version output; never
+  silently weaken peer authentication or retry with a broader trust policy.
+- Keep kind-specific inputs bounded. WireGuard adds per-side UDP listen ports
+  and persistent keepalive plus an explicit Left/Right/Both fixed-endpoint mode;
+  peer ports and enabled inner families derive from the reviewed plan. OpenVPN
+  adds UDP/TCP transport, one listener side, and one listener port; TLS roles
+  derive from that side. Reuse the common endpoint, underlay, inner-address,
+  MTU, route, shaping, bandwidth, and OSPF fields rather than duplicating them
+  in driver options.
+- Reject saved Agent builtin listener collisions at the API write boundary by
+  exact VPS, transport, and local port. The same plan is excluded during edit;
+  disabled saved plans keep their reservation, and TCP/UDP may reuse a number.
+- Test the ownership matrix, missing-prerequisite evidence, idempotent
+  reconciliation, credential rotation, declared-state repair, verified cleanup,
+  listener ownership, and the unchanged External observed and Custom adapter
+  behavior for every new built-in driver.
+
 ### Configuration preset changes
 
 - Keep configuration presets limited to supported agent behaviors. Workflow

@@ -21,9 +21,10 @@ Use these in order for a new deployment:
    supervision, and schedules.
 6. `05-configuration-presets.md`: understand system inheritance, assign or
    reset explicit VPS overrides, and verify effective and applied state.
-7. `06-tunnels-routing-adapters.md`: declare native, observed, or
-   adapter-managed tunnels; inspect topology and tests; and optionally control
-   OSPF costs through operator-owned adapters.
+7. `06-tunnels-routing-adapters.md`: choose Agent builtin, External observed,
+   or Custom adapter ownership; verify kind-specific prerequisites; inspect
+   topology and tests; and optionally control OSPF costs through operator-owned
+   commands.
 8. `07-backup-restore-migration.md`: create backups, restore, roll back
    restores, and link rebuilt-VPS migration records.
 9. `08-agent-updates.md`: publish, stage, activate, and roll back agent

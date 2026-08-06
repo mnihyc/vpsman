@@ -1131,6 +1131,7 @@ pub(crate) enum Command {
     TunnelPlanExport(TunnelPlanExportCommand),
     TunnelPlanEnable(TunnelPlanMutationCommand),
     TunnelPlanDisable(TunnelPlanMutationCommand),
+    TunnelPlanRotateCredentials(TunnelPlanMutationCommand),
     TunnelPlanDelete(TunnelPlanMutationCommand),
     TunnelOspfStatusRefresh(TunnelOspfStatusRefreshCommand),
     TunnelOspfCostUpdate(TunnelOspfCostUpdateCommand),

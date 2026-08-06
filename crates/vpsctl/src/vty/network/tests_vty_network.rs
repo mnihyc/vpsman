@@ -69,6 +69,15 @@ fn parses_explicit_plan_lifecycle_and_ospf_status_refresh() {
         "tunnel-plan-delete",
     )
     .unwrap();
+    let rotated = parse_vty_tunnel_plan_mutation(
+        &[
+            "--plan-id=00000000-0000-0000-0000-000000000001",
+            "--expected-revision=5",
+            "--confirmed",
+        ],
+        "tunnel-plan-rotate-credentials",
+    )
+    .unwrap();
     let status = parse_vty_tunnel_ospf_status_refresh(&[
         "--plan-id",
         "00000000-0000-0000-0000-000000000001",
@@ -79,7 +88,10 @@ fn parses_explicit_plan_lifecycle_and_ospf_status_refresh() {
     assert_eq!(enabled.expected_revision, 3);
     assert!(deleted.confirmed);
     assert_eq!(deleted.expected_revision, 4);
+    assert!(rotated.confirmed);
+    assert_eq!(rotated.expected_revision, 5);
     assert_eq!(enabled.plan_id, deleted.plan_id);
+    assert_eq!(enabled.plan_id, rotated.plan_id);
     assert_eq!(enabled.plan_id, status.plan_id);
     assert!(parse_vty_tunnel_plan_mutation(
         &[

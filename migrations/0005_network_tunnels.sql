@@ -9,6 +9,7 @@ CREATE TABLE tunnel_plans (
     right_client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     input JSONB NOT NULL,
     plan JSONB NOT NULL,
+    builtin_credentials JSONB,
     recommended_ospf_cost INTEGER,
     ospf_status TEXT NOT NULL DEFAULT 'disabled',
     left_ospf_status TEXT NOT NULL DEFAULT 'disabled',

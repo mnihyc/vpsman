@@ -14,7 +14,7 @@ cargo test -p vpsctl vty_network_ospf -- --nocapture
 
 printf '{\n'
 printf '  "network_adapter_contract_smoke": "ok",\n'
-printf '  "runtime_ownership": ["agent_iproute2_managed", "external_observed", "external_managed_adapter"],\n'
+printf '  "runtime_ownership": ["agent_builtin", "external_observed", "custom_adapter"],\n'
 printf '  "routing_control": "server_issued_endpoint_adapter_jobs",\n'
 printf '  "unmanaged_discovery": false\n'
 printf '}\n'

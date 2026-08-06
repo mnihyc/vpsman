@@ -791,6 +791,7 @@ async fn memory_agent_inventory_preserves_unprivileged_capability_snapshot() {
                     max_job_timeout_secs: 3600,
                     can_attempt_privileged_ops: true,
                     can_manage_runtime_tunnels: false,
+                    builtin_tunnel_drivers: Default::default(),
                     can_apply_process_limits: false,
                     port_forwarding: Default::default(),
                     unprivileged_hint: Some(
@@ -892,8 +893,7 @@ async fn deleting_tunnel_endpoint_queues_empty_desired_state_for_surviving_peer(
             });
     }
 
-    let input =
-        crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentIproute2Managed, false);
+    let input = crate::tests_network::test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
     let plan = plan_tunnel(&input).unwrap();
     state
         .repo

@@ -26,7 +26,8 @@ use crate::{
         validate_network_adapter_definition,
     },
     runtime_config::{
-        compose_runtime_config_for_agent_with_read_model, dispatch_runtime_config_for_clients,
+        clear_runtime_tunnel_credentials, compose_runtime_config_for_agent_with_read_model,
+        dispatch_runtime_config_for_clients,
     },
     security::{SCOPE_CONFIG_READ, SCOPE_NETWORK_READ},
     selector_expression::parse_selector_expression,
@@ -335,9 +336,10 @@ pub(crate) async fn effective_agent_config(
         .list_configuration_sources(Some(&query.client_id), None)
         .await?;
     let mut desired_configs = enrich_runtime_sync(&state, &mut sources).await?;
-    let config = desired_configs
+    let mut config = desired_configs
         .remove(&query.client_id)
         .ok_or_else(|| ApiError::not_found("runtime_config_client_not_found"))?;
+    clear_runtime_tunnel_credentials(&mut config.network);
     let sections = serde_json::to_value(&config)
         .map_err(|error| ApiError::from(anyhow::Error::from(error)))?;
     let toml = toml::to_string_pretty(&config)

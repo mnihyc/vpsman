@@ -803,7 +803,7 @@ pub(crate) async fn bind_declared_network_plan(
         return Ok(());
     };
     *runtime_adapter = None;
-    if plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter {
+    if plan.runtime_control.manager != RuntimeTunnelManager::CustomAdapter {
         return Ok(());
     }
     let (definition_id, client_id) = match side {

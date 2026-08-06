@@ -3,9 +3,10 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 use vpsman_common::{
     default_ospf_healthy_windows, default_ospf_min_cost_delta, default_tunnel_mtu, plan_tunnel,
-    BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily,
-    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlanInput, MAX_TUNNEL_BANDWIDTH_MBPS,
-    MIN_TUNNEL_BANDWIDTH_MBPS,
+    BandwidthMbps, OspfControlMode, OspfCostPolicy, RuntimeTunnelManager,
+    RuntimeTunnelOpenvpnTransport, RuntimeTunnelWireguardEndpointMode, TunnelAddressFamily,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    MAX_TUNNEL_BANDWIDTH_MBPS, MIN_TUNNEL_BANDWIDTH_MBPS,
 };
 
 use crate::network_runtime_args::{
@@ -59,7 +60,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut ospf_max_cost = 65_535_u16;
     let mut left_routing_adapter_definition_id = None::<String>;
     let mut right_routing_adapter_definition_id = None::<String>;
-    let mut runtime_manager = RuntimeTunnelManager::AgentIproute2Managed;
+    let mut runtime_manager = RuntimeTunnelManager::AgentBuiltin;
     let mut left_runtime_adapter_definition_id = None::<String>;
     let mut right_runtime_adapter_definition_id = None::<String>;
     let mut traffic_ingress_kbps = None::<u32>;
@@ -68,6 +69,14 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
     let mut fou_port = None::<u16>;
     let mut fou_peer_port = None::<u16>;
     let mut fou_ipproto = None::<u8>;
+    let mut wireguard_left_listen_port = None::<u16>;
+    let mut wireguard_right_listen_port = None::<u16>;
+    let mut wireguard_left_keepalive_secs = None::<u16>;
+    let mut wireguard_right_keepalive_secs = None::<u16>;
+    let mut wireguard_endpoint_mode = None::<RuntimeTunnelWireguardEndpointMode>;
+    let mut openvpn_transport = None::<RuntimeTunnelOpenvpnTransport>;
+    let mut openvpn_listener_side = None::<TunnelEndpointSide>;
+    let mut openvpn_port = None::<u16>;
     let mut topology_desired_interfaces = Vec::<String>::new();
     let mut topology_stale_interfaces = Vec::<String>::new();
     let mut topology_routes = Vec::<String>::new();
@@ -643,6 +652,121 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
                 )?);
                 index += 1;
             }
+            "--wireguard-left-listen-port" => {
+                wireguard_left_listen_port = Some(parse_u16(
+                    next_value(tokens, index, "--wireguard-left-listen-port")?,
+                    "--wireguard-left-listen-port",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--wireguard-left-listen-port=") => {
+                wireguard_left_listen_port = Some(parse_u16(
+                    flag_value(value, "--wireguard-left-listen-port="),
+                    "--wireguard-left-listen-port",
+                )?);
+                index += 1;
+            }
+            "--wireguard-right-listen-port" => {
+                wireguard_right_listen_port = Some(parse_u16(
+                    next_value(tokens, index, "--wireguard-right-listen-port")?,
+                    "--wireguard-right-listen-port",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--wireguard-right-listen-port=") => {
+                wireguard_right_listen_port = Some(parse_u16(
+                    flag_value(value, "--wireguard-right-listen-port="),
+                    "--wireguard-right-listen-port",
+                )?);
+                index += 1;
+            }
+            "--wireguard-left-keepalive-secs" => {
+                wireguard_left_keepalive_secs = Some(parse_u16(
+                    next_value(tokens, index, "--wireguard-left-keepalive-secs")?,
+                    "--wireguard-left-keepalive-secs",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--wireguard-left-keepalive-secs=") => {
+                wireguard_left_keepalive_secs = Some(parse_u16(
+                    flag_value(value, "--wireguard-left-keepalive-secs="),
+                    "--wireguard-left-keepalive-secs",
+                )?);
+                index += 1;
+            }
+            "--wireguard-right-keepalive-secs" => {
+                wireguard_right_keepalive_secs = Some(parse_u16(
+                    next_value(tokens, index, "--wireguard-right-keepalive-secs")?,
+                    "--wireguard-right-keepalive-secs",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--wireguard-right-keepalive-secs=") => {
+                wireguard_right_keepalive_secs = Some(parse_u16(
+                    flag_value(value, "--wireguard-right-keepalive-secs="),
+                    "--wireguard-right-keepalive-secs",
+                )?);
+                index += 1;
+            }
+            "--wireguard-endpoint-mode" => {
+                wireguard_endpoint_mode = Some(parse_wireguard_endpoint_mode(next_value(
+                    tokens,
+                    index,
+                    "--wireguard-endpoint-mode",
+                )?)?);
+                index += 2;
+            }
+            value if value.starts_with("--wireguard-endpoint-mode=") => {
+                wireguard_endpoint_mode = Some(parse_wireguard_endpoint_mode(flag_value(
+                    value,
+                    "--wireguard-endpoint-mode=",
+                ))?);
+                index += 1;
+            }
+            "--openvpn-transport" => {
+                openvpn_transport = Some(parse_openvpn_transport(next_value(
+                    tokens,
+                    index,
+                    "--openvpn-transport",
+                )?)?);
+                index += 2;
+            }
+            value if value.starts_with("--openvpn-transport=") => {
+                openvpn_transport = Some(parse_openvpn_transport(flag_value(
+                    value,
+                    "--openvpn-transport=",
+                ))?);
+                index += 1;
+            }
+            "--openvpn-listener-side" => {
+                openvpn_listener_side = Some(parse_tunnel_endpoint_side(next_value(
+                    tokens,
+                    index,
+                    "--openvpn-listener-side",
+                )?)?);
+                index += 2;
+            }
+            value if value.starts_with("--openvpn-listener-side=") => {
+                openvpn_listener_side = Some(parse_tunnel_endpoint_side(flag_value(
+                    value,
+                    "--openvpn-listener-side=",
+                ))?);
+                index += 1;
+            }
+            "--openvpn-port" => {
+                openvpn_port = Some(parse_u16(
+                    next_value(tokens, index, "--openvpn-port")?,
+                    "--openvpn-port",
+                )?);
+                index += 2;
+            }
+            value if value.starts_with("--openvpn-port=") => {
+                openvpn_port = Some(parse_u16(
+                    flag_value(value, "--openvpn-port="),
+                    "--openvpn-port",
+                )?);
+                index += 1;
+            }
             "--topology-desired-interface" | "--topology-desired" => {
                 topology_desired_interfaces
                     .push(next_value(tokens, index, tokens[index])?.to_string());
@@ -723,7 +847,7 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
         None
     };
     let kind = required(kind, "--kind")?;
-    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentIproute2Managed)
+    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentBuiltin)
         .then(|| default_tunnel_mtu(kind))
         .flatten();
     let input = TunnelPlanInput {
@@ -740,6 +864,14 @@ pub(crate) fn parse_vty_tunnel_plan(tokens: &[&str]) -> Result<VtyTunnelPlanRequ
             fou_port,
             fou_peer_port,
             fou_ipproto,
+            wireguard_left_listen_port,
+            wireguard_right_listen_port,
+            wireguard_left_keepalive_secs,
+            wireguard_right_keepalive_secs,
+            wireguard_endpoint_mode,
+            openvpn_transport,
+            openvpn_listener_side,
+            openvpn_port,
         }),
         runtime_topology: build_runtime_topology(RuntimeTopologyArgs {
             version: None,
@@ -925,6 +1057,31 @@ fn parse_tunnel_address_family(value: &str) -> Result<TunnelAddressFamily> {
         "ipv4" | "IPv4" => Ok(TunnelAddressFamily::Ipv4),
         "ipv6" | "IPv6" => Ok(TunnelAddressFamily::Ipv6),
         _ => anyhow::bail!("--latency-primary-family must be one of ipv4, ipv6"),
+    }
+}
+
+fn parse_wireguard_endpoint_mode(value: &str) -> Result<RuntimeTunnelWireguardEndpointMode> {
+    match value {
+        "left" => Ok(RuntimeTunnelWireguardEndpointMode::Left),
+        "right" => Ok(RuntimeTunnelWireguardEndpointMode::Right),
+        "both" => Ok(RuntimeTunnelWireguardEndpointMode::Both),
+        _ => anyhow::bail!("--wireguard-endpoint-mode must be one of left, right, both"),
+    }
+}
+
+fn parse_openvpn_transport(value: &str) -> Result<RuntimeTunnelOpenvpnTransport> {
+    match value {
+        "udp" => Ok(RuntimeTunnelOpenvpnTransport::Udp),
+        "tcp" => Ok(RuntimeTunnelOpenvpnTransport::Tcp),
+        _ => anyhow::bail!("--openvpn-transport must be one of udp, tcp"),
+    }
+}
+
+fn parse_tunnel_endpoint_side(value: &str) -> Result<TunnelEndpointSide> {
+    match value {
+        "left" => Ok(TunnelEndpointSide::Left),
+        "right" => Ok(TunnelEndpointSide::Right),
+        _ => anyhow::bail!("--openvpn-listener-side must be one of left, right"),
     }
 }
 

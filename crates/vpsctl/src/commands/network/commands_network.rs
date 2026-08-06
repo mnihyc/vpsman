@@ -6,14 +6,15 @@ use uuid::Uuid;
 use vpsman_common::{
     default_tunnel_mtu, payload_hash, plan_tunnel, render_tunnel_endpoint_config,
     routing_cost_update_privilege_payload, BandwidthMbps, JobCommand, OspfControlMode,
-    OspfCostPolicy, RuntimeTunnelManager, TunnelAddressFamily, TunnelAddressPair, TunnelKind,
-    TunnelOspfConfig, TunnelPlan, TunnelPlanInput, DEFAULT_MAX_JOB_TIMEOUT_SECS,
-    NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MAX_DURATION_SECS,
-    NETWORK_SPEED_TEST_MAX_MAX_BYTES, NETWORK_SPEED_TEST_MAX_PORT,
-    NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS,
-    NETWORK_SPEED_TEST_MIN_DURATION_SECS, NETWORK_SPEED_TEST_MIN_MAX_BYTES,
-    NETWORK_SPEED_TEST_MIN_PORT, NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS,
-    NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES, NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
+    OspfCostPolicy, RuntimeTunnelManager, RuntimeTunnelOpenvpnTransport, TunnelAddressFamily,
+    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlan, TunnelPlanInput,
+    DEFAULT_MAX_JOB_TIMEOUT_SECS, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
+    NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
+    NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
+    NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
+    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
 };
 
 use crate::{
@@ -83,13 +84,13 @@ pub(crate) struct TunnelPlanCommand {
     #[arg(
         long,
         value_name = "BYTES",
-        help = "Agent iproute2 left endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
+        help = "Agent builtin left endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
     )]
     pub(crate) left_mtu: Option<u16>,
     #[arg(
         long,
         value_name = "BYTES",
-        help = "Agent iproute2 right endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
+        help = "Agent builtin right endpoint MTU; defaults by tunnel kind for a 1500-byte underlay"
     )]
     pub(crate) right_mtu: Option<u16>,
     #[arg(
@@ -139,7 +140,12 @@ pub(crate) struct TunnelPlanCommand {
         help = "Optional right-endpoint command override; otherwise use that VPS's effective ospf_update_command preset. Invalid overrides and unconfigured effective presets fail"
     )]
     pub(crate) right_routing_adapter_definition_id: Option<String>,
-    #[arg(long, value_enum, default_value = "agent_iproute2_managed")]
+    #[arg(
+        long,
+        value_enum,
+        default_value = "builtin",
+        help = "Runtime ownership: Agent builtin owns a supported kind; External observed is read-only; Custom adapter invokes operator-owned commands"
+    )]
     pub(crate) runtime_manager: RuntimeManagerArg,
     #[arg(long)]
     pub(crate) left_runtime_adapter_definition_id: Option<String>,
@@ -157,23 +163,43 @@ pub(crate) struct TunnelPlanCommand {
     pub(crate) fou_peer_port: Option<u16>,
     #[arg(long)]
     pub(crate) fou_ipproto: Option<u8>,
+    #[arg(long, value_name = "PORT")]
+    pub(crate) wireguard_left_listen_port: Option<u16>,
+    #[arg(long, value_name = "PORT")]
+    pub(crate) wireguard_right_listen_port: Option<u16>,
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) wireguard_left_keepalive_secs: Option<u16>,
+    #[arg(long, value_name = "SECONDS")]
+    pub(crate) wireguard_right_keepalive_secs: Option<u16>,
+    #[arg(
+        long,
+        value_enum,
+        help = "VPS with a fixed WireGuard address; the other VPS points to it and may roam. Defaults to both"
+    )]
+    pub(crate) wireguard_endpoint_mode: Option<WireguardEndpointModeArg>,
+    #[arg(long, value_enum)]
+    pub(crate) openvpn_transport: Option<OpenvpnTransportArg>,
+    #[arg(long, value_enum)]
+    pub(crate) openvpn_listener_side: Option<TunnelEndpointSideArg>,
+    #[arg(long, value_name = "PORT")]
+    pub(crate) openvpn_port: Option<u16>,
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Agent iproute2 only: exact desired interface names"
+        help = "Agent builtin only: exact desired interface names"
     )]
     pub(crate) topology_desired_interfaces: Vec<String>,
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Agent iproute2 only: exact stale interface names eligible for cleanup"
+        help = "Agent builtin only: exact stale interface names eligible for cleanup"
     )]
     pub(crate) topology_stale_interfaces: Vec<String>,
-    #[arg(long, help = "Agent iproute2 only: exact route declaration")]
+    #[arg(long, help = "Agent builtin only: exact route declaration")]
     pub(crate) topology_route: Vec<String>,
     #[arg(
         long,
-        help = "Agent iproute2 only: exact stale route eligible for cleanup"
+        help = "Agent builtin only: exact stale route eligible for cleanup"
     )]
     pub(crate) topology_stale_route: Vec<String>,
     #[arg(long, default_value_t = false)]
@@ -281,6 +307,38 @@ impl From<TunnelEndpointSideArg> for vpsman_common::TunnelEndpointSide {
         match value {
             TunnelEndpointSideArg::Left => Self::Left,
             TunnelEndpointSideArg::Right => Self::Right,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum OpenvpnTransportArg {
+    Udp,
+    Tcp,
+}
+
+impl From<OpenvpnTransportArg> for RuntimeTunnelOpenvpnTransport {
+    fn from(value: OpenvpnTransportArg) -> Self {
+        match value {
+            OpenvpnTransportArg::Udp => Self::Udp,
+            OpenvpnTransportArg::Tcp => Self::Tcp,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum WireguardEndpointModeArg {
+    Left,
+    Right,
+    Both,
+}
+
+impl From<WireguardEndpointModeArg> for vpsman_common::RuntimeTunnelWireguardEndpointMode {
+    fn from(value: WireguardEndpointModeArg) -> Self {
+        match value {
+            WireguardEndpointModeArg::Left => Self::Left,
+            WireguardEndpointModeArg::Right => Self::Right,
+            WireguardEndpointModeArg::Both => Self::Both,
         }
     }
 }
@@ -492,6 +550,28 @@ pub(crate) fn delete_tunnel_plan(
         http_post_json(
             api_url,
             &format!("/api/v1/tunnel-plans/{plan_id}/delete"),
+            token,
+            &serde_json::json!({
+                "confirmed": true,
+                "expected_revision": expected_revision,
+            }),
+        )?
+    );
+    Ok(())
+}
+
+pub(crate) fn rotate_tunnel_plan_credentials(
+    api_url: &str,
+    token: Option<&str>,
+    request: TunnelPlanMutationCommand,
+) -> Result<()> {
+    let (plan_id, expected_revision) =
+        validate_tunnel_plan_mutation(request, "credential rotation")?;
+    println!(
+        "{}",
+        http_post_json(
+            api_url,
+            &format!("/api/v1/tunnel-plans/{plan_id}/credentials/rotate"),
             token,
             &serde_json::json!({
                 "confirmed": true,
@@ -924,7 +1004,7 @@ pub(crate) fn tunnel_plan(
 ) -> Result<()> {
     let kind: TunnelKind = request.kind.into();
     let runtime_manager: RuntimeTunnelManager = request.runtime_manager.into();
-    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentIproute2Managed)
+    let default_mtu = (runtime_manager == RuntimeTunnelManager::AgentBuiltin)
         .then(|| default_tunnel_mtu(kind))
         .flatten();
     let ospf = if request.ospf {
@@ -965,6 +1045,14 @@ pub(crate) fn tunnel_plan(
             fou_port: request.fou_port,
             fou_peer_port: request.fou_peer_port,
             fou_ipproto: request.fou_ipproto,
+            wireguard_left_listen_port: request.wireguard_left_listen_port,
+            wireguard_right_listen_port: request.wireguard_right_listen_port,
+            wireguard_left_keepalive_secs: request.wireguard_left_keepalive_secs,
+            wireguard_right_keepalive_secs: request.wireguard_right_keepalive_secs,
+            wireguard_endpoint_mode: request.wireguard_endpoint_mode.map(Into::into),
+            openvpn_transport: request.openvpn_transport.map(Into::into),
+            openvpn_listener_side: request.openvpn_listener_side.map(Into::into),
+            openvpn_port: request.openvpn_port,
         }),
         runtime_topology: build_runtime_topology(RuntimeTopologyArgs {
             version: None,

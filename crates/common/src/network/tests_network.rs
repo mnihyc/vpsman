@@ -16,9 +16,9 @@ fn ipv4_pair(left: &str, right: &str) -> TunnelAddressPair {
 fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInput {
     let runtime_control = RuntimeTunnelControl {
         manager,
-        left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
             .then(|| LEFT_RUNTIME_ADAPTER.to_string()),
-        right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
             .then(|| RIGHT_RUNTIME_ADAPTER.to_string()),
         ..RuntimeTunnelControl::default()
     };
@@ -41,8 +41,12 @@ fn plan_input(kind: TunnelKind, manager: RuntimeTunnelManager) -> TunnelPlanInpu
         ipv6_tunnel: None,
         latency_primary_family: TunnelAddressFamily::Ipv4,
         bandwidth_mbps: 1234,
-        left_mtu: default_tunnel_mtu(kind),
-        right_mtu: default_tunnel_mtu(kind),
+        left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| default_tunnel_mtu(kind))
+            .flatten(),
+        right_mtu: (manager == RuntimeTunnelManager::AgentBuiltin)
+            .then(|| default_tunnel_mtu(kind))
+            .flatten(),
         ospf: None,
     }
 }
@@ -53,10 +57,31 @@ fn tunnel_mtu_defaults_are_kind_aware_1500_underlay_baselines() {
     assert_eq!(default_tunnel_mtu(TunnelKind::Ipip), Some(1480));
     assert_eq!(default_tunnel_mtu(TunnelKind::Sit), Some(1480));
     assert_eq!(default_tunnel_mtu(TunnelKind::Fou), Some(1472));
-    assert_eq!(default_tunnel_mtu(TunnelKind::Wireguard), None);
-    assert_eq!(default_tunnel_mtu(TunnelKind::Openvpn), None);
+    assert_eq!(default_tunnel_mtu(TunnelKind::Wireguard), Some(1420));
+    assert_eq!(default_tunnel_mtu(TunnelKind::Openvpn), Some(1500));
     assert_eq!(default_tunnel_mtu(TunnelKind::TunTap), None);
     assert_eq!(default_tunnel_mtu(TunnelKind::Custom), None);
+}
+
+#[test]
+fn openvpn_listener_bind_matches_the_initiators_destination_family() {
+    let mut input = plan_input(TunnelKind::Openvpn, RuntimeTunnelManager::AgentBuiltin);
+    input.runtime_control.openvpn.listener_side = TunnelEndpointSide::Left;
+    input.left_remote_underlay = "198.51.100.20".to_string();
+    input.right_remote_underlay = "2001:db8::10".to_string();
+    input.left_local_underlay = Some("2001:db8::10".to_string());
+    input.right_local_underlay = Some("2001:db8::20".to_string());
+    assert!(plan_tunnel(&input).is_ok());
+
+    input.left_local_underlay = Some("198.51.100.10".to_string());
+    assert_eq!(
+        plan_tunnel(&input).unwrap_err(),
+        NetworkPlanError::InvalidUnderlayAddress
+    );
+
+    input.left_local_underlay = Some("  ".to_string());
+    input.right_local_underlay = Some(String::new());
+    assert!(plan_tunnel(&input).is_ok());
 }
 
 fn ospf_config() -> TunnelOspfConfig {
@@ -172,12 +197,12 @@ fn latency_loss_and_preference_remain_primary_cost_inputs() {
 fn planned_ospf_cost_is_optional_and_computed_next_to_operator_inputs() {
     let without_ospf = plan_tunnel(&plan_input(
         TunnelKind::Gre,
-        RuntimeTunnelManager::AgentIproute2Managed,
+        RuntimeTunnelManager::AgentBuiltin,
     ))
     .unwrap();
     assert_eq!(without_ospf.recommended_ospf_cost, None);
 
-    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     input.ospf = Some(ospf_config());
     let expected = ospf_cost(
         OspfCostPolicy::default(),
@@ -196,15 +221,14 @@ fn planned_ospf_cost_is_optional_and_computed_next_to_operator_inputs() {
 
 #[test]
 fn tunnel_plan_rejects_ambiguous_identity_and_underlay() {
-    let mut same_endpoint = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut same_endpoint = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     same_endpoint.right_client_id = same_endpoint.left_client_id.clone();
     assert_eq!(
         plan_tunnel(&same_endpoint),
         Err(NetworkPlanError::InvalidTunnelEndpoints)
     );
 
-    let mut malformed_underlay =
-        plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut malformed_underlay = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     malformed_underlay.right_remote_underlay = "not-an-address".to_string();
     assert_eq!(
         plan_tunnel(&malformed_underlay),
@@ -222,8 +246,7 @@ fn tunnel_plan_rejects_ambiguous_identity_and_underlay() {
         Err(NetworkPlanError::InvalidUnderlayAddress)
     );
 
-    let mut native_ipv6_underlay =
-        plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut native_ipv6_underlay = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     native_ipv6_underlay.left_remote_underlay = "2001:db8::10".to_string();
     native_ipv6_underlay.right_remote_underlay = "2001:db8::20".to_string();
     assert_eq!(
@@ -242,7 +265,7 @@ fn tunnel_plan_rejects_ambiguous_identity_and_underlay() {
 
 #[test]
 fn tunnel_plan_keeps_nat_remote_destinations_independent_from_local_sources() {
-    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     input.left_remote_underlay = "203.0.113.20".to_string();
     input.left_local_underlay = Some("10.0.0.10".to_string());
     input.right_remote_underlay = "198.51.100.10".to_string();
@@ -260,11 +283,11 @@ fn tunnel_plan_keeps_nat_remote_destinations_independent_from_local_sources() {
 
 #[test]
 fn tunnel_plan_rejects_duplicate_or_disconnected_endpoint_addresses() {
-    let mut duplicate = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut duplicate = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     duplicate.ipv4_tunnel = Some(ipv4_pair("10.255.0.1", "10.255.0.1"));
     assert_eq!(plan_tunnel(&duplicate), Err(NetworkPlanError::InvalidCidr));
 
-    let mut disconnected = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut disconnected = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     disconnected.ipv4_tunnel = Some(ipv4_pair("10.255.0.0", "10.255.0.2"));
     assert_eq!(
         plan_tunnel(&disconnected),
@@ -273,41 +296,28 @@ fn tunnel_plan_rejects_duplicate_or_disconnected_endpoint_addresses() {
 }
 
 #[test]
-fn agent_iproute2_only_accepts_supported_kernel_tunnel_kinds() {
+fn agent_builtin_accepts_its_supported_tunnel_kinds() {
     for kind in [
         TunnelKind::Gre,
         TunnelKind::Ipip,
         TunnelKind::Sit,
         TunnelKind::Fou,
-    ] {
-        assert!(plan_tunnel(&plan_input(
-            kind,
-            RuntimeTunnelManager::AgentIproute2Managed
-        ))
-        .is_ok());
-    }
-    for kind in [
         TunnelKind::Openvpn,
         TunnelKind::Wireguard,
-        TunnelKind::TunTap,
-        TunnelKind::Custom,
     ] {
+        assert!(plan_tunnel(&plan_input(kind, RuntimeTunnelManager::AgentBuiltin)).is_ok());
+    }
+    for kind in [TunnelKind::TunTap, TunnelKind::Custom] {
         assert_eq!(
-            plan_tunnel(&plan_input(
-                kind,
-                RuntimeTunnelManager::AgentIproute2Managed
-            )),
+            plan_tunnel(&plan_input(kind, RuntimeTunnelManager::AgentBuiltin)),
             Err(NetworkPlanError::UnsupportedRuntimeManagerTunnelKind)
         );
     }
 }
 
 #[test]
-fn external_managed_plans_require_both_endpoint_definition_ids() {
-    let valid = plan_input(
-        TunnelKind::Wireguard,
-        RuntimeTunnelManager::ExternalManagedAdapter,
-    );
+fn custom_adapter_plans_require_both_endpoint_definition_ids() {
+    let valid = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::CustomAdapter);
     assert!(plan_tunnel(&valid).is_ok());
 
     let mut missing = valid.clone();
@@ -316,6 +326,19 @@ fn external_managed_plans_require_both_endpoint_definition_ids() {
         plan_tunnel(&missing),
         Err(NetworkPlanError::RuntimeTunnelAdapterCommandRequired)
     );
+}
+
+#[test]
+fn custom_adapter_has_one_canonical_wire_name() {
+    assert_eq!(
+        serde_json::to_string(&RuntimeTunnelManager::CustomAdapter).unwrap(),
+        "\"custom_adapter\""
+    );
+    assert_eq!(
+        serde_json::from_str::<RuntimeTunnelManager>("\"custom_adapter\"").unwrap(),
+        RuntimeTunnelManager::CustomAdapter
+    );
+    assert!(serde_json::from_str::<RuntimeTunnelManager>("\"external_managed_adapter\"").is_err());
 }
 
 #[test]
@@ -340,23 +363,20 @@ fn external_observed_plans_are_explicit_and_cannot_mutate() {
     topology_mutation.runtime_topology.stale_interfaces = vec!["wg-old".to_string()];
     assert_eq!(
         plan_tunnel(&topology_mutation),
-        Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement)
+        Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentBuiltin)
     );
 }
 
 #[test]
-fn external_adapter_plans_delegate_topology_mutation_to_the_adapter() {
-    let mut input = plan_input(
-        TunnelKind::Wireguard,
-        RuntimeTunnelManager::ExternalManagedAdapter,
-    );
+fn custom_adapter_plans_delegate_topology_mutation_to_the_adapter() {
+    let mut input = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::CustomAdapter);
     input.runtime_topology.routes.push(RuntimeTunnelRoute {
         destination_cidr: "10.60.0.0/16".to_string(),
         ..RuntimeTunnelRoute::default()
     });
     assert_eq!(
         plan_tunnel(&input),
-        Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentManagement)
+        Err(NetworkPlanError::RuntimeTunnelTopologyRequiresAgentBuiltin)
     );
 }
 
@@ -386,7 +406,7 @@ fn topology_intent_accepts_only_declared_interfaces_and_routes() {
 
 #[test]
 fn endpoint_rendering_is_side_specific_without_generating_daemon_files() {
-    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut input = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     input.left_mtu = Some(1400);
     input.right_mtu = Some(1450);
     let plan = plan_tunnel(&input).unwrap();
@@ -420,14 +440,14 @@ fn endpoint_allocator_returns_non_overlapping_dual_stack_pairs() {
 
 #[test]
 fn plan_rejects_out_of_range_bandwidth_and_invalid_ospf_binding() {
-    let mut bandwidth = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut bandwidth = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     bandwidth.bandwidth_mbps = 10_001;
     assert_eq!(
         plan_tunnel(&bandwidth),
         Err(NetworkPlanError::InvalidBandwidthMbps)
     );
 
-    let mut ospf = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut ospf = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     ospf.ospf = Some(ospf_config());
     ospf.ospf.as_mut().unwrap().left_adapter_definition_id = Some(String::new());
     assert_eq!(plan_tunnel(&ospf), Err(NetworkPlanError::InvalidOspfConfig));
@@ -435,14 +455,14 @@ fn plan_rejects_out_of_range_bandwidth_and_invalid_ospf_binding() {
 
 #[test]
 fn plan_rejects_invalid_endpoint_mtu_and_enforces_the_ipv6_minimum() {
-    let mut too_small = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut too_small = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     too_small.left_mtu = Some(MIN_TUNNEL_MTU - 1);
     assert_eq!(
         plan_tunnel(&too_small),
         Err(NetworkPlanError::InvalidTunnelMtu)
     );
 
-    let mut ipv6 = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut ipv6 = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     ipv6.ipv6_tunnel = Some(TunnelAddressPair {
         left: "fd00::".to_string(),
         right: "fd00::1".to_string(),
@@ -453,24 +473,21 @@ fn plan_rejects_invalid_endpoint_mtu_and_enforces_the_ipv6_minimum() {
     ipv6.right_mtu = Some(MIN_IPV6_TUNNEL_MTU);
     assert!(plan_tunnel(&ipv6).is_ok());
 
-    let mut sit = plan_input(TunnelKind::Sit, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut sit = plan_input(TunnelKind::Sit, RuntimeTunnelManager::AgentBuiltin);
     sit.left_mtu = Some(MIN_IPV6_TUNNEL_MTU - 1);
     assert_eq!(plan_tunnel(&sit), Err(NetworkPlanError::InvalidTunnelMtu));
 
-    let mut missing = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentIproute2Managed);
+    let mut missing = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     missing.right_mtu = None;
     assert_eq!(
         plan_tunnel(&missing),
         Err(NetworkPlanError::TunnelMtuRequired)
     );
 
-    let mut externally_managed = plan_input(
-        TunnelKind::Wireguard,
-        RuntimeTunnelManager::ExternalManagedAdapter,
-    );
-    externally_managed.left_mtu = Some(1420);
+    let mut custom_adapter = plan_input(TunnelKind::Wireguard, RuntimeTunnelManager::CustomAdapter);
+    custom_adapter.left_mtu = Some(1420);
     assert_eq!(
-        plan_tunnel(&externally_managed),
+        plan_tunnel(&custom_adapter),
         Err(NetworkPlanError::TunnelMtuExternallyOwned)
     );
 }

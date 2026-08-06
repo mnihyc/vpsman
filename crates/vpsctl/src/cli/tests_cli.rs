@@ -146,3 +146,30 @@ fn tunnel_plan_defaults_do_not_enable_or_require_ospf() {
         .join()
         .expect("CLI parser test panicked");
 }
+
+#[test]
+fn tunnel_plan_credential_rotation_reuses_the_reviewed_mutation_shape() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "tunnel-plan-rotate-credentials",
+                "--plan-id",
+                "00000000-0000-4000-8000-000000000001",
+                "--expected-revision",
+                "7",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::TunnelPlanRotateCredentials(request) = parsed.command else {
+                panic!("expected tunnel-plan-rotate-credentials command");
+            };
+            assert_eq!(request.plan_id, "00000000-0000-4000-8000-000000000001");
+            assert_eq!(request.expected_revision, Some(7));
+            assert!(request.confirmed);
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}

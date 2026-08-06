@@ -154,6 +154,29 @@ pub(crate) fn submit_vty_tunnel_plan_delete(
     submit_vty_tunnel_plan_mutation(api_url, token, request, "delete")
 }
 
+pub(crate) fn submit_vty_tunnel_plan_credentials_rotation(
+    api_url: &str,
+    token: Option<&str>,
+    request: VtyTunnelPlanMutationRequest,
+) -> Result<String> {
+    anyhow::ensure!(
+        request.confirmed,
+        "tunnel plan credential rotation requires --confirmed"
+    );
+    http_post_json(
+        api_url,
+        &format!(
+            "/api/v1/tunnel-plans/{}/credentials/rotate",
+            request.plan_id
+        ),
+        token,
+        &serde_json::json!({
+            "confirmed": true,
+            "expected_revision": request.expected_revision,
+        }),
+    )
+}
+
 fn submit_vty_tunnel_plan_mutation(
     api_url: &str,
     token: Option<&str>,

@@ -281,7 +281,7 @@ pub fn runtime_config_requires_root_network_capability(command: &JobCommand) -> 
         .network
         .runtime_status_telemetry_plans
         .iter()
-        .any(|plan| plan.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed)
+        .any(|plan| plan.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin)
 }
 
 pub fn target_lacks_process_limit_capability(

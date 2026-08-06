@@ -2613,6 +2613,7 @@ export function App() {
           }
           onRefresh={dashboard.loadTunnelPlans}
           onRefreshTunnelPlanOspfStatus={dashboard.refreshTunnelPlanOspfStatus}
+          onRotateTunnelPlanCredentials={dashboard.rotateTunnelPlanCredentials}
           onSetTunnelPlanEnabled={dashboard.setTunnelPlanEnabled}
           onUpdateTunnelConnectionAssessment={
             dashboard.updateTunnelConnectionAssessment

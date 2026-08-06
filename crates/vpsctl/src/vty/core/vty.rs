@@ -148,7 +148,8 @@ Network and topology:
   port-forwards | port-forward-create | port-forward-update | port-forward-resolve
   port-forward-enable | port-forward-disable | port-forward-reapply
   port-forward-delete | port-forward-forget | port-forward-bulk
-  tunnel-plan-enable | tunnel-plan-disable | tunnel-plan-delete
+  tunnel-plan-enable | tunnel-plan-disable | tunnel-plan-rotate-credentials
+  tunnel-plan-delete
   tunnel-ospf-status-refresh
   tunnel-ospf-cost-update | tunnel-status | tunnel-probe | tunnel-speed-test
   network-observations | network-trends | network-ospf-recommendations

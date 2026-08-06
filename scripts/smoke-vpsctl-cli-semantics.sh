@@ -64,7 +64,7 @@ for kind in gre ipip sit fou; do
 done
 
 observed_plan="$("$bin" tunnel-plan \
-  --name external-openvpn \
+  --name custom-openvpn \
   --interface-name ovpn42 \
   --kind openvpn \
   --runtime-manager external_observed \
@@ -119,6 +119,12 @@ if lifecycle_error="$("$bin" tunnel-plan-disable \
   fail "tunnel-plan-disable accepted a mutation without --confirmed"
 fi
 require_contains "$lifecycle_error" "requires --confirmed" "tunnel plan lifecycle confirmation"
+
+if rotation_error="$("$bin" tunnel-plan-rotate-credentials \
+  --plan-id 00000000-0000-0000-0000-000000000001 2>&1)"; then
+  fail "tunnel-plan-rotate-credentials accepted a mutation without --confirmed"
+fi
+require_contains "$rotation_error" "requires --confirmed" "tunnel plan credential rotation confirmation"
 
 if delete_error="$("$bin" tunnel-plan-delete \
   --plan-id 00000000-0000-0000-0000-000000000001 2>&1)"; then

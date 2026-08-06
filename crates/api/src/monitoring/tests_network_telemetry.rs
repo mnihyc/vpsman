@@ -109,7 +109,7 @@ async fn disabled_tunnel_plan_stops_exposing_stale_telemetry() {
 #[tokio::test]
 async fn adapter_health_output_is_redacted_to_hashes() {
     let repo = Repository::Memory(MemoryState::default());
-    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::ExternalManagedAdapter).await;
+    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::CustomAdapter).await;
     let stdout = b"private adapter output";
     let stderr = b"private adapter error";
     let stdout_hash = hex::encode(Sha256::digest(stdout));
@@ -120,7 +120,7 @@ async fn adapter_health_output_is_redacted_to_hashes() {
         RuntimeTunnelStat {
             interface: "wg0".to_string(),
             kind: "wireguard".to_string(),
-            ownership_mode: "external_managed_adapter".to_string(),
+            ownership_mode: "custom_adapter".to_string(),
             mutation_policy: "managed_desired".to_string(),
             source: "approved_runtime_status_telemetry".to_string(),
             plan_id: Some(plan_id.to_string()),
@@ -556,9 +556,9 @@ async fn seed_declared_plan(repo: &Repository, manager: RuntimeTunnelManager) ->
     }
     let runtime_control = RuntimeTunnelControl {
         manager,
-        left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
             .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-        right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+        right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
             .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
         ..RuntimeTunnelControl::default()
     };

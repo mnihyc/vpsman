@@ -24,7 +24,7 @@ impl Repository {
             .definition
             .get("manager")
             .and_then(serde_json::Value::as_str)
-            != Some("external_managed_adapter")
+            != Some("custom_adapter")
             || definition
                 .definition
                 .get("contract_version")

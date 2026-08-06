@@ -340,7 +340,7 @@ const allViews: ScreenshotEntry[] = [
     requiredText: ["Create plan", "sfo-fra-gre", "external-openvpn"],
     desktopRequiredText: [
       "Runtime owner",
-      "Agent iproute2",
+      "Agent builtin",
       "External observed",
       "Tunnel only",
     ],

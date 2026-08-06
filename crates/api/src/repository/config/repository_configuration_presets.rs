@@ -2489,7 +2489,7 @@ pub(crate) fn validate_network_adapter_definition(
     };
     if request.adapter_kind == "runtime_tunnel" {
         anyhow::ensure!(
-            object.get("manager").and_then(Value::as_str) == Some("external_managed_adapter"),
+            object.get("manager").and_then(Value::as_str) == Some("custom_adapter"),
             "network_adapter_manager_invalid"
         );
         command("status_command", true)?;

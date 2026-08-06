@@ -7,6 +7,7 @@ fn recognizes_network_dispatch_commands() {
         "tunnel-plan-export --plan-id 00000000-0000-0000-0000-000000000000",
         "tunnel-plan-enable --plan-id 00000000-0000-0000-0000-000000000000 --expected-revision 1 --confirmed",
         "tunnel-plan-disable --plan-id 00000000-0000-0000-0000-000000000000 --expected-revision 1 --confirmed",
+        "tunnel-plan-rotate-credentials --plan-id 00000000-0000-0000-0000-000000000000 --expected-revision 1 --confirmed",
         "tunnel-plan-delete --plan-id 00000000-0000-0000-0000-000000000000 --expected-revision 1 --confirmed",
         "tunnel-allocate --ipv4-pool-cidr 10.255.0.0/24",
         "tunnel-ospf-status-refresh --plan-id 00000000-0000-0000-0000-000000000000",

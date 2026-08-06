@@ -21,6 +21,7 @@ hex.workspace = true
 hmac.workspace = true
 ipnet.workspace = true
 rand.workspace = true
+rcgen.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,11 +29,13 @@ sha1.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 tar.workspace = true
+time.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+x25519-dalek.workspace = true
 vpsman-common = { path = "../common" }
 vpsman-object-store = { path = "../object-store" }
 vpsman-server-core = { path = "../server-core" }

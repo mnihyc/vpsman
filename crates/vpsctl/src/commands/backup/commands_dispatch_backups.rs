@@ -409,6 +409,10 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::set_tunnel_plan_enabled(api_url, token, request, false)?;
             Ok(None)
         }
+        Command::TunnelPlanRotateCredentials(request) => {
+            commands_network::rotate_tunnel_plan_credentials(api_url, token, request)?;
+            Ok(None)
+        }
         Command::TunnelPlanDelete(request) => {
             commands_network::delete_tunnel_plan(api_url, token, request)?;
             Ok(None)

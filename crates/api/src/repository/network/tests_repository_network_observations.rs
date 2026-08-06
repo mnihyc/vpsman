@@ -69,7 +69,7 @@ fn parses_network_status_runtime_summary_and_adapter_evidence() {
             "peer_client_id": "right",
             "runtime": {
                 "summary": {
-                    "manager": "external_managed_adapter",
+                    "manager": "custom_adapter",
                     "status": "adapter_unhealthy",
                     "healthy": false,
                     "drift": false,

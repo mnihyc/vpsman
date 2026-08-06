@@ -31,13 +31,13 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -46,8 +46,8 @@ pub const HOST_PACKAGE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const HOST_STORAGE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
-pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION: u16 = 3;
 
 pub const JOB_STATUS_QUEUED: &str = "queued";
 pub const JOB_STATUS_RUNNING: &str = "running";
@@ -845,6 +845,8 @@ pub struct AgentCapabilitySnapshot {
     #[serde(default)]
     pub can_manage_runtime_tunnels: bool,
     #[serde(default)]
+    pub builtin_tunnel_drivers: AgentBuiltinTunnelDriverCapabilities,
+    #[serde(default)]
     pub can_apply_process_limits: bool,
     #[serde(default)]
     pub port_forwarding: crate::PortForwardCapability,
@@ -860,11 +862,32 @@ impl Default for AgentCapabilitySnapshot {
             max_job_timeout_secs: default_agent_max_job_timeout_secs(),
             can_attempt_privileged_ops: false,
             can_manage_runtime_tunnels: false,
+            builtin_tunnel_drivers: AgentBuiltinTunnelDriverCapabilities::default(),
             can_apply_process_limits: false,
             port_forwarding: crate::PortForwardCapability::default(),
             unprivileged_hint: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentBuiltinTunnelDriverCapabilities {
+    #[serde(default)]
+    pub iproute2: AgentBuiltinTunnelDriverCapability,
+    #[serde(default)]
+    pub wireguard: AgentBuiltinTunnelDriverCapability,
+    #[serde(default)]
+    pub openvpn: AgentBuiltinTunnelDriverCapability,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentBuiltinTunnelDriverCapability {
+    #[serde(default)]
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 fn default_agent_max_job_timeout_secs() -> u64 {
@@ -3062,13 +3085,15 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
 
 pub fn job_command_dispatch_protocol_version(command: &JobCommand) -> u16 {
     match command {
-        // These commands are the permanent rolling-upgrade escape hatch. Their
-        // v1 wire shapes stay frozen; new semantics must use a new command
-        // variant instead of making an old agent unable to update.
+        // Update commands are the permanent rolling-upgrade escape hatch. Their
+        // v1 wire shapes stay frozen so an old agent can always update.
         JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        // These read-only v1 wire shapes did not change when their command
+        // families gained v2 operations. Keep them usable during rolling updates.
+        JobCommand::ConfigRead | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
         _ => job_command_protocol_version(command),
     }
 }
@@ -3079,7 +3104,6 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
         | JobCommand::ConfigRead
-        | JobCommand::RuntimeConfigSync { .. }
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3115,10 +3139,11 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
-        | JobCommand::NetworkStatus { .. }
-        | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
+        JobCommand::RuntimeConfigSync { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkProbe { .. }
-        | JobCommand::NetworkSpeedTest { .. } => MIN_COMMAND_PROTOCOL_VERSION,
+        | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
         JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
             NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
         }

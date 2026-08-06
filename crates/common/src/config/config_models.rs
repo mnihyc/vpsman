@@ -326,6 +326,10 @@ pub struct AgentNetworkConfig {
     pub runtime_ip_argv: Vec<String>,
     #[serde(default = "default_network_runtime_tc_argv")]
     pub runtime_tc_argv: Vec<String>,
+    #[serde(default = "default_network_runtime_wg_argv")]
+    pub runtime_wg_argv: Vec<String>,
+    #[serde(default = "default_network_runtime_openvpn_argv")]
+    pub runtime_openvpn_argv: Vec<String>,
     #[serde(default = "default_network_runtime_command_timeout_secs")]
     pub runtime_command_timeout_secs: u64,
     #[serde(default = "default_network_runtime_command_max_output_bytes")]
@@ -389,6 +393,8 @@ pub struct AgentRuntimeStatusTelemetryPlan {
     pub endpoint_side: TunnelEndpointSide,
     pub plan: TunnelPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_credentials: Option<crate::TunnelEndpointBuiltinCredentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_adapter: Option<crate::RuntimeTunnelAdapterCommands>,
     #[serde(default)]
     pub traffic_source: AgentRuntimeTrafficSource,
@@ -412,7 +418,7 @@ pub enum AgentRuntimeTrafficSource {
 pub enum AgentRuntimeUnprivilegedMutationPolicy {
     #[default]
     Skip,
-    TryExternalAdapters,
+    TryCustomAdapters,
     TryAll,
 }
 
@@ -474,6 +480,8 @@ impl Default for AgentNetworkConfig {
             root_dir: default_network_root_dir(),
             runtime_ip_argv: default_network_runtime_ip_argv(),
             runtime_tc_argv: default_network_runtime_tc_argv(),
+            runtime_wg_argv: default_network_runtime_wg_argv(),
+            runtime_openvpn_argv: default_network_runtime_openvpn_argv(),
             runtime_command_timeout_secs: default_network_runtime_command_timeout_secs(),
             runtime_command_max_output_bytes: default_network_runtime_command_max_output_bytes(),
             probe_ping_argv: Vec::new(),
@@ -497,6 +505,14 @@ impl Default for AgentNetworkConfig {
 
 fn default_network_root_dir() -> String {
     "/".to_string()
+}
+
+fn default_network_runtime_wg_argv() -> Vec<String> {
+    vec!["/usr/bin/wg".to_string()]
+}
+
+fn default_network_runtime_openvpn_argv() -> Vec<String> {
+    vec!["/usr/sbin/openvpn".to_string()]
 }
 
 fn default_network_runtime_ip_argv() -> Vec<String> {

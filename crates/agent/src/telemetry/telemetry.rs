@@ -971,11 +971,11 @@ async fn runtime_status_telemetry_stat(
     stat.traffic_reason = traffic.reason;
     stat.traffic_checked_unix = Some(now);
     stat.adapter_health = Some(match plan.runtime_control.manager {
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             adapter_health_for_plan(config, telemetry_plan, now).await
         }
-        RuntimeTunnelManager::AgentIproute2Managed => {
-            skipped_adapter_health("agent_iproute2_managed", now, "agent_iproute2_managed")
+        RuntimeTunnelManager::AgentBuiltin => {
+            skipped_adapter_health("agent_builtin", now, "agent_builtin")
         }
         RuntimeTunnelManager::ExternalObserved => {
             stat.mutation_policy = "observe_only_saved_plan".to_string();
@@ -1572,9 +1572,9 @@ fn endpoint_side_label(side: TunnelEndpointSide) -> &'static str {
 
 fn runtime_manager_label(manager: RuntimeTunnelManager) -> &'static str {
     match manager {
-        RuntimeTunnelManager::AgentIproute2Managed => "agent_iproute2_managed",
+        RuntimeTunnelManager::AgentBuiltin => "agent_builtin",
         RuntimeTunnelManager::ExternalObserved => "external_observed",
-        RuntimeTunnelManager::ExternalManagedAdapter => "external_managed_adapter",
+        RuntimeTunnelManager::CustomAdapter => "custom_adapter",
     }
 }
 

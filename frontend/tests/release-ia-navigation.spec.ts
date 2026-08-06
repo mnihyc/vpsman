@@ -7218,7 +7218,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
       ).toBeVisible();
     }
   }
-  await expect(tunnelPlanGrid).toContainText("Agent iproute2");
+  await expect(tunnelPlanGrid).toContainText("Agent builtin");
   await expect(tunnelPlanGrid).toContainText("L1476 · R1476");
   await expect(tunnelPlanGrid).toContainText("External observed");
   await expect(tunnelPlanGrid).toContainText("Reviewed");
@@ -7266,7 +7266,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     "Partially verified · Peer probe failed; not proof of disconnect",
   );
   if (isMobileViewport) {
-    await expect(planDetail.getByTitle("Agent iproute2")).toBeVisible();
+    await expect(planDetail.getByTitle("Agent builtin")).toBeVisible();
     await expect(
       planDetail.getByTitle("agent-sfo-01 / agent-fra-02"),
     ).toBeVisible();
@@ -7346,7 +7346,7 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     page.getByRole("radiogroup", { name: "Tunnel runtime ownership" }),
   ).toBeVisible();
   await expect(
-    page.getByText("Agent-managed routes and cleanup"),
+    page.getByText("Agent builtin routes and cleanup"),
   ).toBeVisible();
   await expect(
     page.getByText("OSPF cost control", { exact: true }),
@@ -7384,14 +7384,14 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     );
   }
   await activate(page.getByRole("button", { name: "External observed" }));
-  await expect(page.getByText("Agent-managed routes and cleanup")).toHaveCount(
+  await expect(page.getByText("Agent builtin routes and cleanup")).toHaveCount(
     0,
   );
   await expect(
     page.getByLabel("Left runtime adapter", { exact: true }),
   ).toHaveCount(0);
-  await activate(page.getByRole("button", { name: "External adapter" }));
-  await expect(page.getByText("Agent-managed routes and cleanup")).toHaveCount(
+  await activate(page.getByRole("button", { name: "Custom adapter" }));
+  await expect(page.getByText("Agent builtin routes and cleanup")).toHaveCount(
     0,
   );
   await expect(

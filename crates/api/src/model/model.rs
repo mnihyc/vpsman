@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 use vpsman_common::{
     AgentCapabilitySnapshot, JobCommand, PrivilegeAssertion, TunnelAddressFamily,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    TunnelAddressPair, TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan,
+    TunnelPlanInput,
 };
 
 pub(crate) use crate::auth_model::*;
@@ -561,11 +562,76 @@ pub(crate) struct TunnelPlanView {
     pub(crate) right_runtime_config: TunnelPlanEndpointRuntimeConfigView,
     pub(crate) input: TunnelPlanInput,
     pub(crate) plan: TunnelPlan,
+    #[serde(serialize_with = "serialize_tunnel_builtin_credential_evidence")]
+    pub(crate) builtin_credentials: Option<TunnelBuiltinCredentials>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) deleted_at: Option<String>,
     pub(crate) deleted_by: Option<Uuid>,
     pub(crate) deleted_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TunnelBuiltinCredentialEvidence<'a> {
+    Wireguard {
+        generation: u64,
+        left: TunnelWireguardPublicEvidence<'a>,
+        right: TunnelWireguardPublicEvidence<'a>,
+    },
+    Openvpn {
+        generation: u64,
+        left: TunnelOpenvpnPublicEvidence<'a>,
+        right: TunnelOpenvpnPublicEvidence<'a>,
+    },
+}
+
+#[derive(Serialize)]
+struct TunnelWireguardPublicEvidence<'a> {
+    public_key_base64: &'a str,
+}
+
+#[derive(Serialize)]
+struct TunnelOpenvpnPublicEvidence<'a> {
+    certificate_sha256_fingerprint: &'a str,
+}
+
+fn serialize_tunnel_builtin_credential_evidence<S>(
+    credentials: &Option<TunnelBuiltinCredentials>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let evidence = credentials.as_ref().map(|credentials| match credentials {
+        TunnelBuiltinCredentials::Wireguard {
+            generation,
+            left,
+            right,
+        } => TunnelBuiltinCredentialEvidence::Wireguard {
+            generation: *generation,
+            left: TunnelWireguardPublicEvidence {
+                public_key_base64: &left.public_key_base64,
+            },
+            right: TunnelWireguardPublicEvidence {
+                public_key_base64: &right.public_key_base64,
+            },
+        },
+        TunnelBuiltinCredentials::Openvpn {
+            generation,
+            left,
+            right,
+        } => TunnelBuiltinCredentialEvidence::Openvpn {
+            generation: *generation,
+            left: TunnelOpenvpnPublicEvidence {
+                certificate_sha256_fingerprint: &left.certificate_sha256_fingerprint,
+            },
+            right: TunnelOpenvpnPublicEvidence {
+                certificate_sha256_fingerprint: &right.certificate_sha256_fingerprint,
+            },
+        },
+    });
+    evidence.serialize(serializer)
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -1402,7 +1402,7 @@ test("tunnel plan submits a fresh explicit declaration after reopening review", 
     .fill("198.51.100.10");
   await composer.getByLabel("Left tunnel IPv4").fill("10.255.60.0");
   await composer.getByLabel("Right tunnel IPv4").fill("10.255.60.1");
-  await activate(composer.getByRole("button", { name: "External adapter" }));
+  await activate(composer.getByRole("button", { name: "Custom adapter" }));
   await composer
     .getByLabel("Left runtime adapter", { exact: true })
     .selectOption("33333333-3333-4333-8333-333333333333");
@@ -1443,7 +1443,7 @@ test("tunnel plan submits a fresh explicit declaration after reopening review", 
     right_client_id: "agent-fra-02",
     runtime_control: {
       left_adapter_template_id: "33333333-3333-4333-8333-333333333333",
-      manager: "external_managed_adapter",
+      manager: "custom_adapter",
       right_adapter_template_id: "33333333-3333-4333-8333-333333333333",
     },
   });

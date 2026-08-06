@@ -39,6 +39,9 @@ import {
   calculateOspfCostPreview,
   clampTunnelBandwidthMbps,
   DEFAULT_TUNNEL_BANDWIDTH_MBPS,
+  DEFAULT_RUNTIME_FOU_OPTIONS,
+  DEFAULT_RUNTIME_OPENVPN_OPTIONS,
+  DEFAULT_RUNTIME_WIREGUARD_OPTIONS,
   defaultAgentTunnelMtu,
   MAX_TUNNEL_MTU,
   MAX_TUNNEL_BANDWIDTH_MBPS,
@@ -74,12 +77,14 @@ import type {
   TunnelPlanOspfJobsResponse,
   RuntimeTunnelRoute,
   RuntimeTunnelManager,
+  RuntimeTunnelOpenvpnTransport,
+  RuntimeTunnelWireguardEndpointMode,
   TelemetryTunnelRecord,
   TopologyGraph,
   TopologyGraphEdge,
   TunnelAddressPair,
   TunnelKind,
-  TunnelPlan,
+  TunnelPlanExport,
   TunnelPlanEndpointRuntimeConfig,
   TunnelPlanMutationResponse,
   TunnelPlanRecord,
@@ -107,7 +112,14 @@ import { TopologyOspfUpdateControls } from "./topology/TopologyOspfUpdateControl
 import { PortForwardingPanel } from "./topology/PortForwardingPanel";
 import { NetworkAdapterDefinitionsPanel } from "./topology/NetworkAdapterDefinitionsPanel";
 
-const AGENT_TUNNEL_KINDS: TunnelKind[] = ["gre", "ipip", "sit", "fou"];
+const AGENT_TUNNEL_KINDS: TunnelKind[] = [
+  "gre",
+  "ipip",
+  "sit",
+  "fou",
+  "wireguard",
+  "openvpn",
+];
 const ALL_TUNNEL_KINDS: TunnelKind[] = [
   "gre",
   "ipip",
@@ -175,6 +187,7 @@ export function TopologyPanel({
   onUpdatePortForwardRule,
   onRefresh,
   onRefreshTunnelPlanOspfStatus,
+  onRotateTunnelPlanCredentials,
   onSelectSubpage,
   onSetTunnelPlanEnabled,
   onUpdateTunnelConnectionAssessment,
@@ -411,6 +424,7 @@ export function TopologyPanel({
       onOpenAdapterDefinitions={onOpenAdapterDefinitions}
       onOpenConfigurationSources={onOpenConfigurationSources}
       onRefresh={onRefresh}
+      onRotateTunnelPlanCredentials={onRotateTunnelPlanCredentials}
       onSetTunnelPlanEnabled={onSetTunnelPlanEnabled}
       onUpdateTunnelConnectionAssessment={onUpdateTunnelConnectionAssessment}
       onUpdateTunnelPlan={onUpdateTunnelPlan}
@@ -597,6 +611,7 @@ function TunnelPlansWorkspace({
   onOpenAdapterDefinitions,
   onOpenConfigurationSources,
   onRefresh,
+  onRotateTunnelPlanCredentials,
   onSetTunnelPlanEnabled,
   onUpdateTunnelConnectionAssessment,
   onUpdateTunnelPlan,
@@ -627,12 +642,15 @@ function TunnelPlansWorkspace({
   onDeleteTunnelPlan: (
     target: TunnelPlanRevisionTarget,
   ) => Promise<TunnelPlanMutationResponse>;
-  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
+  onExportTunnelPlan: (planId: string) => Promise<TunnelPlanExport>;
   onInitialPlanWorkflowConsumed: () => void;
   onInitialAdapterKindConsumed: () => void;
   onOpenAdapterDefinitions: (domain: NetworkAdapterKind) => void;
   onOpenConfigurationSources: () => void;
   onRefresh: () => Promise<void>;
+  onRotateTunnelPlanCredentials: (
+    target: TunnelPlanRevisionTarget,
+  ) => Promise<TunnelPlanMutationResponse>;
   onSetTunnelPlanEnabled: (
     targets: TunnelPlanRevisionTarget[],
     enabled: boolean,
@@ -654,6 +672,7 @@ function TunnelPlansWorkspace({
   tunnelPlanCorruptions: import("../types").TunnelPlanCorruptRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [createOpen, setCreateOpen] = useState(
     initialPlanWorkflow === "create",
   );
@@ -664,6 +683,8 @@ function TunnelPlansWorkspace({
   const [deleteSnapshot, setDeleteSnapshot] = useState<DeleteSnapshot | null>(
     null,
   );
+  const [credentialRotationSnapshot, setCredentialRotationSnapshot] =
+    useState<TunnelPlanRecord | null>(null);
   const [pending, setPending] = useState(false);
   const createRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLElement | null>(null);
@@ -691,6 +712,7 @@ function TunnelPlansWorkspace({
 
   useEffect(() => {
     if (!feedback && !error) return;
+    if (lifecycleSnapshot || deleteSnapshot || credentialRotationSnapshot) return;
     const frame = window.requestAnimationFrame(() => {
       if (planFeedbackRef.current) {
         scrollIntoViewWithMotion(planFeedbackRef.current, {
@@ -699,7 +721,7 @@ function TunnelPlansWorkspace({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [error, feedback]);
+  }, [credentialRotationSnapshot, deleteSnapshot, error, feedback, lifecycleSnapshot]);
 
   function requestLifecycle(
     ids: string[],
@@ -791,6 +813,31 @@ function TunnelPlansWorkspace({
     }
   }
 
+  async function applyCredentialRotation(plan: TunnelPlanRecord) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      const response = await onRotateTunnelPlanCredentials({
+        expected_revision: plan.revision,
+        plan_id: plan.id,
+      });
+      setCredentialRotationSnapshot(null);
+      setFeedback(
+        tunnelDispatchFeedback(
+          response.sync,
+          `Rotated credentials for tunnel plan ${plan.name}`,
+        ),
+      );
+    } catch (actionError) {
+      setFeedback({
+        message: tunnelCredentialRotationError(actionError),
+        tone: "danger",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
   async function exportPlan(plan: TunnelPlanRecord) {
     setFeedback(null);
     try {
@@ -824,7 +871,10 @@ function TunnelPlansWorkspace({
     () => new Map(topologyGraph.edges.map((edge) => [edge.plan_id, edge])),
     [topologyGraph.edges],
   );
-  const agentNameById = useMemo(() => clientDisplayNameMap(agents), [agents]);
+  const agentNameById = useMemo(
+    () => clientDisplayNameMap(agents, vpsNameDisplayMode),
+    [agents, vpsNameDisplayMode],
+  );
   const columns = useMemo<ConsoleDataGridColumn<TunnelPlanRecord>[]>(
     () => [
       {
@@ -881,7 +931,7 @@ function TunnelPlansWorkspace({
         cell: (plan) => (
           <span className="historyPrimary">
             <strong>{plan.plan.bandwidth_mbps} Mbps</strong>
-            {isAgentManagedTunnelPlan(plan) && (
+            {isAgentBuiltinTunnelPlan(plan) && (
               <small
                 title={
                   plan.plan.left_mtu == null || plan.plan.right_mtu == null
@@ -895,7 +945,7 @@ function TunnelPlansWorkspace({
           </span>
         ),
         searchValue: (plan) =>
-          isAgentManagedTunnelPlan(plan)
+          isAgentBuiltinTunnelPlan(plan)
             ? `${plan.plan.bandwidth_mbps} Mbps MTU ${plan.plan.left_mtu ?? "missing"} ${plan.plan.right_mtu ?? "missing"}`
             : `${plan.plan.bandwidth_mbps} Mbps`,
         sortValue: (plan) => plan.plan.bandwidth_mbps,
@@ -1100,6 +1150,24 @@ function TunnelPlansWorkspace({
     },
     {
       description: (rows) => {
+        if (rows.length !== 1)
+          return "Select one Agent builtin WireGuard or OpenVPN plan.";
+        return supportsBuiltinCredentials(rows[0])
+          ? `Review replacing both endpoint credentials for ${rows[0].name}.`
+          : "Credential rotation applies only to Agent builtin WireGuard or OpenVPN plans.";
+      },
+      disabled: (rows) =>
+        pending || rows.length !== 1 || !supportsBuiltinCredentials(rows[0]),
+      icon: <RefreshCcw size={14} />,
+      label: "Rotate credentials",
+      onSelect: (rows) => {
+        if (!rows[0]) return;
+        setFeedback(null);
+        setCredentialRotationSnapshot(rows[0]);
+      },
+    },
+    {
+      description: (rows) => {
         const eligible = rows.filter((plan) => !plan.enabled);
         return eligible.length > 0
           ? `Review enabling ${eligible.length} selected tunnel plan${eligible.length === 1 ? "" : "s"}.`
@@ -1225,6 +1293,7 @@ function TunnelPlansWorkspace({
           itemLabel="tunnel plans"
           renderExpandedRow={(plan) => (
             <TunnelPlanDetails
+              agents={agents}
               agentNameById={agentNameById}
               onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
               plan={plan}
@@ -1319,15 +1388,6 @@ function TunnelPlansWorkspace({
           />
         </div>
       )}
-      <NetworkAdapterDefinitionsPanel
-        definitions={networkAdapterDefinitions}
-        initialKind={initialAdapterKind}
-        onCreate={onCreateNetworkAdapterDefinition}
-        onDelete={onDeleteNetworkAdapterDefinition}
-        onInitialKindConsumed={onInitialAdapterKindConsumed}
-        onUpdate={onUpdateNetworkAdapterDefinition}
-        tunnelPlans={tunnelPlans}
-      />
       <ConfirmationPrompt
         confirmLabel={
           lifecycleSnapshot?.retryCleanup
@@ -1415,6 +1475,55 @@ function TunnelPlansWorkspace({
         tone={lifecycleSnapshot?.enabled ? "normal" : "danger"}
       />
       <ConfirmationPrompt
+        confirmLabel="Rotate credentials"
+        detail="Replace both endpoint identities as one revision and push the resulting desired state to both endpoints when this plan is enabled. The previous credentials cannot authenticate after convergence."
+        error={
+          credentialRotationSnapshot && feedback?.tone === "danger"
+            ? feedback.message
+            : null
+        }
+        items={
+          credentialRotationSnapshot
+            ? [
+                {
+                  label: "Plan",
+                  value: `${credentialRotationSnapshot.name} (r${credentialRotationSnapshot.revision})`,
+                },
+                {
+                  label: "Driver",
+                  value: formatTunnelKind(credentialRotationSnapshot.kind),
+                },
+                {
+                  label: "Current generation",
+                  value: String(
+                    credentialRotationSnapshot.builtin_credentials
+                      ?.generation ?? "missing",
+                  ),
+                },
+                {
+                  label: "Endpoints",
+                  value: `${credentialRotationSnapshot.left_client_id} / ${credentialRotationSnapshot.right_client_id}`,
+                },
+                {
+                  label: "Runtime effect",
+                  value: credentialRotationSnapshot.enabled
+                    ? "Generate, save, and sync both endpoint identities"
+                    : "Generate and save; sync when enabled",
+                },
+              ]
+            : []
+        }
+        onCancel={() => setCredentialRotationSnapshot(null)}
+        onConfirm={() =>
+          credentialRotationSnapshot &&
+          void applyCredentialRotation(credentialRotationSnapshot)
+        }
+        open={credentialRotationSnapshot !== null}
+        pending={pending}
+        title="Confirm tunnel credential rotation"
+        tone="danger"
+      />
+      <ConfirmationPrompt
         confirmLabel="Delete plan"
         detail="Retire this declaration immediately. It is removed from desired state now; both endpoints receive runtime removal jobs, and offline agents reconcile it on reconnect. Reservations become available immediately and audit history remains."
         error={
@@ -1463,16 +1572,27 @@ function TunnelPlansWorkspace({
         title="Confirm tunnel plan deletion"
         tone="danger"
       />
+      <NetworkAdapterDefinitionsPanel
+        definitions={networkAdapterDefinitions}
+        initialKind={initialAdapterKind}
+        onCreate={onCreateNetworkAdapterDefinition}
+        onDelete={onDeleteNetworkAdapterDefinition}
+        onInitialKindConsumed={onInitialAdapterKindConsumed}
+        onUpdate={onUpdateNetworkAdapterDefinition}
+        tunnelPlans={tunnelPlans}
+      />
     </div>
   );
 }
 
 function TunnelPlanDetails({
+  agents,
   agentNameById,
   onUpdateConnectionAssessment,
   plan,
   runtimeEdge,
 }: {
+  agents: AgentView[];
   agentNameById: Map<string, string>;
   onUpdateConnectionAssessment: (
     planId: string,
@@ -1605,7 +1725,7 @@ function TunnelPlanDetails({
           label="Bandwidth"
           value={`${plan.plan.bandwidth_mbps} Mbps`}
         />
-        {isAgentManagedTunnelPlan(plan) ? (
+        {isAgentBuiltinTunnelPlan(plan) ? (
           <PlanFact
             label="Endpoint MTU"
             value={`Left ${plan.plan.left_mtu ?? "missing"} · Right ${plan.plan.right_mtu ?? "missing"}`}
@@ -1614,12 +1734,42 @@ function TunnelPlanDetails({
         <PlanFact
           label="Runtime ownership"
           title={
-            plan.plan.runtime_control?.manager === "external_managed_adapter"
-              ? `External adapters ${plan.plan.runtime_control.left_adapter_template_id ?? "missing"} / ${plan.plan.runtime_control.right_adapter_template_id ?? "missing"}`
+            plan.plan.runtime_control?.manager === "custom_adapter"
+              ? `Custom adapters ${plan.plan.runtime_control.left_adapter_template_id ?? "missing"} / ${plan.plan.runtime_control.right_adapter_template_id ?? "missing"}`
               : undefined
           }
           value={formatRuntimeBinding(plan)}
         />
+        {isAgentBuiltinTunnelPlan(plan) ? (
+          <PlanFact
+            label="Builtin driver"
+            title={builtinDriverCapabilityTitle(plan, agents)}
+            value={builtinDriverCapabilitySummary(plan, agents)}
+          />
+        ) : null}
+        {plan.kind === "wireguard" && isAgentBuiltinTunnelPlan(plan) ? (
+          <PlanFact
+            label="WireGuard runtime"
+            value={formatWireguardRuntime(plan)}
+          />
+        ) : null}
+        {plan.kind === "openvpn" && isAgentBuiltinTunnelPlan(plan) ? (
+          <PlanFact label="OpenVPN runtime" value={formatOpenvpnRuntime(plan)} />
+        ) : null}
+        {plan.builtin_credentials?.kind === "wireguard" ? (
+          <PlanFact
+            label="WireGuard identity"
+            title={`Left ${plan.builtin_credentials.left.public_key_base64} · Right ${plan.builtin_credentials.right.public_key_base64}`}
+            value={`Generation ${plan.builtin_credentials.generation} · L ${shortPublicEvidence(plan.builtin_credentials.left.public_key_base64)} · R ${shortPublicEvidence(plan.builtin_credentials.right.public_key_base64)}`}
+          />
+        ) : null}
+        {plan.builtin_credentials?.kind === "openvpn" ? (
+          <PlanFact
+            label="OpenVPN identity"
+            title={`Left ${plan.builtin_credentials.left.certificate_sha256_fingerprint} · Right ${plan.builtin_credentials.right.certificate_sha256_fingerprint}`}
+            value={`Generation ${plan.builtin_credentials.generation} · L ${shortPublicEvidence(plan.builtin_credentials.left.certificate_sha256_fingerprint)} · R ${shortPublicEvidence(plan.builtin_credentials.right.certificate_sha256_fingerprint)}`}
+          />
+        ) : null}
         <PlanFact label="OSPF control" value={formatPlanOspf(plan)} />
       </div>
       <form
@@ -1697,8 +1847,8 @@ function TunnelPlanDetails({
         message={assessmentFeedback?.message}
         tone={assessmentFeedback?.tone}
       />
-      {(plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") ===
-        "agent_iproute2_managed" &&
+      {(plan.plan.runtime_control?.manager ?? "agent_builtin") ===
+        "agent_builtin" &&
         (plan.plan.runtime_topology?.desired_interfaces?.length ?? 0) > 0 && (
           <div className="tunnelIntentLine">
             <strong>Declared interfaces</strong>
@@ -1791,11 +1941,13 @@ function TunnelPlanComposer({
         agents,
         current.rightClientId,
         current.runtimeManager,
+        current.kind,
       );
       const suggestedRight = observedPeerAddress(
         agents,
         current.leftClientId,
         current.runtimeManager,
+        current.kind,
       );
       const leftRemoteUnderlay = autoFillOwnership.leftRemote
         ? (suggestedLeft ?? "")
@@ -1818,6 +1970,7 @@ function TunnelPlanComposer({
     form.leftClientId,
     form.rightClientId,
     form.runtimeManager,
+    form.kind,
     initialPlan,
   ]);
 
@@ -2003,11 +2156,11 @@ function TunnelPlanComposer({
 
   function changeManager(manager: RuntimeTunnelManager) {
     if (
-      manager === "agent_iproute2_managed" &&
+      manager === "agent_builtin" &&
       !AGENT_TUNNEL_KINDS.includes(form.kind)
     ) {
       setFeedback({
-        message: `${formatTunnelKind(form.kind)} cannot be agent-managed. Select GRE, IPIP, SIT, or FOU before choosing Agent iproute2.`,
+        message: `${formatTunnelKind(form.kind)} requires external ownership. Agent builtin supports GRE, IPIP, SIT, FOU, WireGuard, and OpenVPN.`,
         location: "manager",
         tone: "warning",
       });
@@ -2103,9 +2256,11 @@ function TunnelPlanComposer({
   }
 
   const kindOptions =
-    form.runtimeManager === "agent_iproute2_managed"
+    form.runtimeManager === "agent_builtin"
       ? AGENT_TUNNEL_KINDS
       : ALL_TUNNEL_KINDS;
+  const wireguardSelectsLocalSource =
+    form.runtimeManager === "agent_builtin" && form.kind === "wireguard";
   return (
     <section className="fleetPanel tunnelPlanComposer">
       <div className="sectionHeader tunnelPlanComposerHeader">
@@ -2162,7 +2317,7 @@ function TunnelPlanComposer({
             </Field>
             <Field
               label="Kind"
-              tooltip="Agent iproute2 supports GRE, IPIP, SIT, and FOU. WireGuard, OpenVPN, TUN/TAP, and custom interfaces require external ownership."
+              tooltip="Agent builtin supports GRE, IPIP, SIT, FOU, WireGuard, and OpenVPN. TUN/TAP and custom interfaces require external ownership."
             >
               <select
                 aria-label="Tunnel kind"
@@ -2179,7 +2334,9 @@ function TunnelPlanComposer({
               </select>
             </Field>
           </div>
-          <div className="topologyFormGrid threeColumn tunnelEndpointUnderlayGrid">
+          <div
+            className={`topologyFormGrid ${wireguardSelectsLocalSource ? "twoColumn" : "threeColumn"} tunnelEndpointUnderlayGrid`}
+          >
             <Field label="Left VPS">
               <VpsCombobox
                 agents={agents}
@@ -2207,19 +2364,21 @@ function TunnelPlanComposer({
                 value={form.leftRemoteUnderlay}
               />
             </Field>
-            <Field
-              label="Left local source"
-              tooltip="Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
-            >
-              <input
-                aria-label="Left local underlay source"
-                onChange={(event) =>
-                  update("leftLocalUnderlay", event.target.value)
-                }
-                placeholder="Automatic"
-                value={form.leftLocalUnderlay}
-              />
-            </Field>
+            {!wireguardSelectsLocalSource && (
+              <Field
+                label="Left local source"
+                tooltip="Optional outer-packet source bound on the left VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
+              >
+                <input
+                  aria-label="Left local underlay source"
+                  onChange={(event) =>
+                    update("leftLocalUnderlay", event.target.value)
+                  }
+                  placeholder="Automatic"
+                  value={form.leftLocalUnderlay}
+                />
+              </Field>
+            )}
             <Field label="Right VPS">
               <VpsCombobox
                 agents={agents}
@@ -2247,19 +2406,21 @@ function TunnelPlanComposer({
                 value={form.rightRemoteUnderlay}
               />
             </Field>
-            <Field
-              label="Right local source"
-              tooltip="Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
-            >
-              <input
-                aria-label="Right local underlay source"
-                onChange={(event) =>
-                  update("rightLocalUnderlay", event.target.value)
-                }
-                placeholder="Automatic"
-                value={form.rightLocalUnderlay}
-              />
-            </Field>
+            {!wireguardSelectsLocalSource && (
+              <Field
+                label="Right local source"
+                tooltip="Optional outer-packet source bound on the right VPS. It may be a private interface address behind NAT. Leave empty to let the OS route choose."
+              >
+                <input
+                  aria-label="Right local underlay source"
+                  onChange={(event) =>
+                    update("rightLocalUnderlay", event.target.value)
+                  }
+                  placeholder="Automatic"
+                  value={form.rightLocalUnderlay}
+                />
+              </Field>
+            )}
           </div>
         </fieldset>
 
@@ -2271,10 +2432,10 @@ function TunnelPlanComposer({
             aria-label="Tunnel runtime ownership"
           >
             <ManagerChoice
-              active={form.runtimeManager === "agent_iproute2_managed"}
-              detail="vpsman creates and removes GRE, IPIP, SIT, or FOU with iproute2."
-              label="Agent iproute2"
-              onClick={() => changeManager("agent_iproute2_managed")}
+              active={form.runtimeManager === "agent_builtin"}
+              detail="vpsman owns supported tunnels with its built-in iproute2, WireGuard, or OpenVPN driver."
+              label="Agent builtin"
+              onClick={() => changeManager("agent_builtin")}
             />
             <ManagerChoice
               active={form.runtimeManager === "external_observed"}
@@ -2283,10 +2444,10 @@ function TunnelPlanComposer({
               onClick={() => changeManager("external_observed")}
             />
             <ManagerChoice
-              active={form.runtimeManager === "external_managed_adapter"}
+              active={form.runtimeManager === "custom_adapter"}
               detail="vpsman executes the selected operator-owned adapter definition."
-              label="External adapter"
-              onClick={() => changeManager("external_managed_adapter")}
+              label="Custom adapter"
+              onClick={() => changeManager("custom_adapter")}
             />
           </div>
           {feedback?.location === "manager" ? (
@@ -2296,7 +2457,7 @@ function TunnelPlanComposer({
               tone={feedback.tone}
             />
           ) : null}
-          {form.runtimeManager === "external_managed_adapter" && (
+          {form.runtimeManager === "custom_adapter" && (
             <div className="topologyFormGrid twoColumn adapterBindingGrid">
               <AdapterDefinitionField
                 clientId={form.leftClientId}
@@ -2407,7 +2568,7 @@ function TunnelPlanComposer({
               </Field>
             </div>
           )}
-          {form.runtimeManager === "agent_iproute2_managed" ? (
+          {form.runtimeManager === "agent_builtin" ? (
             <div className="topologyFormGrid twoColumn compactNumericGrid">
               <Field
                 label="Left MTU"
@@ -2506,9 +2667,147 @@ function TunnelPlanComposer({
                 </Field>
               </div>
             )}
-          {form.runtimeManager === "agent_iproute2_managed" && (
+          {form.kind === "wireguard" &&
+            form.runtimeManager === "agent_builtin" && (
+              <div className="topologyFormGrid threeColumn compactNumericGrid">
+                <Field
+                  label="Peer endpoints"
+                  tooltip="Both VPSs point to each other. Left or Right identifies the fixed VPS; the opposite roaming VPS points to it, while the fixed VPS learns the authenticated roaming peer endpoint."
+                >
+                  <select
+                    aria-label="WireGuard peer endpoint mode"
+                    onChange={(event) =>
+                      update(
+                        "wireguardEndpointMode",
+                        event.target.value as RuntimeTunnelWireguardEndpointMode,
+                      )
+                    }
+                    value={form.wireguardEndpointMode}
+                  >
+                    <option value="both">Both sides fixed</option>
+                    <option value="left">Left fixed · right roams</option>
+                    <option value="right">Right fixed · left roams</option>
+                  </select>
+                </Field>
+                <Field
+                  label="Left listen port"
+                  tooltip="UDP port reserved by WireGuard on the left VPS. It must not collide with another managed listener on that VPS."
+                >
+                  <UnitInput
+                    ariaLabel="Left WireGuard listen port"
+                    max={65535}
+                    min={1}
+                    onChange={(value) =>
+                      update("wireguardLeftListenPort", value)
+                    }
+                    unit="UDP"
+                    value={form.wireguardLeftListenPort}
+                  />
+                </Field>
+                <Field
+                  label="Right listen port"
+                  tooltip="UDP port reserved by WireGuard on the right VPS. It must not collide with another managed listener on that VPS."
+                >
+                  <UnitInput
+                    ariaLabel="Right WireGuard listen port"
+                    max={65535}
+                    min={1}
+                    onChange={(value) =>
+                      update("wireguardRightListenPort", value)
+                    }
+                    unit="UDP"
+                    value={form.wireguardRightListenPort}
+                  />
+                </Field>
+                <Field
+                  label="Left keepalive"
+                  tooltip="Persistent keepalive sent by the left peer. Use 0 to disable; 25 seconds is suitable for peers behind NAT."
+                >
+                  <UnitInput
+                    ariaLabel="Left WireGuard keepalive"
+                    max={65535}
+                    min={0}
+                    onChange={(value) =>
+                      update("wireguardLeftKeepaliveSecs", value)
+                    }
+                    unit="seconds"
+                    value={form.wireguardLeftKeepaliveSecs}
+                  />
+                </Field>
+                <Field
+                  label="Right keepalive"
+                  tooltip="Persistent keepalive sent by the right peer. Use 0 to disable; 25 seconds is suitable for peers behind NAT."
+                >
+                  <UnitInput
+                    ariaLabel="Right WireGuard keepalive"
+                    max={65535}
+                    min={0}
+                    onChange={(value) =>
+                      update("wireguardRightKeepaliveSecs", value)
+                    }
+                    unit="seconds"
+                    value={form.wireguardRightKeepaliveSecs}
+                  />
+                </Field>
+              </div>
+            )}
+          {form.kind === "openvpn" &&
+            form.runtimeManager === "agent_builtin" && (
+              <div className="topologyFormGrid threeColumn compactNumericGrid">
+                <Field
+                  label="Transport"
+                  tooltip="OpenVPN 2.4 or newer point-to-point transport, verified through 2.6. UDP is the normal default; TCP remains available when the network requires it."
+                >
+                  <select
+                    aria-label="OpenVPN transport"
+                    onChange={(event) =>
+                      update(
+                        "openvpnTransport",
+                        event.target.value as RuntimeTunnelOpenvpnTransport,
+                      )
+                    }
+                    value={form.openvpnTransport}
+                  >
+                    <option value="udp">UDP</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </Field>
+                <Field
+                  label="Listener VPS"
+                  tooltip="The selected endpoint listens; the other initiates the point-to-point TLS connection."
+                >
+                  <select
+                    aria-label="OpenVPN listener VPS"
+                    onChange={(event) =>
+                      update(
+                        "openvpnListenerSide",
+                        event.target.value as "left" | "right",
+                      )
+                    }
+                    value={form.openvpnListenerSide}
+                  >
+                    <option value="left">Left VPS</option>
+                    <option value="right">Right VPS</option>
+                  </select>
+                </Field>
+                <Field
+                  label="Listener port"
+                  tooltip="TCP or UDP port reserved on the listener VPS. It must not collide with another managed listener using the same transport."
+                >
+                  <UnitInput
+                    ariaLabel="OpenVPN listener port"
+                    max={65535}
+                    min={1}
+                    onChange={(value) => update("openvpnPort", value)}
+                    unit={form.openvpnTransport.toUpperCase()}
+                    value={form.openvpnPort}
+                  />
+                </Field>
+              </div>
+            )}
+          {form.runtimeManager === "agent_builtin" && (
             <details className="topologyAdvancedFields">
-              <summary>Agent-managed routes and cleanup</summary>
+              <summary>Agent builtin routes and cleanup</summary>
               <div className="topologyFormGrid twoColumn">
                 <Field
                   label="Desired interfaces"
@@ -3312,7 +3611,13 @@ function PlanFact({
   return (
     <span>
       <small>{label}</small>
-      <strong title={title ?? value}>{value}</strong>
+      <strong
+        aria-label={title ? `${label}: ${title}` : undefined}
+        tabIndex={title ? 0 : undefined}
+        title={title ?? value}
+      >
+        {value}
+      </strong>
     </span>
   );
 }
@@ -3559,6 +3864,9 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     minCost: String(DEFAULT_OSPF_POLICY.min_cost),
     minCostDelta: "5",
     name: "",
+    openvpnListenerSide: DEFAULT_RUNTIME_OPENVPN_OPTIONS.listener_side,
+    openvpnPort: String(DEFAULT_RUNTIME_OPENVPN_OPTIONS.port),
+    openvpnTransport: DEFAULT_RUNTIME_OPENVPN_OPTIONS.transport,
     ospfEnabled: false,
     ospfMode: "reviewed",
     packetLossPercent: "0",
@@ -3574,21 +3882,36 @@ function initialTunnelPlanForm(): TunnelPlanForm {
     rightMtu: defaultMtu,
     rightRemoteUnderlay: "",
     routes: "",
-    runtimeManager: "agent_iproute2_managed",
+    runtimeManager: "agent_builtin",
     runtimeTopologyVersion: "",
     staleInterfaces: "",
     staleRoutes: "",
+    wireguardEndpointMode: DEFAULT_RUNTIME_WIREGUARD_OPTIONS.endpoint_mode,
+    wireguardLeftKeepaliveSecs: String(
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.left_keepalive_secs,
+    ),
+    wireguardLeftListenPort: String(
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.left_listen_port,
+    ),
+    wireguardRightKeepaliveSecs: String(
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.right_keepalive_secs,
+    ),
+    wireguardRightListenPort: String(
+      DEFAULT_RUNTIME_WIREGUARD_OPTIONS.right_listen_port,
+    ),
   };
 }
 
 function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
   const input = record.input;
   const runtime = input.runtime_control ?? {
-    manager: "agent_iproute2_managed" as const,
+    manager: "agent_builtin" as const,
   };
   const topology = input.runtime_topology ?? {};
   const traffic = runtime.traffic_limit ?? {};
   const fou = runtime.fou ?? { ipproto: 4, peer_port: 5555, port: 5555 };
+  const wireguard = runtime.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
+  const openvpn = runtime.openvpn ?? DEFAULT_RUNTIME_OPENVPN_OPTIONS;
   const ospf = input.ospf ?? null;
   const policy = ospf?.policy ?? DEFAULT_OSPF_POLICY;
   return {
@@ -3627,6 +3950,9 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     minCost: String(policy.min_cost),
     minCostDelta: String(ospf?.min_cost_delta ?? 5),
     name: record.name,
+    openvpnListenerSide: openvpn.listener_side,
+    openvpnPort: String(openvpn.port),
+    openvpnTransport: openvpn.transport,
     ospfEnabled: Boolean(ospf),
     ospfMode: ospf?.mode ?? "reviewed",
     packetLossPercent: String((ospf?.planned_packet_loss_ratio ?? 0) * 100),
@@ -3650,6 +3976,11 @@ function tunnelPlanFormFromRecord(record: TunnelPlanRecord): TunnelPlanForm {
     staleRoutes: (topology.stale_routes ?? [])
       .map(formatRuntimeRoute)
       .join("\n"),
+    wireguardEndpointMode: wireguard.endpoint_mode,
+    wireguardLeftKeepaliveSecs: String(wireguard.left_keepalive_secs),
+    wireguardLeftListenPort: String(wireguard.left_listen_port),
+    wireguardRightKeepaliveSecs: String(wireguard.right_keepalive_secs),
+    wireguardRightListenPort: String(wireguard.right_listen_port),
   };
 }
 
@@ -3695,6 +4026,7 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     form.leftRemoteUnderlay,
     form.leftLocalUnderlay,
     form.runtimeManager,
+    form.kind,
   );
   if (leftUnderlayError) return leftUnderlayError;
   const rightUnderlayError = validateEndpointUnderlay(
@@ -3702,8 +4034,11 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     form.rightRemoteUnderlay,
     form.rightLocalUnderlay,
     form.runtimeManager,
+    form.kind,
   );
   if (rightUnderlayError) return rightUnderlayError;
+  const openvpnUnderlayError = validateOpenvpnUnderlayPair(form);
+  if (openvpnUnderlayError) return openvpnUnderlayError;
   const bandwidth = Number(form.bandwidthMbps);
   if (
     !Number.isInteger(bandwidth) ||
@@ -3711,7 +4046,7 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
     bandwidth > MAX_TUNNEL_BANDWIDTH_MBPS
   )
     return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
-  if (form.runtimeManager === "agent_iproute2_managed") {
+  if (form.runtimeManager === "agent_builtin") {
     const minimumMtu = form.includeIpv6 || form.kind === "sit"
       ? MIN_IPV6_TUNNEL_MTU
       : MIN_TUNNEL_MTU;
@@ -3743,6 +4078,43 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
       validateIntegerRange(form.fouPeerPort, "FOU peer port", 1, 65_535) ??
       validateIntegerRange(form.fouIpProto, "FOU IP protocol", 1, 255);
     if (fouError) return fouError;
+  }
+  if (form.kind === "wireguard" && form.runtimeManager === "agent_builtin") {
+    const wireguardError =
+      validateIntegerRange(
+        form.wireguardLeftListenPort,
+        "Left WireGuard listen port",
+        1,
+        65_535,
+      ) ??
+      validateIntegerRange(
+        form.wireguardRightListenPort,
+        "Right WireGuard listen port",
+        1,
+        65_535,
+      ) ??
+      validateIntegerRange(
+        form.wireguardLeftKeepaliveSecs,
+        "Left WireGuard keepalive",
+        0,
+        65_535,
+      ) ??
+      validateIntegerRange(
+        form.wireguardRightKeepaliveSecs,
+        "Right WireGuard keepalive",
+        0,
+        65_535,
+      );
+    if (wireguardError) return wireguardError;
+  }
+  if (form.kind === "openvpn" && form.runtimeManager === "agent_builtin") {
+    const openvpnError = validateIntegerRange(
+      form.openvpnPort,
+      "OpenVPN listener port",
+      1,
+      65_535,
+    );
+    if (openvpnError) return openvpnError;
   }
   if (!form.includeIpv4 && !form.includeIpv6)
     return "Select IPv4 or IPv6 tunnel addresses";
@@ -3793,12 +4165,12 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
       return "IPv6 allocation pool must be a valid CIDR";
   }
   if (
-    form.runtimeManager === "agent_iproute2_managed" &&
+    form.runtimeManager === "agent_builtin" &&
     !AGENT_TUNNEL_KINDS.includes(form.kind)
   )
     return `${formatTunnelKind(form.kind)} requires external ownership`;
   if (
-    form.runtimeManager === "external_managed_adapter" &&
+    form.runtimeManager === "custom_adapter" &&
     (!form.leftRuntimeDefinitionId || !form.rightRuntimeDefinitionId)
   )
     return "Select a runtime adapter definition for both endpoints";
@@ -3919,19 +4291,59 @@ function validateEndpointUnderlay(
   remoteValue: string,
   localValue: string,
   manager: RuntimeTunnelManager,
+  kind: TunnelKind,
 ): string | null {
   const remote = remoteValue.trim();
-  const local = localValue.trim();
+  const local =
+    manager === "agent_builtin" && kind === "wireguard"
+      ? ""
+      : localValue.trim();
   if (!remote) return `${side} remote underlay destination is required`;
   if (!isIpAddress(remote))
     return `${side} remote underlay destination must be a valid IP address`;
   if (local && !isIpAddress(local))
     return `${side} local underlay source must be a valid IP address`;
-  if (local && isIpv4Address(local) !== isIpv4Address(remote)) {
+  if (
+    local &&
+    !(manager === "agent_builtin" && kind === "openvpn") &&
+    isIpv4Address(local) !== isIpv4Address(remote)
+  ) {
     return `${side} local source and remote destination must use the same IP family`;
   }
-  if (manager === "agent_iproute2_managed" && !isIpv4Address(remote)) {
-    return `${side} agent iproute2 underlay requires an IPv4 remote destination`;
+  if (
+    manager === "agent_builtin" &&
+    ["gre", "ipip", "sit", "fou"].includes(kind) &&
+    !isIpv4Address(remote)
+  ) {
+    return `${side} Agent builtin ${formatTunnelKind(kind)} requires an IPv4 remote destination`;
+  }
+  if (manager === "agent_builtin" && kind === "wireguard" && local) {
+    return `${side} WireGuard local source must remain empty; routing selects the source address`;
+  }
+  return null;
+}
+
+function validateOpenvpnUnderlayPair(form: TunnelPlanForm): string | null {
+  if (form.runtimeManager !== "agent_builtin" || form.kind !== "openvpn") {
+    return null;
+  }
+  const listenerIsLeft = form.openvpnListenerSide === "left";
+  const target = (
+    listenerIsLeft ? form.rightRemoteUnderlay : form.leftRemoteUnderlay
+  ).trim();
+  const listenerLocal = (
+    listenerIsLeft ? form.leftLocalUnderlay : form.rightLocalUnderlay
+  ).trim();
+  const initiatorLocal = (
+    listenerIsLeft ? form.rightLocalUnderlay : form.leftLocalUnderlay
+  ).trim();
+  for (const [label, local] of [
+    ["Listener local source", listenerLocal],
+    ["Initiator local source", initiatorLocal],
+  ] as const) {
+    if (local && isIpv4Address(local) !== isIpv4Address(target)) {
+      return `${label} must use the same IP family as the listener destination`;
+    }
   }
   return null;
 }
@@ -4049,6 +4461,7 @@ function validateExistingTunnelPlanConflicts(
       form.includeIpv6 ? ipAddressKey(form.rightIpv6, 128) : null,
     ].filter((value): value is string => Boolean(value)),
   );
+  const requestedListeners = tunnelFormListenerResources(form);
   for (const plan of plans) {
     if (plan.id === editingPlanId) continue;
     if (
@@ -4079,8 +4492,113 @@ function validateExistingTunnelPlanConflicts(
     ) {
       return "Another saved plan already uses one of these tunnel endpoint addresses";
     }
+    const savedListeners = tunnelPlanListenerResources(plan);
+    if (
+      requestedListeners.some((requested) =>
+        savedListeners.some(
+          (saved) =>
+            saved.clientId === requested.clientId &&
+            saved.transport === requested.transport &&
+            saved.port === requested.port,
+        ),
+      )
+    ) {
+      return "Another saved plan already reserves this listener port and transport on one of the selected VPSs";
+    }
   }
   return null;
+}
+
+type TunnelListenerResource = {
+  clientId: string;
+  transport: "tcp" | "udp";
+  port: number;
+};
+
+function tunnelFormListenerResources(
+  form: TunnelPlanForm,
+): TunnelListenerResource[] {
+  if (form.runtimeManager !== "agent_builtin") return [];
+  if (form.kind === "fou") {
+    const port = Number(form.fouPort);
+    return [form.leftClientId, form.rightClientId].map((clientId) => ({
+      clientId,
+      transport: "udp" as const,
+      port,
+    }));
+  }
+  if (form.kind === "wireguard") {
+    return [
+      {
+        clientId: form.leftClientId,
+        transport: "udp",
+        port: Number(form.wireguardLeftListenPort),
+      },
+      {
+        clientId: form.rightClientId,
+        transport: "udp",
+        port: Number(form.wireguardRightListenPort),
+      },
+    ];
+  }
+  if (form.kind === "openvpn") {
+    return [
+      {
+        clientId:
+          form.openvpnListenerSide === "left"
+            ? form.leftClientId
+            : form.rightClientId,
+        transport: form.openvpnTransport,
+        port: Number(form.openvpnPort),
+      },
+    ];
+  }
+  return [];
+}
+
+function tunnelPlanListenerResources(
+  plan: TunnelPlanRecord,
+): TunnelListenerResource[] {
+  const runtime = plan.plan.runtime_control;
+  if ((runtime?.manager ?? "agent_builtin") !== "agent_builtin") return [];
+  if (plan.kind === "fou") {
+    const port = (runtime?.fou ?? DEFAULT_RUNTIME_FOU_OPTIONS).port;
+    return [plan.left_client_id, plan.right_client_id].map((clientId) => ({
+      clientId,
+      transport: "udp" as const,
+      port,
+    }));
+  }
+  if (plan.kind === "wireguard") {
+    const options =
+      runtime?.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
+    return [
+      {
+        clientId: plan.left_client_id,
+        transport: "udp",
+        port: options.left_listen_port,
+      },
+      {
+        clientId: plan.right_client_id,
+        transport: "udp",
+        port: options.right_listen_port,
+      },
+    ];
+  }
+  if (plan.kind === "openvpn") {
+    const options = runtime?.openvpn ?? DEFAULT_RUNTIME_OPENVPN_OPTIONS;
+    return [
+      {
+        clientId:
+          options.listener_side === "left"
+            ? plan.left_client_id
+            : plan.right_client_id,
+        transport: options.transport,
+        port: options.port,
+      },
+    ];
+  }
+  return [];
 }
 
 function ipAddressKey(value: string, bits: 32 | 128): string | null {
@@ -4095,7 +4613,7 @@ function validateAdapterBindings(
   leftRoutingDefinitions: NetworkAdapterDefinitionRecord[],
   rightRoutingDefinitions: NetworkAdapterDefinitionRecord[],
 ): string | null {
-  if (form.runtimeManager === "external_managed_adapter") {
+  if (form.runtimeManager === "custom_adapter") {
     const left = leftRuntimeDefinitions.find(
       (definition) => definition.id === form.leftRuntimeDefinitionId,
     );
@@ -4162,10 +4680,42 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
     fouPort: form.kind === "fou" ? form.fouPort : undefined,
     ingressKbps: mbpsToKbpsText(form.ingressMbps),
     leftAdapterDefinitionId: form.leftRuntimeDefinitionId,
+    openvpnListenerSide:
+      form.runtimeManager === "agent_builtin" && form.kind === "openvpn"
+        ? form.openvpnListenerSide
+        : undefined,
+    openvpnPort:
+      form.runtimeManager === "agent_builtin" && form.kind === "openvpn"
+        ? form.openvpnPort
+        : undefined,
+    openvpnTransport:
+      form.runtimeManager === "agent_builtin" && form.kind === "openvpn"
+        ? form.openvpnTransport
+        : undefined,
     rightAdapterDefinitionId: form.rightRuntimeDefinitionId,
+    wireguardEndpointMode:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? form.wireguardEndpointMode
+        : undefined,
+    wireguardLeftKeepaliveSecs:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? form.wireguardLeftKeepaliveSecs
+        : undefined,
+    wireguardLeftListenPort:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? form.wireguardLeftListenPort
+        : undefined,
+    wireguardRightKeepaliveSecs:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? form.wireguardRightKeepaliveSecs
+        : undefined,
+    wireguardRightListenPort:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? form.wireguardRightListenPort
+        : undefined,
   });
   const runtimeTopology =
-    form.runtimeManager === "agent_iproute2_managed"
+    form.runtimeManager === "agent_builtin"
       ? buildRuntimeTopology({
           desiredText: form.desiredInterfaces,
           routesText: form.routes,
@@ -4175,7 +4725,7 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
         })
       : {};
   const mtu =
-    form.runtimeManager === "agent_iproute2_managed"
+    form.runtimeManager === "agent_builtin"
       ? {
           left_mtu: integerOr(
             form.leftMtu,
@@ -4208,7 +4758,10 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
           ? "ipv4"
           : "ipv6",
     left_client_id: form.leftClientId,
-    left_local_underlay: form.leftLocalUnderlay.trim() || null,
+    left_local_underlay:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? null
+        : form.leftLocalUnderlay.trim() || null,
     left_remote_underlay: form.leftRemoteUnderlay.trim(),
     ...mtu,
     name: form.name.trim(),
@@ -4227,7 +4780,10 @@ function buildTunnelPlanRequest(form: TunnelPlanForm): CreateTunnelPlanRequest {
       : null,
     reserved_addresses: [],
     right_client_id: form.rightClientId,
-    right_local_underlay: form.rightLocalUnderlay.trim() || null,
+    right_local_underlay:
+      form.runtimeManager === "agent_builtin" && form.kind === "wireguard"
+        ? null
+        : form.rightLocalUnderlay.trim() || null,
     right_remote_underlay: form.rightRemoteUnderlay.trim(),
     runtime_control: runtimeControl,
     runtime_topology: runtimeTopology,
@@ -4416,7 +4972,23 @@ function createConfirmationItems(
       label: "Runtime owner",
       value: runtimeManagerLabel(request.runtime_control?.manager),
     },
-    ...(runtime?.manager === "external_managed_adapter"
+    ...(runtime?.manager === "agent_builtin" && request.kind === "wireguard"
+      ? [
+          {
+            label: "WireGuard",
+            value: `${wireguardEndpointModeLabel(runtime.wireguard?.endpoint_mode ?? "both")} · UDP ${runtime.wireguard?.left_listen_port ?? 51820} / ${runtime.wireguard?.right_listen_port ?? 51820} · keepalive ${runtime.wireguard?.left_keepalive_secs ?? 25}s / ${runtime.wireguard?.right_keepalive_secs ?? 25}s`,
+          },
+        ]
+      : []),
+    ...(runtime?.manager === "agent_builtin" && request.kind === "openvpn"
+      ? [
+          {
+            label: "OpenVPN",
+            value: `${(runtime.openvpn?.transport ?? "udp").toUpperCase()} · ${runtime.openvpn?.listener_side === "right" ? "Right" : "Left"} listens on ${runtime.openvpn?.port ?? 1194}`,
+          },
+        ]
+      : []),
+    ...(runtime?.manager === "custom_adapter"
       ? [
           {
             label: "Runtime adapters",
@@ -4426,7 +4998,7 @@ function createConfirmationItems(
         ]
       : []),
     { label: "Traffic policy", value: trafficSummary },
-    ...(runtime?.manager === "agent_iproute2_managed"
+    ...(runtime?.manager === "agent_builtin"
       ? [
           {
             label: "Routes and cleanup",
@@ -4448,7 +5020,7 @@ function createConfirmationItems(
         .join("; "),
     },
     { label: "Planning bandwidth", value: `${request.bandwidth_mbps} Mbps` },
-    ...(runtime?.manager === "agent_iproute2_managed"
+    ...(runtime?.manager === "agent_builtin"
       ? [
           {
             label: "Endpoint MTU",
@@ -4535,11 +5107,14 @@ function tunnelPlanSaveError(error: unknown): string {
     if (error.code === "tunnel_plan_address_conflict") {
       return "Another saved plan already uses one of these tunnel endpoint addresses.";
     }
+    if (error.code === "tunnel_plan_listener_port_conflict") {
+      return "Another saved plan already reserves this listener port and transport on one of the selected VPSs.";
+    }
     if (error.code === "invalid_tunnel_mtu") {
       return "Each endpoint MTU must be a whole number from 68 to 65535 bytes, and at least 1280 for SIT or when IPv6 is enabled.";
     }
     if (error.code === "tunnel_mtu_required") {
-      return "Agent iproute2 requires both endpoint MTUs.";
+      return "Agent builtin requires both endpoint MTUs.";
     }
     if (error.code === "tunnel_mtu_externally_owned") {
       return "The selected external runtime owns MTU; endpoint MTUs must remain unset.";
@@ -4557,6 +5132,27 @@ function tunnelPlanDeleteError(error: unknown): string {
   return error instanceof Error ? error.message : "Tunnel plan deletion failed";
 }
 
+function tunnelCredentialRotationError(error: unknown): string {
+  if (error instanceof ApiResponseError) {
+    if (error.code === "tunnel_plan_snapshot_stale") {
+      return "This tunnel plan changed after the rotation review opened. Refresh the registry and review it again.";
+    }
+    if (error.code === "tunnel_plan_builtin_credentials_not_supported") {
+      return "Credential rotation applies only to Agent builtin WireGuard or OpenVPN plans.";
+    }
+  }
+  return error instanceof Error
+    ? error.message
+    : "Tunnel credential rotation failed";
+}
+
+function supportsBuiltinCredentials(plan: TunnelPlanRecord): boolean {
+  return (
+    isAgentBuiltinTunnelPlan(plan) &&
+    (plan.kind === "wireguard" || plan.kind === "openvpn")
+  );
+}
+
 function formatTunnelAddresses(plan: TunnelPlanRecord): string {
   const values = [plan.plan.ipv4_tunnel, plan.plan.ipv6_tunnel]
     .filter((pair): pair is TunnelAddressPair => Boolean(pair))
@@ -4567,10 +5163,10 @@ function formatTunnelAddresses(plan: TunnelPlanRecord): string {
   return values.join("; ") || "No addresses";
 }
 
-function isAgentManagedTunnelPlan(plan: TunnelPlanRecord): boolean {
+function isAgentBuiltinTunnelPlan(plan: TunnelPlanRecord): boolean {
   return (
-    (plan.plan.runtime_control?.manager ?? "agent_iproute2_managed") ===
-    "agent_iproute2_managed"
+    (plan.plan.runtime_control?.manager ?? "agent_builtin") ===
+    "agent_builtin"
   );
 }
 
@@ -4583,11 +5179,85 @@ function formatEndpointUnderlay(
 
 function formatRuntimeBinding(plan: TunnelPlanRecord): string {
   const control = plan.plan.runtime_control;
-  if (!control || control.manager === "agent_iproute2_managed")
-    return "Agent iproute2";
+  if (!control || control.manager === "agent_builtin")
+    return "Agent builtin";
   if (control.manager === "external_observed")
     return "External observed; no mutation";
-  return `External adapters ${shortId(control.left_adapter_template_id ?? "missing")} / ${shortId(control.right_adapter_template_id ?? "missing")}`;
+  return `Custom adapters ${shortId(control.left_adapter_template_id ?? "missing")} / ${shortId(control.right_adapter_template_id ?? "missing")}`;
+}
+
+function formatWireguardRuntime(plan: TunnelPlanRecord): string {
+  const options =
+    plan.plan.runtime_control?.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
+  return `${wireguardEndpointModeLabel(options.endpoint_mode)} · UDP ${options.left_listen_port} / ${options.right_listen_port} · keepalive ${options.left_keepalive_secs}s / ${options.right_keepalive_secs}s`;
+}
+
+function formatOpenvpnRuntime(plan: TunnelPlanRecord): string {
+  const options =
+    plan.plan.runtime_control?.openvpn ?? DEFAULT_RUNTIME_OPENVPN_OPTIONS;
+  return `${options.transport.toUpperCase()} · ${options.listener_side === "left" ? "Left" : "Right"} listens on ${options.port}`;
+}
+
+function builtinDriverCapabilitySummary(
+  plan: TunnelPlanRecord,
+  agents: AgentView[],
+): string {
+  const driver = builtinDriverName(plan.kind);
+  if (!driver) return "Unsupported kind";
+  return [plan.left_client_id, plan.right_client_id]
+    .map((clientId, index) => {
+      const capability = agents.find((agent) => agent.id === clientId)
+        ?.capabilities.builtin_tunnel_drivers?.[driver];
+      const side = index === 0 ? "L" : "R";
+      if (!capability) return `${side} not reported`;
+      return `${side} ${capability.available ? capability.version || "available" : "unavailable"}`;
+    })
+    .join(" · ");
+}
+
+function builtinDriverCapabilityTitle(
+  plan: TunnelPlanRecord,
+  agents: AgentView[],
+): string {
+  const driver = builtinDriverName(plan.kind);
+  if (!driver) return "This tunnel kind is not supported by Agent builtin.";
+  return [plan.left_client_id, plan.right_client_id]
+    .map((clientId, index) => {
+      const capability = agents.find((agent) => agent.id === clientId)
+        ?.capabilities.builtin_tunnel_drivers?.[driver];
+      const side = index === 0 ? "Left" : "Right";
+      if (!capability) return `${side}: capability not reported`;
+      if (capability.available)
+        return `${side}: ${capability.version || "available"}`;
+      return `${side}: ${capability.unavailable_reason || "unavailable"}`;
+    })
+    .join(" · ");
+}
+
+function builtinDriverName(
+  kind: TunnelKind,
+): "iproute2" | "wireguard" | "openvpn" | null {
+  if (["gre", "ipip", "sit", "fou"].includes(kind)) return "iproute2";
+  if (kind === "wireguard") return "wireguard";
+  if (kind === "openvpn") return "openvpn";
+  return null;
+}
+
+function shortPublicEvidence(value: string): string {
+  return value.length <= 18 ? value : `${value.slice(0, 8)}…${value.slice(-8)}`;
+}
+
+function wireguardEndpointModeLabel(
+  mode: RuntimeTunnelWireguardEndpointMode,
+): string {
+  switch (mode) {
+    case "left":
+      return "Left fixed; right roams";
+    case "right":
+      return "Right fixed; left roams";
+    case "both":
+      return "Both peer endpoints fixed";
+  }
 }
 
 function formatPlanOspf(plan: TunnelPlanRecord): string {
@@ -4742,13 +5412,18 @@ function observedPeerAddress(
   agents: AgentView[],
   clientId: string,
   manager: RuntimeTunnelManager,
+  kind: TunnelKind,
 ): string | null {
   if (!clientId) return null;
   const observed = agents
     .find((agent) => agent.id === clientId)
     ?.last_ip?.trim();
   if (!observed || !isIpAddress(observed)) return null;
-  if (manager === "agent_iproute2_managed" && !isIpv4Address(observed)) {
+  if (
+    manager === "agent_builtin" &&
+    ["gre", "ipip", "sit", "fou"].includes(kind) &&
+    !isIpv4Address(observed)
+  ) {
     return null;
   }
   return observed;
@@ -4789,6 +5464,9 @@ type TunnelPlanForm = {
   minCost: string;
   minCostDelta: string;
   name: string;
+  openvpnListenerSide: "left" | "right";
+  openvpnPort: string;
+  openvpnTransport: RuntimeTunnelOpenvpnTransport;
   ospfEnabled: boolean;
   ospfMode: "reviewed" | "automatic";
   packetLossPercent: string;
@@ -4808,6 +5486,11 @@ type TunnelPlanForm = {
   runtimeTopologyVersion: string;
   staleInterfaces: string;
   staleRoutes: string;
+  wireguardEndpointMode: RuntimeTunnelWireguardEndpointMode;
+  wireguardLeftKeepaliveSecs: string;
+  wireguardLeftListenPort: string;
+  wireguardRightKeepaliveSecs: string;
+  wireguardRightListenPort: string;
 };
 
 type Feedback = { message: string; tone: ActionFeedbackTone };
@@ -4859,7 +5542,7 @@ type TopologyPanelProps = {
   onDeleteTunnelPlan: (
     target: TunnelPlanRevisionTarget,
   ) => Promise<TunnelPlanMutationResponse>;
-  onExportTunnelPlan: (planId: string) => Promise<TunnelPlan>;
+  onExportTunnelPlan: (planId: string) => Promise<TunnelPlanExport>;
   onInitialPlanWorkflowConsumed: () => void;
   onInitialAdapterKindConsumed: () => void;
   onInitialTargetIntentConsumed?: (requestId: string) => void;
@@ -4904,6 +5587,9 @@ type TopologyPanelProps = {
   onRefreshTunnelPlanOspfStatus: (
     planId: string,
   ) => Promise<TunnelPlanOspfJobsResponse>;
+  onRotateTunnelPlanCredentials: (
+    target: TunnelPlanRevisionTarget,
+  ) => Promise<TunnelPlanMutationResponse>;
   onSelectSubpage: (subpage: string) => void;
   onSetTunnelPlanEnabled: (
     targets: TunnelPlanRevisionTarget[],

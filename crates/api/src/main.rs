@@ -161,6 +161,8 @@ mod repository_telemetry_rollups;
 mod repository_terminal_sessions;
 #[path = "repository/network/repository_topology_graph.rs"]
 mod repository_topology_graph;
+#[path = "repository/network/repository_tunnel_credentials.rs"]
+mod repository_tunnel_credentials;
 #[path = "repository/config/repository_webhook_rules.rs"]
 mod repository_webhook_rules;
 #[path = "routes/core/routes.rs"]

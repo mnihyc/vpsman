@@ -11,9 +11,9 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         kind: TunnelKind::Gre,
         runtime_control: RuntimeTunnelControl {
             manager,
-            left_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            left_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| "11111111-1111-4111-8111-111111111111".to_string()),
-            right_adapter_definition_id: (manager == RuntimeTunnelManager::ExternalManagedAdapter)
+            right_adapter_definition_id: (manager == RuntimeTunnelManager::CustomAdapter)
                 .then(|| "22222222-2222-4222-8222-222222222222".to_string()),
             ..RuntimeTunnelControl::default()
         },
@@ -35,8 +35,8 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
         ipv6_tunnel: None,
         latency_primary_family: Default::default(),
         bandwidth_mbps: 100,
-        left_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1476),
-        right_mtu: (manager == RuntimeTunnelManager::AgentIproute2Managed).then_some(1400),
+        left_mtu: (manager == RuntimeTunnelManager::AgentBuiltin).then_some(1476),
+        right_mtu: (manager == RuntimeTunnelManager::AgentBuiltin).then_some(1400),
         ospf: None,
     })
     .unwrap()
@@ -44,7 +44,7 @@ fn test_plan(manager: RuntimeTunnelManager) -> TunnelPlan {
 
 #[test]
 fn reconnect_repair_uses_only_declared_managed_runtime_evidence() {
-    let managed = test_plan(RuntimeTunnelManager::AgentIproute2Managed);
+    let managed = test_plan(RuntimeTunnelManager::AgentBuiltin);
     let interface = serde_json::json!({ "exists": true, "operstate": "up", "mtu": 1476 });
     let desired = vec![serde_json::json!({ "exists": true, "operstate": "up" })];
     let stale = Vec::new();
@@ -72,7 +72,7 @@ fn reconnect_repair_uses_only_declared_managed_runtime_evidence() {
         vec!["runtime_interface_missing"]
     );
 
-    let adapter_managed = test_plan(RuntimeTunnelManager::ExternalManagedAdapter);
+    let adapter_managed = test_plan(RuntimeTunnelManager::CustomAdapter);
     let adapter_failed = serde_json::json!({ "configured": true, "success": false });
     assert_eq!(
         runtime_reconcile_reasons(
@@ -137,7 +137,7 @@ async fn status_rejects_a_side_for_another_agent() {
     let error = execute_network_status_command(NetworkStatusInput {
         job_id: uuid::Uuid::new_v4(),
         config: &config,
-        plan: &test_plan(RuntimeTunnelManager::AgentIproute2Managed),
+        plan: &test_plan(RuntimeTunnelManager::AgentBuiltin),
         runtime_adapter: None,
         side: TunnelEndpointSide::Left,
         max_timeout_secs: 5,

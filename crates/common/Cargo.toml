@@ -26,6 +26,7 @@ thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
 uuid.workspace = true
+x25519-dalek.workspace = true
 
 [[bin]]
 name = "generate_frontend_contracts"

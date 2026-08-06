@@ -10,14 +10,38 @@ use vpsman_common::{
 
 #[path = "network_runtime_command_runner.rs"]
 mod command_runner;
+#[path = "network_runtime_openvpn.rs"]
+mod openvpn;
+#[path = "network_runtime_wireguard.rs"]
+mod wireguard;
 
 use crate::command_worker::CommandCancelToken;
 
 use self::command_runner::run_runtime_command_cancelable;
 
+pub(crate) async fn probe_runtime_command(
+    label: &'static str,
+    argv: &[String],
+    max_timeout_secs: u64,
+    max_output_bytes: usize,
+) -> Result<serde_json::Value> {
+    run_runtime_command_cancelable(
+        label,
+        argv,
+        false,
+        true,
+        max_timeout_secs,
+        max_output_bytes,
+        CommandCancelToken::default(),
+    )
+    .await
+}
+
 pub(crate) struct NetworkRuntimeReconcileInput<'a> {
     pub(crate) config: &'a AgentConfig,
+    pub(crate) plan_id: Option<&'a str>,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) builtin_credentials: Option<&'a vpsman_common::TunnelEndpointBuiltinCredentials>,
     pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) max_timeout_secs: u64,
@@ -27,7 +51,9 @@ pub(crate) struct NetworkRuntimeReconcileInput<'a> {
 
 pub(crate) struct NetworkRuntimeRemoveInput<'a> {
     pub(crate) config: &'a AgentConfig,
+    pub(crate) plan_id: Option<&'a str>,
     pub(crate) plan: &'a TunnelPlan,
+    pub(crate) builtin_credentials: Option<&'a vpsman_common::TunnelEndpointBuiltinCredentials>,
     pub(crate) runtime_adapter: Option<&'a RuntimeTunnelAdapterCommands>,
     pub(crate) side: TunnelEndpointSide,
     pub(crate) max_timeout_secs: u64,
@@ -109,35 +135,150 @@ async fn reconcile_runtime_tunnel(
         }));
     }
 
+    let effective_uid = effective_uid(input.effective_uid_override());
+    let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
+    let mutation_will_be_skipped = should_skip_unprivileged_mutation(
+        true,
+        effective_uid,
+        input.plan.runtime_control.manager,
+        unprivileged_mutation_policy,
+    );
+    if mutation_will_be_skipped
+        && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+        && matches!(input.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn)
+    {
+        return Ok(serde_json::json!({
+            "type": "runtime_tunnel_reconcile",
+            "status": "degraded_unprivileged",
+            "reason": "agent_unprivileged",
+            "plan": input.plan.name,
+            "interface": input.plan.interface_name,
+            "side": side_name(input.side),
+            "client_id": input.config.client_id,
+            "manager": input.plan.runtime_control.manager,
+            "commands": [],
+        }));
+    }
+
     let root = Path::new(&input.config.network.root_dir);
     let link_exists = runtime_link_exists(root, &input.plan.interface_name).await;
+    let mut active_link_exists = link_exists;
     let mut preflight_reports = Vec::new();
     let mut existing_link_validation = serde_json::Value::Null;
-    if link_exists
-        && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed
-    {
-        let (reports, validation) = validate_existing_iproute2_tunnel(
-            input.config,
-            input.plan,
-            &endpoint,
-            cancel_token.clone(),
-        )
-        .await?;
-        preflight_reports.extend(reports);
-        existing_link_validation = validation;
-    }
-    let cleanup_specs =
-        if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentIproute2Managed {
-            build_runtime_topology_cleanup_steps(input.config, input.plan)?
-        } else {
-            Vec::new()
-        };
-    let specs = match input.plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
-            build_iproute2_reconcile_steps(input.config, input.plan, &endpoint, link_exists)?
+    let mut prepared_wireguard = None;
+    let mut existing_wireguard_peers = Vec::new();
+    let mut prepared_openvpn = None;
+    if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin {
+        match input.plan.kind {
+            TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
+                if link_exists {
+                    let (reports, validation) = validate_existing_iproute2_tunnel(
+                        input.config,
+                        input.plan,
+                        &endpoint,
+                        cancel_token.clone(),
+                    )
+                    .await?;
+                    preflight_reports.extend(reports);
+                    existing_link_validation = validation;
+                }
+            }
+            TunnelKind::Wireguard => {
+                let prepared = wireguard::prepare_wireguard_state(
+                    input.plan_id,
+                    input.side,
+                    input.builtin_credentials,
+                )
+                .await?;
+                if link_exists {
+                    let (reports, validation, peers) = wireguard::validate_existing_wireguard(
+                        input.config,
+                        input.plan,
+                        input.builtin_credentials,
+                        &prepared,
+                        cancel_token.clone(),
+                    )
+                    .await?;
+                    preflight_reports.extend(reports);
+                    existing_link_validation = validation;
+                    existing_wireguard_peers = peers;
+                }
+                prepared_wireguard = Some(prepared);
+            }
+            TunnelKind::Openvpn => {
+                let (reports, openvpn_version) =
+                    openvpn::inspect_openvpn_prerequisites(input.config, cancel_token.clone())
+                        .await?;
+                preflight_reports.extend(reports);
+                let prepared = openvpn::prepare_openvpn_state(
+                    input.plan_id,
+                    input.plan,
+                    &endpoint,
+                    input.builtin_credentials,
+                    &openvpn_version,
+                )
+                .await?;
+                if link_exists && !mutation_will_be_skipped {
+                    let (still_running, validation) =
+                        openvpn::reconcile_existing_openvpn(input.config, input.plan, &prepared)
+                            .await?;
+                    active_link_exists = still_running;
+                    existing_link_validation = validation;
+                } else if !link_exists && !mutation_will_be_skipped {
+                    if let Some(validation) =
+                        openvpn::ensure_openvpn_start_is_safe(input.config, input.plan, &prepared)
+                            .await?
+                    {
+                        existing_link_validation = validation;
+                    }
+                }
+                prepared_openvpn = Some(prepared);
+            }
+            TunnelKind::TunTap | TunnelKind::Custom => {
+                anyhow::bail!("tunnel kind is not supported by Agent builtin")
+            }
         }
+    }
+    let cleanup_specs = if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+    {
+        build_runtime_topology_cleanup_steps(input.config, input.plan)?
+    } else {
+        Vec::new()
+    };
+    let specs = match input.plan.runtime_control.manager {
+        RuntimeTunnelManager::AgentBuiltin => match input.plan.kind {
+            TunnelKind::Gre | TunnelKind::Ipip | TunnelKind::Sit | TunnelKind::Fou => {
+                build_iproute2_reconcile_steps(
+                    input.config,
+                    input.plan,
+                    &endpoint,
+                    active_link_exists,
+                )?
+            }
+            TunnelKind::Wireguard => wireguard::build_wireguard_reconcile_steps(
+                input.config,
+                input.plan,
+                &endpoint,
+                input.builtin_credentials,
+                prepared_wireguard
+                    .as_ref()
+                    .context("WireGuard state was not prepared")?,
+                active_link_exists,
+                &existing_wireguard_peers,
+            )?,
+            TunnelKind::Openvpn => openvpn::build_openvpn_reconcile_steps(
+                input.config,
+                input.plan,
+                &endpoint,
+                prepared_openvpn
+                    .as_ref()
+                    .context("OpenVPN state was not prepared")?,
+                active_link_exists,
+            )?,
+            TunnelKind::TunTap | TunnelKind::Custom => unreachable!(),
+        },
         RuntimeTunnelManager::ExternalObserved => Vec::new(),
-        RuntimeTunnelManager::ExternalManagedAdapter => build_external_adapter_steps(
+        RuntimeTunnelManager::CustomAdapter => build_custom_adapter_steps(
             input.plan,
             &endpoint,
             required_runtime_adapter(input.runtime_adapter)?,
@@ -145,11 +286,27 @@ async fn reconcile_runtime_tunnel(
     };
 
     let specs = cleanup_specs.into_iter().chain(specs).collect::<Vec<_>>();
-    let effective_uid = effective_uid(input.effective_uid_override());
-    let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
+    if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+        && input.plan.kind == TunnelKind::Wireguard
+    {
+        wireguard::mark_wireguard_pending(
+            prepared_wireguard
+                .as_ref()
+                .context("WireGuard state was not prepared")?,
+            input.builtin_credentials,
+            input
+                .plan
+                .runtime_control
+                .wireguard
+                .configures_peer_endpoint(input.side),
+        )
+        .await?;
+    }
     let mut reports = preflight_reports;
     let mut degraded = false;
     let mut failed = false;
+    let mut openvpn_start_attempted = false;
+    let mut plan_owned_link_created = false;
     let mut failed_required_label = None;
     for spec in specs {
         if should_skip_unprivileged_mutation(
@@ -173,7 +330,10 @@ async fn reconcile_runtime_tunnel(
             }
             continue;
         }
-        let report = run_runtime_command_cancelable(
+        if spec.label == "runtime_openvpn_start" {
+            openvpn_start_attempted = true;
+        }
+        let mut report = run_runtime_command_cancelable(
             spec.label,
             &spec.argv,
             spec.mutates,
@@ -183,13 +343,133 @@ async fn reconcile_runtime_tunnel(
             cancel_token.clone(),
         )
         .await?;
+        accept_idempotent_traffic_clear(spec.label, &mut report);
+        if spec.label == "runtime_wireguard_public_key_verify"
+            && report["success"].as_bool() == Some(true)
+        {
+            let expected = match input.builtin_credentials {
+                Some(vpsman_common::TunnelEndpointBuiltinCredentials::Wireguard {
+                    local_public_key_base64,
+                    ..
+                }) => local_public_key_base64.as_str(),
+                _ => "",
+            };
+            if report["stdout"]["text"].as_str().unwrap_or_default().trim() != expected {
+                failed = true;
+                failed_required_label = Some(spec.label);
+                reports.push(report);
+                reports.push(serde_json::json!({
+                    "label": "runtime_wireguard_public_key_match",
+                    "mutates": false,
+                    "required": true,
+                    "success": false,
+                    "reason": "configured_private_key_did_not_produce_expected_public_key",
+                }));
+                break;
+            }
+        }
+        if spec.label == "runtime_wireguard_peer_verify"
+            && report["success"].as_bool() == Some(true)
+        {
+            let expected = match input.builtin_credentials {
+                Some(vpsman_common::TunnelEndpointBuiltinCredentials::Wireguard {
+                    peer_public_key_base64,
+                    ..
+                }) => peer_public_key_base64.as_str(),
+                _ => "",
+            };
+            let peers = report["stdout"]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            if peers != [expected] {
+                failed = true;
+                failed_required_label = Some(spec.label);
+                reports.push(report);
+                reports.push(serde_json::json!({
+                    "label": "runtime_wireguard_peer_match",
+                    "mutates": false,
+                    "required": true,
+                    "success": false,
+                    "reason": "configured_peer_set_does_not_match_saved_plan",
+                }));
+                break;
+            }
+            wireguard::mark_wireguard_applied(
+                prepared_wireguard
+                    .as_ref()
+                    .context("WireGuard state was not prepared")?,
+                input.builtin_credentials,
+                input
+                    .plan
+                    .runtime_control
+                    .wireguard
+                    .configures_peer_endpoint(input.side),
+            )
+            .await?;
+        }
         if spec.required && report["success"].as_bool() != Some(true) {
             failed = true;
             failed_required_label = Some(spec.label);
             reports.push(report);
             break;
         }
+        if report["success"].as_bool() == Some(true)
+            && matches!(
+                spec.label,
+                "runtime_tunnel_add" | "runtime_wireguard_link_add"
+            )
+        {
+            plan_owned_link_created = true;
+        }
         reports.push(report);
+        if spec.label == "runtime_openvpn_start" {
+            let prepared = prepared_openvpn
+                .as_ref()
+                .context("OpenVPN state was not prepared")?;
+            match openvpn::mark_openvpn_started(
+                input.config,
+                input.plan,
+                prepared,
+                cancel_token.clone(),
+            )
+            .await
+            {
+                Ok(()) => reports.push(serde_json::json!({
+                    "label": "runtime_openvpn_interface_ready",
+                    "mutates": false,
+                    "required": true,
+                    "success": true,
+                })),
+                Err(error) => {
+                    failed = true;
+                    failed_required_label = Some("runtime_openvpn_interface_ready");
+                    reports.push(serde_json::json!({
+                        "label": "runtime_openvpn_interface_ready",
+                        "mutates": false,
+                        "required": true,
+                        "success": false,
+                        "error": error.to_string(),
+                    }));
+                    break;
+                }
+            }
+        }
+    }
+    if failed
+        && !degraded
+        && input.plan.kind == TunnelKind::Openvpn
+        && openvpn_start_attempted
+        && openvpn::stop_openvpn_for_remove(input.config, input.plan_id, input.side, false).await?
+    {
+        openvpn::wait_for_link_state(
+            root,
+            &input.plan.interface_name,
+            false,
+            cancel_token.clone(),
+        )
+        .await?;
     }
     let compensation = if failed && !degraded {
         Some(
@@ -198,7 +478,7 @@ async fn reconcile_runtime_tunnel(
                 input.plan,
                 &endpoint,
                 input.runtime_adapter,
-                link_exists,
+                plan_owned_link_created,
                 failed_required_label.unwrap_or("unknown_required_step"),
                 cancel_token.clone(),
             )
@@ -278,24 +558,68 @@ async fn remove_runtime_tunnel(
 
     let root = Path::new(&input.config.network.root_dir);
     let link_exists = runtime_link_exists(root, &input.plan.interface_name).await;
+    let mut active_link_exists = link_exists;
+    let effective_uid = effective_uid(input.effective_uid_override());
+    let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
+    let mut reports = Vec::new();
+    if input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin {
+        match input.plan.kind {
+            TunnelKind::Wireguard if link_exists => {
+                let prepared = wireguard::load_wireguard_state(input.plan_id, input.side).await?;
+                let (preflight, _, _) = wireguard::validate_existing_wireguard(
+                    input.config,
+                    input.plan,
+                    input.builtin_credentials,
+                    &prepared,
+                    cancel_token.clone(),
+                )
+                .await?;
+                reports.extend(preflight);
+            }
+            TunnelKind::Openvpn
+                if !should_skip_unprivileged_mutation(
+                    true,
+                    effective_uid,
+                    input.plan.runtime_control.manager,
+                    unprivileged_mutation_policy,
+                ) =>
+            {
+                let stopped_owned_process = openvpn::stop_openvpn_for_remove(
+                    input.config,
+                    input.plan_id,
+                    input.side,
+                    link_exists,
+                )
+                .await?;
+                if stopped_owned_process {
+                    openvpn::wait_for_link_state(
+                        root,
+                        &input.plan.interface_name,
+                        false,
+                        cancel_token.clone(),
+                    )
+                    .await?;
+                }
+                active_link_exists = runtime_link_exists(root, &input.plan.interface_name).await;
+            }
+            _ => {}
+        }
+    }
     let specs = match input.plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
-            build_iproute2_remove_steps(input.config, input.plan, link_exists)?
+        RuntimeTunnelManager::AgentBuiltin => {
+            build_iproute2_remove_steps(input.config, input.plan, active_link_exists)?
         }
         RuntimeTunnelManager::ExternalObserved => Vec::new(),
-        RuntimeTunnelManager::ExternalManagedAdapter => build_external_adapter_remove_steps(
+        RuntimeTunnelManager::CustomAdapter => build_custom_adapter_remove_steps(
             input.plan,
             &endpoint,
             required_runtime_adapter(input.runtime_adapter)?,
         )?,
     };
-    let effective_uid = effective_uid(input.effective_uid_override());
-    let unprivileged_mutation_policy = input.config.network.runtime_unprivileged_mutation_policy;
     let adapter_remove_available = input
         .runtime_adapter
         .is_some_and(|adapter| adapter.stop.is_some() || adapter.cleanup.is_some())
-        || input.plan.runtime_control.manager != RuntimeTunnelManager::ExternalManagedAdapter;
-    let mut reports = Vec::new();
+        || input.plan.runtime_control.manager != RuntimeTunnelManager::CustomAdapter;
     let mut degraded = false;
     let mut failed = false;
     for spec in specs {
@@ -334,6 +658,21 @@ async fn remove_runtime_tunnel(
             failed = true;
         }
         reports.push(report);
+    }
+
+    if !failed
+        && !degraded
+        && input.plan.runtime_control.manager == RuntimeTunnelManager::AgentBuiltin
+    {
+        match input.plan.kind {
+            TunnelKind::Wireguard => {
+                wireguard::cleanup_wireguard_state(input.plan_id, input.side).await?
+            }
+            TunnelKind::Openvpn => {
+                openvpn::cleanup_openvpn_state(input.plan_id, input.side).await?
+            }
+            _ => {}
+        }
     }
 
     let status = if input.plan.runtime_control.manager == RuntimeTunnelManager::ExternalObserved {
@@ -375,8 +714,8 @@ fn should_skip_unprivileged_mutation(
     }
     match policy {
         AgentRuntimeUnprivilegedMutationPolicy::Skip => true,
-        AgentRuntimeUnprivilegedMutationPolicy::TryExternalAdapters => {
-            manager != RuntimeTunnelManager::ExternalManagedAdapter
+        AgentRuntimeUnprivilegedMutationPolicy::TryCustomAdapters => {
+            manager != RuntimeTunnelManager::CustomAdapter
         }
         AgentRuntimeUnprivilegedMutationPolicy::TryAll => false,
     }
@@ -424,7 +763,7 @@ fn build_iproute2_reconcile_steps(
     }
     let local_mtu = endpoint
         .local_mtu
-        .context("agent-managed runtime tunnel endpoint MTU is required")?
+        .context("Agent builtin runtime tunnel endpoint MTU is required")?
         .to_string();
     steps.push(RuntimeCommandSpec {
         label: "runtime_link_mtu",
@@ -442,27 +781,11 @@ fn build_iproute2_reconcile_steps(
         mutates: true,
         required: true,
     });
-    steps.push(RuntimeCommandSpec {
-        label: "runtime_addr_replace",
-        argv: extend_argv(
-            &config.network.runtime_ip_argv,
-            [
-                "addr",
-                "replace",
-                &format!(
-                    "{}/{}",
-                    local_address(plan, endpoint),
-                    plan.tunnel_prefix_len
-                ),
-                "peer",
-                remote_address(plan, endpoint),
-                "dev",
-                &plan.interface_name,
-            ],
-        ),
-        mutates: true,
-        required: true,
-    });
+    steps.extend(build_address_replace_steps(
+        &config.network.runtime_ip_argv,
+        plan,
+        endpoint,
+    )?);
     steps.push(RuntimeCommandSpec {
         label: "runtime_link_up",
         argv: extend_argv(
@@ -516,6 +839,48 @@ fn build_runtime_topology_cleanup_steps(
         });
     }
     Ok(steps)
+}
+
+fn build_address_replace_steps(
+    base: &[String],
+    plan: &TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Result<Vec<RuntimeCommandSpec>> {
+    ensure_command_base(base, "runtime ip")?;
+    Ok(endpoint_address_pairs(plan, endpoint)
+        .into_iter()
+        .map(|(local, remote, prefix_len)| RuntimeCommandSpec {
+            label: "runtime_addr_replace",
+            argv: extend_argv(
+                base,
+                [
+                    "addr",
+                    "replace",
+                    &format!("{local}/{prefix_len}"),
+                    "peer",
+                    remote,
+                    "dev",
+                    &plan.interface_name,
+                ],
+            ),
+            mutates: true,
+            required: true,
+        })
+        .collect())
+}
+
+fn endpoint_address_pairs<'a>(
+    plan: &'a TunnelPlan,
+    endpoint: &TunnelEndpointConfig,
+) -> Vec<(&'a str, &'a str, u8)> {
+    [plan.ipv4_tunnel.as_ref(), plan.ipv6_tunnel.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|pair| match endpoint.side {
+            TunnelEndpointSide::Left => (pair.left.as_str(), pair.right.as_str(), pair.prefix_len),
+            TunnelEndpointSide::Right => (pair.right.as_str(), pair.left.as_str(), pair.prefix_len),
+        })
+        .collect()
 }
 
 fn build_iproute2_remove_steps(
@@ -674,9 +1039,14 @@ async fn validate_existing_iproute2_tunnel(
     let addresses = parse_iproute2_addr_json(addr_stdout, &plan.interface_name)?;
 
     let mut mismatches = existing_iproute2_tunnel_mismatches(&link, plan, endpoint)?;
-    let matched_address = matching_existing_iproute2_address(&addresses, plan, endpoint);
-    if matched_address.is_none() {
-        mismatches.push(address_mismatch_message(&addresses, plan, endpoint));
+    let mut matched_addresses = Vec::new();
+    for (local, remote, prefix_len) in endpoint_address_pairs(plan, endpoint) {
+        match matching_existing_iproute2_address(&addresses, local, remote, prefix_len) {
+            Some(address) => matched_addresses.push(address),
+            None => mismatches.push(address_mismatch_message(
+                &addresses, local, remote, prefix_len,
+            )),
+        }
     }
     if !mismatches.is_empty() {
         anyhow::bail!(
@@ -687,7 +1057,7 @@ async fn validate_existing_iproute2_tunnel(
     }
     let desired_mtu = endpoint
         .local_mtu
-        .context("agent-managed runtime tunnel endpoint MTU is required")?;
+        .context("Agent builtin runtime tunnel endpoint MTU is required")?;
     let mtu_matches = link.mtu == Some(u64::from(desired_mtu));
     Ok((
         vec![link_report, addr_report],
@@ -703,7 +1073,7 @@ async fn validate_existing_iproute2_tunnel(
             "ttl": link.ttl,
             "encap": link.encap,
             "encap_dport": link.encap_dport,
-            "address": matched_address,
+            "addresses": matched_addresses,
         }),
     ))
 }
@@ -847,11 +1217,10 @@ fn existing_iproute2_tunnel_mismatches(
 
 fn matching_existing_iproute2_address(
     addresses: &[ExistingIproute2Address],
-    plan: &TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
+    expected_local: &str,
+    expected_remote: &str,
+    expected_prefix_len: u8,
 ) -> Option<ExistingIproute2Address> {
-    let expected_local = local_address(plan, endpoint);
-    let expected_remote = remote_address(plan, endpoint);
     addresses
         .iter()
         .find(|address| {
@@ -859,7 +1228,7 @@ fn matching_existing_iproute2_address(
                 .local
                 .as_deref()
                 .is_some_and(|actual| ip_values_match(actual, expected_local))
-                && address.prefix_len == Some(plan.tunnel_prefix_len)
+                && address.prefix_len == Some(expected_prefix_len)
                 && address
                     .peer
                     .as_deref()
@@ -870,14 +1239,13 @@ fn matching_existing_iproute2_address(
 
 fn address_mismatch_message(
     addresses: &[ExistingIproute2Address],
-    plan: &TunnelPlan,
-    endpoint: &TunnelEndpointConfig,
+    expected_local: &str,
+    expected_remote: &str,
+    expected_prefix_len: u8,
 ) -> String {
     let expected = format!(
         "{}/{} peer {}",
-        local_address(plan, endpoint),
-        plan.tunnel_prefix_len,
-        remote_address(plan, endpoint)
+        expected_local, expected_prefix_len, expected_remote
     );
     let actual = if addresses.is_empty() {
         "<missing>".to_string()
@@ -1048,7 +1416,7 @@ fn build_traffic_limit_steps(
     interface_name: &str,
     limit: &RuntimeTunnelTrafficLimit,
 ) -> Result<Vec<RuntimeCommandSpec>> {
-    if limit.is_default() {
+    if limit.is_default() && base.is_empty() {
         return Ok(Vec::new());
     }
     ensure_command_base(base, "runtime tc")?;
@@ -1074,6 +1442,13 @@ fn build_traffic_limit_steps(
                     "50ms",
                 ],
             ),
+            mutates: true,
+            required: true,
+        });
+    } else {
+        steps.push(RuntimeCommandSpec {
+            label: "runtime_traffic_egress_clear",
+            argv: extend_argv(base, ["qdisc", "del", "dev", interface_name, "root"]),
             mutates: true,
             required: true,
         });
@@ -1115,11 +1490,42 @@ fn build_traffic_limit_steps(
             mutates: true,
             required: true,
         });
+    } else {
+        steps.push(RuntimeCommandSpec {
+            label: "runtime_traffic_ingress_clear",
+            argv: extend_argv(base, ["qdisc", "del", "dev", interface_name, "ingress"]),
+            mutates: true,
+            required: true,
+        });
     }
     Ok(steps)
 }
 
-fn build_external_adapter_steps(
+fn accept_idempotent_traffic_clear(label: &str, report: &mut serde_json::Value) {
+    if !matches!(
+        label,
+        "runtime_traffic_egress_clear" | "runtime_traffic_ingress_clear"
+    ) || report["success"].as_bool() != Some(false)
+        || report["timed_out"].as_bool() == Some(true)
+        || report["killed_for_output_limit"].as_bool() == Some(true)
+    {
+        return;
+    }
+    let stderr = report["stderr"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let already_absent = stderr.contains("cannot delete qdisc with handle of zero")
+        || stderr.contains("cannot find specified qdisc on specified device")
+        || stderr.contains("rtnetlink answers: no such file or directory");
+    if already_absent {
+        report["success"] = serde_json::Value::Bool(true);
+        report["idempotent"] = serde_json::Value::Bool(true);
+        report["reason"] = serde_json::Value::String("qdisc_already_absent".to_string());
+    }
+}
+
+fn build_custom_adapter_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     adapter: &RuntimeTunnelAdapterCommands,
@@ -1159,7 +1565,7 @@ fn build_external_adapter_steps(
     Ok(steps)
 }
 
-fn build_external_adapter_remove_steps(
+fn build_custom_adapter_remove_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     adapter: &RuntimeTunnelAdapterCommands,
@@ -1195,7 +1601,7 @@ async fn run_runtime_compensation(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
-    link_exists_before: bool,
+    plan_owned_link_created: bool,
     triggered_by: &'static str,
     cancel_token: CommandCancelToken,
 ) -> Result<serde_json::Value> {
@@ -1204,7 +1610,7 @@ async fn run_runtime_compensation(
         plan,
         endpoint,
         runtime_adapter,
-        link_exists_before,
+        plan_owned_link_created,
     )?;
     if specs.is_empty() {
         return Ok(serde_json::json!({
@@ -1246,12 +1652,12 @@ fn build_runtime_compensation_steps(
     plan: &TunnelPlan,
     endpoint: &TunnelEndpointConfig,
     runtime_adapter: Option<&RuntimeTunnelAdapterCommands>,
-    link_exists_before: bool,
+    plan_owned_link_created: bool,
 ) -> Result<(Vec<RuntimeCommandSpec>, Option<&'static str>)> {
     match plan.runtime_control.manager {
-        RuntimeTunnelManager::AgentIproute2Managed => {
-            if link_exists_before {
-                return Ok((Vec::new(), Some("existing_link_preserved")));
+        RuntimeTunnelManager::AgentBuiltin => {
+            if !plan_owned_link_created {
+                return Ok((Vec::new(), Some("no_plan_owned_link_created")));
             }
             ensure_command_base(&config.network.runtime_ip_argv, "runtime ip")?;
             Ok((
@@ -1268,7 +1674,7 @@ fn build_runtime_compensation_steps(
             ))
         }
         RuntimeTunnelManager::ExternalObserved => Ok((Vec::new(), Some("observed_only"))),
-        RuntimeTunnelManager::ExternalManagedAdapter => {
+        RuntimeTunnelManager::CustomAdapter => {
             let adapter = required_runtime_adapter(runtime_adapter)?;
             let mut specs = Vec::new();
             if let Some(command) = &adapter.stop {
@@ -1494,7 +1900,7 @@ fn linux_tunnel_mode(kind: TunnelKind) -> Result<&'static str> {
         TunnelKind::Ipip | TunnelKind::Fou => Ok("ipip"),
         TunnelKind::Sit => Ok("sit"),
         TunnelKind::Openvpn | TunnelKind::Wireguard | TunnelKind::TunTap | TunnelKind::Custom => {
-            anyhow::bail!("tunnel kind is not supported by agent iproute2 runtime")
+            anyhow::bail!("tunnel kind is not supported by the Agent builtin iproute2 driver")
         }
     }
 }

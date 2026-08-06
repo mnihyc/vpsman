@@ -165,6 +165,7 @@ config-preset-update --preset-id <custom_preset_uuid> --definition-json={"source
 tunnel-plans
 tunnel-plan-export --plan-id <saved_plan_uuid> --output-file ./plan.json
 tunnel-plan-disable --plan-id <saved_plan_uuid> --expected-revision <revision> --confirmed
+tunnel-plan-rotate-credentials --plan-id <saved_plan_uuid> --expected-revision <revision> --confirmed
 tunnel-plan-delete --plan-id <saved_plan_uuid> --expected-revision <reviewed_plan_revision> --confirmed
 topology-graph --limit 50
 backups
@@ -198,6 +199,8 @@ provider matrix, reviewed-state arguments, and unsupported behavior.
 
 `tunnel-plan-delete` accepts the exact reviewed revision of an enabled or
 disabled plan. `tunnel-plan-disable` is separate and not a deletion prerequisite.
+`tunnel-plan-rotate-credentials` uses that same reviewed revision contract and
+is supported only for Agent builtin WireGuard and OpenVPN plans.
 
 `agent-update-check` stages a newer verified artifact without activation. Add
 `--activate --restart-agent` only for an explicitly reviewed immediate update.

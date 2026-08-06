@@ -117,7 +117,7 @@ test("uses the real API proxy for fleet, topology planning, and audit visibility
     planRow.getByText("live-gre-a-b", { exact: true }),
   ).toBeVisible();
   await expect(planRow).toContainText(/GRE.*gre42/);
-  await expect(planRow).toContainText("Agent iproute2");
+  await expect(planRow).toContainText("Agent builtin");
   await expect(planRow).toContainText("Disabled");
   await expect(planRow).toContainText("Off");
   await expect(planRow).toContainText("Tunnel only");
