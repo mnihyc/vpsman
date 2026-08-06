@@ -79,6 +79,34 @@ test("browses a VPS filesystem and saves a highlighted text file", async ({ page
 
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   await expect(page.getByRole("button", { name: /etc dir/ })).toBeVisible();
+  const etcRow = page.getByRole("button", { name: /etc dir/ });
+  const listRequestsBeforeExpand = await page.evaluate(() =>
+    (window as any).__vpsmanTestRequests.fileBrowserJobs.filter(
+      (request: any) => request.operation?.type === "file_list_dir",
+    ).length,
+  );
+  await etcRow.locator(".fileTreeExpander").click();
+  await expect(page.getByRole("button", { name: /app\.conf/ })).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window as any).__vpsmanTestRequests.fileBrowserJobs.filter(
+          (request: any) => request.operation?.type === "file_list_dir",
+        ).length,
+      ),
+    )
+    .toBe(listRequestsBeforeExpand + 1);
+  await etcRow.locator(".fileTreeExpander").click();
+  await expect(page.getByRole("button", { name: /app\.conf/ })).toBeHidden();
+  await etcRow.locator(".fileTreeExpander").click();
+  await expect(page.getByRole("button", { name: /app\.conf/ })).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      (window as any).__vpsmanTestRequests.fileBrowserJobs.filter(
+        (request: any) => request.operation?.type === "file_list_dir",
+      ).length,
+    ),
+  ).toBe(listRequestsBeforeExpand + 1);
   await openAppConfig(page);
   await expect(page.locator(".codeMirrorShell")).toContainText("listen=443");
   const editorPane = page.locator(".fileEditorPane");

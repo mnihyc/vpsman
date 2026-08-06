@@ -1854,6 +1854,10 @@ function TreeNode({
                 className="fileTreeExpander"
                 onClick={(event) => {
                   event.stopPropagation();
+                  if (!open && !Object.prototype.hasOwnProperty.call(entriesByPath, path)) {
+                    onOpenEntry(entry);
+                    return;
+                  }
                   setExpandedPaths((current) => ({ ...current, [path]: !open }));
                 }}
               >
