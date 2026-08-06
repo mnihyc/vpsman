@@ -836,6 +836,7 @@ fn job_allows_unprivileged_submission(command: &JobCommand) -> bool {
         command,
         JobCommand::ConfigRead
             | JobCommand::ProcessList { .. }
+            | JobCommand::StorageInventory { .. }
             | JobCommand::ServiceInventory { .. }
             | JobCommand::ServiceLogs { .. }
             | JobCommand::PackageUpdatePlan {

@@ -529,6 +529,16 @@ fn unprivileged_submission_allowlist_keeps_server_routing_status_read_only() {
 }
 
 #[test]
+fn unprivileged_submission_allowlist_includes_read_only_storage_inventory() {
+    assert!(job_allows_unprivileged_submission(
+        &JobCommand::StorageInventory {
+            include_pseudo_mounts: true,
+            limit: 2048,
+        }
+    ));
+}
+
+#[test]
 fn routing_jobs_require_the_direct_argv_protocol() {
     for command in [
         network_routing_command(false),
