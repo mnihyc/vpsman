@@ -31,7 +31,6 @@ import type {
   HostStorageInventoryRecord,
   ProcessSupervisorInventoryRecord,
   UpsertCommandTemplateRequest,
-  WsTerminalOutputEvent,
 } from "../types";
 import type {
   FileTransferHandoffRecord,
@@ -40,8 +39,6 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
-  TerminalControlAck,
-  TerminalControlSubmitRequest,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
@@ -112,6 +109,7 @@ type RemoteOperationsSubpage =
   | "storage";
 
 export function RemoteOperationsPanel({
+  accessToken,
   activeSubpage,
   agents,
   commandTemplates,
@@ -123,7 +121,6 @@ export function RemoteOperationsPanel({
   fileTransferSources,
   fileTransferSourcesTruncated,
   initialTargetIntent,
-  lastTerminalOutputEvent,
   loading,
   onCreateFileTransferHandoff,
   onCreateJob,
@@ -148,7 +145,6 @@ export function RemoteOperationsPanel({
   onResolveTargets,
   onSaveFileTransferHandoff,
   onSelectSubpage,
-  onControlTerminalSession,
   onTransferTargetConsumed,
   onUploadFileTransferSource,
   onDeleteCommandTemplate,
@@ -161,6 +157,7 @@ export function RemoteOperationsPanel({
   terminalSessionsTruncated,
   transferTargetIntent,
 }: {
+  accessToken: string;
   activeSubpage: string;
   agents: AgentView[];
   commandTemplates: CommandTemplateRecord[];
@@ -176,7 +173,6 @@ export function RemoteOperationsPanel({
     destination: "processes" | "terminal";
     requestId: string;
   } | null;
-  lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onCreateFileTransferHandoff: (
     clientId: string,
@@ -235,11 +231,6 @@ export function RemoteOperationsPanel({
     },
   ) => Promise<void>;
   onSelectSubpage?: (subpage: string) => void;
-  onControlTerminalSession: (
-    clientId: string,
-    sessionId: string,
-    request: TerminalControlSubmitRequest,
-  ) => Promise<TerminalControlAck>;
   onTransferTargetConsumed?: () => void;
   onUploadFileTransferSource: (
     request: UploadFileTransferSourceArtifactRequest,
@@ -631,6 +622,7 @@ export function RemoteOperationsPanel({
         {remoteSubpage === "terminal" && (
           <div className="jobConsoleStack">
             <TerminalSessionsPanel
+              accessToken={accessToken}
               agents={agents}
               clientLabel={clientLabel}
               initialTargetClientId={
@@ -645,12 +637,10 @@ export function RemoteOperationsPanel({
               }
               sessions={terminalSessions}
               sessionsTruncated={terminalSessionsTruncated}
-              lastTerminalOutputEvent={lastTerminalOutputEvent}
               loading={loading}
               onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
               onInitialTargetConsumed={onInitialTargetIntentConsumed}
               onOpenTerminal={openTerminalSessionDirectly}
-              onControl={onControlTerminalSession}
               onReplay={onLoadTerminalReplay}
               onRefresh={onRefresh}
               onOpenSessionEvidence={onOpenSessionEvidence}

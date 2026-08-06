@@ -3745,6 +3745,7 @@ export async function installConsoleApiMock(
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
         suiteConfigReads: 0,
+        terminalControlAcks: [] as unknown[],
         terminalControls: [] as unknown[],
         totpSetups: [] as unknown[],
         tunnelPlanAllocations: [] as unknown[],
@@ -7182,69 +7183,6 @@ export async function installConsoleApiMock(
           return jsonResponse(terminalSessionsFixture);
         }
         if (
-          /^\/api\/v1\/terminal-sessions\/[^/]+\/[^/]+\/control$/.test(
-            pathname,
-          ) &&
-          method === "POST"
-        ) {
-          const body = await readJsonBody(input, init);
-          requests.terminalControls.push(body);
-          const request = body as {
-            request_id: string;
-            action:
-              | { type: "input"; data_base64: string }
-              | { type: "resize"; cols: number; rows: number }
-              | { type: "close"; reason?: string };
-          };
-          const sessionId = pathname.split("/").at(-2)!;
-          const session = terminalSessionsFixture.find(
-            (candidate: { session_id: string }) =>
-              candidate.session_id === sessionId,
-          );
-          if (!session) {
-            return jsonResponse({ error: "terminal_session_not_found" }, 404);
-          }
-          if (request.action.type === "input") {
-            session.last_input_seq += 1;
-            return jsonResponse({
-              request_id: request.request_id,
-              session_id: sessionId,
-              action: "input",
-              accepted: true,
-              status: "accepted",
-              message: "terminal_input_accepted",
-              input_seq: session.last_input_seq,
-              written_bytes: atob(request.action.data_base64).length,
-            });
-          }
-          if (request.action.type === "resize") {
-            session.cols = request.action.cols;
-            session.rows = request.action.rows;
-            return jsonResponse({
-              request_id: request.request_id,
-              session_id: sessionId,
-              action: "resize",
-              accepted: true,
-              status: "resized",
-              message: "terminal_resized",
-              cols: request.action.cols,
-              rows: request.action.rows,
-            });
-          }
-          session.state = "closed";
-          session.last_status = "closed";
-          session.last_event = "terminal_close";
-          session.close_reason = request.action.reason ?? "operator";
-          return jsonResponse({
-            request_id: request.request_id,
-            session_id: sessionId,
-            action: "close",
-            accepted: true,
-            status: "closed",
-            message: "terminal_closed",
-          });
-        }
-        if (
           pathname ===
             "/api/v1/terminal-sessions/agent-sfo-01/61616161-2222-4333-8444-555555555555/replay" &&
           method === "GET"
@@ -7258,8 +7196,8 @@ export async function installConsoleApiMock(
             ),
             available_first_seq: 1,
             next_seq: 4,
-            chunk_count: 2,
-            byte_count: 30,
+            chunk_count: 3,
+            byte_count: 40,
             truncated: false,
             source: "terminal_output_chunks",
             chunks: [
@@ -7274,10 +7212,22 @@ export async function installConsoleApiMock(
               {
                 terminal_seq: 2,
                 job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
-                data_base64: btoa("prompt$ "),
-                size_bytes: 8,
+                data_base64: btoa(
+                  `prompt$ ${String.fromCharCode(0xe2)}`,
+                ),
+                size_bytes: 9,
                 sha256_hex: "9".repeat(64),
                 created_at: "2026-05-31T10:12:00Z",
+              },
+              {
+                terminal_seq: 3,
+                job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
+                data_base64: btoa(
+                  `${String.fromCharCode(0x82, 0xac)} ready\n`,
+                ),
+                size_bytes: 9,
+                sha256_hex: "a".repeat(64),
+                created_at: "2026-05-31T10:12:01Z",
               },
             ],
           });
@@ -8921,14 +8871,20 @@ export async function installConsoleApiMock(
         static CLOSING = 2;
         static CLOSED = 3;
 
-        readyState = TestWebSocket.OPEN;
+        readyState = TestWebSocket.CONNECTING;
         url: string;
 
         constructor(url: string) {
           super();
           this.url = url;
           testWebSockets.push(this);
-          window.setTimeout(() => this.dispatchEvent(new Event("open")), 0);
+          window.setTimeout(() => {
+            if (this.readyState !== TestWebSocket.CONNECTING) {
+              return;
+            }
+            this.readyState = TestWebSocket.OPEN;
+            this.dispatchEvent(new Event("open"));
+          }, 0);
         }
 
         close() {
@@ -8936,8 +8892,134 @@ export async function installConsoleApiMock(
           this.dispatchEvent(new CloseEvent("close"));
         }
 
-        send() {
-          return;
+        send(data: string) {
+          const url = new URL(this.url, window.location.href);
+          const match = url.pathname.match(
+            /^\/ws\/terminal\/([^/]+)\/([^/]+)$/,
+          );
+          if (!match) {
+            return;
+          }
+          const frame = JSON.parse(data) as Record<string, unknown>;
+          const clientId = decodeURIComponent(match[1]);
+          const sessionId = decodeURIComponent(match[2]);
+          const session = terminalSessionsFixture.find(
+            (candidate: { client_id: string; session_id: string }) =>
+              candidate.client_id === clientId &&
+              candidate.session_id === sessionId,
+          );
+          const dispatch = (message: Record<string, unknown>) =>
+            this.dispatchEvent(
+              new MessageEvent("message", { data: JSON.stringify(message) }),
+            );
+          if (frame.type === "auth") {
+            if (!session) {
+              dispatch({
+                type: "error",
+                message: "terminal_session_not_found",
+                recoverable: false,
+              });
+              return;
+            }
+            const fromSeq = Number(frame.from_seq ?? 1);
+            dispatch({
+              type: "ready",
+              from_seq: fromSeq,
+              available_first_seq: 1,
+              next_seq: session.output_next_seq,
+              replay_truncated: false,
+              session: { ...session },
+            });
+            const chunks = [
+              {
+                data_base64: btoa("durable replay line 1\n"),
+                terminal_seq: 1,
+              },
+              {
+                data_base64: btoa(
+                  `prompt$ ${String.fromCharCode(0xe2)}`,
+                ),
+                terminal_seq: 2,
+              },
+              {
+                data_base64: btoa(
+                  `${String.fromCharCode(0x82, 0xac)} ready\n`,
+                ),
+                terminal_seq: 3,
+              },
+            ];
+            for (const chunk of chunks) {
+              if (chunk.terminal_seq >= fromSeq) {
+                dispatch({ type: "output", ...chunk });
+              }
+            }
+            dispatch({ type: "session_state", session: { ...session } });
+            return;
+          }
+          if (
+            !session ||
+            typeof frame.request_id !== "string" ||
+            !["input", "resize", "close"].includes(String(frame.type))
+          ) {
+            return;
+          }
+          requests.terminalControls.push(frame);
+          const terminalTestWindow = window as typeof window & {
+            __vpsmanRejectNextTerminalControl?: string | null;
+          };
+          if (terminalTestWindow.__vpsmanRejectNextTerminalControl === frame.type) {
+            terminalTestWindow.__vpsmanRejectNextTerminalControl = null;
+            dispatch({
+              type: "error",
+              message: `terminal_${String(frame.type)}_rejected_for_test`,
+              recoverable: true,
+              request_id: frame.request_id,
+            });
+            return;
+          }
+          const ack: Record<string, unknown> = {
+            request_id: frame.request_id,
+            session_id: sessionId,
+            action: frame.type,
+            accepted: true,
+            status: "accepted",
+            message: `terminal_${String(frame.type)}_accepted`,
+          };
+          if (frame.type === "input") {
+            session.last_input_seq += 1;
+            ack.input_seq = session.last_input_seq;
+            ack.written_bytes = atob(String(frame.data_base64 ?? "")).length;
+          } else if (frame.type === "resize") {
+            session.cols = Number(frame.cols);
+            session.rows = Number(frame.rows);
+            ack.cols = session.cols;
+            ack.rows = session.rows;
+          } else {
+            session.state = "closed";
+            session.last_status = "closed";
+            session.last_event = "terminal_close";
+            session.close_reason = String(frame.reason ?? "operator");
+            ack.status = "closed";
+          }
+          const dispatchAck = () => {
+            requests.terminalControlAcks.push(ack);
+            dispatch({ type: "control_ack", ack });
+            if (frame.type === "close") {
+              dispatch({ type: "session_state", session: { ...session } });
+            }
+          };
+          const ackDelayMs = Number(
+            (
+              window as typeof window & {
+                __vpsmanTerminalControlAckDelayMs?: number;
+              }
+            ).__vpsmanTerminalControlAckDelayMs ?? 0,
+          );
+          if (ackDelayMs > 0) {
+            window.setTimeout(dispatchAck, ackDelayMs);
+          } else {
+            dispatchAck();
+          }
         }
       }
 

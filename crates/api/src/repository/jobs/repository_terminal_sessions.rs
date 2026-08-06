@@ -354,6 +354,11 @@ impl Repository {
                 }
             }
         }
+        let lifecycle_event = matches!(action, TerminalControlAction::Close { .. })
+            || (!ack.accepted && matches!(ack.status.as_str(), "missing" | "failed" | "exited"));
+        if !lifecycle_event {
+            return Ok(());
+        }
         let audit = AuditLogView {
             id: Uuid::new_v4(),
             actor_id: Some(operator.operator.id),
@@ -405,12 +410,9 @@ impl Repository {
                 .await?;
             }
         }
-        let state = if ack.accepted {
-            Some(match action {
-                TerminalControlAction::Close { .. } => "closed",
-                _ => "open",
-            })
-        } else if matches!(ack.status.as_str(), "missing" | "failed" | "exited") {
+        let state = if ack.accepted && matches!(action, TerminalControlAction::Close { .. }) {
+            Some("closed")
+        } else if !ack.accepted && matches!(ack.status.as_str(), "missing" | "failed" | "exited") {
             Some(ack.status.as_str())
         } else {
             None

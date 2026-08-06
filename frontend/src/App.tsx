@@ -2395,6 +2395,7 @@ export function App() {
   function renderRemoteOperationsPanel(panelSubpage: string) {
     return (
       <RemoteOperationsPanel
+        accessToken={dashboard.terminalAccessToken}
         activeSubpage={panelSubpage}
         agents={dashboard.agents}
         commandTemplates={dashboard.commandTemplates}
@@ -2405,7 +2406,6 @@ export function App() {
         fileTransfersTruncated={dashboard.fileTransfersTruncated}
         fileTransferSources={dashboard.fileTransferSources}
         fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
-        lastTerminalOutputEvent={dashboard.lastTerminalOutputEvent}
         loading={dashboard.jobsLoading}
         initialTargetIntent={
           workflowTargetIntent?.destination === "terminal" ||
@@ -2436,13 +2436,12 @@ export function App() {
         onOpenJobsDispatch={() => selectView("Jobs", "dispatch")}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenSessionEvidence={() => selectView("Audit", "sessions")}
-        onRefresh={dashboard.loadJobs}
+        onRefresh={dashboard.loadTerminalSessions}
         onResolveTargets={dashboard.resolveJobTargets}
         onSaveFileTransferHandoff={dashboard.saveFileTransferHandoff}
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Remote Operations", subpage)
         }
-        onControlTerminalSession={dashboard.controlTerminalSession}
         onTransferTargetConsumed={() => setTransferTargetIntent(null)}
         onUploadFileTransferSource={dashboard.uploadFileTransferSource}
         onDeleteCommandTemplate={dashboard.deleteCommandTemplate}

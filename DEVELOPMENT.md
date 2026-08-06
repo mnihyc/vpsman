@@ -110,6 +110,15 @@ Every update must keep these boundaries explicit:
 - Preserve explicit schema/version rejection; do not parse an unknown shape as
   an older one.
 - Regenerate and verify frontend protocol contracts when shared types change.
+- Browser terminal attachment uses the session-bound
+  `/ws/terminal/{client_id}/{session_id}` transport: authenticate and authorize
+  the existing terminal job at attachment, revalidate the binding periodically,
+  resume retained output by sequence, and keep input/resize off REST refresh
+  paths. Input and resize update compact session evidence without per-packet
+  audit or job reconciliation; close and terminal failure remain lifecycle
+  events. The REST terminal-control endpoint remains the one-shot `vpsctl`
+  transport and must share the same authorization, gateway-ACK binding, and
+  evidence semantics rather than becoming a second control model.
 
 ### Tunnel ownership changes
 

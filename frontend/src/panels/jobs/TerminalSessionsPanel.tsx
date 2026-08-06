@@ -30,14 +30,14 @@ import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { consolePalette } from "../../colorPalette";
 import { formatLowerBoundCount } from "../../constants";
-import { MAX_TERMINAL_INPUT_BYTES } from "../../generated/protocolContracts";
+import {
+  useTerminalSessionSocket,
+  type TerminalStreamSnapshot,
+} from "../../hooks/useTerminalSessionSocket";
 import { terminalSessionStateBadgeClass } from "../../jobStatusPresentation";
 import { scrollIntoViewWithMotion } from "../../motion";
-import type { AgentView, WsTerminalOutputEvent } from "../../types";
+import type { AgentView } from "../../types";
 import type {
-  TerminalControlAck,
-  TerminalControlAction,
-  TerminalControlSubmitRequest,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../../typesTerminal";
@@ -84,29 +84,28 @@ type ModalSiblingState = {
 
 export function TerminalSessionsPanel({
   agents,
+  accessToken,
   clientLabel,
   initialTargetClientId,
   initialTargetRequestId,
   sessions,
   sessionsTruncated,
-  lastTerminalOutputEvent,
   loading,
   onOpenSessionEvidence,
   onOpenPrivilegeUnlock,
   onInitialTargetConsumed,
   onOpenTerminal,
-  onControl,
   onReplay,
   onRefresh,
   privilegeMaterial,
 }: {
   agents: AgentView[];
+  accessToken: string;
   clientLabel: (clientId: string) => string;
   initialTargetClientId?: string | null;
   initialTargetRequestId?: string | null;
   sessions: TerminalSessionRecord[];
   sessionsTruncated: boolean;
-  lastTerminalOutputEvent: WsTerminalOutputEvent | null;
   loading: boolean;
   onOpenSessionEvidence?: () => void;
   onOpenPrivilegeUnlock: () => void;
@@ -118,11 +117,6 @@ export function TerminalSessionsPanel({
     terminalUser: string;
     terminalUserPolicy: "fail" | "fallback";
   }) => Promise<void>;
-  onControl: (
-    clientId: string,
-    sessionId: string,
-    request: TerminalControlSubmitRequest,
-  ) => Promise<TerminalControlAck>;
   onReplay: (
     clientId: string,
     sessionId: string,
@@ -150,11 +144,6 @@ export function TerminalSessionsPanel({
   const [followKey, setFollowKey] = useState<string | null>(null);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [terminalFocusOpen, setTerminalFocusOpen] = useState(false);
-  const [terminalControlStatus, setTerminalControlStatus] = useState<
-    string | null
-  >(null);
-  const [terminalControlStatusTone, setTerminalControlStatusTone] =
-    useState<ActionFeedbackTone>("info");
   const [closeSession, setCloseSession] =
     useState<TerminalSessionRecord | null>(null);
   const [closePending, setClosePending] = useState(false);
@@ -166,11 +155,7 @@ export function TerminalSessionsPanel({
   const terminalFocusReplayFeedbackRef = useRef<HTMLDivElement | null>(null);
   const terminalCloseFeedbackRef = useRef<HTMLDivElement | null>(null);
   const appliedInitialTargetRequestRef = useRef<string | null>(null);
-  const terminalControlQueueRef = useRef<QueuedTerminalControl[]>([]);
-  const terminalControlSendingRef = useRef(false);
-  const lastTerminalResizeRef = useRef(new Map<string, string>());
-  const terminalControlHandlerRef = useRef(onControl);
-  terminalControlHandlerRef.current = onControl;
+  const autoFollowedSessionKeyRef = useRef<string | null>(null);
   const launchTarget =
     agents.find((agent) => agent.id === launchTargetId) ?? null;
   const launchProfileRecord =
@@ -222,19 +207,85 @@ export function TerminalSessionsPanel({
   const followingLive = Boolean(
     followedSession && isTerminalActive(followedSession),
   );
+  const streamFromSeq = followedSession
+    ? (followedSession.output_retained_first_seq ??
+      followedSession.output_first_seq ??
+      1)
+    : 1;
+  const terminalSocket = useTerminalSessionSocket({
+    accessToken,
+    clientId: followedSession?.client_id ?? null,
+    enabled: followingLive,
+    fromSeq: streamFromSeq,
+    sessionId: followedSession?.session_id ?? null,
+  });
   const terminalSummary = sessionsTruncated
     ? `${formatLowerBoundCount(openSessions, true)} open, ${formatLowerBoundCount(replayableSessions, true)} replayable, ${formatBytes(retainedBytes)} retained in loaded sessions`
     : `${openSessions} open, ${replayableSessions} replayable, ${formatBytes(retainedBytes)} retained`;
   const terminalReplayFeedbackMessage = replayError;
-  const activeReplay =
-    replayPreview && activeSession?.session_id === replayPreview.sessionId
+  const activeSessionKey = activeSession
+    ? `${activeSession.client_id}:${activeSession.session_id}`
+    : null;
+  const activeSocketReplay =
+    terminalSocket.snapshot?.sessionKey === activeSessionKey
+      ? terminalSocket.snapshot
+      : null;
+  const activeStream =
+    activeSocketReplay?.sessionKey === followKey ? activeSocketReplay : null;
+  const presentedActiveSession =
+    activeSession && activeStream
+      ? {
+          ...activeSession,
+          ...(terminalSocket.sessionRecord ?? {}),
+          output_next_seq: activeStream.nextSeq,
+          output_retained_first_seq:
+            activeStream.availableFirstSeq ??
+            terminalSocket.sessionRecord?.output_retained_first_seq ??
+            activeSession.output_retained_first_seq,
+        }
+      : activeSession;
+  const activeReplay = activeSocketReplay
+    ? toStreamReplayPreview(
+        activeSocketReplay,
+        activeSession?.session_id ?? "",
+      )
+    : replayPreview && activeSession?.session_id === replayPreview.sessionId
       ? replayPreview
       : null;
   const transcriptUnavailableReason = activeSession
     ? activeReplay?.text
       ? null
-      : "Load Replay first; transcript export uses the retained replay loaded in this browser."
+      : activeStream && terminalSocket.connectionState !== "ready"
+        ? "Terminal replay is reconnecting; retained output already shown remains available."
+        : "Load Replay first; transcript export uses the retained replay loaded in this browser."
     : "Select a terminal session before copying or downloading transcript text.";
+  const terminalControlStatus = terminalSocket.feedback;
+  const terminalControlStatusTone: ActionFeedbackTone =
+    terminalSocket.feedback === null ? "info" : "danger";
+  const terminalInputEnabled = Boolean(
+    activeSession &&
+      isTerminalActive(activeSession) &&
+      activeStream &&
+      terminalSocket.connectionState === "ready" &&
+      (!terminalSocket.sessionState ||
+        isTerminalSocketStateOpen(terminalSocket.sessionState)),
+  );
+  const closeSessionKey = closeSession
+    ? `${closeSession.client_id}:${closeSession.session_id}`
+    : null;
+  const closeSocketReady = Boolean(
+    closeSessionKey &&
+      terminalSocket.snapshot?.sessionKey === closeSessionKey &&
+      terminalSocket.connectionState === "ready",
+  );
+  const terminalTranscriptState = activeStream
+    ? terminalSocket.connectionState === "ready"
+      ? "Live terminal connected; retained replay and new output stream over this session socket."
+      : terminalSocket.connectionState === "closed"
+        ? "Terminal stream closed; retained output already received remains available."
+        : "Terminal stream reconnecting; input is disabled and retained output already received remains available."
+    : (transcriptUnavailableReason ??
+      "Loaded retained replay can be copied or downloaded from this browser.");
   const terminalRowActions: ConsoleDataGridAction<TerminalSessionRecord>[] = [
     {
       description: ([session]) =>
@@ -439,20 +490,6 @@ export function TerminalSessionsPanel({
   ]);
 
   useEffect(() => {
-    if (!lastTerminalOutputEvent || !followKey) {
-      return;
-    }
-    const eventKey = `${lastTerminalOutputEvent.client_id}:${lastTerminalOutputEvent.session_id}`;
-    if (eventKey !== followKey) {
-      return;
-    }
-    void loadLiveReplay(
-      lastTerminalOutputEvent.client_id,
-      lastTerminalOutputEvent.session_id,
-    );
-  }, [lastTerminalOutputEvent, followKey]);
-
-  useEffect(() => {
     if (!followKey) {
       return;
     }
@@ -492,11 +529,11 @@ export function TerminalSessionsPanel({
       return;
     }
     const key = `${activeSession.client_id}:${activeSession.session_id}`;
-    if (followKey) {
+    if (followKey || autoFollowedSessionKeyRef.current === key) {
       return;
     }
+    autoFollowedSessionKeyRef.current = key;
     setFollowKey(key);
-    void loadDurableReplay(activeSession);
   }, [
     activeSession?.client_id,
     activeSession?.session_id,
@@ -656,26 +693,6 @@ export function TerminalSessionsPanel({
     }
   }
 
-  async function loadLiveReplay(clientId: string, sessionId: string) {
-    const key = `${clientId}:${sessionId}`;
-    setReplayError(null);
-    try {
-      const fromSeq =
-        replayPreview?.sessionId === sessionId ? replayPreview.nextSeq : 1;
-      const replay = await onReplay(clientId, sessionId, fromSeq);
-      setReplayPreview((current) =>
-        mergeReplayPreview(current, toReplayPreview(replay)),
-      );
-    } catch (error) {
-      setReplayError(
-        error instanceof Error
-          ? error.message
-          : "Terminal live replay unavailable",
-      );
-      setFollowKey((current) => (current === key ? null : current));
-    }
-  }
-
   async function copyTranscript() {
     if (!activeReplay?.text) {
       return;
@@ -705,6 +722,7 @@ export function TerminalSessionsPanel({
     const key = `${session.client_id}:${session.session_id}`;
     selectTerminalSession(key);
     if (followKey === key) {
+      autoFollowedSessionKeyRef.current = key;
       setFollowKey(null);
       return;
     }
@@ -712,182 +730,39 @@ export function TerminalSessionsPanel({
       return;
     }
     setFollowKey(key);
-    void loadDurableReplay(session);
   }
 
   function focusTerminalInput(session: TerminalSessionRecord) {
     selectTerminalSession(`${session.client_id}:${session.session_id}`);
+    setFollowKey(`${session.client_id}:${session.session_id}`);
     setTerminalFocusOpen(true);
-    void loadDurableReplay(session);
   }
 
   function attachTerminalSession(session: TerminalSessionRecord) {
     focusTerminalInput(session);
-    if (!followKey && session.output_next_seq !== null) {
-      setFollowKey(`${session.client_id}:${session.session_id}`);
-    }
-  }
-
-  function queueTerminalInput(session: TerminalSessionRecord, data: string) {
-    if (!isTerminalActive(session) || !data) {
-      return;
-    }
-    const bytes = new TextEncoder().encode(data);
-    for (
-      let offset = 0;
-      offset < bytes.length;
-      offset += MAX_TERMINAL_INPUT_BYTES
-    ) {
-      const chunk = bytes.slice(offset, offset + MAX_TERMINAL_INPUT_BYTES);
-      const queue = terminalControlQueueRef.current;
-      const previous = queue[queue.length - 1];
-      if (
-        previous &&
-        previous.session.client_id === session.client_id &&
-        previous.session.session_id === session.session_id &&
-        previous.action.type === "input" &&
-        !previous.resolve
-      ) {
-        const previousBytes = base64ToBytes(previous.action.data_base64);
-        if (previousBytes.length + chunk.length <= MAX_TERMINAL_INPUT_BYTES) {
-          const combined = new Uint8Array(previousBytes.length + chunk.length);
-          combined.set(previousBytes);
-          combined.set(chunk, previousBytes.length);
-          previous.action = {
-            type: "input",
-            data_base64: bytesToBase64(combined),
-          };
-          continue;
-        }
-      }
-      queue.push({
-        action: { type: "input", data_base64: bytesToBase64(chunk) },
-        session,
-      });
-    }
-    void drainTerminalControls();
-  }
-
-  function queueTerminalResize(
-    session: TerminalSessionRecord,
-    cols: number,
-    rows: number,
-  ) {
-    if (!isTerminalActive(session)) {
-      return;
-    }
-    const key = `${session.client_id}:${session.session_id}`;
-    const dimensions = `${cols}:${rows}`;
-    if (lastTerminalResizeRef.current.get(key) === dimensions) {
-      return;
-    }
-    lastTerminalResizeRef.current.set(key, dimensions);
-    const queue = terminalControlQueueRef.current;
-    const pending = [...queue]
-      .reverse()
-      .find(
-        (item) =>
-          item.session.client_id === session.client_id &&
-          item.session.session_id === session.session_id &&
-          item.action.type === "resize",
-      );
-    if (pending) {
-      pending.action = { type: "resize", cols, rows };
-    } else {
-      queue.push({
-        action: { type: "resize", cols, rows },
-        session,
-      });
-    }
-    void drainTerminalControls();
-  }
-
-  function queueTerminalControl(
-    session: TerminalSessionRecord,
-    action: TerminalControlAction,
-  ): Promise<TerminalControlAck> {
-    return new Promise((resolve, reject) => {
-      terminalControlQueueRef.current.push({
-        action,
-        reject,
-        resolve,
-        session,
-      });
-      void drainTerminalControls();
-    });
-  }
-
-  async function drainTerminalControls() {
-    if (terminalControlSendingRef.current) {
-      return;
-    }
-    terminalControlSendingRef.current = true;
-    try {
-      while (terminalControlQueueRef.current.length > 0) {
-        const queued = terminalControlQueueRef.current.shift()!;
-        try {
-          const ack = await terminalControlHandlerRef.current(
-            queued.session.client_id,
-            queued.session.session_id,
-            {
-              request_id: crypto.randomUUID(),
-              action: queued.action,
-            },
-          );
-          if (!ack.accepted) {
-            throw new Error(
-              ack.message || `Terminal ${ack.action} was rejected.`,
-            );
-          }
-          queued.resolve?.(ack);
-          if (queued.action.type !== "input") {
-            setTerminalControlStatus(null);
-          }
-        } catch (error) {
-          queued.reject?.(error);
-          const action = queued.action.type;
-          if (action === "input") {
-            terminalControlQueueRef.current =
-              terminalControlQueueRef.current.filter(
-                (pending) =>
-                  pending.action.type !== "input" ||
-                  pending.session.client_id !== queued.session.client_id ||
-                  pending.session.session_id !== queued.session.session_id,
-              );
-          } else if (action === "resize") {
-            lastTerminalResizeRef.current.delete(
-              `${queued.session.client_id}:${queued.session.session_id}`,
-            );
-          }
-          setTerminalControlStatusTone("danger");
-          setTerminalControlStatus(
-            `${action === "input" ? "Terminal input" : `Terminal ${action}`} failed: ${
-              error instanceof Error ? error.message : "delivery failed"
-            }${action === "input" ? " Input was not retried." : ""}`,
-          );
-        }
-      }
-    } finally {
-      terminalControlSendingRef.current = false;
-    }
   }
 
   async function confirmTerminalClose() {
     const session = closeSession;
     if (!session || closePending) return;
+    if (!closeSocketReady) {
+      setCloseStatusTone("warning");
+      setCloseStatus(
+        "Terminal session socket is still connecting. No close action was sent.",
+      );
+      return;
+    }
     setClosePending(true);
     setCloseStatusTone("progress");
     setCloseStatus(
       `Closing terminal ${shortId(session.session_id)} on ${clientLabel(session.client_id)}...`,
     );
     try {
-      await queueTerminalControl(session, {
-        type: "close",
-        reason: "operator_closed",
-      });
+      await terminalSocket.closeSession("operator_closed");
       setCloseStatusTone("success");
       setCloseStatus(`Terminal ${shortId(session.session_id)} closed.`);
       setCloseSession(null);
+      onRefresh();
     } catch (error) {
       setCloseStatusTone("danger");
       setCloseStatus(
@@ -900,6 +775,8 @@ export function TerminalSessionsPanel({
 
   function requestTerminalClose(session: TerminalSessionRecord) {
     setCloseStatus(null);
+    selectTerminalSession(`${session.client_id}:${session.session_id}`);
+    setFollowKey(`${session.client_id}:${session.session_id}`);
     setCloseSession(session);
   }
 
@@ -972,7 +849,6 @@ export function TerminalSessionsPanel({
 
   function selectTerminalSession(key: string) {
     setReplayError(null);
-    setTerminalControlStatus(null);
     setActiveKey(key);
   }
 
@@ -1197,13 +1073,13 @@ export function TerminalSessionsPanel({
         <div className="terminalActiveHeader">
           <div>
             <strong>
-              {activeSession
-                ? clientLabel(activeSession.client_id)
+              {presentedActiveSession
+                ? clientLabel(presentedActiveSession.client_id)
                 : "No active terminal"}
             </strong>
             <span>
-              {activeSession
-                ? `${shortId(activeSession.session_id)} - ${formatArgv(activeSession.argv) || "terminal"}`
+              {presentedActiveSession
+                ? `${shortId(presentedActiveSession.session_id)} - ${formatArgv(presentedActiveSession.argv) || "terminal"}`
                 : "Open a terminal session to attach retained output"}
             </span>
           </div>
@@ -1276,8 +1152,7 @@ export function TerminalSessionsPanel({
           className="terminalTranscriptState"
           aria-label="Terminal transcript availability"
         >
-          {transcriptUnavailableReason ??
-            "Loaded retained replay can be copied or downloaded from this browser."}
+          {terminalTranscriptState}
         </div>
         <div
           className="terminalSessionContext"
@@ -1285,56 +1160,58 @@ export function TerminalSessionsPanel({
         >
           <span>
             <strong>
-              {activeSession
-                ? formatSessionLifecycle(activeSession)
+              {presentedActiveSession
+                ? formatSessionLifecycle(presentedActiveSession)
                 : "No session selected"}
             </strong>
             <small>Lifecycle</small>
           </span>
           <span>
             <strong>
-              {activeSession
-                ? (activeSession.cwd ?? "Working directory not reported")
+              {presentedActiveSession
+                ? (presentedActiveSession.cwd ?? "Working directory not reported")
                 : "-"}
             </strong>
             <small>Working directory</small>
           </span>
           <span>
             <strong>
-              {activeSession ? formatOutputRange(activeSession) : "-"}
+              {presentedActiveSession
+                ? formatOutputRange(presentedActiveSession)
+                : "-"}
             </strong>
             <small>Replay range</small>
           </span>
           <span>
             <strong>
-              {activeSession ? formatLastInput(activeSession) : "-"}
+              {presentedActiveSession
+                ? formatLastInput(presentedActiveSession)
+                : "-"}
             </strong>
             <small>Input state</small>
           </span>
         </div>
         <XtermReplay
           inputEnabled={
-            Boolean(activeSession && isTerminalActive(activeSession)) &&
-            !terminalFocusOpen
+            terminalInputEnabled && !terminalFocusOpen
           }
           label="Active terminal emulator"
           onData={(data) => {
             if (activeSession) {
-              queueTerminalInput(activeSession, data);
+              terminalSocket.queueInput(data);
             }
           }}
           onResize={(cols, rows) => {
             if (activeSession) {
-              queueTerminalResize(activeSession, cols, rows);
+              terminalSocket.queueResize(cols, rows);
             }
           }}
+          resetKey={activeSessionKey ?? "none"}
           text={
-            replayPreview &&
-            replayPreview.sessionId === activeSession?.session_id
-              ? replayPreview.text
-              : activeSession
-                ? "Select Replay or Follow to load retained output for this session.\r\n"
-                : "No terminal session selected.\r\n"
+            activeReplay?.text ??
+            (activeSession
+              ? "Select Replay or Follow to load retained output for this session.\r\n"
+              : "No terminal session selected.\r\n")
           }
         />
         <ActionFeedback
@@ -1356,10 +1233,19 @@ export function TerminalSessionsPanel({
           >
             <header>
               <div>
-                <strong>{clientLabel(activeSession.client_id)}</strong>
+                <strong>
+                  {clientLabel(
+                    presentedActiveSession?.client_id ?? activeSession.client_id,
+                  )}
+                </strong>
                 <span>
-                  {shortId(activeSession.session_id)} -{" "}
-                  {formatArgv(activeSession.argv) || "terminal"}
+                  {shortId(
+                    presentedActiveSession?.session_id ?? activeSession.session_id,
+                  )}{" "}
+                  -{" "}
+                  {formatArgv(
+                    presentedActiveSession?.argv ?? activeSession.argv,
+                  ) || "terminal"}
                 </span>
               </div>
               <div className="rowActions compactRowActions">
@@ -1374,12 +1260,12 @@ export function TerminalSessionsPanel({
                 </button>
                 <button
                   className="secondaryAction compactAction"
-                  disabled={!isTerminalActive(activeSession)}
+                  disabled={!terminalInputEnabled}
                   onClick={() => focusTerminalInput(activeSession)}
                   title={
-                    isTerminalActive(activeSession)
+                    terminalInputEnabled
                       ? "Focus the interactive terminal."
-                      : "Closed terminal sessions cannot receive input."
+                      : "Terminal input is available after the active session socket connects."
                   }
                   type="button"
                 >
@@ -1406,17 +1292,16 @@ export function TerminalSessionsPanel({
             />
             <XtermReplay
               autoFocus
-              inputEnabled={isTerminalActive(activeSession)}
+              inputEnabled={terminalInputEnabled}
               label="Focused terminal emulator"
-              onData={(data) => queueTerminalInput(activeSession, data)}
+              onData={(data) => terminalSocket.queueInput(data)}
               onResize={(cols, rows) =>
-                queueTerminalResize(activeSession, cols, rows)
+                terminalSocket.queueResize(cols, rows)
               }
+              resetKey={activeSessionKey ?? "none"}
               text={
-                replayPreview &&
-                replayPreview.sessionId === activeSession.session_id
-                  ? replayPreview.text
-                  : "Select Replay or Follow to load retained output for this session.\r\n"
+                activeReplay?.text ??
+                "Select Replay or Follow to load retained output for this session.\r\n"
               }
             />
             <ActionFeedback
@@ -1508,25 +1393,25 @@ export function TerminalSessionsPanel({
         storageKey="vpsman.jobs.terminalSessions"
         title="Session inventory and controls"
       />
-      {replayPreview && (
+      {activeReplay && (
         <div
           className="terminalReplayPreview"
           aria-label="Durable terminal replay status"
         >
           <div>
             <strong>
-              Durable replay {shortId(replayPreview.sessionId)}:{" "}
-              {replayPreview.chunkCount} chunks,{" "}
-              {formatBytes(replayPreview.byteCount)}
+              Durable replay {shortId(activeReplay.sessionId)}:{" "}
+              {activeReplay.chunkCount} chunks,{" "}
+              {formatBytes(activeReplay.byteCount)}
             </strong>
             <span>
               {formatReplaySequence(
-                replayPreview.availableFirstSeq ?? replayPreview.fromSeq,
-                replayPreview.nextSeq,
+                activeReplay.availableFirstSeq ?? activeReplay.fromSeq,
+                activeReplay.nextSeq,
               )}
-              {replayPreview.truncated ? "; truncated" : ""}
+              {activeReplay.truncated ? "; truncated" : ""}
               {followingLive &&
-              activeSession?.session_id === replayPreview.sessionId &&
+              activeSession?.session_id === activeReplay.sessionId &&
               followKey ===
                 `${activeSession.client_id}:${activeSession.session_id}`
                 ? "; following live output"
@@ -1536,8 +1421,13 @@ export function TerminalSessionsPanel({
         </div>
       )}
       <ConfirmationPrompt
+        confirmDisabled={!closeSocketReady}
         confirmLabel="Close terminal"
-        detail="Ends this exact authorized terminal session. Retained replay remains available after it closes."
+        detail={
+          closeSocketReady
+            ? "Ends this exact authorized terminal session. Retained replay remains available after it closes."
+            : "Connecting this exact authorized terminal session before close can be sent. No action is queued or retried while disconnected."
+        }
         error={closeStatusTone === "danger" ? closeStatus : null}
         items={[
           {
@@ -1572,6 +1462,7 @@ function XtermReplay({
   label,
   onData,
   onResize,
+  resetKey,
   text,
 }: {
   autoFocus?: boolean;
@@ -1579,6 +1470,7 @@ function XtermReplay({
   label: string;
   onData: (data: string) => void;
   onResize: (cols: number, rows: number) => void;
+  resetKey: string;
   text: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -1587,6 +1479,8 @@ function XtermReplay({
   const onDataRef = useRef(onData);
   const onResizeRef = useRef(onResize);
   const inputEnabledRef = useRef(inputEnabled);
+  const renderedKeyRef = useRef<string | null>(null);
+  const renderedTextRef = useRef("");
   onDataRef.current = onData;
   onResizeRef.current = onResize;
   inputEnabledRef.current = inputEnabled;
@@ -1691,20 +1585,23 @@ function XtermReplay({
     if (!terminal) {
       return;
     }
-    terminal.reset();
-    terminal.write(text);
+    const previousText = renderedTextRef.current;
+    if (
+      renderedKeyRef.current !== resetKey ||
+      !text.startsWith(previousText)
+    ) {
+      terminal.reset();
+      terminal.write(text);
+    } else if (text.length > previousText.length) {
+      terminal.write(text.slice(previousText.length));
+    }
+    renderedKeyRef.current = resetKey;
+    renderedTextRef.current = text;
     window.setTimeout(() => fitRef.current?.fit(), 0);
-  }, [text]);
+  }, [resetKey, text]);
 
   return <div aria-label={label} className="xtermReplay" ref={containerRef} />;
 }
-
-type QueuedTerminalControl = {
-  action: TerminalControlAction;
-  reject?: (reason: unknown) => void;
-  resolve?: (ack: TerminalControlAck) => void;
-  session: TerminalSessionRecord;
-};
 
 type TerminalReplayPreview = {
   sessionId: string;
@@ -1725,15 +1622,20 @@ type TerminalReplayPreviewChunk = {
 };
 
 function toReplayPreview(replay: TerminalReplayRecord): TerminalReplayPreview {
-  const chunks = replay.chunks
+  const decoder = new TextDecoder();
+  const chunks = [...replay.chunks]
+    .sort((left, right) => left.terminal_seq - right.terminal_seq)
     .map((chunk) => ({
       byteCount: chunk.size_bytes,
       terminalSeq: chunk.terminal_seq,
       text: chunk.data_base64
-        ? new TextDecoder().decode(base64ToBytes(chunk.data_base64))
+        ? decoder.decode(base64ToBytes(chunk.data_base64), { stream: true })
         : "",
-    }))
-    .sort((left, right) => left.terminalSeq - right.terminalSeq);
+    }));
+  const trailingText = decoder.decode();
+  if (trailingText && chunks.length > 0) {
+    chunks[chunks.length - 1]!.text += trailingText;
+  }
   return {
     sessionId: replay.session_id,
     fromSeq: replay.from_seq,
@@ -1747,35 +1649,20 @@ function toReplayPreview(replay: TerminalReplayRecord): TerminalReplayPreview {
   };
 }
 
-function mergeReplayPreview(
-  current: TerminalReplayPreview | null,
-  next: TerminalReplayPreview,
+function toStreamReplayPreview(
+  stream: TerminalStreamSnapshot,
+  sessionId: string,
 ): TerminalReplayPreview {
-  if (!current || current.sessionId !== next.sessionId || next.fromSeq <= 1) {
-    return next;
-  }
-  const chunksBySequence = new Map(
-    current.chunks.map((chunk) => [chunk.terminalSeq, chunk]),
-  );
-  for (const chunk of next.chunks) {
-    const currentChunk = chunksBySequence.get(chunk.terminalSeq);
-    if (!currentChunk || (!currentChunk.text && chunk.text)) {
-      chunksBySequence.set(chunk.terminalSeq, chunk);
-    }
-  }
-  const chunks = Array.from(chunksBySequence.values()).sort(
-    (left, right) => left.terminalSeq - right.terminalSeq,
-  );
   return {
-    sessionId: next.sessionId,
-    fromSeq: Math.min(current.fromSeq, next.fromSeq),
-    availableFirstSeq: current.availableFirstSeq ?? next.availableFirstSeq,
-    nextSeq: Math.max(current.nextSeq, next.nextSeq),
-    chunkCount: chunks.length,
-    byteCount: chunks.reduce((total, chunk) => total + chunk.byteCount, 0),
-    truncated: current.truncated || next.truncated,
-    text: chunks.map((chunk) => chunk.text).join(""),
-    chunks,
+    sessionId,
+    fromSeq: stream.firstSeq,
+    availableFirstSeq: stream.availableFirstSeq,
+    nextSeq: stream.nextSeq,
+    chunkCount: stream.chunkCount,
+    byteCount: stream.byteCount,
+    truncated: stream.truncated,
+    text: stream.text,
+    chunks: [],
   };
 }
 
@@ -1786,14 +1673,6 @@ function base64ToBytes(value: string): Uint8Array {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
-}
-
-function bytesToBase64(value: Uint8Array): string {
-  let binary = "";
-  for (let offset = 0; offset < value.length; offset += 0x8000) {
-    binary += String.fromCharCode(...value.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -1864,6 +1743,10 @@ function formatOutputRetention(session: TerminalSessionRecord): string {
 
 function isTerminalActive(session: TerminalSessionRecord): boolean {
   return session.state === "open";
+}
+
+function isTerminalSocketStateOpen(state: string): boolean {
+  return state === "opening" || state === "open";
 }
 
 function formatSessionLifecycle(session: TerminalSessionRecord): string {

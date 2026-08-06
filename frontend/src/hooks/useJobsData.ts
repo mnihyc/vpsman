@@ -38,8 +38,6 @@ import type {
   UploadFileTransferSourceArtifactRequest,
 } from "../typesFileTransfer";
 import type {
-  TerminalControlAck,
-  TerminalControlSubmitRequest,
   TerminalReplayRecord,
   TerminalSessionRecord,
 } from "../typesTerminal";
@@ -983,33 +981,6 @@ export function useJobsData(
     [apiToken, rethrowDirectRequestError],
   );
 
-  const controlTerminalSession = useCallback(
-    async (clientId: string, sessionId: string, request: TerminalControlSubmitRequest) => {
-      try {
-        const response = await apiPost<TerminalControlAck>(
-          `/api/v1/terminal-sessions/${encodeURIComponent(clientId)}/${encodeURIComponent(sessionId)}/control`,
-          apiToken,
-          request,
-        );
-        if (currentApiToken.current !== apiToken) {
-          return response;
-        }
-        void Promise.allSettled([loadJobs(), onFleetChanged(), onAuditChanged()]);
-        return response;
-      } catch (error) {
-        if (currentApiToken.current !== apiToken) {
-          throw error;
-        }
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          throw new Error("Operator login required");
-        }
-        throw error;
-      }
-    },
-    [apiToken, loadJobs, onAuditChanged, onFleetChanged, onUnauthorized],
-  );
-
   const createJob = useCallback(
     async (request: CreateJobRequest) => {
       const response = await apiPost<CreateJobResponse>("/api/v1/jobs", apiToken, request);
@@ -1268,7 +1239,6 @@ export function useJobsData(
     loadAgentUpdateReleases,
     loadServerJobs,
     loadTerminalReplay,
-    controlTerminalSession,
     loadTerminalSessions,
     updateJobRollout,
     deleteCommandTemplate,

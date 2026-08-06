@@ -1516,11 +1516,6 @@ export type WsJobOutputEvent = Extract<
   WsEvent,
   { type: "job_output_recorded" }
 >;
-export type WsTerminalOutputEvent = Extract<
-  WsEvent,
-  { type: "terminal_output_recorded" }
->;
-
 export type OperatorView = {
   id: string;
   username: string;

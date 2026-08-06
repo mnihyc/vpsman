@@ -9,7 +9,6 @@ import type {
   AuthResponse,
   DashboardRefreshIntervalSecs,
   WsJobOutputEvent,
-  WsTerminalOutputEvent,
 } from "../types";
 import { parseWsEvent } from "../utils";
 import { useAccessData } from "./useAccessData";
@@ -62,8 +61,6 @@ export function useDashboardData(activeView: ActiveView) {
   const [lastLiveEvent, setLastLiveEvent] = useState("waiting");
   const [lastJobOutputEvent, setLastJobOutputEvent] =
     useState<WsJobOutputEvent | null>(null);
-  const [lastTerminalOutputEvent, setLastTerminalOutputEvent] =
-    useState<WsTerminalOutputEvent | null>(null);
   const [authRefreshError, setAuthRefreshError] = useState<string | null>(null);
   const [logoutWarning, setLogoutWarning] = useState<string | null>(null);
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
@@ -186,7 +183,6 @@ export function useDashboardData(activeView: ActiveView) {
     fleetTelemetryReloadedAt.current = 0;
     setLastLiveEvent("waiting");
     setLastJobOutputEvent(null);
-    setLastTerminalOutputEvent(null);
     access.clearAccess();
     dashboardOverview.clearDashboardOverview();
     fleet.clearFleet();
@@ -563,10 +559,6 @@ export function useDashboardData(activeView: ActiveView) {
             void jobs.loadJobs();
           }
         }
-        if (event.type === "terminal_output_recorded") {
-          setLastTerminalOutputEvent(event);
-          void jobs.loadTerminalSessions();
-        }
         if (event.type === "job_finished") {
           scheduleFleetReload();
           void jobs.loadJobs();
@@ -608,7 +600,6 @@ export function useDashboardData(activeView: ActiveView) {
     backups.loadBackups,
     dashboardOverview.loadDashboardOverview,
     jobs.loadJobs,
-    jobs.loadTerminalSessions,
     scheduleDashboardOverviewReload,
     scheduleFleetReload,
     scheduleFleetTelemetryReload,
@@ -793,7 +784,7 @@ export function useDashboardData(activeView: ActiveView) {
     webhookRuleDeliveries: fleet.webhookRuleDeliveries,
     lastLiveEvent,
     lastJobOutputEvent,
-    lastTerminalOutputEvent,
+    terminalAccessToken: apiToken,
     loadAudits: audit.loadAudits,
     loadAuditEvent: audit.loadAuditEvent,
     loadHistoryExport: audit.loadHistoryExport,
@@ -817,7 +808,6 @@ export function useDashboardData(activeView: ActiveView) {
     loadServerJobs: jobs.loadServerJobs,
     loadTerminalSessions: jobs.loadTerminalSessions,
     loadTerminalReplay: jobs.loadTerminalReplay,
-    controlTerminalSession: jobs.controlTerminalSession,
     loadAgentUpdateReleases: jobs.loadAgentUpdateReleases,
     loadJobTargets: jobs.loadJobTargets,
     loadHostProcessInventory: jobs.loadHostProcessInventory,

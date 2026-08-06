@@ -57,11 +57,6 @@ export type TerminalControlAction =
   | { type: "resize"; cols: number; rows: number }
   | { type: "close"; reason?: string | null };
 
-export type TerminalControlSubmitRequest = {
-  request_id: string;
-  action: TerminalControlAction;
-};
-
 export type TerminalControlAck = {
   request_id: string;
   session_id: string;

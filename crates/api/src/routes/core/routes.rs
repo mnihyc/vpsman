@@ -125,6 +125,7 @@ use crate::{
     routes_system::system_dashboard,
     routes_terminal_sessions::{
         control_terminal_session, list_terminal_sessions, terminal_session_replay,
+        terminal_ws_handler,
     },
     routes_update_releases::{
         create_agent_update_release, latest_agent_update_release, list_agent_update_releases,
@@ -591,6 +592,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/terminal-sessions/{client_id}/{session_id}/replay",
             get(terminal_session_replay),
+        )
+        .route(
+            "/ws/terminal/{client_id}/{session_id}",
+            get(terminal_ws_handler),
         )
         .route(
             "/api/v1/terminal-sessions/{client_id}/{session_id}/control",

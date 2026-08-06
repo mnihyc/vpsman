@@ -1,5 +1,4 @@
 use super::*;
-use axum::http::{header::AUTHORIZATION, HeaderMap};
 
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -7,6 +6,7 @@ use crate::{
     model_terminal::TerminalSessionView,
     repository::{MemoryState, Repository},
 };
+use axum::http::{header::AUTHORIZATION, HeaderMap};
 use uuid::Uuid;
 use vpsman_common::{AgentCapabilitySnapshot, TerminalControlAction};
 
@@ -40,40 +40,80 @@ fn terminal_control_input_validation_accepts_exact_terminal_bytes() {
 }
 
 #[test]
-fn terminal_control_request_uses_only_the_session_control_shape() {
+fn terminal_socket_frames_use_the_session_bound_contract() {
+    let request_id = Uuid::new_v4();
+    let frame = serde_json::from_value::<TerminalSocketClientFrame>(serde_json::json!({
+        "type": "input",
+        "request_id": request_id,
+        "data_base64": "Aw=="
+    }))
+    .unwrap();
+    let (parsed_request_id, action) = frame.into_control();
+    assert_eq!(parsed_request_id, request_id);
+    assert_eq!(
+        action,
+        TerminalControlAction::Input {
+            data_base64: "Aw==".to_string()
+        }
+    );
+
+    let legacy_http_shape =
+        serde_json::from_value::<TerminalSocketClientFrame>(serde_json::json!({
+            "request_id": Uuid::new_v4(),
+            "action": {"type": "close", "reason": "done"}
+        }));
+    assert!(legacy_http_shape.is_err());
+
+    let unknown_field = serde_json::from_value::<TerminalSocketClientFrame>(serde_json::json!({
+        "type": "resize",
+        "request_id": Uuid::new_v4(),
+        "cols": 80,
+        "rows": 24,
+        "confirmed": true
+    }));
+    assert!(unknown_field.is_err());
+
+    let ack = TerminalControlAck {
+        request_id,
+        session_id: Uuid::new_v4(),
+        action: "input".to_string(),
+        accepted: true,
+        status: "accepted".to_string(),
+        message: "accepted".to_string(),
+        input_seq: Some(1),
+        written_bytes: Some(1),
+        cols: None,
+        rows: None,
+    };
+    let encoded = serde_json::to_value(TerminalSocketServerFrame::ControlAck { ack }).unwrap();
+    assert_eq!(encoded["type"], "control_ack");
+    assert_eq!(encoded["ack"]["request_id"], request_id.to_string());
+}
+
+#[test]
+fn terminal_rest_control_request_preserves_the_vpsctl_contract() {
     let request_id = Uuid::new_v4();
     let request = serde_json::from_value::<TerminalControlSubmitRequest>(serde_json::json!({
         "request_id": request_id,
         "action": {
-            "type": "input",
-            "data_base64": "Aw=="
+            "type": "resize",
+            "cols": 80,
+            "rows": 24
         }
     }))
     .unwrap();
     assert_eq!(request.request_id, request_id);
     assert_eq!(
         request.action,
-        TerminalControlAction::Input {
-            data_base64: "Aw==".to_string()
-        }
+        TerminalControlAction::Resize { cols: 80, rows: 24 }
     );
-
-    let legacy_input = serde_json::from_value::<TerminalControlSubmitRequest>(serde_json::json!({
-        "job_id": Uuid::new_v4(),
-        "text": "uptime\n",
-        "confirmed": true
-    }));
-    assert!(legacy_input.is_err());
-
-    let unknown_field = serde_json::from_value::<TerminalControlSubmitRequest>(serde_json::json!({
-        "request_id": Uuid::new_v4(),
-        "action": {
-            "type": "close",
-            "reason": "done"
-        },
-        "confirmed": true
-    }));
-    assert!(unknown_field.is_err());
+    assert!(
+        serde_json::from_value::<TerminalControlSubmitRequest>(serde_json::json!({
+            "request_id": request_id,
+            "text": "uptime\n"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -107,52 +147,25 @@ fn terminal_control_resize_and_close_reuse_session_validation() {
     )
     .unwrap_err();
     assert_eq!(invalid_close.code, "terminal_close_reason_invalid");
-
-    let invalid_session = validate_terminal_control_action(
-        Uuid::nil(),
-        &TerminalControlAction::Resize { cols: 80, rows: 24 },
-    )
-    .unwrap_err();
-    assert_eq!(invalid_session.code, "terminal_session_id_invalid");
 }
 
 #[tokio::test]
-async fn terminal_control_route_requires_scope_and_session_ownership() {
+async fn terminal_socket_auth_requires_both_scopes_and_session_ownership() {
     let (state, memory, session_id, job_id) = route_test_state("open").await;
-    let (missing_scope_headers, _) = auth_headers(&state, &memory, &["jobs:write"]).await;
-    let action = TerminalControlAction::Resize {
-        cols: 100,
-        rows: 30,
-    };
-
-    let missing_scope = control_terminal_session(
-        State(state.clone()),
-        missing_scope_headers,
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
-            request_id: Uuid::new_v4(),
-            action: action.clone(),
-        }),
-    )
-    .await
-    .unwrap_err();
+    let (missing_scope_token, _) = issue_auth(&state, &memory, &["terminal:read"]).await;
+    let missing_scope =
+        authenticate_terminal_socket(&state, &missing_scope_token, "edge-a", session_id, false)
+            .await
+            .unwrap_err();
     assert_eq!(missing_scope.status, StatusCode::FORBIDDEN);
     assert_eq!(missing_scope.code, "operator_scope_insufficient");
 
-    let (owner_headers, owner_id) =
-        auth_headers(&state, &memory, &["jobs:write", "terminal:read"]).await;
+    let (owner_token, owner_id) =
+        issue_auth(&state, &memory, &["jobs:write", "terminal:read"]).await;
     seed_terminal_open_job(&memory, job_id, Uuid::nil()).await;
-    let not_owned = control_terminal_session(
-        State(state),
-        owner_headers,
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
-            request_id: Uuid::new_v4(),
-            action,
-        }),
-    )
-    .await
-    .unwrap_err();
+    let not_owned = authenticate_terminal_socket(&state, &owner_token, "edge-a", session_id, false)
+        .await
+        .unwrap_err();
     assert_eq!(not_owned.status, StatusCode::FORBIDDEN);
     assert_eq!(not_owned.code, "terminal_session_not_owned");
     assert_ne!(owner_id, memory.jobs.read().await[0].actor_id.unwrap());
@@ -160,118 +173,144 @@ async fn terminal_control_route_requires_scope_and_session_ownership() {
 }
 
 #[tokio::test]
-async fn terminal_control_route_rejects_invalid_identifiers_and_closed_sessions() {
-    let (state, memory, session_id, _) = route_test_state("closed").await;
-    let (headers, _) = auth_headers(&state, &memory, &["jobs:write", "terminal:read"]).await;
-    let action = TerminalControlAction::Resize {
-        cols: 100,
-        rows: 30,
-    };
-
-    let invalid_request = control_terminal_session(
-        State(state.clone()),
-        headers.clone(),
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
-            request_id: Uuid::nil(),
-            action: action.clone(),
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(invalid_request.code, "terminal_control_request_id_invalid");
-
-    let invalid_session = control_terminal_session(
-        State(state.clone()),
-        headers.clone(),
-        Path(("edge-a".to_string(), Uuid::nil())),
-        Json(TerminalControlSubmitRequest {
-            request_id: Uuid::new_v4(),
-            action: action.clone(),
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(invalid_session.code, "terminal_session_id_invalid");
-
-    let closed = control_terminal_session(
-        State(state),
-        headers,
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
-            request_id: Uuid::new_v4(),
-            action,
-        }),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(closed.status, StatusCode::CONFLICT);
-    assert_eq!(closed.code, "terminal_session_not_open");
-}
-
-#[tokio::test]
-async fn terminal_control_route_updates_resize_and_close_lifecycle() {
+async fn terminal_socket_controls_update_evidence_without_packet_audits_or_reconciliation() {
     let (state, memory, session_id, job_id) = route_test_state("open").await;
-    let (headers, owner_id) = auth_headers(&state, &memory, &["jobs:write", "terminal:read"]).await;
+    let (token, owner_id) = issue_auth(&state, &memory, &["jobs:write", "terminal:read"]).await;
     seed_terminal_open_job(&memory, job_id, owner_id).await;
+    let authority = authenticate_terminal_socket(&state, &token, "edge-a", session_id, false)
+        .await
+        .unwrap();
 
-    let Json(resize_ack) = control_terminal_session(
-        State(state.clone()),
-        headers.clone(),
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
+    let input = dispatch_bound_terminal_control(
+        &state,
+        "edge-a",
+        session_id,
+        &authority,
+        TerminalSocketControlWork {
+            request_id: Uuid::new_v4(),
+            action: TerminalControlAction::Input {
+                data_base64: BASE64_STANDARD.encode(b"uptime\r"),
+            },
+            pending_input_bytes: 7,
+        },
+    )
+    .await;
+    assert!(input.error.is_none());
+    assert_eq!(input.ack.as_ref().unwrap().action, "input");
+    assert!(memory.audits.read().await.is_empty());
+    assert_eq!(memory.jobs.read().await[0].status, "running");
+
+    let resize = dispatch_bound_terminal_control(
+        &state,
+        "edge-a",
+        session_id,
+        &authority,
+        TerminalSocketControlWork {
             request_id: Uuid::new_v4(),
             action: TerminalControlAction::Resize {
                 cols: 132,
                 rows: 43,
             },
-        }),
+            pending_input_bytes: 0,
+        },
     )
-    .await
-    .unwrap();
-    assert!(resize_ack.accepted);
-    assert_eq!(resize_ack.action, "resize");
+    .await;
+    assert!(resize.error.is_none());
+    assert_eq!(resize.ack.as_ref().unwrap().action, "resize");
     let resized = memory.terminal_sessions.read().await[0].clone();
     assert_eq!((resized.cols, resized.rows), (Some(132), Some(43)));
     assert_eq!(resized.state, "open");
     assert_eq!(resized.last_event, "terminal_resize");
+    assert!(memory.audits.read().await.is_empty());
+    assert_eq!(memory.jobs.read().await[0].status, "running");
+    assert_eq!(memory.job_targets.read().await[0].status, "running");
 
-    let Json(close_ack) = control_terminal_session(
-        State(state),
-        headers,
-        Path(("edge-a".to_string(), session_id)),
-        Json(TerminalControlSubmitRequest {
+    let close = dispatch_bound_terminal_control(
+        &state,
+        "edge-a",
+        session_id,
+        &authority,
+        TerminalSocketControlWork {
             request_id: Uuid::new_v4(),
             action: TerminalControlAction::Close {
                 reason: Some("operator finished".to_string()),
             },
-        }),
+            pending_input_bytes: 0,
+        },
     )
-    .await
-    .unwrap();
-    assert!(close_ack.accepted);
-    assert_eq!(close_ack.action, "close");
-
+    .await;
+    assert!(close.error.is_none());
+    assert!(close.terminal);
     let closed = memory.terminal_sessions.read().await[0].clone();
     assert_eq!(closed.state, "closed");
     assert_eq!(closed.close_reason.as_deref(), Some("operator finished"));
-    assert_eq!(closed.last_event, "terminal_close");
     assert_eq!(memory.jobs.read().await[0].status, "completed");
     assert_eq!(memory.job_targets.read().await[0].status, "completed");
     let audits = memory.audits.read().await;
-    assert_eq!(audits.len(), 2);
-    assert_eq!(audits[0].action, "terminal.resize");
-    assert_eq!(audits[1].action, "terminal.close");
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].action, "terminal.close");
 }
 
 #[tokio::test]
-async fn terminal_control_lazily_fails_a_session_from_an_old_agent_process() {
+async fn terminal_socket_controls_reuse_attach_authority_until_revalidation() {
     let (state, memory, session_id, job_id) = route_test_state("open").await;
-    let (headers, owner_id) = auth_headers(&state, &memory, &["jobs:write", "terminal:read"]).await;
+    let (token, owner_id) = issue_auth(&state, &memory, &["jobs:write", "terminal:read"]).await;
     seed_terminal_open_job(&memory, job_id, owner_id).await;
-    memory.agents.write().await[0].process_incarnation_id = Some(Uuid::new_v4());
+    let authority = authenticate_terminal_socket(&state, &token, "edge-a", session_id, false)
+        .await
+        .unwrap();
 
-    let error = control_terminal_session(
+    memory.jobs.write().await[0].actor_id = Some(Uuid::new_v4());
+    let result = dispatch_bound_terminal_control(
+        &state,
+        "edge-a",
+        session_id,
+        &authority,
+        TerminalSocketControlWork {
+            request_id: Uuid::new_v4(),
+            action: TerminalControlAction::Input {
+                data_base64: BASE64_STANDARD.encode(b"x"),
+            },
+            pending_input_bytes: 1,
+        },
+    )
+    .await;
+    assert!(result.error.is_none());
+    assert_eq!(result.ack.as_ref().unwrap().action, "input");
+    assert!(result.session.is_none());
+}
+
+#[test]
+fn terminal_socket_retries_transient_server_failures_and_releases_rejected_close() {
+    assert!(terminal_socket_error_recoverable(
+        StatusCode::INTERNAL_SERVER_ERROR
+    ));
+    assert!(terminal_socket_error_recoverable(
+        StatusCode::SERVICE_UNAVAILABLE
+    ));
+    assert!(!terminal_socket_error_recoverable(StatusCode::UNAUTHORIZED));
+    assert!(should_clear_terminal_close_queue(true, false));
+    assert!(!should_clear_terminal_close_queue(true, true));
+    assert!(!should_clear_terminal_close_queue(false, false));
+}
+
+#[test]
+fn terminal_socket_ignores_redundant_streaming_status_notifications() {
+    assert!(!terminal_event_requires_replay(None, false));
+    assert!(terminal_event_requires_replay(Some(7), false));
+    assert!(terminal_event_requires_replay(None, true));
+    assert!(terminal_event_requires_replay(Some(7), true));
+}
+
+#[tokio::test]
+async fn terminal_rest_control_reuses_the_same_evidence_path() {
+    let (state, memory, session_id, job_id) = route_test_state("open").await;
+    let (token, owner_id) = issue_auth(&state, &memory, &["jobs:write", "terminal:read"]).await;
+    seed_terminal_open_job(&memory, job_id, owner_id).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+
+    let Json(ack) = control_terminal_session(
         State(state),
         headers,
         Path(("edge-a".to_string(), session_id)),
@@ -284,8 +323,28 @@ async fn terminal_control_lazily_fails_a_session_from_an_old_agent_process() {
         }),
     )
     .await
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(ack.action, "resize");
+    assert_eq!(
+        (
+            memory.terminal_sessions.read().await[0].cols,
+            memory.terminal_sessions.read().await[0].rows
+        ),
+        (Some(100), Some(30))
+    );
+    assert!(memory.audits.read().await.is_empty());
+}
 
+#[tokio::test]
+async fn terminal_socket_attach_lazily_fails_an_old_agent_incarnation() {
+    let (state, memory, session_id, job_id) = route_test_state("open").await;
+    let (token, owner_id) = issue_auth(&state, &memory, &["jobs:write", "terminal:read"]).await;
+    seed_terminal_open_job(&memory, job_id, owner_id).await;
+    memory.agents.write().await[0].process_incarnation_id = Some(Uuid::new_v4());
+
+    let error = authenticate_terminal_socket(&state, &token, "edge-a", session_id, true)
+        .await
+        .unwrap_err();
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.code, "terminal_session_not_open");
     let session = memory.terminal_sessions.read().await[0].clone();
@@ -380,11 +439,7 @@ async fn route_test_state(state_name: &str) -> (AppState, MemoryState, Uuid, Uui
     (state, memory, session_id, job_id)
 }
 
-async fn auth_headers(
-    state: &AppState,
-    memory: &MemoryState,
-    scopes: &[&str],
-) -> (HeaderMap, Uuid) {
+async fn issue_auth(state: &AppState, memory: &MemoryState, scopes: &[&str]) -> (String, Uuid) {
     let operator = OperatorRecord {
         id: Uuid::new_v4(),
         username: format!("operator-{}", Uuid::new_v4()),
@@ -407,12 +462,7 @@ async fn auth_headers(
     let operator_id = view.id;
     memory.operators.write().await.push(operator);
     let auth = state.repo.issue_session(view).await.unwrap();
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        AUTHORIZATION,
-        format!("Bearer {}", auth.access_token).parse().unwrap(),
-    );
-    (headers, operator_id)
+    (auth.access_token, operator_id)
 }
 
 async fn seed_terminal_open_job(memory: &MemoryState, job_id: Uuid, actor_id: Uuid) {

@@ -16,9 +16,22 @@ test.beforeEach(async ({ page }, testInfo) => {
         }
       : session,
   );
+  const switchableTerminalSessions = terminalSessions.map((session, index) =>
+    index === 1
+      ? {
+          ...session,
+          close_reason: null,
+          last_event: "terminal_input",
+          last_status: "accepted",
+          state: "open",
+        }
+      : session,
+  );
   await installConsoleApiMock(
     page,
-    testInfo.title.includes("closed replayable terminal")
+    testInfo.title.includes("explicit stop after switching")
+      ? { terminalSessionsOverride: switchableTerminalSessions }
+      : testInfo.title.includes("closed replayable terminal")
       ? {
           terminalSessionsOverride: [
             {
@@ -85,13 +98,11 @@ async function terminalControlRequests(page: Page) {
       window as unknown as {
         __vpsmanTestRequests: {
           terminalControls: Array<{
-            action: {
-              type: string;
-              data_base64?: string;
-              cols?: number;
-              rows?: number;
-              reason?: string;
-            };
+            type: string;
+            data_base64?: string;
+            cols?: number;
+            rows?: number;
+            reason?: string;
             request_id: string;
           }>;
         };
@@ -106,13 +117,14 @@ async function terminalInputText(page: Page) {
       window as unknown as {
         __vpsmanTestRequests: {
           terminalControls: Array<{
-            action: { type: string; data_base64?: string };
+            type: string;
+            data_base64?: string;
           }>;
         };
       }
     ).__vpsmanTestRequests.terminalControls
-      .filter((request) => request.action.type === "input")
-      .map((request) => atob(request.action.data_base64 ?? ""))
+      .filter((request) => request.type === "input")
+      .map((request) => atob(request.data_base64 ?? ""))
       .join(""),
   );
 }
@@ -154,7 +166,19 @@ test("uses retained session actions and sends exact xterm input without creating
       page.getByRole("menuitem", { name: action, exact: true }),
     ).toBeVisible();
   }
-  await page.keyboard.press("Escape");
+  await activate(
+    page.getByRole("menuitem", { name: "Stop follow", exact: true }),
+  );
+  await expect(page.getByText("Not following", { exact: true })).toBeVisible();
+  await page.waitForTimeout(250);
+  await openTerminalActionMenu(page, activeTerminalRow);
+  await expect(
+    page.getByRole("menuitem", { name: "Follow", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop follow", exact: true }),
+  ).toHaveCount(0);
+  await activate(page.getByRole("menuitem", { name: "Follow", exact: true }));
   await activate(grid.getByText("Seq 1-3 retained, next 4").first());
   await expect(page.getByText("Opened by")).toBeVisible();
   await expect(page.getByText("Not reported by terminal API").first()).toBeVisible();
@@ -188,6 +212,16 @@ test("uses retained session actions and sends exact xterm input without creating
   const terminalInput = focused.locator(".xterm-helper-textarea");
   await expect(focused).toBeVisible();
   await expect(terminalInput).toBeFocused();
+  await expect(
+    page.getByLabel("Terminal transcript availability"),
+  ).toContainText("Live terminal connected");
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests?.splice(0);
+  });
   await page.keyboard.type("uptime");
   await page.keyboard.press("Enter");
   await page.keyboard.press("Control+C");
@@ -198,13 +232,58 @@ test("uses retained session actions and sends exact xterm input without creating
   await expect.poll(() => terminalInputText(page)).toContain(
     "uptime\r\u0003\t\u001b",
   );
+  await expect(sessionContext).toContainText(/Last input seq [3-9]/);
+  await page.evaluate(() => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget & { url: string }>;
+      }
+    ).__vpsmanTestWebSockets.find(
+      (candidate) => new URL(candidate.url, window.location.href).pathname === "/ws",
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "terminal_output_recorded",
+          job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
+          client_id: "agent-sfo-01",
+          session_id: "61616161-2222-4333-8444-555555555555",
+          terminal_seq: null,
+          done: false,
+        }),
+      }),
+    );
+  });
+  await page.waitForTimeout(250);
+  const hotPathFetches = await page.evaluate(() =>
+    (
+      (
+        window as typeof window & {
+          __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+        }
+      ).__vpsmanFetchRequests ?? []
+    ).filter(({ url }) => {
+      const pathname = new URL(url, window.location.href).pathname;
+      return (
+        pathname === "/api/v1/terminal-sessions" ||
+        /^\/api\/v1\/terminal-sessions\/[^/]+\/[^/]+\/(?:control|replay)$/.test(
+          pathname,
+        ) ||
+        pathname === "/api/v1/jobs" ||
+        pathname.startsWith("/api/v1/audit") ||
+        pathname === "/api/v1/agents" ||
+        pathname.startsWith("/api/v1/fleet")
+      );
+    }),
+  );
+  expect(hotPathFetches).toEqual([]);
   const controls = await terminalControlRequests(page);
   expect(JSON.stringify(controls)).not.toContain("local-super-password");
   expect(JSON.stringify(controls)).not.toContain("privilege_assertion");
   expect(JSON.stringify(controls)).not.toContain("input_seq");
   expect(
     controls
-      .filter((request) => request.action.type === "input")
+      .filter((request) => request.type === "input")
       .every((request) => /^[0-9a-f-]{36}$/.test(request.request_id)),
   ).toBe(true);
   expect(
@@ -219,9 +298,84 @@ test("uses retained session actions and sends exact xterm input without creating
   ).toBe(0);
 });
 
+test("keeps explicit stop after switching followed terminals", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "terminal follow state is covered in the desktop workspace",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  await invokeTerminalAction(page, closedTerminalRow, "Follow");
+  await invokeTerminalAction(page, closedTerminalRow, "Stop follow");
+  await expect(page.getByText("Not following", { exact: true })).toBeVisible();
+  await page.waitForTimeout(250);
+  await openTerminalActionMenu(page, closedTerminalRow);
+  await expect(
+    page.getByRole("menuitem", { name: "Follow", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop follow", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("pipelines terminal input without waiting one RTT per frame", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "terminal input transport is covered in the desktop workspace",
+  );
+
+  await page.goto("/");
+  await openConsoleSubpage(page, "Remote Operations", "Terminal");
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanTerminalControlAckDelayMs?: number;
+      }
+    ).__vpsmanTerminalControlAckDelayMs = 300;
+  });
+  await invokeTerminalAction(page, activeTerminalRow, "Attach");
+  const focused = page.getByRole("dialog", {
+    name: "Focused terminal workspace",
+  });
+  await expect(focused.locator(".xterm-helper-textarea")).toBeFocused();
+  await page.keyboard.type("a");
+  await page.waitForTimeout(40);
+  await page.keyboard.type("b");
+  await page.waitForTimeout(40);
+
+  const beforeFirstAck = await page.evaluate(() => {
+    const requests = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          terminalControlAcks: Array<{ action: string }>;
+          terminalControls: Array<{ type: string }>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return {
+      inputAcks: requests.terminalControlAcks.filter(
+        (ack) => ack.action === "input",
+      ).length,
+      inputFrames: requests.terminalControls.filter(
+        (request) => request.type === "input",
+      ).length,
+    };
+  });
+  expect(beforeFirstAck).toEqual({ inputAcks: 0, inputFrames: 2 });
+  await expect(page.getByLabel("Active terminal session context")).toContainText(
+    "Last input seq 4",
+  );
+});
+
 test("keeps a closed replayable terminal out of live-follow state", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.includes("mobile"), "terminal lifecycle controls are covered on desktop");
 
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("/");
   await openConsoleSubpage(page, "Remote Operations", "Terminal");
 
@@ -235,6 +389,10 @@ test("keeps a closed replayable terminal out of live-follow state", async ({ pag
   await panel.locator(".terminalActiveHeader").getByRole("button", { name: "Replay" }).click();
   await expect(panel.getByLabel("Durable terminal replay status")).toContainText("retained replay");
   await expect(panel.getByLabel("Durable terminal replay status")).not.toContainText("following live output");
+  await panel.getByRole("button", { name: "Copy transcript" }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("durable replay line 1\nprompt$ € ready\n");
 });
 
 test("labels the full retained terminal range instead of only the latest output event", async ({
@@ -333,6 +491,18 @@ test("presents one exact review and directly closes the authorized session", asy
   await expect(prompt.locator("dd").nth(1)).toHaveText(
     "61616161-2222-4333-8444-555555555555",
   );
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanRejectNextTerminalControl?: string;
+      }
+    ).__vpsmanRejectNextTerminalControl = "close";
+  });
+  await prompt.getByRole("button", { name: "Close terminal" }).click();
+  await expect(prompt).toContainText("terminal_close_rejected_for_test");
+  await expect(
+    prompt.getByRole("button", { name: "Close terminal" }),
+  ).toBeEnabled();
   await prompt.getByRole("button", { name: "Close terminal" }).click();
   await expect(prompt).toBeHidden();
   await expect(panel).toContainText("Terminal 61616161 closed.");
@@ -340,10 +510,8 @@ test("presents one exact review and directly closes the authorized session", asy
   const controls = await terminalControlRequests(page);
   const request = controls.at(-1);
   expect(request).toMatchObject({
-    action: {
-      type: "close",
-      reason: "operator_closed",
-    },
+    type: "close",
+    reason: "operator_closed",
   });
   expect(
     await page.evaluate(
@@ -369,7 +537,7 @@ test("loads durable terminal replay from persisted output history", async ({ pag
 
   const preview = terminalPanel.getByLabel("Durable terminal replay status");
   await expect(preview).toContainText("Durable replay 61616161");
-  await expect(preview).toContainText("2 chunks");
+  await expect(preview).toContainText("3 chunks");
   await expect(preview).toContainText("Seq 1-3 retained, next 4");
   await expect(preview).not.toContainText("durable replay line 1");
   await expect(preview).not.toContainText("prompt$");
@@ -384,7 +552,7 @@ test("loads durable terminal replay from persisted output history", async ({ pag
   expect(download.suggestedFilename()).toBe("terminal-61616161-replay.txt");
 });
 
-test("deduplicates overlapping live terminal replay refreshes", async ({ page }, testInfo) => {
+test("deduplicates terminal output and resets split UTF-8 across retention gaps", async ({ page }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "terminal live replay merging is covered in the desktop session workspace",
@@ -396,31 +564,76 @@ test("deduplicates overlapping live terminal replay refreshes", async ({ page },
 
   const panel = page.locator(".terminalSessionsPanel");
   const preview = panel.getByLabel("Durable terminal replay status");
-  await expect(preview).toContainText("2 chunks, 30 B");
+  await expect(preview).toContainText("3 chunks, 40 B");
 
   await page.evaluate(() => {
     const sockets = (
       window as typeof window & {
-        __vpsmanTestWebSockets: Array<EventTarget>;
+        __vpsmanTestWebSockets: Array<EventTarget & { url: string }>;
       }
     ).__vpsmanTestWebSockets;
-    const socket = sockets.at(-1);
-    const message = JSON.stringify({
-      type: "terminal_output_recorded",
-      job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
-      client_id: "agent-sfo-01",
-      session_id: "61616161-2222-4333-8444-555555555555",
-      terminal_seq: 3,
-      done: false,
+    const socket = sockets.find((candidate) =>
+      candidate.url.includes("/ws/terminal/"),
+    );
+    const firstMessage = JSON.stringify({
+      type: "output",
+      terminal_seq: 4,
+      data_base64: btoa(String.fromCharCode(0xe2)),
     });
-    socket?.dispatchEvent(new MessageEvent("message", { data: message }));
-    socket?.dispatchEvent(new MessageEvent("message", { data: message }));
+    const secondMessage = JSON.stringify({
+      type: "output",
+      terminal_seq: 5,
+      data_base64: btoa(String.fromCharCode(0x82, 0xac)),
+    });
+    socket?.dispatchEvent(
+      new MessageEvent("message", { data: firstMessage }),
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", { data: secondMessage }),
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", { data: secondMessage }),
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "output",
+          terminal_seq: 6,
+          data_base64: btoa(String.fromCharCode(0xe2)),
+        }),
+      }),
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "ready",
+          session: { state: "open" },
+          from_seq: 7,
+          available_first_seq: 8,
+          next_seq: 9,
+          replay_truncated: true,
+        }),
+      }),
+    );
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "output",
+          terminal_seq: 8,
+          data_base64: btoa(String.fromCharCode(0x82, 0xac)),
+        }),
+      }),
+    );
   });
 
-  await expect(preview).toContainText("2 chunks, 30 B");
+  await expect(preview).toContainText("7 chunks, 46 B");
+  await expect(preview).toContainText("truncated");
+  await expect(page.getByLabel("Active terminal session context")).toContainText(
+    "Seq 8 retained",
+  );
   await panel.getByRole("button", { name: "Copy transcript" }).click();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
-    "durable replay line 1\nprompt$ ",
+    "durable replay line 1\nprompt$ € ready\n€��",
   );
 });
 
@@ -450,9 +663,9 @@ test("keeps terminal emulator resizable and target impact compact", async ({
     .poll(async () =>
       (await terminalControlRequests(page)).some(
         (request) =>
-          request.action.type === "resize" &&
-          Number(request.action.cols) > 0 &&
-          Number(request.action.rows) > 0,
+          request.type === "resize" &&
+          Number(request.cols) > 0 &&
+          Number(request.rows) > 0,
       ),
     )
     .toBe(true);
