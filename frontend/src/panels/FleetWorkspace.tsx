@@ -854,14 +854,14 @@ export function FleetWorkspace({
         size: 88,
         minSize: 76,
         sortValue: (agent) =>
-          diskFreeRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
+          diskUsedRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
         searchValue: (agent) =>
-          formatDiskFree(latestRollupsRef.current.get(agent.id)),
+          formatDiskUsed(latestRollupsRef.current.get(agent.id)),
         cell: (agent) => {
           const rollup = latestRollupsRef.current.get(agent.id);
           return (
             <span className="historyPrimary">
-              <strong>{formatDiskFreeCompact(rollup)}</strong>
+              <strong>{formatDiskUsedCompact(rollup)}</strong>
               <small>{formatRollupFreshness(rollup)}</small>
             </span>
           );
@@ -2042,11 +2042,11 @@ function FleetInstanceDetail({
           tone="blue"
         />
         <Metric
-          label="Disk free"
+          label="Disk used"
           value={
             !latestRollup && telemetryRollupsTruncated
               ? "Unknown in loaded rollup page"
-              : formatDiskFree(latestRollup)
+              : formatDiskUsed(latestRollup)
           }
           tone="green"
         />
@@ -2153,11 +2153,11 @@ function FleetInstanceDetail({
             />
             <DetailLine
               icon={<Boxes size={18} />}
-              label="Disk free"
+              label="Disk used"
               value={
                 !latestRollup && telemetryRollupsTruncated
                   ? "Unknown in loaded rollup page; more may exist"
-                  : formatDiskFree(latestRollup)
+                  : formatDiskUsed(latestRollup)
               }
             />
             <DetailLine
@@ -3473,7 +3473,7 @@ function FleetSelectionStatsTable({
           <span role="columnheader">VPS</span>
           <span role="columnheader">CPU</span>
           <span role="columnheader">RAM used</span>
-          <span role="columnheader">Disk free</span>
+          <span role="columnheader">Disk used</span>
           <span role="columnheader">Network</span>
           <span role="columnheader">Samples</span>
         </div>
@@ -3487,7 +3487,7 @@ function FleetSelectionStatsTable({
               </span>
               <span role="cell">{formatLoad(rollup?.cpu_load_1_avg)}</span>
               <span role="cell">{formatMemoryUsed(rollup)}</span>
-              <span role="cell">{formatDiskFree(rollup)}</span>
+              <span role="cell">{formatDiskUsed(rollup)}</span>
               <span role="cell">
                 {formatNetworkRateSummary(
                   rates,
@@ -3535,11 +3535,11 @@ function memoryUsedRatio(
   if (!rollup || rollup.memory_total_bytes_max <= 0) return null;
   return rollup.memory_used_ratio_avg * 100;
 }
-function diskFreeRatio(
+function diskUsedRatio(
   rollup: TelemetryRollupRecord | null | undefined,
 ): number | null {
   if (!rollup || rollup.disk_total_bytes_max <= 0) return null;
-  return (1 - rollup.disk_used_ratio_avg) * 100;
+  return rollup.disk_used_ratio_avg * 100;
 }
 function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
   return rates.reduce(
@@ -9259,21 +9259,19 @@ function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
   return `${percent}% (${formatBytes(rollup.memory_total_bytes_max)})`;
 }
 
-function formatDiskFreeCompact(
+function formatDiskUsedCompact(
   rollup: TelemetryRollupRecord | null | undefined,
 ) {
-  const ratio = diskFreeRatio(rollup);
-  return ratio === null ? "None" : `${Math.round(ratio)}% free`;
+  const ratio = diskUsedRatio(rollup);
+  return ratio === null ? "None" : `${Math.round(ratio)}%`;
 }
 
-function formatDiskFree(rollup: TelemetryRollupRecord | null | undefined) {
+function formatDiskUsed(rollup: TelemetryRollupRecord | null | undefined) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
     return "Awaiting rollup";
   }
-  const percent = Math.round(
-    (1 - rollup.disk_used_ratio_avg) * 100,
-  );
-  return `${percent}% free (${formatBytes(rollup.disk_total_bytes_max)})`;
+  const percent = Math.round(rollup.disk_used_ratio_avg * 100);
+  return `${percent}% (${formatBytes(rollup.disk_total_bytes_max)})`;
 }
 
 function formatRollupFreshness(

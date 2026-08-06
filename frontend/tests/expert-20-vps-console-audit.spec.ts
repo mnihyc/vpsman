@@ -235,6 +235,8 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   const primaryVpsRow = fleetGrid
     .locator(".gridBody [role=row]", { hasText: "ams-payments-edge-01" })
     .first();
+  await expect(primaryVpsRow).toContainText("30%");
+  await expect(primaryVpsRow).not.toContainText("% free");
   await primaryVpsRow.click({ button: "right" });
   await activate(
     page.getByRole("menuitem", {
@@ -277,7 +279,9 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     selectionPanel.getByLabel("Selected VPS statistical tables"),
   ).toBeVisible();
   await expect(selectionPanel.getByText("RAM used").first()).toBeVisible();
-  await expect(selectionPanel).toContainText("75% (12 GiB / 16 GiB)");
+  await expect(selectionPanel.getByText("Disk used").first()).toBeVisible();
+  await expect(selectionPanel).not.toContainText("Disk free");
+  await expect(selectionPanel).toContainText("75% (16 GiB)");
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   await expect(

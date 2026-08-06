@@ -1003,9 +1003,18 @@ test("keeps group-assignment feedback with the VPS whose mutation produced it", 
     .filter({ hasText: "core-fra-02" })
     .first();
   await fraRow.click({ button: "right" });
-  await expect(
-    page.getByRole("menuitem", { name: "Edit groups", exact: true }),
-  ).toHaveAttribute("data-disabled", "");
+  const disabledEditGroups = page.getByRole("menuitem", {
+    name: "Edit groups",
+    exact: true,
+  });
+  await expect(disabledEditGroups).toHaveAttribute("data-disabled", "");
+  expect(
+    Number.parseFloat(
+      await disabledEditGroups.evaluate(
+        (item) => getComputedStyle(item).opacity,
+      ),
+    ),
+  ).toBeLessThanOrEqual(0.6);
   await page.keyboard.press("Escape");
 
   await expect

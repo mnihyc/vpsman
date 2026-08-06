@@ -369,7 +369,7 @@ async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsR
             c.id,
             c.display_name,
             c.status,
-            c.registration_ip::text AS registration_ip,
+            host(c.registration_ip) AS registration_ip,
             host(c.last_ip) AS last_ip,
             c.last_seen_at::text AS last_seen_at,
             c.internal_build_number,

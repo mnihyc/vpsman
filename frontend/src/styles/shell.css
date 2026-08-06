@@ -1908,7 +1908,7 @@ h2 {
 .consoleMenuItem[data-disabled] {
   color: var(--muted);
   cursor: not-allowed;
-  opacity: 1;
+  opacity: 0.5;
 }
 
 .consoleMenuItem.danger {

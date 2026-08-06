@@ -446,7 +446,7 @@ impl Repository {
                         gateway_sessions.gateway_id,
                         gateway_sessions.client_id,
                         gateway_sessions.noise_public_key_hex,
-                        gateway_sessions.remote_ip::text AS remote_ip,
+                        host(gateway_sessions.remote_ip) AS remote_ip,
                         c.agent_version,
                         gateway_sessions.status,
                         gateway_sessions.started_at::text AS started_at,

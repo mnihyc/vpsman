@@ -53,6 +53,63 @@ use crate::{
 };
 
 #[tokio::test]
+async fn postgres_single_host_ip_views_never_expose_prefix_lengths() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "plain-ip-projection";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        UPDATE clients
+        SET registration_ip = '198.51.100.10/24'::inet,
+            last_ip = '2001:db8::20/64'::inet
+        WHERE id = $1
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO gateway_sessions (
+            id, gateway_id, client_id, remote_ip, status
+        )
+        VALUES ($1, 'plain-ip-gateway', $2, '2001:db8::30/64'::inet, 'active')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let agent = db
+        .repo
+        .list_agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.id == client_id)
+        .unwrap();
+    assert_eq!(agent.registration_ip.as_deref(), Some("198.51.100.10"));
+    assert_eq!(agent.last_ip.as_deref(), Some("2001:db8::20"));
+
+    let session = db
+        .repo
+        .list_gateway_sessions(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|session| session.client_id == client_id)
+        .unwrap();
+    assert_eq!(session.remote_ip.as_deref(), Some("2001:db8::30"));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_deleted_delivery_owners_reject_stale_dispatch_snapshots() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;

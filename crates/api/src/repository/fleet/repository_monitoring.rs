@@ -2300,7 +2300,7 @@ impl Repository {
                     SELECT
                         share_id,
                         visitor_id,
-                        source_ip::text AS source_ip,
+                        host(source_ip) AS source_ip,
                         user_agent,
                         first_seen_at::text AS first_seen_at,
                         last_seen_at::text AS last_seen_at
