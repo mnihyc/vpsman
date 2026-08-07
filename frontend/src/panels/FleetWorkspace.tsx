@@ -798,9 +798,7 @@ export function FleetWorkspace({
         cell: (agent) => (
           <span className="historyPrimary">
             <strong>
-              {typeof agent.internal_build_number === "number"
-                ? `Build ${agent.internal_build_number}`
-                : "Unknown"}
+              {agent.internal_build_number ?? "Unknown"}
             </strong>
             <small>
               {[agent.arch ?? "arch unknown", privilegeModeLabel(agent)]

@@ -92,7 +92,7 @@ export function DispatchOptions({
             }
           }}
           pattern="[0-9]*"
-          placeholder="Default max job timeout (1h)"
+          placeholder="Default max job timeout (3600s)"
           type="text"
           value={maxTimeoutSecs}
         />

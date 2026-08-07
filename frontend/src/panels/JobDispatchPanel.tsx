@@ -403,6 +403,7 @@ export function JobDispatchPanel({
     "fail" | "fallback"
   >("fail");
   const [terminalCols, setTerminalCols] = useState(120);
+  const [executionOptionsOpen, setExecutionOptionsOpen] = useState(false);
   const [terminalRows, setTerminalRows] = useState(40);
   const [terminalReplayFromSeq, setTerminalReplayFromSeq] = useState("");
   const [terminalIdleTimeoutSecs, setTerminalIdleTimeoutSecs] = useState(3600);
@@ -721,6 +722,12 @@ export function JobDispatchPanel({
 
   function setMode(nextMode: DispatchMode) {
     setModeState(fixedMode ?? nextMode);
+    if (nextMode === "agent_update_check") {
+      setMaxTimeoutSecs("300");
+      setExecutionOptionsOpen(true);
+    } else {
+      setMaxTimeoutSecs("");
+    }
   }
 
   useEffect(() => {
@@ -2245,7 +2252,11 @@ export function JobDispatchPanel({
           mode={impactMode}
           targets={impactTargets}
         />
-        <details className="dispatchExecutionOptions">
+        <details
+          className="dispatchExecutionOptions"
+          open={executionOptionsOpen}
+          onToggle={(e) => setExecutionOptionsOpen(e.currentTarget.open)}
+        >
           <summary>Execution options</summary>
           <div className="dispatchExecutionOptionsGrid">
             {supportsForceUnprivileged && (

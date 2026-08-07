@@ -20,7 +20,7 @@ use crate::{
 };
 
 const MAX_UPDATE_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
-const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20);
+const UPDATE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_ROOT_CERT_PEM_ENV: &str = "VPSMAN_UPDATE_ROOT_CERT_PEM";
 const VERSION_MANIFEST_SCHEMA_VERSION: u16 = 3;
 
@@ -68,6 +68,7 @@ pub(crate) async fn execute_update_agent(
             expected_sha256_hex: &sha256_hex,
             current_exe: &current_exe,
             cancel_token: &input.cancel_token,
+            max_timeout_secs: input.max_timeout_secs,
         }),
     )
     .await
@@ -99,6 +100,7 @@ pub(crate) async fn execute_update_check(
             current_exe: &current_exe,
             cancel_token: &input.cancel_token,
             verification_tx: input.verification_tx.clone(),
+            max_timeout_secs: input.max_timeout_secs,
         }),
     )
     .await
@@ -140,6 +142,7 @@ struct UpdateStageInput<'a> {
     expected_sha256_hex: &'a str,
     current_exe: &'a Path,
     cancel_token: &'a CommandCancelToken,
+    max_timeout_secs: u64,
 }
 
 struct CheckStageInput<'a> {
@@ -148,6 +151,7 @@ struct CheckStageInput<'a> {
     current_exe: &'a Path,
     cancel_token: &'a CommandCancelToken,
     verification_tx: Option<AgentUpdateVerificationSender>,
+    max_timeout_secs: u64,
 }
 
 struct CheckStageResult {
@@ -187,7 +191,8 @@ struct VersionManifestAsset {
 
 async fn stage_update_artifact(input: UpdateStageInput<'_>) -> Result<CommandOutput> {
     input.cancel_token.check("agent_update")?;
-    let artifact = fetch_update_artifact(input.artifact_url).await?;
+    let timeout = Duration::from_secs(input.max_timeout_secs.max(1));
+    let artifact = fetch_update_artifact(input.artifact_url, timeout).await?;
     input.cancel_token.check("agent_update")?;
     let observed_sha256_hex = sha256_hex(&artifact);
     if observed_sha256_hex != input.expected_sha256_hex {
@@ -236,7 +241,8 @@ fn stage_downloaded_update_artifact(
 
 async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStageResult> {
     input.cancel_token.check("agent_update_check")?;
-    let manifest_bytes = fetch_update_artifact(input.version_url)
+    let timeout = Duration::from_secs(input.max_timeout_secs.max(1));
+    let manifest_bytes = fetch_update_artifact(input.version_url, timeout)
         .await
         .with_context(|| format!("failed to fetch update manifest {}", input.version_url))?;
     input.cancel_token.check("agent_update_check")?;
@@ -342,7 +348,7 @@ async fn check_and_stage_update(input: CheckStageInput<'_>) -> Result<CheckStage
     };
 
     let artifact_url = manifest_download_url(&asset.download_url, asset_name)?;
-    let artifact = fetch_update_artifact(&artifact_url)
+    let artifact = fetch_update_artifact(&artifact_url, timeout)
         .await
         .with_context(|| format!("failed to fetch update artifact {artifact_url}"))?;
     input.cancel_token.check("agent_update_check")?;
@@ -504,11 +510,13 @@ fn manifest_download_url(value: &str, asset_name: &str) -> Result<String> {
     Ok(value.to_string())
 }
 
-async fn fetch_update_artifact(artifact_url: &str) -> Result<Vec<u8>> {
+async fn fetch_update_artifact(artifact_url: &str, timeout: Duration) -> Result<Vec<u8>> {
     let parsed = parse_artifact_url(artifact_url)?;
     match parsed.scheme {
         ArtifactScheme::File => read_file_artifact(&parsed),
-        ArtifactScheme::Https | ArtifactScheme::HttpLocalDev => fetch_http_artifact(&parsed).await,
+        ArtifactScheme::Https | ArtifactScheme::HttpLocalDev => {
+            fetch_http_artifact(&parsed, timeout).await
+        }
     }
 }
 
@@ -529,8 +537,8 @@ fn read_file_artifact(parsed: &ParsedArtifactUrl) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("failed to read update artifact {}", path.display()))
 }
 
-async fn fetch_http_artifact(parsed: &ParsedArtifactUrl) -> Result<Vec<u8>> {
-    let client = update_http_client()?;
+async fn fetch_http_artifact(parsed: &ParsedArtifactUrl, timeout: Duration) -> Result<Vec<u8>> {
+    let client = update_http_client(timeout)?;
     let url = Url::parse(&parsed.http_url()).context("update artifact URL is invalid")?;
     if !update_http_url_allowed(&url) {
         anyhow::bail!("update artifact URL is not allowed");
@@ -546,11 +554,11 @@ async fn fetch_http_artifact(parsed: &ParsedArtifactUrl) -> Result<Vec<u8>> {
     read_limited_response(response).await
 }
 
-fn update_http_client() -> Result<reqwest::Client> {
+fn update_http_client(timeout: Duration) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
-        .connect_timeout(UPDATE_DOWNLOAD_TIMEOUT)
-        .timeout(UPDATE_DOWNLOAD_TIMEOUT)
+        .connect_timeout(UPDATE_CONNECT_TIMEOUT)
+        .timeout(timeout)
         .redirect(redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 10 {
                 return attempt.error("update artifact redirect limit exceeded");
