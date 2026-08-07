@@ -115,7 +115,6 @@ fn supported_config_autocomplete() -> serde_json::Value {
                 "status_probe_max_output_bytes",
                 "runtime_status_telemetry_enabled",
                 "runtime_status_telemetry_interval_secs",
-                "runtime_vnstat_argv",
                 "latency_monitoring_enabled",
                 "latency_monitoring_interval_secs",
                 "latency_down_windows"

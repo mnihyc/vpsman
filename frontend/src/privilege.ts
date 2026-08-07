@@ -737,6 +737,12 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["runtime_adapter", optional(operation.runtime_adapter as JsonValue | null | undefined)]]);
     case "network_interfaces":
       return ordered([["type", operation.type]]);
+    case "network_traffic_import_vnstat":
+      return ordered([
+        ["type", operation.type],
+        ["interfaces", operation.interfaces],
+        ["start_unix", operation.start_unix],
+      ]);
     case "network_probe":
       return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["count", operation.count], ["interval_ms", operation.interval_ms]]);
     case "network_speed_test":

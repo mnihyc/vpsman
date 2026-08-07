@@ -6,6 +6,7 @@ use vpsman_common::{
     render_tunnel_endpoint_config, validate_runtime_topology_intent,
     validate_runtime_tunnel_control, JobCommand, ProcessResourceLimits, ProcessRunPolicy,
     RestoreRollbackFile, MAX_SHELL_SCRIPT_BYTES, NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS,
+    NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES, NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
     NETWORK_SPEED_TEST_MAX_DURATION_SECS, NETWORK_SPEED_TEST_MAX_MAX_BYTES,
     NETWORK_SPEED_TEST_MAX_PORT, NETWORK_SPEED_TEST_MAX_RATE_LIMIT_KBPS,
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
@@ -334,6 +335,10 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             validate_network_status_operation(plan, *side, runtime_adapter.as_ref())
         }
         JobCommand::NetworkInterfaces => Ok(()),
+        JobCommand::NetworkTrafficImportVnstat {
+            interfaces,
+            start_unix,
+        } => validate_network_traffic_import_vnstat(interfaces, *start_unix),
         JobCommand::NetworkProbe {
             plan_id,
             plan,
@@ -386,6 +391,57 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             Some(*desired_cost),
         ),
     }
+}
+
+fn validate_network_traffic_import_vnstat(
+    interfaces: &[String],
+    start_unix: u64,
+) -> Result<(), ApiError> {
+    if interfaces.is_empty() || interfaces.len() > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_interface_count_out_of_range",
+        ));
+    }
+    let mut normalized = interfaces
+        .iter()
+        .map(|interface| interface.trim())
+        .collect::<Vec<_>>();
+    if normalized.iter().any(|interface| {
+        interface.is_empty()
+            || interface.len() > 64
+            || !interface.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+            })
+    }) {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_interface_invalid",
+        ));
+    }
+    normalized.sort_unstable();
+    normalized.dedup();
+    if normalized.len() != interfaces.len() {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_interface_duplicate",
+        ));
+    }
+    if start_unix < 60 || !start_unix.is_multiple_of(60) {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_start_not_minute_aligned",
+        ));
+    }
+    let now_unix = crate::unix_now();
+    let current_minute = now_unix - now_unix % 60;
+    if start_unix >= current_minute {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_start_not_in_past",
+        ));
+    }
+    if current_minute.saturating_sub(start_unix) > NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS {
+        return Err(ApiError::bad_request(
+            "network_traffic_import_start_exceeds_lookback_limit",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_host_service_name(

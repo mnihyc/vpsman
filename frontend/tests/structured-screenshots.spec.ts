@@ -634,8 +634,8 @@ const allViews: ScreenshotEntry[] = [
     prepare: "configuration-assignment-review",
     requiredText: [
       "Review effective configuration change",
-      "Interface traffic counters",
-      "Edge vnStat",
+      "Linux process inventory",
+      "Host-mounted processes",
       "edge-sfo-01",
       "core-fra-02",
     ],
@@ -1592,10 +1592,10 @@ async function navigateAndScreenshot(
     });
     await drawer
       .getByLabel("Configuration behavior")
-      .selectOption("tunnel_traffic");
+      .selectOption("process_inventory");
     await drawer
       .getByLabel("Configuration preset")
-      .selectOption("11111111-1111-4111-8111-111111111111");
+      .selectOption("22222222-2222-4222-8222-222222222222");
     const directTarget = drawer.getByRole("combobox", {
       name: "Add configuration target VPS",
     });

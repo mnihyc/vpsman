@@ -28,6 +28,7 @@ use crate::{
     model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
     repository::Repository,
+    repository_network_traffic_import::is_intentional_vnstat_import_boundary,
     repository_key_lifecycle::{
         lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
         require_visible_postgres_clients_in_tx,
@@ -772,7 +773,8 @@ impl Repository {
                                 sample.rx_bytes,
                                 sample.tx_bytes,
                                 sample.rx_counter_epoch,
-                                sample.tx_counter_epoch
+                                sample.tx_counter_epoch,
+                                sample.sample_source
                             FROM traffic_counter_samples sample
                             JOIN requested
                               ON requested.source_kind = sample.source_kind
@@ -789,7 +791,8 @@ impl Repository {
                                 previous.rx_bytes,
                                 previous.tx_bytes,
                                 previous.rx_counter_epoch,
-                                previous.tx_counter_epoch
+                                previous.tx_counter_epoch,
+                                previous.sample_source
                             FROM requested
                             JOIN LATERAL (
                                 SELECT
@@ -797,7 +800,8 @@ impl Repository {
                                     rx_bytes,
                                     tx_bytes,
                                     rx_counter_epoch,
-                                    tx_counter_epoch
+                                    tx_counter_epoch,
+                                    sample_source
                                 FROM traffic_counter_samples sample
                                 WHERE sample.client_id = $1
                                   AND sample.source_kind = requested.source_kind
@@ -816,7 +820,8 @@ impl Repository {
                                 lag(rx_bytes) OVER stream AS previous_rx_bytes,
                                 lag(tx_bytes) OVER stream AS previous_tx_bytes,
                                 lag(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-                                lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch
+                                lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+                                lag(sample_source) OVER stream AS previous_sample_source
                             FROM selected
                             WINDOW stream AS (
                                 PARTITION BY source_kind, interface
@@ -831,6 +836,11 @@ impl Repository {
                                 tx_bytes,
                                 previous_rx_bytes,
                                 previous_tx_bytes,
+                                sample_source,
+                                previous_sample_source,
+                                (previous_sample_source LIKE 'vnstat_import:%'
+                                  AND sample_source NOT LIKE 'vnstat_import:%')
+                                    AS intentional_import_boundary,
                                 (direction_mask & 1) <> 0 AS selected_rx,
                                 (direction_mask & 2) <> 0 AS selected_tx,
                                 ((direction_mask & 1) = 0 OR (
@@ -854,8 +864,9 @@ impl Repository {
                                    OR (selected_tx AND valid_tx)
                             )::integer AS sample_count,
                             count(*) FILTER (
-                                WHERE (selected_rx AND NOT valid_rx)
-                                   OR (selected_tx AND NOT valid_tx)
+                                WHERE NOT intentional_import_boundary
+                                  AND ((selected_rx AND NOT valid_rx)
+                                   OR (selected_tx AND NOT valid_tx))
                             )::integer AS reset_count,
                             CASE
                             WHEN count(*) FILTER (
@@ -2243,6 +2254,7 @@ impl Repository {
                             sample.tx_bytes,
                             sample.rx_counter_epoch,
                             sample.tx_counter_epoch,
+                            sample.sample_source,
                             requested.cycle_start_unix
                         FROM traffic_counter_samples sample
                         JOIN requested
@@ -2262,6 +2274,7 @@ impl Repository {
                             sample.tx_bytes,
                             sample.rx_counter_epoch,
                             sample.tx_counter_epoch,
+                            sample.sample_source,
                             requested.cycle_start_unix
                         FROM requested
                         JOIN LATERAL (
@@ -2270,7 +2283,8 @@ impl Repository {
                                 sample.rx_bytes,
                                 sample.tx_bytes,
                                 sample.rx_counter_epoch,
-                                sample.tx_counter_epoch
+                                sample.tx_counter_epoch,
+                                sample.sample_source
                             FROM traffic_counter_samples sample
                             WHERE sample.client_id = requested.client_id
                               AND sample.source_kind = requested.source_kind
@@ -2295,7 +2309,8 @@ impl Repository {
                             LAG(rx_bytes) OVER stream AS previous_rx_bytes,
                             LAG(tx_bytes) OVER stream AS previous_tx_bytes,
                             LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
-                            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch
+                            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+                            LAG(sample_source) OVER stream AS previous_sample_source
                         FROM selected_samples
                         WINDOW stream AS (
                             PARTITION BY client_id, source_kind, interface
@@ -2327,10 +2342,22 @@ impl Repository {
                                     ELSE 0
                                 END
                             ), 0)::bigint AS cycle_tx,
-                            COUNT(DISTINCT rx_counter_epoch)::bigint
-                                AS rx_counter_epochs_seen,
-                            COUNT(DISTINCT tx_counter_epoch)::bigint
-                                AS tx_counter_epochs_seen
+                            (1 + COUNT(*) FILTER (
+                                WHERE previous_rx_counter_epoch IS NOT NULL
+                                  AND rx_counter_epoch <> previous_rx_counter_epoch
+                                  AND NOT (
+                                    previous_sample_source LIKE 'vnstat_import:%'
+                                    AND sample_source NOT LIKE 'vnstat_import:%'
+                                  )
+                            ))::bigint AS rx_counter_epochs_seen,
+                            (1 + COUNT(*) FILTER (
+                                WHERE previous_tx_counter_epoch IS NOT NULL
+                                  AND tx_counter_epoch <> previous_tx_counter_epoch
+                                  AND NOT (
+                                    previous_sample_source LIKE 'vnstat_import:%'
+                                    AND sample_source NOT LIKE 'vnstat_import:%'
+                                  )
+                            ))::bigint AS tx_counter_epochs_seen
                         FROM sequenced_samples
                         GROUP BY client_id, source_kind, interface
                     ),
@@ -3296,16 +3323,8 @@ fn aggregate_memory_traffic_counter_usage(
             continue;
         }
         let usage = derive_cycle_usage(&selected, request.cycle_start_unix, now_unix);
-        let rx_counter_epochs_seen = selected
-            .iter()
-            .map(|sample| sample.rx_counter_epoch)
-            .collect::<HashSet<_>>()
-            .len();
-        let tx_counter_epochs_seen = selected
-            .iter()
-            .map(|sample| sample.tx_counter_epoch)
-            .collect::<HashSet<_>>()
-            .len();
+        let rx_counter_epochs_seen = unexpected_counter_epochs_seen(&selected, true);
+        let tx_counter_epochs_seen = unexpected_counter_epochs_seen(&selected, false);
         rows.push(TrafficCounterStreamUsage {
             client_id: request.client_id.clone(),
             source_kind: request.source_kind.clone(),
@@ -3328,6 +3347,36 @@ fn aggregate_memory_traffic_counter_usage(
             .then_with(|| left.interface.cmp(&right.interface))
     });
     rows
+}
+
+fn unexpected_counter_epochs_seen(
+    samples: &[TrafficCounterSampleRecord],
+    rx_direction: bool,
+) -> usize {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by_key(|sample| sample.observed_unix);
+    let mut epochs_seen = 1_usize;
+    for pair in sorted.windows(2) {
+        let previous = &pair[0];
+        let current = &pair[1];
+        let epoch_changed = if rx_direction {
+            current.rx_counter_epoch != previous.rx_counter_epoch
+        } else {
+            current.tx_counter_epoch != previous.tx_counter_epoch
+        };
+        if epoch_changed
+            && !is_intentional_vnstat_import_boundary(
+                &previous.sample_source,
+                &current.sample_source,
+            )
+        {
+            epochs_seen = epochs_seen.saturating_add(1);
+        }
+    }
+    epochs_seen
 }
 
 fn raw_memory_traffic_samples(
@@ -3446,7 +3495,13 @@ fn aggregate_memory_traffic_history(
                 && sample.tx_bytes >= prior.tx_bytes;
             bucket.selected_rx |= selected_rx;
             bucket.selected_tx |= selected_tx;
-            if (selected_rx && !valid_rx) || (selected_tx && !valid_tx) {
+            let intentional_boundary = is_intentional_vnstat_import_boundary(
+                &prior.sample_source,
+                &sample.sample_source,
+            );
+            if !intentional_boundary
+                && ((selected_rx && !valid_rx) || (selected_tx && !valid_tx))
+            {
                 bucket.reset_count = bucket.reset_count.saturating_add(1);
             }
             if (selected_rx && valid_rx) || (selected_tx && valid_tx) {

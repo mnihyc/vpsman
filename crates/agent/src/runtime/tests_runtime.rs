@@ -399,8 +399,6 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
                 plan,
                 builtin_credentials: None,
                 runtime_adapter: None,
-                traffic_source: Default::default(),
-                traffic_command: None,
                 latency_monitoring_enabled: true,
             }],
             ..Default::default()
@@ -1084,8 +1082,6 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
             plan,
             builtin_credentials: None,
             runtime_adapter: None,
-            traffic_source: Default::default(),
-            traffic_command: None,
             latency_monitoring_enabled: true,
         },
     );
@@ -1216,8 +1212,6 @@ fn runtime_sync_test_telemetry_plan(
         plan,
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: Default::default(),
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }
 }

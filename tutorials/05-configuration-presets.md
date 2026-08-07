@@ -8,7 +8,6 @@ editing every VPS separately. Open **Config > Sources** in the console.
 Each VPS has one effective preset for each supported behavior:
 
 - `host_metrics`
-- `tunnel_traffic`
 - `latency_probe`
 - `ospf_update_command`
 - `process_inventory`
@@ -94,10 +93,10 @@ fallback.
 
 ## Assign A Preset To One VPS
 
-List the available traffic presets:
+List the available process-inventory presets:
 
 ```sh
-cargo run -p vpsctl -- config-presets --behavior tunnel_traffic
+cargo run -p vpsctl -- config-presets --behavior process_inventory
 ```
 
 Choose the ID of an existing non-default System or Custom preset. Preview the
@@ -106,7 +105,7 @@ change for one VPS before applying it:
 ```sh
 assignment_preview="$(
   cargo run -p vpsctl -- config-source-set \
-    --behavior tunnel_traffic \
+    --behavior process_inventory \
     --preset-id <preset_uuid> \
     --clients edge-01
 )"
@@ -123,7 +122,7 @@ export VPSMAN_SUPER_PASSWORD='<local-super-password>'
 source ./path/to/secrets/operator-privilege.env
 
 cargo run -p vpsctl -- config-source-set \
-  --behavior tunnel_traffic \
+  --behavior process_inventory \
   --preset-id <preset_uuid> \
   --clients edge-01 \
   --preview-hash "$assignment_preview_hash" \
@@ -145,14 +144,14 @@ Preview and then confirm the reset:
 ```sh
 reset_preview="$(
   cargo run -p vpsctl -- config-source-reset \
-    --behavior tunnel_traffic \
+    --behavior process_inventory \
     --clients edge-01
 )"
 printf '%s\n' "$reset_preview" | jq .
 reset_preview_hash="$(jq -er '.preview_hash' <<<"$reset_preview")"
 
 cargo run -p vpsctl -- config-source-reset \
-  --behavior tunnel_traffic \
+  --behavior process_inventory \
   --clients edge-01 \
   --preview-hash "$reset_preview_hash" \
   --confirmed
@@ -174,7 +173,7 @@ the complete definition as JSON:
 
 ```sh
 cargo run -p vpsctl -- config-preset-create \
-  --behavior tunnel_traffic \
+  --behavior process_inventory \
   --name traffic-vnstat \
   --description "Use the packaged vnStat binary" \
   --definition-json '{"source":"vnstat","vnstat_argv":["/usr/bin/vnstat"]}'
@@ -206,7 +205,7 @@ needed:
 ```sh
 cargo run -p vpsctl -- config-preset-clone \
   --preset-id <system_or_custom_preset_uuid> \
-  --name traffic-vnstat-lab
+  --name host-mounted-processes-lab
 ```
 
 Preview a complete candidate definition:
@@ -215,14 +214,14 @@ Preview a complete candidate definition:
 preset_preview="$(
   cargo run -p vpsctl -- config-preset-preview \
     --preset-id <custom_preset_uuid> \
-    --definition-json '{"source":"interface_counters"}'
+    --definition-json '{"source":"linux_procfs","proc_root":"/srv/proc"}'
 )"
 printf '%s\n' "$preset_preview" | jq .
 preset_preview_hash="$(jq -er '.preview_hash' <<<"$preset_preview")"
 
 cargo run -p vpsctl -- config-preset-update \
   --preset-id <custom_preset_uuid> \
-  --definition-json '{"source":"interface_counters"}' \
+  --definition-json '{"source":"linux_procfs","proc_root":"/srv/proc"}' \
   --preview-hash "$preset_preview_hash" \
   --confirmed
 ```

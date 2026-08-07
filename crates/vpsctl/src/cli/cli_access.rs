@@ -188,7 +188,7 @@ pub(crate) struct ComposeSecretsCommand {
 pub(crate) struct ConfigPresetListCommand {
     #[arg(
         long,
-        help = "Limit to host_metrics, tunnel_traffic, latency_probe, process_inventory, user_sessions, command_execution, or ospf_update_command"
+        help = "Limit to host_metrics, latency_probe, process_inventory, user_sessions, command_execution, or ospf_update_command"
     )]
     pub(crate) behavior: Option<String>,
 }

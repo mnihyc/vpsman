@@ -170,6 +170,32 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   VPS/source/interface stream, and configured retention cannot be shorter than
   32 days so an active monthly cycle remains computable.
 
+### One-time vnStat history import
+
+vnStat is not a selectable runtime accounting backend. Agent-managed tunnel
+interfaces may not exist long enough for `vnstatd` to retain them, so tunnel
+traffic telemetry always uses the managed interface's live kernel counters.
+
+For a host interface whose agent started after the current traffic cycle, an
+operator may dispatch `network_traffic_import_vnstat` once. The command accepts
+one or more host interface names and a UTC-minute-aligned start. The API derives
+the end independently for each interface from its first retained live agent
+sample; an operator-supplied end could create a gap or overlap and is therefore
+not part of the command.
+
+The agent reads the retained five-minute, hourly, and daily vnStat JSON in one
+snapshot per interface. The API reconciles overlapping resolutions from finest
+to coarsest, preserves each aggregate byte total, and distributes only the
+unresolved coarse residual across uncovered minutes. It then inserts cumulative
+synthetic host-interface samples before the first live sample. The synthetic to
+live transition is an intentional counter epoch boundary: no bridge delta is
+counted and it is not reported as a counter reset.
+
+The import requires complete retained coverage of the requested range and a
+live agent sample that establishes its end. Rerunning it replaces only prior
+`vnstat_import:*` samples for the selected interfaces. Normal agent collection
+continues unchanged afterward; vnStat is not polled periodically by vpsman.
+
 The optional display rules next to traffic do not alter accounting:
 
 - `billing.price` accepts an amount, currency symbol or three-letter code, and

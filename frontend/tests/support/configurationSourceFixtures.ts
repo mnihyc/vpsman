@@ -67,17 +67,6 @@ export const configurationPresets: ConfigurationPresetRecord[] = [
     },
   ),
   preset(
-    "00000000-0000-4000-8000-000000000002",
-    "tunnel_traffic",
-    "Interface traffic counters",
-    { source: "interface_counters" },
-    {
-      description: "Use Linux interface counters for tunnel traffic.",
-      effectiveVpsCount: 2,
-      isDefault: true,
-    },
-  ),
-  preset(
     "00000000-0000-4000-8000-000000000003",
     "latency_probe",
     "Linux latency probe",
@@ -146,25 +135,15 @@ export const configurationPresets: ConfigurationPresetRecord[] = [
     },
   ),
   preset(
-    "11111111-1111-4111-8111-111111111111",
-    "tunnel_traffic",
-    "Edge vnStat",
-    { source: "vnstat", vnstat_argv: ["/usr/bin/vnstat"] },
-    {
-      description: "Use vnStat on edge images where it is installed.",
-      effectiveVpsCount: 1,
-      kind: "custom",
-      overrideVpsCount: 1,
-    },
-  ),
-  preset(
     "22222222-2222-4222-8222-222222222222",
     "process_inventory",
     "Host-mounted processes",
     { source: "linux_procfs", proc_root: "/host/proc" },
     {
       description: "Read processes from a host procfs mount.",
+      effectiveVpsCount: 1,
       kind: "custom",
+      overrideVpsCount: 1,
     },
   ),
   preset(
@@ -221,7 +200,6 @@ const defaultPresetByBehavior = new Map(
 
 const behaviors = [
   "host_metrics",
-  "tunnel_traffic",
   "latency_probe",
   "ospf_update_command",
   "process_inventory",
@@ -233,11 +211,11 @@ export const configurationSources: ConfigurationSourceView[] = [
   ...["agent-sfo-01", "agent-fra-02", "agent-nyc-03"].flatMap((clientId) =>
     behaviors.map((behavior) => {
       const inherited = defaultPresetByBehavior.get(behavior)!;
-      const customTraffic =
-        clientId === "agent-sfo-01" && behavior === "tunnel_traffic"
+      const customProcess =
+        clientId === "agent-sfo-01" && behavior === "process_inventory"
           ? configurationPresets.find(
               (record) =>
-                record.id === "11111111-1111-4111-8111-111111111111",
+                record.id === "22222222-2222-4222-8222-222222222222",
             )!
           : null;
       const customOspf =
@@ -250,8 +228,8 @@ export const configurationSources: ConfigurationSourceView[] = [
       const staleLatency =
         clientId === "agent-fra-02" && behavior === "latency_probe";
       const notObserved = clientId === "agent-nyc-03";
-      const effective = customTraffic ?? customOspf ?? inherited;
-      const hasOverride = customTraffic !== null || customOspf !== null;
+      const effective = customProcess ?? customOspf ?? inherited;
+      const hasOverride = customProcess !== null || customOspf !== null;
       return {
         behavior,
         client_id: clientId,

@@ -49,7 +49,7 @@ semver = "1.0.23"
 sha2 = "0.10.9"
 sha1 = "0.10.6"
 snow = "0.9.6"
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "migrate"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "json", "migrate", "chrono"] }
 tar = "0.4.44"
 thiserror = "2.0.12"
 time = "0.3.44"

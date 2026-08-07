@@ -1,9 +1,8 @@
 use super::models::{
     AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig, AgentNetworkConfig,
     AgentNoiseConfig, AgentPingProbeKind, AgentPingTarget, AgentProcessInventorySource,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, AgentTelemetryConfig,
-    AgentTelemetrySource, AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint,
-    MAX_AGENT_PING_TARGETS,
+    AgentRuntimeStatusTelemetryPlan, AgentTelemetryConfig, AgentTelemetrySource,
+    AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint, MAX_AGENT_PING_TARGETS,
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control,
@@ -320,7 +319,6 @@ fn validate_network_config(config: &AgentNetworkConfig) -> Result<(), String> {
     if !(15..=3600).contains(&config.runtime_status_telemetry_interval_secs) {
         return Err("network_runtime_status_telemetry_interval_secs_out_of_range".to_string());
     }
-    validate_network_hook_argv(&config.runtime_vnstat_argv, "network_runtime_vnstat_argv")?;
     if !(15..=3600).contains(&config.latency_monitoring_interval_secs) {
         return Err("network_latency_monitoring_interval_secs_out_of_range".to_string());
     }
@@ -424,32 +422,6 @@ fn validate_runtime_status_telemetry_plans(
             .map_err(|_| "network_runtime_status_telemetry_topology_invalid".to_string())?;
         validate_runtime_adapter_snapshot(plan)?;
         validate_builtin_tunnel_credentials(plan)?;
-        match plan.traffic_source {
-            AgentRuntimeTrafficSource::InterfaceCounters => {
-                if plan.traffic_command.is_some() {
-                    return Err(
-                        "network_runtime_traffic_interface_source_cannot_use_command".to_string(),
-                    );
-                }
-            }
-            AgentRuntimeTrafficSource::Vnstat => {
-                if let Some(command) = &plan.traffic_command {
-                    validate_network_hook_argv(
-                        &command.argv,
-                        "network_runtime_traffic_vnstat_argv",
-                    )?;
-                }
-            }
-            AgentRuntimeTrafficSource::CustomCommand => {
-                let Some(command) = &plan.traffic_command else {
-                    return Err("network_runtime_traffic_custom_command_required".to_string());
-                };
-                validate_network_hook_argv(&command.argv, "network_runtime_traffic_custom_argv")?;
-            }
-        }
-        if let Some(command) = &plan.traffic_command {
-            validate_runtime_command_budget(command, "network_runtime_traffic_command")?;
-        }
         let expected_client = match plan.endpoint_side {
             TunnelEndpointSide::Left => &plan.plan.left_client_id,
             TunnelEndpointSide::Right => &plan.plan.right_client_id,

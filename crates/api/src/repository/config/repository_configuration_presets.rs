@@ -68,25 +68,6 @@ fn system_configuration_presets() -> Vec<SystemConfigurationPreset> {
             }),
         },
         SystemConfigurationPreset {
-            id: "00000000-0000-4000-8000-000000000002",
-            behavior: "tunnel_traffic",
-            name: "Interface traffic counters",
-            is_default: true,
-            description: "Use Linux interface counters for tunnel traffic accounting.",
-            definition: serde_json::json!({"source": "interface_counters"}),
-        },
-        SystemConfigurationPreset {
-            id: "00000000-0000-4000-8000-000000000021",
-            behavior: "tunnel_traffic",
-            name: "vnStat traffic counters",
-            is_default: false,
-            description: "Use the JSON output from /usr/bin/vnstat.",
-            definition: serde_json::json!({
-                "source": "vnstat",
-                "vnstat_argv": ["/usr/bin/vnstat"]
-            }),
-        },
-        SystemConfigurationPreset {
             id: "00000000-0000-4000-8000-000000000003",
             behavior: "latency_probe",
             name: "Linux latency probe",
@@ -2034,7 +2015,6 @@ fn render_configuration_preset_definition(
     validate_configuration_behavior(behavior)?;
     let sections = match behavior {
         "host_metrics" => render_host_metrics(definition)?,
-        "tunnel_traffic" => render_tunnel_traffic(definition)?,
         "latency_probe" => render_latency_probe(definition)?,
         "ospf_update_command" => render_ospf_update_command(definition)?,
         "process_inventory" => render_process_inventory(definition)?,
@@ -2066,13 +2046,6 @@ enum HostMetricsDefinition {
         os_release_file: String,
         custom_metrics_command: PresetCommand,
     },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
-enum TunnelTrafficDefinition {
-    InterfaceCounters {},
-    Vnstat { vnstat_argv: Vec<String> },
 }
 
 #[derive(Deserialize)]
@@ -2184,19 +2157,6 @@ fn render_host_metrics(definition: &Value) -> Result<Value> {
         }
     };
     Ok(serde_json::json!({"telemetry": telemetry}))
-}
-
-fn render_tunnel_traffic(definition: &Value) -> Result<Value> {
-    let parsed: TunnelTrafficDefinition =
-        serde_json::from_value(definition.clone()).context("tunnel_traffic_definition_invalid")?;
-    let argv = match parsed {
-        TunnelTrafficDefinition::InterfaceCounters {} => Vec::new(),
-        TunnelTrafficDefinition::Vnstat { vnstat_argv } => {
-            validate_argv(&vnstat_argv, "vnstat_argv")?;
-            vnstat_argv
-        }
-    };
-    Ok(serde_json::json!({"network": {"runtime_vnstat_argv": argv}}))
 }
 
 fn render_latency_probe(definition: &Value) -> Result<Value> {

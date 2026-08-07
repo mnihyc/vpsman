@@ -1,6 +1,7 @@
 use std::{net::IpAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use clap::{ArgAction, Args, ValueEnum};
 use uuid::Uuid;
 use vpsman_common::{
@@ -14,7 +15,8 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS, NETWORK_SPEED_TEST_MIN_DURATION_SECS,
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
     NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
-    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS,
+    NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+    NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
 };
 
 use crate::{
@@ -432,6 +434,34 @@ pub(crate) struct TunnelProbeCommand {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct NetworkTrafficImportVnstatCommand {
+    #[arg(long, value_delimiter = ',', required = true)]
+    pub(crate) clients: Vec<String>,
+    #[arg(
+        long = "interface",
+        value_delimiter = ',',
+        required = true,
+        help = "Host interface name; repeat the flag or use a comma-separated list"
+    )]
+    pub(crate) interfaces: Vec<String>,
+    #[arg(
+        long,
+        help = "Import start as YYYY-MM-DD (UTC midnight) or an RFC3339 timestamp aligned to a minute; the end is derived from each interface's first live agent sample"
+    )]
+    pub(crate) start: String,
+    #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
+    pub(crate) password_env: String,
+    #[arg(long)]
+    pub(crate) super_salt_hex: Option<String>,
+    #[arg(long, default_value_t = 300)]
+    pub(crate) privilege_ttl_secs: u64,
+    #[arg(long, default_value_t = 300)]
+    pub(crate) max_timeout_secs: u64,
+    #[arg(long, default_value_t = false)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct TunnelSpeedTestCommand {
     #[arg(long)]
     pub(crate) plan_id: Uuid,
@@ -756,6 +786,116 @@ fn validate_definition_hash(value: &str, flag: &str) -> Result<()> {
         "{flag} must be a 64-character hexadecimal SHA-256 hash"
     );
     Ok(())
+}
+
+pub(crate) fn network_traffic_import_vnstat(
+    api_url: &str,
+    token: Option<&str>,
+    mut request: NetworkTrafficImportVnstatCommand,
+) -> Result<()> {
+    anyhow::ensure!(
+        request.confirmed,
+        "network-traffic-import-vnstat requires --confirmed because it rewrites historical traffic samples"
+    );
+    normalize_unique_nonempty(&mut request.clients, "--clients")?;
+    normalize_unique_nonempty(&mut request.interfaces, "--interface")?;
+    anyhow::ensure!(
+        request.interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+        "--interface accepts at most {NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES} values"
+    );
+    anyhow::ensure!(
+        request
+            .interfaces
+            .iter()
+            .all(|interface| valid_import_interface_name(interface)),
+        "--interface values must be 1-64 characters containing only letters, digits, '_', '-', '.', or ':'"
+    );
+    let start_unix = parse_network_traffic_import_start(&request.start)?;
+    let now_unix = Utc::now().timestamp();
+    let now_minute = u64::try_from(now_unix.max(0)).unwrap_or_default() / 60 * 60;
+    anyhow::ensure!(
+        start_unix < now_minute,
+        "--start must be before the current UTC minute"
+    );
+    anyhow::ensure!(
+        now_minute.saturating_sub(start_unix) <= NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
+        "--start exceeds the {} day import lookback limit",
+        NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS / 86_400
+    );
+
+    let operation = JobCommand::NetworkTrafficImportVnstat {
+        interfaces: request.interfaces,
+        start_unix,
+    };
+    let password = load_super_password(&request.password_env)?;
+    let salt_hex = load_super_salt_hex(request.super_salt_hex.as_deref())?;
+    println!(
+        "{}",
+        submit_network_job(
+            api_url,
+            token,
+            "network_traffic_import_vnstat",
+            request.clients,
+            operation,
+            Some((&password, &salt_hex, request.privilege_ttl_secs)),
+            request.max_timeout_secs,
+            true,
+            true,
+            false,
+        )?
+    );
+    Ok(())
+}
+
+fn parse_network_traffic_import_start(value: &str) -> Result<u64> {
+    let value = value.trim();
+    anyhow::ensure!(!value.is_empty(), "--start is required");
+    let timestamp = if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        Utc.from_utc_datetime(
+            &date
+                .and_hms_opt(0, 0, 0)
+                .context("--start date is outside the supported range")?,
+        )
+    } else {
+        DateTime::parse_from_rfc3339(value)
+            .context("--start must be YYYY-MM-DD or RFC3339")?
+            .with_timezone(&Utc)
+    };
+    anyhow::ensure!(
+        timestamp.timestamp_subsec_nanos() == 0 && timestamp.timestamp() % 60 == 0,
+        "--start must be aligned to a UTC minute"
+    );
+    u64::try_from(timestamp.timestamp())
+        .context("--start must be at or after 1970-01-01T00:01:00Z")
+        .and_then(|unix| {
+            anyhow::ensure!(
+                unix >= 60,
+                "--start must be at or after 1970-01-01T00:01:00Z"
+            );
+            Ok(unix)
+        })
+}
+
+fn normalize_unique_nonempty(values: &mut Vec<String>, flag: &str) -> Result<()> {
+    for value in values.iter_mut() {
+        *value = value.trim().to_string();
+    }
+    anyhow::ensure!(
+        values.iter().all(|value| !value.is_empty()),
+        "{flag} contains an empty value"
+    );
+    values.sort();
+    values.dedup();
+    anyhow::ensure!(!values.is_empty(), "{flag} requires at least one value");
+    Ok(())
+}
+
+fn valid_import_interface_name(interface: &str) -> bool {
+    !interface.is_empty()
+        && interface.len() <= 64
+        && interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 
 pub(crate) fn tunnel_status(
@@ -1206,3 +1346,7 @@ fn ensure_explicit_tunnel_endpoints(
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "tests_commands_network_traffic_import.rs"]
+mod tests_network_traffic_import;

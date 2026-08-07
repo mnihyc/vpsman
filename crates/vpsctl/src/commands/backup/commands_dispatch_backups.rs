@@ -429,6 +429,10 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             commands_network::tunnel_status(api_url, token, request)?;
             Ok(None)
         }
+        Command::NetworkTrafficImportVnstat(request) => {
+            commands_network::network_traffic_import_vnstat(api_url, token, request)?;
+            Ok(None)
+        }
         Command::TunnelProbe(request) => {
             commands_network::tunnel_probe(api_url, token, request)?;
             Ok(None)

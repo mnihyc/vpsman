@@ -26,6 +26,9 @@ use crate::repository_jobs::{
 };
 use crate::repository_key_lifecycle::public_key_sha256_hex;
 use crate::repository_monitoring::{accepted_postgres_ping_results, upsert_postgres_ping_results};
+use crate::repository_network_traffic_import::{
+    is_intentional_vnstat_import_boundary, lock_postgres_traffic_counter_streams,
+};
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
@@ -1037,6 +1040,11 @@ impl Repository {
                     &received_metrics.ping_results,
                 )
                 .await?;
+                lock_postgres_traffic_counter_streams(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                )
+                .await?;
                 let metrics = &received_metrics;
                 upsert_postgres_telemetry_sample(
                     &mut tx,
@@ -1825,10 +1833,12 @@ fn upsert_memory_traffic_counter(
             && stored.interface == sample.interface
             && stored.observed_unix == sample.observed_unix
     }) {
-        sample.rx_counter_epoch =
-            stored.rx_counter_epoch + i64::from(sample.rx_bytes < stored.rx_bytes);
-        sample.tx_counter_epoch =
-            stored.tx_counter_epoch + i64::from(sample.tx_bytes < stored.tx_bytes);
+        let source_boundary =
+            is_intentional_vnstat_import_boundary(&stored.sample_source, &sample.sample_source);
+        sample.rx_counter_epoch = stored.rx_counter_epoch
+            + i64::from(sample.rx_bytes < stored.rx_bytes || source_boundary);
+        sample.tx_counter_epoch = stored.tx_counter_epoch
+            + i64::from(sample.tx_bytes < stored.tx_bytes || source_boundary);
         *stored = sample;
     } else {
         if let Some(previous) = samples
@@ -1841,10 +1851,14 @@ fn upsert_memory_traffic_counter(
             })
             .max_by_key(|stored| stored.observed_unix)
         {
-            sample.rx_counter_epoch =
-                previous.rx_counter_epoch + i64::from(sample.rx_bytes < previous.rx_bytes);
-            sample.tx_counter_epoch =
-                previous.tx_counter_epoch + i64::from(sample.tx_bytes < previous.tx_bytes);
+            let source_boundary = is_intentional_vnstat_import_boundary(
+                &previous.sample_source,
+                &sample.sample_source,
+            );
+            sample.rx_counter_epoch = previous.rx_counter_epoch
+                + i64::from(sample.rx_bytes < previous.rx_bytes || source_boundary);
+            sample.tx_counter_epoch = previous.tx_counter_epoch
+                + i64::from(sample.tx_bytes < previous.tx_bytes || source_boundary);
         }
         samples.push(sample);
     }
@@ -2329,7 +2343,7 @@ async fn insert_traffic_counter_sample(
     sqlx::query(
         r#"
         WITH previous AS (
-            SELECT rx_counter_epoch, tx_counter_epoch, rx_bytes, tx_bytes
+            SELECT rx_counter_epoch, tx_counter_epoch, rx_bytes, tx_bytes, sample_source
             FROM traffic_counter_samples
             WHERE client_id = $1
               AND source_kind = $2
@@ -2350,9 +2364,19 @@ async fn insert_traffic_counter_sample(
             $5,
             $6,
             COALESCE(previous.rx_counter_epoch, 0)
-                + CASE WHEN $5 < previous.rx_bytes THEN 1 ELSE 0 END,
+                + CASE
+                    WHEN $5 < previous.rx_bytes THEN 1
+                    WHEN previous.sample_source LIKE 'vnstat_import:%'
+                     AND $7 NOT LIKE 'vnstat_import:%' THEN 1
+                    ELSE 0
+                  END,
             COALESCE(previous.tx_counter_epoch, 0)
-                + CASE WHEN $6 < previous.tx_bytes THEN 1 ELSE 0 END,
+                + CASE
+                    WHEN $6 < previous.tx_bytes THEN 1
+                    WHEN previous.sample_source LIKE 'vnstat_import:%'
+                     AND $7 NOT LIKE 'vnstat_import:%' THEN 1
+                    ELSE 0
+                  END,
             $7
         FROM (SELECT 1) seed
         LEFT JOIN previous ON TRUE
@@ -2361,6 +2385,10 @@ async fn insert_traffic_counter_sample(
             tx_bytes = EXCLUDED.tx_bytes,
             rx_counter_epoch = CASE
                 WHEN EXCLUDED.rx_bytes < traffic_counter_samples.rx_bytes
+                  OR (
+                    traffic_counter_samples.sample_source LIKE 'vnstat_import:%'
+                    AND EXCLUDED.sample_source NOT LIKE 'vnstat_import:%'
+                  )
                 THEN traffic_counter_samples.rx_counter_epoch + 1
                 ELSE GREATEST(
                     traffic_counter_samples.rx_counter_epoch,
@@ -2369,6 +2397,10 @@ async fn insert_traffic_counter_sample(
             END,
             tx_counter_epoch = CASE
                 WHEN EXCLUDED.tx_bytes < traffic_counter_samples.tx_bytes
+                  OR (
+                    traffic_counter_samples.sample_source LIKE 'vnstat_import:%'
+                    AND EXCLUDED.sample_source NOT LIKE 'vnstat_import:%'
+                  )
                 THEN traffic_counter_samples.tx_counter_epoch + 1
                 ELSE GREATEST(
                     traffic_counter_samples.tx_counter_epoch,

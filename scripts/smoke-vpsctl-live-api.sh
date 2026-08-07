@@ -466,9 +466,9 @@ jq -e '
 configuration_sources_json="$(vpsctl_auth config-sources)"
 jq -e '
   map(select(.client_id == "cli-agent-a" or .client_id == "cli-agent-b")) as $live |
-  ($live | length) == 14 and
+  ($live | length) == 12 and
   ([ $live[].behavior ] | unique | sort) ==
-    ["command_execution", "host_metrics", "latency_probe", "ospf_update_command", "process_inventory", "tunnel_traffic", "user_sessions"] and
+    ["command_execution", "host_metrics", "latency_probe", "ospf_update_command", "process_inventory", "user_sessions"] and
   all($live[];
     .effective_preset_kind == "system" and
     .selection_origin == "system_default" and
@@ -799,11 +799,10 @@ if [[ "$scoped_alert_notification_write_status" != "403" ]]; then
   fail "fleet:read scoped fleet-alert-notification write returned HTTP $scoped_alert_notification_write_status: $scoped_alert_notification_write_body"
 fi
 jq -e '.error == "operator_scope_insufficient"' <<<"$scoped_alert_notification_write_body" >/dev/null
-traffic_presets_json="$(vpsctl_auth config-presets --behavior tunnel_traffic)"
+process_presets_json="$(vpsctl_auth config-presets --behavior process_inventory)"
 jq -e '
-  any(.[]; .name == "Interface traffic counters" and .kind == "system" and .is_default == true) and
-  any(.[]; .name == "vnStat traffic counters" and .kind == "system" and .is_default == false)
-' <<<"$traffic_presets_json" >/dev/null
+  any(.[]; .name == "Linux process inventory" and .kind == "system" and .is_default == true)
+' <<<"$process_presets_json" >/dev/null
 
 tag_json="$(vpsctl_auth tag-create --name cli-live-tag --confirmed)"
 jq -e '.name == "cli-live-tag"' <<<"$tag_json" >/dev/null

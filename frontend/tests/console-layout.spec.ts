@@ -3937,7 +3937,7 @@ test("reviews one authoritative configuration target union and applies its froze
   const effectiveGrid = panel.getByLabel("Effective configuration data grid");
   await expect(
     effectiveGrid.locator(".gridBody .gridRow").filter({
-      hasText: "Edge vnStat",
+      hasText: "Host-mounted processes",
     }),
   ).toContainText("Explicit override");
   await effectiveGrid
@@ -3951,10 +3951,10 @@ test("reviews one authoritative configuration target union and applies its froze
   });
   await drawer
     .getByLabel("Configuration behavior")
-    .selectOption("tunnel_traffic");
+    .selectOption("process_inventory");
   await drawer
     .getByLabel("Configuration preset")
-    .selectOption("11111111-1111-4111-8111-111111111111");
+    .selectOption("22222222-2222-4222-8222-222222222222");
   await chooseVpsBySearch(
     drawer,
     "Add configuration target VPS",
@@ -3982,11 +3982,11 @@ test("reviews one authoritative configuration target union and applies its froze
     "normal",
   );
   await expect(prompt).toContainText(
-    "Interface traffic counters → Edge vnStat",
+    "Linux process inventory → Host-mounted processes",
   );
   await expect(prompt).toContainText("Unchanged targets");
   await expect(prompt).toContainText(
-    "Edge vnStat already selected; included for runtime resync",
+    "Host-mounted processes already selected; included for runtime resync",
   );
   await confirmVisiblePrompt(page, "Save selection");
 
@@ -4006,8 +4006,8 @@ test("reviews one authoritative configuration target union and applies its froze
     pathname: "/api/v1/configuration-source-overrides/preview",
     body: {
       action: "set",
-      behavior: "tunnel_traffic",
-      preset_id: "11111111-1111-4111-8111-111111111111",
+      behavior: "process_inventory",
+      preset_id: "22222222-2222-4222-8222-222222222222",
       selector_expression: "id:agent-sfo-01 || country:DE",
       target_client_ids: ["agent-sfo-01"],
     },
@@ -4045,10 +4045,10 @@ test("rejects a same-preset no-op without inventing a configuration change", asy
   });
   await unchangedDrawer
     .getByLabel("Configuration behavior")
-    .selectOption("tunnel_traffic");
+    .selectOption("process_inventory");
   await unchangedDrawer
     .getByLabel("Configuration preset")
-    .selectOption("11111111-1111-4111-8111-111111111111");
+    .selectOption("22222222-2222-4222-8222-222222222222");
   await chooseVpsBySearch(
     unchangedDrawer,
     "Add configuration target VPS",
@@ -4078,10 +4078,10 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
   });
   await drawer
     .getByLabel("Configuration behavior")
-    .selectOption("tunnel_traffic");
+    .selectOption("process_inventory");
   await drawer
     .getByLabel("Configuration preset")
-    .selectOption("11111111-1111-4111-8111-111111111111");
+    .selectOption("22222222-2222-4222-8222-222222222222");
 
   const emptyReview = drawer.getByRole("button", { name: "Review change" });
   await expect(emptyReview).toBeDisabled();
@@ -4118,7 +4118,7 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
   });
   await drawer
     .getByLabel("Configuration behavior")
-    .selectOption("tunnel_traffic");
+    .selectOption("process_inventory");
   await chooseVpsBySearch(
     drawer,
     "Add configuration target VPS",
@@ -4132,7 +4132,7 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
   );
   prompt = page.locator(".confirmationPrompt").last();
   await expect(prompt).toContainText(
-    "Edge vnStat → Interface traffic counters",
+    "Host-mounted processes → Linux process inventory",
   );
   await confirmVisiblePrompt(page, "Reset to system default");
 
@@ -4152,7 +4152,7 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
     pathname: "/api/v1/configuration-source-overrides/apply",
     body: {
       action: "reset",
-      behavior: "tunnel_traffic",
+      behavior: "process_inventory",
       selector_expression: "",
       target_client_ids: ["agent-fra-02"],
     },
@@ -4341,10 +4341,10 @@ test(
     });
     await drawer
       .getByLabel("Configuration behavior")
-      .selectOption("tunnel_traffic");
+      .selectOption("process_inventory");
     await drawer
       .getByLabel("Configuration preset")
-      .selectOption("11111111-1111-4111-8111-111111111111");
+      .selectOption("22222222-2222-4222-8222-222222222222");
     await chooseVpsBySearch(
       drawer,
       "Add configuration target VPS",
@@ -4377,10 +4377,10 @@ test(
     });
     await drawer
       .getByLabel("Configuration behavior")
-      .selectOption("tunnel_traffic");
+      .selectOption("process_inventory");
     await drawer
       .getByLabel("Configuration preset")
-      .selectOption("11111111-1111-4111-8111-111111111111");
+      .selectOption("22222222-2222-4222-8222-222222222222");
     await chooseVpsBySearch(
       drawer,
       "Add configuration target VPS",

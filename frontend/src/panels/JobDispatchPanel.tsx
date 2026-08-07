@@ -121,6 +121,11 @@ function shellQuoteArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+function currentUtcMonthStartDate(): string {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-01`;
+}
+
 function commandTypeForApi(
   operation: CreateJobRequest["operation"],
 ): GeneratedJobCommandType {
@@ -560,6 +565,18 @@ export function JobDispatchPanel({
       false,
       preserveHistoryState,
     );
+  const [networkTrafficImportInterfacesText, setNetworkTrafficImportInterfacesText] =
+    useDispatchHistoryState(
+      "networkTrafficImportInterfacesText",
+      "",
+      preserveHistoryState,
+    );
+  const [networkTrafficImportStartDate, setNetworkTrafficImportStartDate] =
+    useDispatchHistoryState(
+      "networkTrafficImportStartDate",
+      currentUtcMonthStartDate,
+      preserveHistoryState,
+    );
   const [processLimit, setProcessLimit] = useDispatchHistoryState(
     "processLimit",
     50,
@@ -722,7 +739,7 @@ export function JobDispatchPanel({
 
   function setMode(nextMode: DispatchMode) {
     setModeState(fixedMode ?? nextMode);
-    if (nextMode === "agent_update_check") {
+    if (nextMode === "agent_update_check" || nextMode === "network_traffic_import_vnstat") {
       setMaxTimeoutSecs("300");
       setExecutionOptionsOpen(true);
     } else {
@@ -1403,6 +1420,8 @@ export function JobDispatchPanel({
       filePushPath,
       filePushMode,
       filePushPayload,
+      networkTrafficImportInterfacesText,
+      networkTrafficImportStartDate,
     );
     const clientIds = targets.map((target) => target.id);
     const payloadHashHex = await operationPayloadHashHex(operation);
@@ -1582,6 +1601,13 @@ export function JobDispatchPanel({
         setMode("agent_update_rollback");
         setUpdateRollbackSha256Hex(operation.rollback_sha256_hex ?? "");
         return;
+      case "network_traffic_import_vnstat":
+        setMode("network_traffic_import_vnstat");
+        setNetworkTrafficImportInterfacesText(operation.interfaces.join(", "));
+        setNetworkTrafficImportStartDate(
+          new Date(operation.start_unix * 1000).toISOString().slice(0, 10),
+        );
+        return;
       default:
         setActionError(
           `Template operation ${operation.type} is not editable in this composer yet`,
@@ -1637,6 +1663,8 @@ export function JobDispatchPanel({
       filePushPath,
       filePushMode,
       null,
+      networkTrafficImportInterfacesText,
+      networkTrafficImportStartDate,
     );
     const maxTimeoutOverride = parseOptionalJobMaxTimeoutSecs(maxTimeoutSecs);
     return {
@@ -2170,6 +2198,8 @@ export function JobDispatchPanel({
           fileTransferResumeToken={fileTransferResumeToken}
           fileTransferSessionId={fileTransferSessionId}
           mode={mode}
+          networkTrafficImportInterfacesText={networkTrafficImportInterfacesText}
+          networkTrafficImportStartDate={networkTrafficImportStartDate}
           processLimit={processLimit}
           setCommandText={setCommandText}
           setShellPty={setShellPty}
@@ -2199,6 +2229,8 @@ export function JobDispatchPanel({
           setFileTransferRateLimit={setFileTransferRateLimit}
           setFileTransferResumeToken={setFileTransferResumeToken}
           setFileTransferSessionId={setFileTransferSessionId}
+          setNetworkTrafficImportInterfacesText={setNetworkTrafficImportInterfacesText}
+          setNetworkTrafficImportStartDate={setNetworkTrafficImportStartDate}
           setProcessLimit={setProcessLimit}
           setSupervisorAction={setSupervisorAction}
           setSupervisorArgv={setSupervisorArgv}

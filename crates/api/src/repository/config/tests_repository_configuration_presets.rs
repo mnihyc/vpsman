@@ -36,10 +36,10 @@ fn operator_visible_names_reject_control_characters() {
 #[test]
 fn preset_definitions_reject_missing_discriminators_and_unknown_fields() {
     assert!(
-        validate_configuration_preset_definition("tunnel_traffic", &serde_json::json!({})).is_err()
+        validate_configuration_preset_definition("latency_probe", &serde_json::json!({})).is_err()
     );
     assert!(validate_configuration_preset_definition(
-        "tunnel_traffic",
+        "latency_probe",
         &serde_json::json!({
             "source": "interface_counters",
             "unexpected": true
@@ -123,11 +123,11 @@ async fn override_apply_rejects_a_changed_selection_origin() {
     memory.agents.write().await.push(test_agent("edge-a"));
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
-    let preset = create_test_traffic_preset(&repo, "vnStat A", "/usr/bin/vnstat", &operator).await;
+    let preset = create_test_latency_preset(&repo, "vnStat A", "/usr/bin/vnstat", &operator).await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["edge-a".to_string()],
@@ -143,7 +143,7 @@ async fn override_apply_rejects_a_changed_selection_origin() {
         .await
         .push(ConfigurationPresetOverrideRecord {
             client_id: "edge-a".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: preset.id,
             updated_at: unix_now().to_string(),
         });
@@ -164,11 +164,11 @@ async fn override_preview_and_audit_retain_the_trimmed_selector() {
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_traffic_preset(&repo, "vnStat selector", "/usr/bin/vnstat", &operator).await;
+        create_test_latency_preset(&repo, "vnStat selector", "/usr/bin/vnstat", &operator).await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Some(preset.id),
             selector_expression: "  tag:edge  ".to_string(),
             target_client_ids: vec!["edge-a".to_string()],
@@ -198,12 +198,12 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_traffic_preset(&repo, "Retired edge traffic", "/usr/bin/vnstat", &operator)
+        create_test_latency_preset(&repo, "Retired edge traffic", "/usr/bin/vnstat", &operator)
             .await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["edge-delete".to_string()],
@@ -214,7 +214,7 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
         .await
         .unwrap();
     let assigned = repo
-        .list_configuration_presets(Some("tunnel_traffic"))
+        .list_configuration_presets(Some("latency_probe"))
         .await
         .unwrap()
         .into_iter()
@@ -227,7 +227,7 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
         .unwrap();
 
     let released = repo
-        .list_configuration_presets(Some("tunnel_traffic"))
+        .list_configuration_presets(Some("latency_probe"))
         .await
         .unwrap()
         .into_iter()
@@ -241,8 +241,8 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
             &PreviewConfigurationPresetRequest {
                 description: Some("Updated after endpoint retirement".to_string()),
                 definition: serde_json::json!({
-                    "source": "vnstat",
-                    "vnstat_argv": ["/opt/vnstat"]
+                    "source": "configured_ping_argv",
+                    "probe_ping_argv": ["/opt/vnstat"]
                 }),
             },
         )
@@ -293,12 +293,12 @@ async fn revoking_agent_key_keeps_its_configuration_preset_override() {
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_traffic_preset(&repo, "Revoked edge traffic", "/usr/bin/vnstat", &operator)
+        create_test_latency_preset(&repo, "Revoked edge traffic", "/usr/bin/vnstat", &operator)
             .await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["edge-revoke".to_string()],
@@ -353,7 +353,7 @@ async fn existing_key_revocation_record_preserves_configuration_override() {
         .await
         .push(ConfigurationPresetOverrideRecord {
             client_id: "edge-recover".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Uuid::new_v4(),
             updated_at: unix_now().to_string(),
         });
@@ -394,14 +394,14 @@ async fn targeted_source_reads_ignore_unrequested_client_overrides() {
         .await
         .push(ConfigurationPresetOverrideRecord {
             client_id: "edge-b".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: Uuid::new_v4(),
             updated_at: unix_now().to_string(),
         });
     let repo = Repository::Memory(memory);
 
     let rows = repo
-        .list_configuration_sources_for_clients(&["edge-a".to_string()], "tunnel_traffic")
+        .list_configuration_sources_for_clients(&["edge-a".to_string()], "latency_probe")
         .await
         .unwrap();
 
@@ -420,7 +420,7 @@ async fn preset_update_rejects_changed_affected_client_membership() {
         .extend([test_agent("edge-a"), test_agent("edge-b")]);
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
-    let preset = create_test_traffic_preset(&repo, "vnStat B", "/usr/bin/vnstat", &operator).await;
+    let preset = create_test_latency_preset(&repo, "vnStat B", "/usr/bin/vnstat", &operator).await;
     let Repository::Memory(memory) = &repo else {
         unreachable!()
     };
@@ -430,7 +430,7 @@ async fn preset_update_rejects_changed_affected_client_membership() {
         .await
         .push(ConfigurationPresetOverrideRecord {
             client_id: "edge-a".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: preset.id,
             updated_at: unix_now().to_string(),
         });
@@ -440,8 +440,8 @@ async fn preset_update_rejects_changed_affected_client_membership() {
             &PreviewConfigurationPresetRequest {
                 description: preset.description.clone(),
                 definition: serde_json::json!({
-                    "source": "vnstat",
-                    "vnstat_argv": ["/opt/vnstat"]
+                    "source": "configured_ping_argv",
+                    "probe_ping_argv": ["/opt/vnstat"]
                 }),
             },
         )
@@ -454,7 +454,7 @@ async fn preset_update_rejects_changed_affected_client_membership() {
         .await
         .push(ConfigurationPresetOverrideRecord {
             client_id: "edge-b".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             preset_id: preset.id,
             updated_at: unix_now().to_string(),
         });
@@ -574,7 +574,7 @@ async fn tunnel_plan_persistence_rejects_missing_adapter_definitions() {
         .contains("tunnel_plan_adapter_definition_unavailable"));
 }
 
-async fn create_test_traffic_preset(
+async fn create_test_latency_preset(
     repo: &Repository,
     name: &str,
     executable: &str,
@@ -582,12 +582,12 @@ async fn create_test_traffic_preset(
 ) -> ConfigurationPresetView {
     repo.create_configuration_preset(
         &CreateConfigurationPresetRequest {
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "latency_probe".to_string(),
             name: name.to_string(),
             description: None,
             definition: serde_json::json!({
-                "source": "vnstat",
-                "vnstat_argv": [executable]
+                "source": "configured_ping_argv",
+                "probe_ping_argv": [executable]
             }),
         },
         operator,

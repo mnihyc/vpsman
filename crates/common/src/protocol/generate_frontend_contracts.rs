@@ -1309,6 +1309,13 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
         ),
         golden_vector("network_interfaces", JobCommand::NetworkInterfaces),
         golden_vector(
+            "network_traffic_import_vnstat",
+            JobCommand::NetworkTrafficImportVnstat {
+                interfaces: vec!["eth0".to_string()],
+                start_unix: 1_722_470_400,
+            },
+        ),
+        golden_vector(
             "network_probe",
             JobCommand::NetworkProbe {
                 plan_id: "11111111-2222-4333-8444-555555555555".to_string(),

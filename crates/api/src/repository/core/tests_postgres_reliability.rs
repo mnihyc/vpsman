@@ -5478,12 +5478,12 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
         .repo
         .create_configuration_preset(
             &CreateConfigurationPresetRequest {
-                behavior: "tunnel_traffic".to_string(),
-                name: "Retired endpoint traffic".to_string(),
+                behavior: "process_inventory".to_string(),
+                name: "Retired endpoint processes".to_string(),
                 description: None,
                 definition: serde_json::json!({
-                    "source": "vnstat",
-                    "vnstat_argv": ["/usr/bin/vnstat"]
+                    "source": "linux_procfs",
+                    "proc_root": "/host/proc"
                 }),
             },
             &operator,
@@ -5494,7 +5494,7 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
         .repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "process_inventory".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["client-a".to_string()],
@@ -5562,7 +5562,7 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
     assert!(db.repo.list_tunnel_plans().await.unwrap().is_empty());
     let released_preset = db
         .repo
-        .list_configuration_presets(Some("tunnel_traffic"))
+        .list_configuration_presets(Some("process_inventory"))
         .await
         .unwrap()
         .into_iter()
@@ -5591,8 +5591,8 @@ async fn postgres_agent_delete_returns_retired_peers_and_rejects_hidden_endpoint
             &PreviewConfigurationPresetRequest {
                 description: Some("Updated after endpoint retirement".to_string()),
                 definition: serde_json::json!({
-                    "source": "vnstat",
-                    "vnstat_argv": ["/opt/vnstat"]
+                    "source": "linux_procfs",
+                    "proc_root": "/srv/proc"
                 }),
             },
         )
@@ -5673,12 +5673,12 @@ async fn postgres_key_revocation_remains_visible_and_preserves_configuration_ove
         .repo
         .create_configuration_preset(
             &CreateConfigurationPresetRequest {
-                behavior: "tunnel_traffic".to_string(),
-                name: "Revoked endpoint traffic".to_string(),
+                behavior: "process_inventory".to_string(),
+                name: "Revoked endpoint processes".to_string(),
                 description: None,
                 definition: serde_json::json!({
-                    "source": "vnstat",
-                    "vnstat_argv": ["/usr/bin/vnstat"]
+                    "source": "linux_procfs",
+                    "proc_root": "/host/proc"
                 }),
             },
             &operator,
@@ -5689,7 +5689,7 @@ async fn postgres_key_revocation_remains_visible_and_preserves_configuration_ove
         .repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "process_inventory".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["client-revoke".to_string()],
@@ -5724,7 +5724,7 @@ async fn postgres_key_revocation_remains_visible_and_preserves_configuration_ove
         .repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "process_inventory".to_string(),
             preset_id: Some(preset.id),
             selector_expression: String::new(),
             target_client_ids: vec!["client-revoke-recovery".to_string()],

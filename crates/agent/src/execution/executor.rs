@@ -30,6 +30,9 @@ use crate::{
     host_services::{execute_service_action, execute_service_inventory, execute_service_logs},
     host_storage::execute_storage_inventory,
     network_interfaces::{execute_network_interfaces_command, NetworkInterfacesInput},
+    network_traffic_import::{
+        execute_network_traffic_import_command, NetworkTrafficImportInput,
+    },
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
     terminal::execute_terminal_command,
@@ -380,6 +383,20 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
                 job_id,
                 config,
                 max_timeout_secs,
+            })
+            .await
+        }
+        JobCommand::NetworkTrafficImportVnstat {
+            interfaces,
+            start_unix,
+        } => {
+            execute_network_traffic_import_command(NetworkTrafficImportInput {
+                job_id,
+                interfaces,
+                start_unix: *start_unix,
+                max_timeout_secs,
+                cancel_token,
+                output_tx,
             })
             .await
         }

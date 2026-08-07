@@ -2805,6 +2805,11 @@ export type JobOperation =
     }
   | { type: "network_interfaces" }
   | {
+      type: "network_traffic_import_vnstat";
+      interfaces: string[];
+      start_unix: number;
+    }
+  | {
       type: "network_probe";
       plan_id: string;
       plan: TunnelPlan;
@@ -3438,7 +3443,6 @@ export type ScheduleImpactRecord = {
 
 export type ConfigurationBehavior =
   | "host_metrics"
-  | "tunnel_traffic"
   | "latency_probe"
   | "ospf_update_command"
   | "process_inventory"

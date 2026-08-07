@@ -10,7 +10,7 @@ use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
     validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, JobCommand,
+    AgentRuntimeStatusTelemetryPlan, JobCommand,
     RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelManager,
     TunnelEndpointSide, TunnelKind,
 };
@@ -442,12 +442,6 @@ async fn apply_enabled_tunnel_plans(
                 plan: plan.plan.clone(),
                 builtin_credentials,
                 runtime_adapter,
-                traffic_source: if effective.network.runtime_vnstat_argv.is_empty() {
-                    AgentRuntimeTrafficSource::InterfaceCounters
-                } else {
-                    AgentRuntimeTrafficSource::Vnstat
-                },
-                traffic_command: None,
                 latency_monitoring_enabled: effective.network.latency_monitoring_enabled,
             });
     }
@@ -574,7 +568,6 @@ fn reject_configuration_preset_owned_runtime_config_keys(patch: &toml::Value) ->
     ];
     const NETWORK_KEYS: &[&str] = &[
         "probe_ping_argv",
-        "runtime_vnstat_argv",
         "ospf_status_command",
         "ospf_update_command",
     ];

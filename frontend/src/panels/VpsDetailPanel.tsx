@@ -1867,6 +1867,8 @@ function displayCommandType(value: string): string {
       return "Backup run";
     case "network_probe":
       return "Network probe";
+    case "network_traffic_import_vnstat":
+      return "vnStat traffic history import";
     case "network_speed_test":
       return "Network speed test";
     case "network_status":

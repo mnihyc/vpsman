@@ -8,7 +8,8 @@ use vpsman_common::{
     is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
     GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
-    GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
+    GatewayTerminalOutputIngest, JobCommand, OutputStream,
+    RoutingCostAdapterJobResult,
     RoutingCostAdapterOperation, MAX_RUNTIME_CONFIG_REASON_BYTES, MAX_TELEMETRY_DISKS,
     MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
 };
@@ -21,6 +22,9 @@ use vpsman_server_core::{
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     error::ApiError,
+    job_traffic_import::{
+        apply_network_traffic_import_if_ready, NetworkTrafficImportApply,
+    },
     model::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },
@@ -305,7 +309,17 @@ pub(crate) async fn ingest_command_output(
     }
     let received_at = command_output_received_at(event.received_unix);
     if event.output.done {
-        let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
+        let mut outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
+        apply_network_traffic_import_outcome(
+            &state,
+            event.job_id,
+            &event.client_id,
+            event.seq,
+            &event.output,
+            &[],
+            &mut outcome,
+        )
+        .await?;
         let record_result = match state
             .repo
             .record_active_final_job_output_and_target_result_with_config(
@@ -467,7 +481,17 @@ async fn finalize_contiguous_final_job_output_if_ready(
         .received_at
         .clone()
         .unwrap_or_else(|| Utc::now().to_rfc3339());
-    let outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
+    let mut outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
+    apply_network_traffic_import_outcome(
+        state,
+        job_id,
+        client_id,
+        candidate.seq,
+        &candidate.output,
+        &[],
+        &mut outcome,
+    )
+    .await?;
     let record_result = match state
         .repo
         .record_active_final_job_output_and_target_result_with_config(
@@ -536,6 +560,46 @@ async fn finalize_contiguous_final_job_output_if_ready(
                     "backup artifact auto-record failed after deferred command output finalization"
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+async fn apply_network_traffic_import_outcome(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    client_id: &str,
+    final_seq: i32,
+    final_output: &CommandOutput,
+    inline_outputs: &[(i32, CommandOutput)],
+    outcome: &mut TargetDispatchOutcome,
+) -> Result<(), ApiError> {
+    if outcome.status != TARGET_STATUS_COMPLETED {
+        return Ok(());
+    }
+    let applied = apply_network_traffic_import_if_ready(
+        state,
+        job_id,
+        client_id,
+        final_seq,
+        final_output,
+        inline_outputs,
+    )
+    .await
+    .map_err(|error| {
+        ApiError::internal(
+            "network_traffic_import_failed",
+            "The vnStat traffic history could not be imported.",
+            error,
+        )
+    })?;
+    match applied {
+        NetworkTrafficImportApply::NotApplicable | NetworkTrafficImportApply::Pending => {}
+        NetworkTrafficImportApply::Applied(message) => outcome.message = message,
+        NetworkTrafficImportApply::Invalid(message) => {
+            outcome.status = TARGET_STATUS_FAILED.to_string();
+            outcome.exit_code = Some(1);
+            outcome.message = message;
         }
     }
     Ok(())

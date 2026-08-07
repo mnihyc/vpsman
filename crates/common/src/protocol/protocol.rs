@@ -20,6 +20,10 @@ pub const NETWORK_SPEED_TEST_MIN_PORT: u16 = 1024;
 pub const NETWORK_SPEED_TEST_MAX_PORT: u16 = 65_535;
 pub const NETWORK_SPEED_TEST_MIN_CONNECT_TIMEOUT_MS: u16 = 100;
 pub const NETWORK_SPEED_TEST_MAX_CONNECT_TIMEOUT_MS: u16 = 30_000;
+pub const NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES: usize = 16;
+pub const NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS: u64 = 35 * 24 * 60 * 60;
+pub const NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE: usize = 20_000;
+pub const NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT: usize = 128;
 pub const MAX_SHELL_SCRIPT_BYTES: usize = 16 * 1024;
 pub const MAX_TERMINAL_INPUT_BYTES: usize = 8 * 1024;
 pub const MAX_TERMINAL_REASON_BYTES: usize = 240;
@@ -31,7 +35,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 3;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 4;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -48,6 +52,7 @@ pub const BACKUP_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const RESTORE_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION: u16 = 3;
+pub const NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION: u16 = 4;
 
 pub const JOB_STATUS_QUEUED: &str = "queued";
 pub const JOB_STATUS_RUNNING: &str = "running";
@@ -1416,6 +1421,7 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "restore_rollback",
         "network_status",
         "network_interfaces",
+        "network_traffic_import_vnstat",
         "network_probe",
         "network_speed_test",
         "network_routing_status",
@@ -1428,7 +1434,7 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 54] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
@@ -1478,13 +1484,14 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 53] = [
     "restore_rollback",
     "network_status",
     "network_interfaces",
+    "network_traffic_import_vnstat",
     "network_probe",
     "network_speed_test",
     "network_routing_status",
     "network_routing_apply",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
@@ -1533,13 +1540,14 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("restore_rollback", JOB_COMMAND_SAFETY_WRITE),
     ("network_status", JOB_COMMAND_SAFETY_READ),
     ("network_interfaces", JOB_COMMAND_SAFETY_READ),
+    ("network_traffic_import_vnstat", JOB_COMMAND_SAFETY_WRITE),
     ("network_probe", JOB_COMMAND_SAFETY_READ),
     ("network_speed_test", JOB_COMMAND_SAFETY_EXEC),
     ("network_routing_status", JOB_COMMAND_SAFETY_READ),
     ("network_routing_apply", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 53] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
@@ -1588,13 +1596,14 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 52
     ("restore_rollback", true),
     ("network_status", false),
     ("network_interfaces", false),
+    ("network_traffic_import_vnstat", true),
     ("network_probe", false),
     ("network_speed_test", true),
     ("network_routing_status", false),
     ("network_routing_apply", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
@@ -1649,13 +1658,14 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 52] = [
     ("restore_rollback", "restore_rollback"),
     ("network_status", "network_status"),
     ("network_interfaces", "network_interfaces"),
+    ("network_traffic_import_vnstat", "network_traffic_import_vnstat"),
     ("network_probe", "network_probe"),
     ("network_speed_test", "network_speed_test"),
     ("network_routing_status", "network_routing_status"),
     ("network_routing_apply", "network_routing_apply"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 54] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
@@ -1705,6 +1715,7 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 53] = [
     ("restore_rollback", "restore"),
     ("network_status", "network"),
     ("network_interfaces", "network"),
+    ("network_traffic_import_vnstat", "network"),
     ("network_probe", "network"),
     ("network_speed_test", "network"),
     ("network_routing_status", "network"),
@@ -2650,6 +2661,42 @@ pub fn parse_build_number(value: Option<&str>) -> u64 {
         .unwrap_or_else(default_internal_build_number)
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NetworkTrafficImportBucket {
+    pub interface: String,
+    pub start_unix: u64,
+    pub duration_secs: u32,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NetworkTrafficImportBatch {
+    pub r#type: String,
+    pub batch_index: u32,
+    pub buckets: Vec<NetworkTrafficImportBucket>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NetworkTrafficImportSource {
+    pub interface: String,
+    pub database_created_unix: Option<u64>,
+    pub source_updated_unix: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NetworkTrafficImportResult {
+    pub r#type: String,
+    pub status: String,
+    pub requested_start_unix: u64,
+    pub collected_until_unix: u64,
+    pub interfaces: Vec<String>,
+    pub sources: Vec<NetworkTrafficImportSource>,
+    pub batch_count: u32,
+    pub bucket_count: u32,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum JobCommand {
@@ -2989,6 +3036,10 @@ pub enum JobCommand {
         runtime_adapter: Option<crate::RuntimeTunnelAdapterCommands>,
     },
     NetworkInterfaces,
+    NetworkTrafficImportVnstat {
+        interfaces: Vec<String>,
+        start_unix: u64,
+    },
     NetworkProbe {
         plan_id: String,
         plan: Box<TunnelPlan>,
@@ -3077,6 +3128,9 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::NetworkInterfaces
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkTrafficImportVnstat { .. } => {
+            NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
             NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
         }
@@ -3144,6 +3198,9 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
+        JobCommand::NetworkTrafficImportVnstat { .. } => {
+            NETWORK_TRAFFIC_IMPORT_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::NetworkRoutingStatus { .. } | JobCommand::NetworkRoutingApply { .. } => {
             NETWORK_ROUTING_COMMAND_PROTOCOL_VERSION
         }
@@ -3208,6 +3265,7 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::RestoreRollback { .. } => "restore_rollback",
         JobCommand::NetworkStatus { .. } => "network_status",
         JobCommand::NetworkInterfaces => "network_interfaces",
+        JobCommand::NetworkTrafficImportVnstat { .. } => "network_traffic_import_vnstat",
         JobCommand::NetworkProbe { .. } => "network_probe",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test",
         JobCommand::NetworkRoutingStatus { .. } => "network_routing_status",
@@ -3232,6 +3290,7 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkInterfaces
+        | JobCommand::NetworkTrafficImportVnstat { .. }
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. }
         | JobCommand::NetworkRoutingStatus { .. }
@@ -3306,7 +3365,8 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::FileChown { .. }
         | JobCommand::FileCopy { .. }
         | JobCommand::Restore { .. }
-        | JobCommand::RestoreRollback { .. } => JobCommandSafety::Write,
+        | JobCommand::RestoreRollback { .. }
+        | JobCommand::NetworkTrafficImportVnstat { .. } => JobCommandSafety::Write,
         JobCommand::ProcessStart { .. }
         | JobCommand::ProcessStop { .. }
         | JobCommand::ProcessRestart { .. }

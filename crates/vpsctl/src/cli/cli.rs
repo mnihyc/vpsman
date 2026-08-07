@@ -28,9 +28,9 @@ use crate::commands_host_management::{
     OsUpdateApplyCommand, OsUpdateCheckCommand, OsUpdatePlanCommand, OsUpdateRefreshCommand,
 };
 use crate::commands_network::{
-    TunnelAllocateCommand, TunnelOspfCostUpdateCommand, TunnelOspfStatusRefreshCommand,
-    TunnelPlanCommand, TunnelPlanExportCommand, TunnelPlanMutationCommand, TunnelProbeCommand,
-    TunnelSpeedTestCommand, TunnelStatusCommand,
+    NetworkTrafficImportVnstatCommand, TunnelAllocateCommand, TunnelOspfCostUpdateCommand,
+    TunnelOspfStatusRefreshCommand, TunnelPlanCommand, TunnelPlanExportCommand,
+    TunnelPlanMutationCommand, TunnelProbeCommand, TunnelSpeedTestCommand, TunnelStatusCommand,
 };
 use crate::commands_port_forwarding::{
     PortForwardBulkCommand, PortForwardCreateCommand, PortForwardMutationCommand,
@@ -1136,6 +1136,7 @@ pub(crate) enum Command {
     TunnelOspfStatusRefresh(TunnelOspfStatusRefreshCommand),
     TunnelOspfCostUpdate(TunnelOspfCostUpdateCommand),
     TunnelStatus(TunnelStatusCommand),
+    NetworkTrafficImportVnstat(NetworkTrafficImportVnstatCommand),
     TunnelProbe(TunnelProbeCommand),
     TunnelSpeedTest(TunnelSpeedTestCommand),
     NoiseKeygen,

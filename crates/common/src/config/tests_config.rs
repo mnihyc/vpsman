@@ -1,7 +1,7 @@
 use super::{
     default_agent_backup_max_archive_bytes, validate_agent_bootstrap_config_shape,
     validate_agent_config_shape, AgentBackupConfig, AgentConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource,
+    AgentRuntimeStatusTelemetryPlan,
 };
 use crate::{
     pair_port_expressions, plan_tunnel, port_forwarding_desired_hash, AgentPortForwardingConfig,
@@ -196,8 +196,6 @@ fn explicit_agent_builtin_plan_needs_no_adapter_snapshot() {
         plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
     validate_agent_config_shape(&config).unwrap();
@@ -214,8 +212,6 @@ fn stateful_builtin_runtime_plans_require_uuid_identity() {
         plan,
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
 
@@ -241,8 +237,6 @@ fn runtime_config_rejects_driver_options_on_the_wrong_tunnel_kind() {
         plan,
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
 
@@ -262,8 +256,6 @@ fn custom_adapter_plan_requires_the_bound_adapter_snapshot() {
         plan: plan.clone(),
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
     assert_eq!(
@@ -294,8 +286,6 @@ fn observed_plan_rejects_an_adapter_snapshot() {
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
         builtin_credentials: None,
         runtime_adapter: Some(runtime_adapter()),
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
     assert_eq!(
@@ -314,8 +304,6 @@ fn observed_plan_reconcile_does_not_require_mutation() {
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
 
@@ -332,8 +320,6 @@ fn managed_plan_reconcile_requires_mutation() {
         plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
         builtin_credentials: None,
         runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-        traffic_command: None,
         latency_monitoring_enabled: true,
     }];
 
@@ -341,27 +327,4 @@ fn managed_plan_reconcile_requires_mutation() {
         validate_agent_config_shape(&config).unwrap_err(),
         "network_runtime_reconcile_requires_apply_enabled"
     );
-}
-
-#[test]
-fn custom_traffic_command_is_explicit_and_bounded() {
-    let mut config = AgentConfig::default();
-    config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
-        plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
-        endpoint_side: TunnelEndpointSide::Left,
-        plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
-        builtin_credentials: None,
-        runtime_adapter: None,
-        traffic_source: AgentRuntimeTrafficSource::CustomCommand,
-        traffic_command: Some(command("traffic")),
-        latency_monitoring_enabled: true,
-    }];
-    validate_agent_config_shape(&config).unwrap();
-
-    config.network.runtime_status_telemetry_plans[0]
-        .traffic_command
-        .as_mut()
-        .unwrap()
-        .argv[0] = "relative-command".to_string();
-    assert!(validate_agent_config_shape(&config).is_err());
 }

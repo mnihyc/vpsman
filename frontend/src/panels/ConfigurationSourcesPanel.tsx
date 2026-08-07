@@ -61,7 +61,6 @@ import { scrollIntoViewWithMotion } from "../motion";
 
 const BEHAVIORS: readonly ConfigurationBehavior[] = [
   "host_metrics",
-  "tunnel_traffic",
   "latency_probe",
   "ospf_update_command",
   "process_inventory",
@@ -1894,13 +1893,6 @@ function PresetDefinitionEditor({
         />
       ) : null}
 
-      {behavior === "tunnel_traffic" && source === "vnstat" ? (
-        <ArgvField
-          label="vnStat arguments"
-          onChange={(value) => onTextDraftChange("vnstat_argv", value)}
-          value={textDrafts.vnstat_argv ?? ""}
-        />
-      ) : null}
 
       {behavior === "latency_probe" && source === "configured_ping_argv" ? (
         <ArgvField
@@ -2067,8 +2059,6 @@ function defaultDefinition(
         hostname_file: "/etc/hostname",
         os_release_file: "/etc/os-release",
       };
-    case "tunnel_traffic":
-      return { source: "interface_counters" };
     case "latency_probe":
       return { source: "linux_ping_preset" };
     case "ospf_update_command":
@@ -2138,11 +2128,6 @@ function defaultDefinitionForSource(
       custom_metrics_command: defaultCommand(),
     };
   }
-  if (behavior === "tunnel_traffic") {
-    return source === "vnstat"
-      ? { source, vnstat_argv: ["/usr/bin/vnstat"] }
-      : { source };
-  }
   if (behavior === "latency_probe") {
     return source === "configured_ping_argv"
       ? { source, probe_ping_argv: ["/usr/bin/ping"] }
@@ -2185,11 +2170,6 @@ function sourceOptions(behavior: ConfigurationBehavior) {
           value: "linux_procfs_and_custom_command",
           label: "Linux procfs plus custom command",
         },
-      ];
-    case "tunnel_traffic":
-      return [
-        { value: "interface_counters", label: "Interface counters" },
-        { value: "vnstat", label: "vnStat" },
       ];
     case "latency_probe":
       return [
@@ -2242,8 +2222,6 @@ export function behaviorLabel(behavior: ConfigurationBehavior): string {
   switch (behavior) {
     case "host_metrics":
       return "Host metrics";
-    case "tunnel_traffic":
-      return "Tunnel traffic accounting";
     case "latency_probe":
       return "Latency checks";
     case "ospf_update_command":
@@ -2602,7 +2580,6 @@ function textDraftsForDefinition(
     "update_command.argv": asStringArray(
       asObject(definition.update_command).argv,
     ).join("\n"),
-    vnstat_argv: asStringArray(definition.vnstat_argv).join("\n"),
   };
 }
 
@@ -2653,9 +2630,6 @@ function materializeDefinition(
   }
 
   const source = asString(candidate.source);
-  if (behavior === "tunnel_traffic" && source === "vnstat") {
-    candidate.vnstat_argv = parseMultilineDraft(textDrafts.vnstat_argv ?? "");
-  }
   if (behavior === "latency_probe" && source === "configured_ping_argv") {
     candidate.probe_ping_argv = parseMultilineDraft(
       textDrafts.probe_ping_argv ?? "",
@@ -2823,9 +2797,6 @@ function validatePresetDefinition(
   for (const [field, label] of requiredPaths) {
     const pathError = validateAbsolutePath(asString(definition[field]), label);
     if (pathError) return pathError;
-  }
-  if (behavior === "tunnel_traffic" && source === "vnstat") {
-    return validateArgv(definition.vnstat_argv, "vnStat arguments");
   }
   if (behavior === "latency_probe" && source === "configured_ping_argv") {
     return validateArgv(definition.probe_ping_argv, "Ping arguments");

@@ -1166,6 +1166,9 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
     match command {
         JobCommand::Backup { .. } => "backup_confirmation_required",
         JobCommand::NetworkSpeedTest { .. } => "network_speed_test_confirmation_required",
+        JobCommand::NetworkTrafficImportVnstat { .. } => {
+            "network_traffic_import_confirmation_required"
+        }
         JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }

@@ -173,3 +173,33 @@ fn tunnel_plan_credential_rotation_reuses_the_reviewed_mutation_shape() {
         .join()
         .expect("CLI parser test panicked");
 }
+
+#[test]
+fn network_traffic_import_vnstat_accepts_explicit_hosts_interfaces_and_start() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "network-traffic-import-vnstat",
+                "--clients",
+                "edge-a,edge-b",
+                "--interface",
+                "eth0,ens3",
+                "--start",
+                "2024-08-01",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::NetworkTrafficImportVnstat(request) = parsed.command else {
+                panic!("expected network-traffic-import-vnstat command");
+            };
+            assert_eq!(request.clients, ["edge-a", "edge-b"]);
+            assert_eq!(request.interfaces, ["eth0", "ens3"]);
+            assert_eq!(request.start, "2024-08-01");
+            assert!(request.confirmed);
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}

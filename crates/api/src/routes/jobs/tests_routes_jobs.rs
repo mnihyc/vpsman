@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, AgentRuntimeTrafficSource, ProcessResourceLimits,
+    AgentRuntimeStatusTelemetryPlan, ProcessResourceLimits,
     ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
 };
 
@@ -833,8 +833,6 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
             plan,
             builtin_credentials: None,
             runtime_adapter: None,
-            traffic_source: AgentRuntimeTrafficSource::InterfaceCounters,
-            traffic_command: None,
             latency_monitoring_enabled: true,
         });
     JobCommand::RuntimeConfigSync {

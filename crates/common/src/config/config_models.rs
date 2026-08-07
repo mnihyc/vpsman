@@ -344,8 +344,6 @@ pub struct AgentNetworkConfig {
     pub runtime_status_telemetry_enabled: bool,
     #[serde(default = "default_network_runtime_status_telemetry_interval_secs")]
     pub runtime_status_telemetry_interval_secs: u64,
-    #[serde(default = "default_network_runtime_vnstat_argv")]
-    pub runtime_vnstat_argv: Vec<String>,
     #[serde(default = "default_true")]
     pub latency_monitoring_enabled: bool,
     #[serde(default = "default_network_latency_monitoring_interval_secs")]
@@ -396,21 +394,8 @@ pub struct AgentRuntimeStatusTelemetryPlan {
     pub builtin_credentials: Option<crate::TunnelEndpointBuiltinCredentials>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_adapter: Option<crate::RuntimeTunnelAdapterCommands>,
-    #[serde(default)]
-    pub traffic_source: AgentRuntimeTrafficSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub traffic_command: Option<RuntimeTunnelCommand>,
     #[serde(default = "default_true")]
     pub latency_monitoring_enabled: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRuntimeTrafficSource {
-    #[default]
-    InterfaceCounters,
-    Vnstat,
-    CustomCommand,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -490,7 +475,6 @@ impl Default for AgentNetworkConfig {
             runtime_status_telemetry_enabled: true,
             runtime_status_telemetry_interval_secs:
                 default_network_runtime_status_telemetry_interval_secs(),
-            runtime_vnstat_argv: default_network_runtime_vnstat_argv(),
             latency_monitoring_enabled: true,
             latency_monitoring_interval_secs: default_network_latency_monitoring_interval_secs(),
             latency_down_windows: default_network_latency_down_windows(),
@@ -541,10 +525,6 @@ fn default_network_status_probe_max_output_bytes() -> u32 {
 
 fn default_network_runtime_status_telemetry_interval_secs() -> u64 {
     60
-}
-
-fn default_network_runtime_vnstat_argv() -> Vec<String> {
-    Vec::new()
 }
 
 fn default_true() -> bool {

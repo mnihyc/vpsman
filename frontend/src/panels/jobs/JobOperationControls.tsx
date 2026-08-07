@@ -125,6 +125,13 @@ function operationModeGroups(includeTerminal: boolean): OperationModeGroup[] {
       modes: [{ label: "Backup", mode: "backup" }],
     },
     {
+      id: "network",
+      label: "Network",
+      modes: [
+        { label: "Import vnStat history", mode: "network_traffic_import_vnstat" },
+      ],
+    },
+    {
       id: "process",
       label: "Process",
       modes: [
@@ -192,6 +199,8 @@ export function JobOperationEditor({
   fileTransferSourcesTruncated,
   fileTransferUploadSourceKind,
   mode,
+  networkTrafficImportInterfacesText,
+  networkTrafficImportStartDate,
   processLimit,
   setBackupIncludeConfig,
   setBackupFollowSymlinks,
@@ -225,6 +234,8 @@ export function JobOperationEditor({
   setFileTransferSessionId,
   setFileTransferSourceArtifactId,
   setFileTransferUploadSourceKind,
+  setNetworkTrafficImportInterfacesText,
+  setNetworkTrafficImportStartDate,
   setProcessLimit,
   setSupervisorAction,
   setSupervisorArgv,
@@ -286,6 +297,8 @@ export function JobOperationEditor({
   fileTransferSourcesTruncated: boolean;
   fileTransferUploadSourceKind: "local-file" | "source-artifact";
   mode: DispatchMode;
+  networkTrafficImportInterfacesText: string;
+  networkTrafficImportStartDate: string;
   processLimit: number;
   setBackupIncludeConfig: (value: boolean) => void;
   setBackupFollowSymlinks: (value: boolean) => void;
@@ -319,6 +332,8 @@ export function JobOperationEditor({
   setFileTransferSessionId: (value: string) => void;
   setFileTransferSourceArtifactId: (value: string) => void;
   setFileTransferUploadSourceKind: (value: "local-file" | "source-artifact") => void;
+  setNetworkTrafficImportInterfacesText: (value: string) => void;
+  setNetworkTrafficImportStartDate: (value: string) => void;
   setProcessLimit: (value: number) => void;
   setSupervisorAction: (value: SupervisorAction) => void;
   setSupervisorArgv: (value: string) => void;
@@ -727,6 +742,51 @@ export function JobOperationEditor({
             value={fileTransferResumeToken}
           />
         </label>
+      </div>
+    );
+  }
+
+  if (mode === "network_traffic_import_vnstat") {
+    return (
+      <div className="operationNote compactOperation">
+        <Activity size={18} />
+        <div>
+          <strong>Import retained vnStat traffic</strong>
+          <span>
+            The agent reads vnStat once. The API backfills synthetic minute samples from
+            the UTC start date up to, but not including, each interface&apos;s first live
+            agent counter sample. A rerun replaces prior vnStat-imported samples for
+            those interfaces.
+          </span>
+        </div>
+        <label className="wideField">
+          <span>Host interfaces</span>
+          <textarea
+            aria-label="vnStat import host interfaces"
+            onChange={(event) =>
+              setNetworkTrafficImportInterfacesText(event.target.value)
+            }
+            placeholder="eth0, ens3"
+            rows={2}
+            value={networkTrafficImportInterfacesText}
+          />
+        </label>
+        <label>
+          <span>Start date (UTC)</span>
+          <input
+            aria-label="vnStat import start date"
+            onChange={(event) =>
+              setNetworkTrafficImportStartDate(event.target.value)
+            }
+            type="date"
+            value={networkTrafficImportStartDate}
+          />
+        </label>
+        <span className="operationHint">
+          The operation requires complete retained vnStat coverage and an existing live
+          agent sample after the start. Aggregate bytes are preserved; minute-level
+          distribution is reconstructed from vnStat&apos;s retained resolutions.
+        </span>
       </div>
     );
   }

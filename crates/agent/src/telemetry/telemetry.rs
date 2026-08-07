@@ -32,7 +32,7 @@ use crate::telemetry_custom::{
     apply_custom_metrics_if_configured, custom_metrics_replaces_linux,
     empty_custom_metrics_snapshot,
 };
-use crate::telemetry_traffic::traffic_accumulation_for_plan;
+use crate::telemetry_traffic::traffic_accumulation_for_interface;
 
 const MAX_LATENCY_PROBE_OUTPUT_BYTES: usize = 16 * 1024;
 pub(crate) const GENERAL_PING_INTERVAL_SECS: u64 = 60;
@@ -963,7 +963,8 @@ async fn runtime_status_telemetry_stat(
         peer_client_id: Some(peer_client_id(plan, telemetry_plan.endpoint_side).to_string()),
         ..RuntimeTunnelStat::default()
     };
-    let traffic = traffic_accumulation_for_plan(config, telemetry_plan, interface_counter).await;
+    let traffic =
+        traffic_accumulation_for_interface(&telemetry_plan.plan.interface_name, interface_counter);
     stat.rx_bytes = traffic.rx_bytes;
     stat.tx_bytes = traffic.tx_bytes;
     stat.traffic_source = Some(traffic.source);

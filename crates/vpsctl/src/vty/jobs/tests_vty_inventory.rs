@@ -73,16 +73,16 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-create --behavior=tunnel_traffic --name=vnstat --definition-json={\"source\":\"vnstat\",\"vnstat_argv\":[\"/usr/bin/vnstat\"]}",
+            "config-preset-create --behavior=process_inventory --name=host-proc --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetCreate {
-            behavior: "tunnel_traffic".to_string(),
-            name: "vnstat".to_string(),
+            behavior: "process_inventory".to_string(),
+            name: "host-proc".to_string(),
             description: None,
             definition: serde_json::json!({
-                "source": "vnstat",
-                "vnstat_argv": ["/usr/bin/vnstat"]
+                "source": "linux_procfs",
+                "proc_root": "/host/proc"
             }),
         }
     );
@@ -99,26 +99,26 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-preview --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"}",
+            "config-preset-preview --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetPreview {
             preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: false,
-            definition: serde_json::json!({"source": "interface_counters"}),
+            definition: serde_json::json!({"source": "linux_procfs", "proc_root": "/host/proc"}),
         }
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"interface_counters\"} --preview-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirmed",
+            "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"} --preview-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirmed",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetUpdate {
             preset_id: "11111111-1111-4111-8111-111111111111".to_string(),
             description: None,
             clear_description: true,
-            definition: serde_json::json!({"source": "interface_counters"}),
+            definition: serde_json::json!({"source": "linux_procfs", "proc_root": "/host/proc"}),
             preview_hash: Some(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()
             ),
@@ -127,12 +127,12 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-source-set --behavior tunnel_traffic --preset-id 11111111-1111-4111-8111-111111111111 --selector provider:alpha&&country:US --client edge-a --tag bgp --preview-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --confirmed",
+            "config-source-set --behavior process_inventory --preset-id 11111111-1111-4111-8111-111111111111 --selector provider:alpha&&country:US --client edge-a --tag bgp --preview-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --confirmed",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigSourceChange {
             action: "set".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "process_inventory".to_string(),
             preset_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             selector: Some("provider:alpha&&country:US".to_string()),
             clients: vec!["edge-a".to_string()],
@@ -145,12 +145,12 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-source-reset --behavior=tunnel_traffic --client=edge/a"
+            "config-source-reset --behavior=process_inventory --client=edge/a"
         )
         .unwrap(),
         VtyInventoryCommand::ConfigSourceChange {
             action: "reset".to_string(),
-            behavior: "tunnel_traffic".to_string(),
+            behavior: "process_inventory".to_string(),
             preset_id: None,
             selector: None,
             clients: vec!["edge/a".to_string()],
@@ -167,11 +167,11 @@ fn parses_inventory_commands() {
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("config-sources --client-id=edge/a --behavior=tunnel_traffic")
+        parse_vty_inventory_command("config-sources --client-id=edge/a --behavior=process_inventory")
             .unwrap(),
         VtyInventoryCommand::ConfigSources {
             client_id: Some("edge/a".to_string()),
-            behavior: Some("tunnel_traffic".to_string()),
+            behavior: Some("process_inventory".to_string()),
         }
     );
     assert_eq!(
@@ -361,11 +361,11 @@ fn rejects_invalid_inventory_commands() {
     .is_err());
     assert!(parse_vty_inventory_command("config-source-set --behavior x").is_err());
     assert!(parse_vty_inventory_command(
-        "config-source-set --behavior tunnel_traffic --preset-id 11111111-1111-4111-8111-111111111111 --client edge-a --confirmed"
+        "config-source-set --behavior process_inventory --preset-id 11111111-1111-4111-8111-111111111111 --client edge-a --confirmed"
     )
     .is_err());
     assert!(parse_vty_inventory_command(
-        "config-source-reset --behavior tunnel_traffic --client edge-a --preview-hash aaaa"
+        "config-source-reset --behavior process_inventory --client edge-a --preview-hash aaaa"
     )
     .is_err());
     assert!(parse_vty_inventory_command(

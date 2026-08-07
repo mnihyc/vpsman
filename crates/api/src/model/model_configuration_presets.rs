@@ -6,7 +6,6 @@ use crate::model::RuntimeConfigDispatchView;
 
 pub(crate) const CONFIGURATION_BEHAVIORS: &[&str] = &[
     "host_metrics",
-    "tunnel_traffic",
     "latency_probe",
     "ospf_update_command",
     "process_inventory",

@@ -43,6 +43,8 @@ mod network_routing_adapter;
 mod network_runtime;
 #[path = "network/network_speed.rs"]
 mod network_speed;
+#[path = "network/network_traffic_import.rs"]
+mod network_traffic_import;
 #[path = "network/network_status.rs"]
 mod network_status;
 #[path = "host/platform_accounts.rs"]

@@ -32,6 +32,8 @@ mod job_files;
 mod job_request;
 #[path = "jobs/job_terminal.rs"]
 mod job_terminal;
+#[path = "jobs/job_traffic_import.rs"]
+mod job_traffic_import;
 #[path = "jobs/lifecycle_outcome.rs"]
 mod lifecycle_outcome;
 #[path = "model/model.rs"]
@@ -137,6 +139,8 @@ mod repository_network;
 mod repository_network_adapters;
 #[path = "repository/network/repository_network_observations.rs"]
 mod repository_network_observations;
+#[path = "repository/network/repository_network_traffic_import.rs"]
+mod repository_network_traffic_import;
 #[path = "repository/network/repository_network_recommendations.rs"]
 mod repository_network_recommendations;
 #[path = "repository/access/repository_operator_totp.rs"]
