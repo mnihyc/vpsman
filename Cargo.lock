@@ -3051,7 +3051,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpsctl"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "base64",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-agent"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "base64",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-api"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3139,11 +3139,11 @@ dependencies = [
 
 [[package]]
 name = "vpsman-build-support"
-version = "0.2.24"
+version = "0.2.25"
 
 [[package]]
 name = "vpsman-common"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "base64",
  "bytes",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-gateway"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-object-store"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "hex",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-server-build-info"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "vpsman-build-support",
  "vpsman-common",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-server-core"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -3220,7 +3220,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-worker"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "chrono",
