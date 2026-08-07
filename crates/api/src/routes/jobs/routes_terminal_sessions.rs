@@ -643,8 +643,8 @@ async fn handle_terminal_socket(
                             break;
                         };
                         replay_cursor = next_cursor;
-                        if done {
-                            if !send_current_terminal_session(
+                        if done
+                            && !send_current_terminal_session(
                                 &mut socket,
                                 &state,
                                 &client_id,
@@ -652,7 +652,6 @@ async fn handle_terminal_socket(
                             ).await {
                                 break;
                             }
-                        }
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {

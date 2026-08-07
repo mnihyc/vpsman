@@ -945,25 +945,25 @@ async fn monitoring_agents(
         .map(str::trim)
         .filter(|selector| !selector.is_empty())
     else {
-        return Ok(state
+        return state
             .repo
             .list_agents()
             .await
             .map_err(ApiError::internal_mapper(
                 "vps_inventory_unavailable",
                 "The VPS inventory could not be loaded.",
-            ))?);
+            ));
     };
     let client_ids =
         resolve_selector(state, selector_expression, MAX_MONITORING_SELECTOR_BYTES).await?;
-    Ok(state
+    state
         .repo
         .list_agents_for_client_ids(&client_ids)
         .await
         .map_err(ApiError::internal_mapper(
             "vps_inventory_unavailable",
             "The VPS inventory could not be loaded.",
-        ))?)
+        ))
 }
 
 fn sort_monitoring_agents(agents: &mut [AgentView]) {

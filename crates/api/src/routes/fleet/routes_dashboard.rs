@@ -855,7 +855,7 @@ async fn load_dashboard_rollups(
     client_ids: &[String],
 ) -> Result<Vec<TelemetryRollupView>, ApiError> {
     if dashboard_uses_raw_samples(range) {
-        return Ok(state
+        return state
             .repo
             .list_dashboard_raw_telemetry_rollups(
                 i64::from(chart_points),
@@ -868,10 +868,10 @@ async fn load_dashboard_rollups(
             .map_err(ApiError::internal_mapper(
                 "dashboard_resource_history_unavailable",
                 "Dashboard resource history could not be loaded.",
-            ))?);
+            ));
     }
     let bounded_range = telemetry_query_bounds(range);
-    Ok(state
+    state
         .repo
         .list_dashboard_telemetry_rollups(
             i64::from(chart_points),
@@ -885,7 +885,7 @@ async fn load_dashboard_rollups(
         .map_err(ApiError::internal_mapper(
             "dashboard_resource_history_unavailable",
             "Dashboard resource history could not be loaded.",
-        ))?)
+        ))
 }
 
 async fn load_dashboard_network_rates(
@@ -896,7 +896,7 @@ async fn load_dashboard_network_rates(
     selection: &NetworkRateInterfaceSelection,
 ) -> Result<Vec<TelemetryNetworkRateView>, ApiError> {
     if dashboard_uses_raw_samples(range) {
-        return Ok(state
+        return state
             .repo
             .list_dashboard_raw_telemetry_network_rates_selected(
                 i64::from(chart_points),
@@ -909,10 +909,10 @@ async fn load_dashboard_network_rates(
             .map_err(ApiError::internal_mapper(
                 "dashboard_network_history_unavailable",
                 "Dashboard network history could not be loaded.",
-            ))?);
+            ));
     }
     let bounded_range = telemetry_query_bounds(range);
-    Ok(state
+    state
         .repo
         .list_dashboard_telemetry_network_rates_selected(
             i64::from(chart_points),
@@ -926,7 +926,7 @@ async fn load_dashboard_network_rates(
         .map_err(ApiError::internal_mapper(
             "dashboard_network_history_unavailable",
             "Dashboard network history could not be loaded.",
-        ))?)
+        ))
 }
 
 fn dashboard_uses_raw_samples(range: &DashboardRange) -> bool {
