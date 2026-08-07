@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "allocator-api2"
-version = "0.2.23"
+version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
@@ -1734,7 +1734,7 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
-version = "0.2.23"
+version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
@@ -3051,7 +3051,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpsctl"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "base64",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-agent"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "base64",
@@ -3099,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-api"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3139,11 +3139,11 @@ dependencies = [
 
 [[package]]
 name = "vpsman-build-support"
-version = "0.2.23"
+version = "0.2.24"
 
 [[package]]
 name = "vpsman-common"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "base64",
  "bytes",
@@ -3169,7 +3169,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-gateway"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3187,7 +3187,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-object-store"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "hex",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-server-build-info"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "vpsman-build-support",
  "vpsman-common",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-server-core"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -3220,7 +3220,7 @@ dependencies = [
 
 [[package]]
 name = "vpsman-worker"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "anyhow",
  "chrono",
