@@ -62,7 +62,8 @@ async fn postgres_single_host_ip_views_never_expose_prefix_lengths() {
     sqlx::query(
         r#"
         UPDATE clients
-        SET registration_ip = '198.51.100.10/24'::inet,
+        SET agent_version = 'postgres-test',
+            registration_ip = '198.51.100.10/24'::inet,
             last_ip = '2001:db8::20/64'::inet
         WHERE id = $1
         "#,
