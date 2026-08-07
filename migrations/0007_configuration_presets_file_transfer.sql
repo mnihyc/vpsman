@@ -11,7 +11,6 @@ CREATE TABLE configuration_presets (
     CONSTRAINT configuration_presets_behavior_check
         CHECK (behavior IN (
             'host_metrics',
-            'tunnel_traffic',
             'latency_probe',
             'ospf_update_command',
             'process_inventory',
