@@ -221,3 +221,52 @@ where
         NoiseFrameStream::server_enrolled(server_io, &server_key.private, Some(&client_key.public));
     tokio::try_join!(client, server).unwrap()
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn noise_frame_stream_read_survives_select_cancellation() {
+    let (client_io, server_io) = tokio::io::duplex(1);
+    let (mut client, mut server) = enrolled_stream_pair(client_io, server_io).await;
+
+    let payload = b"cancel-safe frame".to_vec();
+    let sent_payload = payload.clone();
+
+    let writer = tokio::spawn(async move {
+        client
+            .write_frame(&Frame::new(
+                crate::MessageKind::Telemetry,
+                4,
+                9,
+                sent_payload,
+            ))
+            .await
+            .unwrap();
+    });
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            tokio::select! {
+                biased;
+
+                result = server.read_frame() => {
+                    break result;
+                }
+
+                // If read_frame() returned Pending after consuming a byte,
+                // this branch wins and drops that read future.
+                _ = std::future::ready(()) => {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("read timed out")
+    .expect("read failed");
+
+    writer.await.unwrap();
+
+    assert_eq!(received.kind, crate::MessageKind::Telemetry);
+    assert_eq!(received.stream_id, 4);
+    assert_eq!(received.seq, 9);
+    assert_eq!(received.payload, payload);
+}

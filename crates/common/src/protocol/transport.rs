@@ -100,6 +100,7 @@ pub struct NoiseFrameStream<S> {
     io: S,
     transport: TransportState,
     remote_static: Option<Vec<u8>>,
+    wire_read_buf: BytesMut,
     plaintext_buf: BytesMut,
     decrypt_buf: Vec<u8>,
     encrypt_buf: Vec<u8>,
@@ -180,6 +181,7 @@ where
             io,
             transport: handshake.into_transport_mode()?,
             remote_static,
+            wire_read_buf: BytesMut::with_capacity(8192),
             plaintext_buf: BytesMut::with_capacity(8192),
             decrypt_buf: vec![0_u8; MAX_NOISE_MESSAGE_LEN],
             encrypt_buf: vec![0_u8; MAX_NOISE_PLAINTEXT_CHUNK + NOISE_TAG_OVERHEAD],
@@ -210,12 +212,51 @@ where
                 return Ok(frame);
             }
 
-            let encrypted = read_noise_message(&mut self.io).await?;
+            let encrypted = self.read_noise_message_buffered().await?;
             let len = self
                 .transport
                 .read_message(&encrypted, &mut self.decrypt_buf)?;
             self.plaintext_buf
                 .extend_from_slice(&self.decrypt_buf[..len]);
+        }
+    }
+
+    /// Read one Noise wire record into a caller-owned buffer.
+    ///
+    /// [`read_frame`] is a branch of `tokio::select!` on both the
+    /// gateway and agent.  Partial wire records must survive
+    /// cancellation and re-creation of the `read_frame()` future, so
+    /// this helper uses the cancellation-safe [`AsyncReadExt::read_buf`]
+    /// and stages data in [`self.wire_read_buf`] until a complete
+    /// `[length][ciphertext]` record is available.
+    async fn read_noise_message_buffered(&mut self) -> Result<BytesMut, TransportError> {
+        loop {
+            if self.wire_read_buf.len() >= 2 {
+                let len = usize::from(u16::from_be_bytes([
+                    self.wire_read_buf[0],
+                    self.wire_read_buf[1],
+                ]));
+                if len > MAX_NOISE_MESSAGE_LEN {
+                    return Err(TransportError::NoiseMessageTooLarge(len));
+                }
+                let record_len = 2 + len;
+                if self.wire_read_buf.len() >= record_len {
+                    let mut record = self.wire_read_buf.split_to(record_len);
+                    return Ok(record.split_off(2));
+                }
+            }
+
+            // Ensure read_buf cannot return zero merely because the
+            // BytesMut has no spare allocation.
+            self.wire_read_buf.reserve(8192);
+
+            if self.io.read_buf(&mut self.wire_read_buf).await? == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed while reading Noise message",
+                )
+                .into());
+            }
         }
     }
 
