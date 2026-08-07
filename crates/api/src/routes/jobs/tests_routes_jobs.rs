@@ -1,8 +1,8 @@
 use uuid::Uuid;
 use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentPrivilegeMode, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, ProcessResourceLimits,
-    ProcessRunPolicy, TunnelAddressPair, TunnelKind, TunnelPlanInput,
+    AgentRuntimeStatusTelemetryPlan, ProcessResourceLimits, ProcessRunPolicy, TunnelAddressPair,
+    TunnelKind, TunnelPlanInput,
 };
 
 use super::*;

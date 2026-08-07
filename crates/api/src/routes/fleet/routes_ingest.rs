@@ -8,8 +8,7 @@ use vpsman_common::{
     is_terminal_command_type, AgentUpdateVerificationResult, CommandOutput,
     GatewayAgentHelloIngest, GatewayAgentUpdateVerificationIngest, GatewayCommandOutputIngest,
     GatewayRuntimeConfigReloadRequest, GatewaySessionLifecycleIngest, GatewayTelemetryIngest,
-    GatewayTerminalOutputIngest, JobCommand, OutputStream,
-    RoutingCostAdapterJobResult,
+    GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
     RoutingCostAdapterOperation, MAX_RUNTIME_CONFIG_REASON_BYTES, MAX_TELEMETRY_DISKS,
     MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
 };
@@ -22,9 +21,7 @@ use vpsman_server_core::{
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     error::ApiError,
-    job_traffic_import::{
-        apply_network_traffic_import_if_ready, NetworkTrafficImportApply,
-    },
+    job_traffic_import::{apply_network_traffic_import_if_ready, NetworkTrafficImportApply},
     model::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },

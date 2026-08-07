@@ -25,17 +25,16 @@ fn parses_all_vnstat_resolutions_from_one_v2_snapshot() {
         }]
     });
 
-    let (source, buckets) =
-        parse_vnstat_payload(&payload, "eth0", 1_722_384_000).unwrap();
+    let (source, buckets) = parse_vnstat_payload(&payload, "eth0", 1_722_384_000).unwrap();
 
     assert_eq!(source.database_created_unix, Some(1_722_000_000));
     assert_eq!(source.source_updated_unix, Some(1_722_474_135));
     assert!(buckets.iter().any(|bucket| bucket.duration_secs == 300));
     assert!(buckets.iter().any(|bucket| bucket.duration_secs == 3_600));
     assert!(buckets.iter().any(|bucket| bucket.duration_secs == 86_400));
-    assert!(buckets.iter().any(|bucket| {
-        bucket.start_unix == 1_722_474_000 && bucket.duration_secs == 120
-    }));
+    assert!(buckets
+        .iter()
+        .any(|bucket| { bucket.start_unix == 1_722_474_000 && bucket.duration_secs == 120 }));
 }
 
 #[test]

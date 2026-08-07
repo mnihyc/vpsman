@@ -1040,11 +1040,7 @@ impl Repository {
                     &received_metrics.ping_results,
                 )
                 .await?;
-                lock_postgres_traffic_counter_streams(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                )
-                .await?;
+                lock_postgres_traffic_counter_streams(&mut tx, &event.telemetry.client_id).await?;
                 let metrics = &received_metrics;
                 upsert_postgres_telemetry_sample(
                     &mut tx,

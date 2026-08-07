@@ -28,11 +28,11 @@ use crate::{
     model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
     repository::Repository,
-    repository_network_traffic_import::is_intentional_vnstat_import_boundary,
     repository_key_lifecycle::{
         lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
         require_visible_postgres_clients_in_tx,
     },
+    repository_network_traffic_import::is_intentional_vnstat_import_boundary,
     repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
     selector_expression::{agent_matches_selector_expression, parse_selector_expression},
     unix_now,
@@ -3495,13 +3495,9 @@ fn aggregate_memory_traffic_history(
                 && sample.tx_bytes >= prior.tx_bytes;
             bucket.selected_rx |= selected_rx;
             bucket.selected_tx |= selected_tx;
-            let intentional_boundary = is_intentional_vnstat_import_boundary(
-                &prior.sample_source,
-                &sample.sample_source,
-            );
-            if !intentional_boundary
-                && ((selected_rx && !valid_rx) || (selected_tx && !valid_tx))
-            {
+            let intentional_boundary =
+                is_intentional_vnstat_import_boundary(&prior.sample_source, &sample.sample_source);
+            if !intentional_boundary && ((selected_rx && !valid_rx) || (selected_tx && !valid_tx)) {
                 bucket.reset_count = bucket.reset_count.saturating_add(1);
             }
             if (selected_rx && valid_rx) || (selected_tx && valid_tx) {

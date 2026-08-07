@@ -139,10 +139,10 @@ mod repository_network;
 mod repository_network_adapters;
 #[path = "repository/network/repository_network_observations.rs"]
 mod repository_network_observations;
-#[path = "repository/network/repository_network_traffic_import.rs"]
-mod repository_network_traffic_import;
 #[path = "repository/network/repository_network_recommendations.rs"]
 mod repository_network_recommendations;
+#[path = "repository/network/repository_network_traffic_import.rs"]
+mod repository_network_traffic_import;
 #[path = "repository/access/repository_operator_totp.rs"]
 mod repository_operator_totp;
 #[path = "repository/network/repository_port_forwarding.rs"]

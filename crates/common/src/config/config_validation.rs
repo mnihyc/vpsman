@@ -1,8 +1,8 @@
 use super::models::{
     AgentAuthConfig, AgentBackupConfig, AgentConfig, AgentExecutionConfig, AgentNetworkConfig,
     AgentNoiseConfig, AgentPingProbeKind, AgentPingTarget, AgentProcessInventorySource,
-    AgentRuntimeStatusTelemetryPlan, AgentTelemetryConfig, AgentTelemetrySource,
-    AgentUpdateConfig, AgentUserSessionsSource, ServerEndpoint, MAX_AGENT_PING_TARGETS,
+    AgentRuntimeStatusTelemetryPlan, AgentTelemetryConfig, AgentTelemetrySource, AgentUpdateConfig,
+    AgentUserSessionsSource, ServerEndpoint, MAX_AGENT_PING_TARGETS,
 };
 use crate::{
     validate_runtime_topology_intent, validate_runtime_tunnel_control,

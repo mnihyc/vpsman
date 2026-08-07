@@ -54,14 +54,7 @@ impl Repository {
             Self::Memory(memory) => {
                 let mut samples = memory.traffic_counter_samples.write().await;
                 let prepared = prepare_imports(
-                    job_id,
-                    client_id,
-                    interfaces,
-                    start_unix,
-                    result,
-                    buckets,
-                    now_unix,
-                    &samples,
+                    job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &samples,
                 )?;
                 apply_memory_import(&mut samples, client_id, &prepared);
                 let epochs = samples
@@ -143,14 +136,7 @@ impl Repository {
                     })
                     .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
                 let prepared = prepare_imports(
-                    job_id,
-                    client_id,
-                    interfaces,
-                    start_unix,
-                    result,
-                    buckets,
-                    now_unix,
-                    &existing,
+                    job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &existing,
                 )?;
 
                 sqlx::query(
@@ -260,8 +246,7 @@ fn validate_result_contract(
         "source_interface_mismatch",
     )?;
     invalid_ensure(
-        buckets.len()
-            <= interfaces.len() * NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
+        buckets.len() <= interfaces.len() * NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
         "bucket_count_exceeds_limit",
     )?;
     invalid_ensure(
@@ -366,9 +351,8 @@ fn prepare_imports(
             "negative_counter_baseline",
         )?;
 
-        let mut samples = Vec::with_capacity(
-            minute_deltas.len() + if previous.is_none() { 1 } else { 0 },
-        );
+        let mut samples =
+            Vec::with_capacity(minute_deltas.len() + if previous.is_none() { 1 } else { 0 });
         if previous.is_none() {
             samples.push(sample_record(
                 client_id,
@@ -380,16 +364,18 @@ fn prepare_imports(
             )?);
         }
         for (observed_unix, rx_delta, tx_delta) in minute_deltas {
-            cumulative_rx = cumulative_rx
-                .checked_add(i64::try_from(rx_delta).context(
-                    "network_traffic_import_invalid:rx_delta_exceeds_database_range",
-                )?)
-                .context("network_traffic_import_invalid:rx_counter_overflow")?;
-            cumulative_tx = cumulative_tx
-                .checked_add(i64::try_from(tx_delta).context(
-                    "network_traffic_import_invalid:tx_delta_exceeds_database_range",
-                )?)
-                .context("network_traffic_import_invalid:tx_counter_overflow")?;
+            cumulative_rx =
+                cumulative_rx
+                    .checked_add(i64::try_from(rx_delta).context(
+                        "network_traffic_import_invalid:rx_delta_exceeds_database_range",
+                    )?)
+                    .context("network_traffic_import_invalid:rx_counter_overflow")?;
+            cumulative_tx =
+                cumulative_tx
+                    .checked_add(i64::try_from(tx_delta).context(
+                        "network_traffic_import_invalid:tx_delta_exceeds_database_range",
+                    )?)
+                    .context("network_traffic_import_invalid:tx_counter_overflow")?;
             samples.push(sample_record(
                 client_id,
                 interface,
@@ -422,7 +408,10 @@ fn expand_buckets_to_minutes(
     invalid_ensure(end_unix > start_unix, "empty_range")?;
     let mut relevant = Vec::new();
     let mut identities = BTreeSet::new();
-    for bucket in buckets.iter().filter(|bucket| bucket.interface == interface) {
+    for bucket in buckets
+        .iter()
+        .filter(|bucket| bucket.interface == interface)
+    {
         invalid_ensure(bucket.start_unix % 60 == 0, "bucket_not_minute_aligned")?;
         invalid_ensure(
             bucket.duration_secs >= 60 && bucket.duration_secs % 60 == 0,
@@ -545,9 +534,8 @@ fn expand_buckets_to_minutes(
         .enumerate()
     {
         if !cell.assigned {
-            let gap_unix = start_unix.saturating_add(
-                u64::try_from(offset).unwrap_or(u64::MAX).saturating_mul(60),
-            );
+            let gap_unix = start_unix
+                .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX).saturating_mul(60));
             anyhow::bail!("network_traffic_import_invalid:vnstat_history_gap_at_{gap_unix}");
         }
         let observed_unix = start_unix

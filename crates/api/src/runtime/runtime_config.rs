@@ -10,9 +10,8 @@ use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
     validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, JobCommand,
-    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelManager,
-    TunnelEndpointSide, TunnelKind,
+    AgentRuntimeStatusTelemetryPlan, JobCommand, RuntimeConfigReconcileResource,
+    RuntimeConfigReconcileScope, RuntimeTunnelManager, TunnelEndpointSide, TunnelKind,
 };
 
 use crate::{

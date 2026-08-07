@@ -30,9 +30,7 @@ use crate::{
     host_services::{execute_service_action, execute_service_inventory, execute_service_logs},
     host_storage::execute_storage_inventory,
     network_interfaces::{execute_network_interfaces_command, NetworkInterfacesInput},
-    network_traffic_import::{
-        execute_network_traffic_import_command, NetworkTrafficImportInput,
-    },
+    network_traffic_import::{execute_network_traffic_import_command, NetworkTrafficImportInput},
     process::execute_process_list,
     supervisor::execute_process_supervisor_command,
     terminal::execute_terminal_command,

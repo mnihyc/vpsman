@@ -167,8 +167,10 @@ fn parses_inventory_commands() {
         }
     );
     assert_eq!(
-        parse_vty_inventory_command("config-sources --client-id=edge/a --behavior=process_inventory")
-            .unwrap(),
+        parse_vty_inventory_command(
+            "config-sources --client-id=edge/a --behavior=process_inventory"
+        )
+        .unwrap(),
         VtyInventoryCommand::ConfigSources {
             client_id: Some("edge/a".to_string()),
             behavior: Some("process_inventory".to_string()),

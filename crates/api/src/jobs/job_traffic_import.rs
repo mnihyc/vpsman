@@ -118,8 +118,7 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
     if output_by_seq.len() < expected_batch_count {
         return Ok(NetworkTrafficImportApply::Pending);
     }
-    if output_by_seq.len() != expected_batch_count
-        || output_by_seq.keys().copied().ne(0..final_seq)
+    if output_by_seq.len() != expected_batch_count || output_by_seq.keys().copied().ne(0..final_seq)
     {
         return Ok(NetworkTrafficImportApply::Invalid(
             "network_traffic_import_invalid:batch_output_sequence_invalid".to_string(),
@@ -176,7 +175,11 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
         .await
     {
         Ok(summary) => Ok(NetworkTrafficImportApply::Applied(summary.message)),
-        Err(error) if error.to_string().contains("network_traffic_import_invalid:") => {
+        Err(error)
+            if error
+                .to_string()
+                .contains("network_traffic_import_invalid:") =>
+        {
             Ok(NetworkTrafficImportApply::Invalid(error.to_string()))
         }
         Err(error) => Err(error),
@@ -190,4 +193,3 @@ fn command_output_matches(left: &CommandOutput, right: &CommandOutput) -> bool {
         && left.exit_code == right.exit_code
         && left.done == right.done
 }
-

@@ -24,8 +24,7 @@ fn finer_rows_are_preserved_and_only_coarse_residual_is_distributed() {
         bucket(start, 300, 1_000, 500),
     ];
 
-    let (minutes, rx, tx) =
-        expand_buckets_to_minutes(&buckets, "eth0", start, end).unwrap();
+    let (minutes, rx, tx) = expand_buckets_to_minutes(&buckets, "eth0", start, end).unwrap();
 
     assert_eq!(minutes.len(), 60);
     assert_eq!(rx, 3_600);
@@ -92,15 +91,8 @@ fn prepare_import_stops_immediately_before_first_live_sample() {
         bucket_count: 1,
         message: String::new(),
     };
-    let existing = vec![sample_record(
-        "agent-a",
-        "eth0",
-        live,
-        10,
-        20,
-        "interface_counters",
-    )
-    .unwrap()];
+    let existing =
+        vec![sample_record("agent-a", "eth0", live, 10, 20, "interface_counters").unwrap()];
     let prepared = prepare_imports(
         job_id,
         "agent-a",

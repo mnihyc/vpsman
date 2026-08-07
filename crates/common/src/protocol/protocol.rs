@@ -1658,7 +1658,10 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("restore_rollback", "restore_rollback"),
     ("network_status", "network_status"),
     ("network_interfaces", "network_interfaces"),
-    ("network_traffic_import_vnstat", "network_traffic_import_vnstat"),
+    (
+        "network_traffic_import_vnstat",
+        "network_traffic_import_vnstat",
+    ),
     ("network_probe", "network_probe"),
     ("network_speed_test", "network_speed_test"),
     ("network_routing_status", "network_routing_status"),

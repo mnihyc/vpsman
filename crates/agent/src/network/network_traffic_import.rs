@@ -6,15 +6,12 @@ use tokio::{process::Command, sync::mpsc, time};
 use vpsman_common::{
     CommandOutput, NetworkTrafficImportBatch, NetworkTrafficImportBucket,
     NetworkTrafficImportResult, NetworkTrafficImportSource, OutputStream,
-    NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT,
-    NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
+    NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT, NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
     NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES, NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
 };
 
 use crate::{
-    child_process::{
-        run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult,
-    },
+    child_process::{run_child_with_bounded_output_cancelable, ChildCleanupPolicy, ChildRunResult},
     command_worker::{run_cancelable, CommandCancelToken},
 };
 
@@ -64,9 +61,7 @@ async fn collect_vnstat_history(
     let mut sources = Vec::new();
 
     for interface in input.interfaces {
-        input
-            .cancel_token
-            .check("network_traffic_import_vnstat")?;
+        input.cancel_token.check("network_traffic_import_vnstat")?;
         let payload = run_vnstat_query(executable, interface, input.cancel_token.clone()).await?;
         let (source, mut interface_buckets) =
             parse_vnstat_payload(&payload, interface, input.start_unix)?;
@@ -109,9 +104,7 @@ async fn collect_vnstat_history(
         .chunks(NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT)
         .enumerate()
     {
-        input
-            .cancel_token
-            .check("network_traffic_import_vnstat")?;
+        input.cancel_token.check("network_traffic_import_vnstat")?;
         let batch = NetworkTrafficImportBatch {
             r#type: "network_traffic_import_vnstat_batch".to_string(),
             batch_index: u32::try_from(batch_index).context("vnstat batch index overflow")?,
@@ -282,7 +275,10 @@ fn parse_vnstat_payload(
     interface: &str,
     requested_start_unix: u64,
 ) -> Result<(NetworkTrafficImportSource, Vec<NetworkTrafficImportBucket>)> {
-    anyhow::ensure!(json_version_is_two(payload), "vnstat JSON version 2 is required");
+    anyhow::ensure!(
+        json_version_is_two(payload),
+        "vnstat JSON version 2 is required"
+    );
     let interface_payload = interface_payload(payload, interface)?;
     let database_created_unix = nested_timestamp(interface_payload, "created");
     let source_updated_unix = nested_timestamp(interface_payload, "updated")
@@ -368,7 +364,10 @@ fn parse_interval_rows(
     let mut seen = BTreeSet::new();
     for row in rows {
         let start_unix = traffic_row_timestamp(row)?;
-        anyhow::ensure!(seen.insert(start_unix), "vnstat {field} rows contain a duplicate timestamp");
+        anyhow::ensure!(
+            seen.insert(start_unix),
+            "vnstat {field} rows contain a duplicate timestamp"
+        );
         push_bucket_if_relevant(
             buckets,
             interface,

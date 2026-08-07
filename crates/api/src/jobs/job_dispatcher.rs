@@ -20,9 +20,7 @@ use vpsman_server_core::{
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     internal_operator::{server_issued_job_actor, system_operator},
-    job_traffic_import::{
-        apply_network_traffic_import_if_ready, NetworkTrafficImportApply,
-    },
+    job_traffic_import::{apply_network_traffic_import_if_ready, NetworkTrafficImportApply},
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
@@ -481,7 +479,10 @@ async fn finish_claimed_target(
         return Ok(());
     }
     if outcome.status == TARGET_STATUS_COMPLETED
-        && matches!(&claimed.operation, JobCommand::NetworkTrafficImportVnstat { .. })
+        && matches!(
+            &claimed.operation,
+            JobCommand::NetworkTrafficImportVnstat { .. }
+        )
     {
         let Some(candidate) = state
             .repo
