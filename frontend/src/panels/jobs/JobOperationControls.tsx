@@ -783,9 +783,10 @@ export function JobOperationEditor({
           />
         </label>
         <span className="operationHint">
-          The operation requires complete retained vnStat coverage and an existing live
-          agent sample after the start. Aggregate bytes are preserved; minute-level
-          distribution is reconstructed from vnStat&apos;s retained resolutions.
+          There is no fixed lookback limit: choose the earliest date covered by the
+          retained vnStat database. The operation also requires an existing live agent
+          sample after the start. Aggregate bytes are preserved; minute-level distribution
+          is reconstructed from vnStat&apos;s retained resolutions.
         </span>
       </div>
     );

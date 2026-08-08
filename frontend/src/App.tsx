@@ -1927,6 +1927,7 @@ export function App() {
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
         telemetryTunnels={dashboard.telemetryTunnels}
+        telemetryUptimes={dashboard.telemetryUptimes}
         wsState={dashboard.wsState}
       />
     );
@@ -2029,6 +2030,7 @@ export function App() {
         telemetryNetworkRates={dashboard.telemetryNetworkRates}
         telemetryRollups={dashboard.telemetryRollups}
         telemetryTunnels={dashboard.telemetryTunnels}
+        telemetryUptimes={dashboard.telemetryUptimes}
         vpsRuleValues={dashboard.vpsRuleValues}
       />
     );

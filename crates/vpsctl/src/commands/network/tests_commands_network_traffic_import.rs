@@ -16,3 +16,11 @@ fn parses_date_and_rfc3339_starts_to_utc_minutes() {
 fn rejects_non_minute_rfc3339_start() {
     assert!(parse_network_traffic_import_start("2024-08-01T00:00:01Z").is_err());
 }
+
+#[test]
+fn accepts_the_first_unix_minute_as_an_import_start() {
+    assert_eq!(
+        parse_network_traffic_import_start("1970-01-01T00:01:00Z").unwrap(),
+        60
+    );
+}

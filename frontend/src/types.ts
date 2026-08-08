@@ -949,6 +949,12 @@ export type TelemetryRollupRecord = {
   updated_at: string;
 };
 
+export type TelemetryUptimeRecord = {
+  client_id: string;
+  uptime_secs: number;
+  observed_at: string;
+};
+
 export type TelemetryNetworkRateRecord = {
   client_id: string;
   interface: string;
@@ -1113,6 +1119,7 @@ export type PublicNetworkPointView = {
 
 export type PublicTrafficMetricView = {
   configured: boolean;
+  reset_day?: number;
   cycle_start?: string;
   cycle_end?: string;
   rx_bytes?: number;
@@ -1133,6 +1140,7 @@ export type PublicTrafficMetricView = {
 export type PublicBillingPlanView = {
   disabled: boolean;
   display: string;
+  period_code?: "m" | "q" | "hy" | "y" | string;
   cycle?: string;
 };
 

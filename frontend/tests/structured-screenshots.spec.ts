@@ -1035,7 +1035,11 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Maintenance",
     heading: "System maintenance",
     id: "57-system-maintenance",
-    requiredText: ["Stale frozen selectors", "Saved selector", "Frozen targets"],
+    requiredText: [
+      "Stale frozen selectors",
+      "Saved selector",
+      "Frozen targets",
+    ],
   },
   {
     view: "System",
@@ -1629,9 +1633,15 @@ async function navigateAndScreenshot(
   }
 
   if (entry.prepare === "vps-rules-preview") {
-    await page.getByLabel("Reset day").fill("14");
-    await page.getByLabel("Total quota").fill("4TB");
-    await page.getByLabel("Interfaces / selectors").fill("ens3, eth0+tx");
+    await page
+      .getByRole("textbox", { name: "Reset day", exact: true })
+      .fill("14");
+    await page
+      .getByRole("textbox", { name: "Total quota", exact: true })
+      .fill("4TB");
+    await page
+      .getByRole("textbox", { name: "Interfaces / selectors", exact: true })
+      .fill("ens3, eth0+tx");
     await page.getByRole("button", { name: "Preview changes" }).click();
     await expect(page.getByLabel("Preview changes data grid")).toBeVisible({
       timeout: 5_000,

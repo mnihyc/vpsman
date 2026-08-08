@@ -691,7 +691,7 @@ export function TopologyNetworkTestControls({
               mode="generic"
               targets={planTargets}
               title="Plan endpoint visibility"
-              unavailableLabel="N/A"
+              unavailableLabel="-"
             />
           </section>
 

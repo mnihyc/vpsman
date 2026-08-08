@@ -25,6 +25,7 @@ import type {
   OperatorAuthEventRecord,
   ScheduleRecord,
   TagMutationResponse,
+  TrafficAccountingRecord,
   VpsRuleValueRecord,
 } from "../../src/types";
 
@@ -1380,7 +1381,7 @@ const vpsRuleValues: VpsRuleValueRecord[] = [
   },
 ];
 
-const trafficAccounting = [
+const trafficAccounting: TrafficAccountingRecord[] = [
   {
     client_id: "agent-sfo-01",
     cycle_end: "2026-07-14T00:00:00Z",
@@ -3527,6 +3528,7 @@ export async function installConsoleApiMock(
     fileTransfersOverride?: typeof fileTransfers;
     fleetAlertStateFailure?: boolean;
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
+    fleetSnapshotAfterDeleteDelayMs?: number;
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
     hostServiceInventoryOverride?: ReturnType<typeof hostServiceInventory>;
@@ -3545,6 +3547,7 @@ export async function installConsoleApiMock(
     schedulesOverride?: ScheduleRecord[];
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
+    trafficAccountingOverride?: Partial<(typeof trafficAccounting)[number]>;
     terminalSessionsOverride?: typeof terminalSessions;
     totpSetupDelayMs?: number;
     totpSetupOperatorIdOverride?: string;
@@ -3600,6 +3603,7 @@ export async function installConsoleApiMock(
       fleetAlertStateFailureFixture,
       fleetAlertStatesFixture,
       fleetAlertsFixture,
+      fleetSnapshotAfterDeleteDelayMsFixture,
       policyAlertsFixture,
       policyDryRunFixture,
       portForwardRulesFixture,
@@ -3750,6 +3754,31 @@ export async function installConsoleApiMock(
         }));
       const deletedAgentIds = new Set<string>();
       const deletedTunnelPlanIds = new Set<string>();
+      const uptimeSourceWindow = window as typeof window & {
+        __vpsmanTestTelemetryUptimesSource: {
+          data: Array<{
+            client_id: string;
+            observed_at: string;
+            uptime_secs: number;
+          }> | null;
+          error: string | null;
+        };
+      };
+      uptimeSourceWindow.__vpsmanTestTelemetryUptimesSource = {
+        data: [
+          {
+            client_id: "agent-sfo-01",
+            observed_at: "2026-06-05T20:35:00Z",
+            uptime_secs: 702_000,
+          },
+          {
+            client_id: "agent-fra-02",
+            observed_at: "2026-06-05T20:35:00Z",
+            uptime_secs: 10_920,
+          },
+        ],
+        error: null,
+      };
       let mutablePortForwardRules = portForwardRulesFixture.map((rule) => ({
         ...rule,
         mappings: rule.mappings.map((mapping) => ({
@@ -5145,6 +5174,17 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/fleet/snapshot" && method === "GET") {
+          if (
+            deletedAgentIds.size > 0 &&
+            fleetSnapshotAfterDeleteDelayMsFixture > 0
+          ) {
+            await new Promise((resolve) =>
+              window.setTimeout(
+                resolve,
+                fleetSnapshotAfterDeleteDelayMsFixture,
+              ),
+            );
+          }
           const mode = new URL(url, window.location.href).searchParams.get(
             "mode",
           );
@@ -5199,6 +5239,8 @@ export async function installConsoleApiMock(
             telemetry_network_rates: telemetryNetworkRates,
             telemetry_rollups: telemetryRollups,
             telemetry_tunnels: telemetryTunnels,
+            telemetry_uptimes:
+              uptimeSourceWindow.__vpsmanTestTelemetryUptimesSource,
           };
           if (mode === "full") {
             const [
@@ -5561,7 +5603,19 @@ export async function installConsoleApiMock(
                     updated_at: "2026-06-05T20:35:00Z",
                   }
                 : null,
-            system_information: null,
+            system_information:
+              client.id === "agent-sfo-01"
+                ? {
+                    architecture: null,
+                    cpu_model: null,
+                    kernel_release: null,
+                    os_name: null,
+                    reported_at: null,
+                    uptime_observed_at: "2026-06-05T20:35:00Z",
+                    uptime_secs: 702_000,
+                    virtualization: null,
+                  }
+                : null,
             traffic:
               trafficAccountingFixture.find(
                 (row) => row.client_id === client.id,
@@ -9650,6 +9704,8 @@ export async function installConsoleApiMock(
       fleetAlertNotificationChannelsFixture:
         options.fleetAlertNotificationChannelsOverride ??
         fleetAlertNotificationChannels,
+      fleetSnapshotAfterDeleteDelayMsFixture:
+        options.fleetSnapshotAfterDeleteDelayMs ?? 0,
       fleetAlertNotificationsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...fleetAlertNotifications[0],
@@ -9778,7 +9834,13 @@ export async function installConsoleApiMock(
         options.totpSetupOperatorIdOverride ?? null,
       totpSetupSwitchSessionFixture: options.totpSetupSwitchSession ?? false,
       topologyGraphFixture: topologyGraph,
-      trafficAccountingFixture: trafficAccounting,
+      trafficAccountingFixture: options.trafficAccountingOverride
+        ? trafficAccounting.map((record, index) =>
+            index === 0
+              ? { ...record, ...options.trafficAccountingOverride }
+              : record,
+          )
+        : trafficAccounting,
       tunnelPlansFixture: tunnelPlans,
       portSpeedRulesDelayMsFixture: options.portSpeedRulesDelayMs ?? 0,
       vpsRulesApplyDelayMsFixture: options.vpsRulesApplyDelayMs ?? 0,

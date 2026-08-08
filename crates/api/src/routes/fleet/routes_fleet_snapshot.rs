@@ -46,6 +46,7 @@ pub(crate) async fn fleet_snapshot(
         telemetry_rollups: live.telemetry_rollups,
         telemetry_network_rates: live.telemetry_network_rates,
         telemetry_tunnels: live.telemetry_tunnels,
+        telemetry_uptimes: live.telemetry_uptimes,
         fleet_alerts: None,
         fleet_alert_states: None,
         fleet_alert_policies: None,
@@ -87,11 +88,19 @@ struct LiveSources {
     telemetry_rollups: FleetSnapshotSource<Vec<crate::model::TelemetryRollupView>>,
     telemetry_network_rates: FleetSnapshotSource<Vec<crate::model::TelemetryNetworkRateView>>,
     telemetry_tunnels: FleetSnapshotSource<Vec<crate::model::TelemetryTunnelView>>,
+    telemetry_uptimes: FleetSnapshotSource<Vec<crate::model::TelemetryUptimeView>>,
 }
 
 async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
-    let (summary, agents, telemetry_rollups, telemetry_network_rates, telemetry_tunnels) = tokio::join!(
+    let (
+        summary,
+        agents,
+        telemetry_rollups,
+        telemetry_network_rates,
+        telemetry_tunnels,
+        telemetry_uptimes,
+    ) = tokio::join!(
         load_source("summary", fleet_read, state.repo.fleet_summary()),
         load_source("agents", fleet_read, state.repo.list_agents()),
         load_source(
@@ -118,6 +127,11 @@ async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {
                 .repo
                 .list_telemetry_tunnels(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
         ),
+        load_source(
+            "telemetry_uptimes",
+            fleet_read,
+            state.repo.list_latest_telemetry_uptimes(),
+        ),
     );
     LiveSources {
         summary,
@@ -125,6 +139,7 @@ async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {
         telemetry_rollups,
         telemetry_network_rates,
         telemetry_tunnels,
+        telemetry_uptimes,
     }
 }
 

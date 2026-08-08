@@ -696,6 +696,7 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           telemetry_network_rates: available(telemetryNetworkRates),
           telemetry_rollups: available(telemetryRollups),
           telemetry_tunnels: available([]),
+          telemetry_uptimes: available([]),
         });
       }
       if (pathname === "/api/v1/agents" && method === "GET") {

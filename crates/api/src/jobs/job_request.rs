@@ -12,7 +12,6 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
     NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
     NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
-    NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
 };
 
 use crate::{
@@ -435,11 +434,6 @@ fn validate_network_traffic_import_vnstat(
     if start_unix >= current_minute {
         return Err(ApiError::bad_request(
             "network_traffic_import_start_not_in_past",
-        ));
-    }
-    if current_minute.saturating_sub(start_unix) > NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS {
-        return Err(ApiError::bad_request(
-            "network_traffic_import_start_exceeds_lookback_limit",
         ));
     }
     Ok(())
@@ -1079,4 +1073,21 @@ fn validate_sha256_hex(value: &str, error_code: &'static str) -> Result<(), ApiE
 
 fn is_fixed_hex(value: &str, len: usize) -> bool {
     value.len() == len && value.as_bytes().iter().all(u8::is_ascii_hexdigit)
+}
+
+#[cfg(test)]
+mod network_traffic_import_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_an_import_start_older_than_thirty_five_days() {
+        assert!(validate_network_traffic_import_vnstat(&["eth0".to_string()], 60).is_ok());
+    }
+
+    #[test]
+    fn retains_alignment_and_past_time_validation() {
+        assert!(validate_network_traffic_import_vnstat(&["eth0".to_string()], 61).is_err());
+        let now_minute = crate::unix_now() / 60 * 60;
+        assert!(validate_network_traffic_import_vnstat(&["eth0".to_string()], now_minute).is_err());
+    }
 }

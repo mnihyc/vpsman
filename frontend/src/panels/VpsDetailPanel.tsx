@@ -41,9 +41,13 @@ import type {
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
+  TelemetryUptimeRecord,
   VpsRuleValueRecord,
 } from "../types";
-import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
+import {
+  formatByteRateFromBitsPerSecond,
+  formatUptime,
+} from "../telemetryMetrics";
 import {
   networkRateSelectionLabel,
   selectedNetworkRates,
@@ -120,6 +124,7 @@ type VpsDetailPanelProps = {
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
+  telemetryUptimes: TelemetryUptimeRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
 };
 
@@ -176,6 +181,7 @@ export function VpsDetailPanel({
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
+  telemetryUptimes,
   vpsRuleValues,
 }: VpsDetailPanelProps) {
   const [activeTab, setActiveTab] = useHistoryEntryState<VpsDetailTab>(
@@ -226,6 +232,7 @@ export function VpsDetailPanel({
             telemetryNetworkRates,
             telemetryRollups,
             telemetryTunnels,
+            telemetryUptimes,
             vpsRuleValues,
           })
         : null,
@@ -247,6 +254,7 @@ export function VpsDetailPanel({
       telemetryNetworkRates,
       telemetryRollups,
       telemetryTunnels,
+      telemetryUptimes,
       vpsRuleValues,
     ],
   );
@@ -626,6 +634,20 @@ function SummaryTab({
         <VpsFact label="CPU load" value={related.rollup ? related.rollup.cpu_load_1_avg.toFixed(2) : "No resource rollup"} />
         <VpsFact label="Memory used" value={related.rollup && related.rollup.memory_total_bytes_max > 0 ? `${Math.round(related.rollup.memory_used_ratio_avg * 100)}% (${formatBytes(related.rollup.memory_total_bytes_max)})` : "No resource rollup"} />
         <VpsFact label="Disk used" value={related.rollup && related.rollup.disk_total_bytes_max > 0 ? `${Math.round(related.rollup.disk_used_ratio_avg * 100)}% (${formatBytes(related.rollup.disk_total_bytes_max)})` : "No resource rollup"} />
+        <VpsFact
+          label="Uptime"
+          value={
+            related.uptime ? (
+              <span
+                title={`Observed ${formatFullTime(related.uptime.observed_at)}`}
+              >
+                {formatUptime(related.uptime.uptime_secs)}
+              </span>
+            ) : (
+              <span title="Agent-reported uptime is unavailable; - is shown">-</span>
+            )
+          }
+        />
         <VpsFact
           label="Resource sample"
           value={
@@ -1080,7 +1102,7 @@ function NetworkTab({
             <span className="vpsDetailRecord static" key={observation.id}>
               <strong>{networkObservationLabel(observation.kind)} · {observation.healthy === false ? "Degraded" : "Observed"}</strong>
               <span>
-                {observation.interface_name ?? "interface n/a"} ·{" "}
+                {observation.interface_name ?? "interface -"} ·{" "}
                 <DetailTime value={observation.observed_at} />
               </span>
             </span>
@@ -1379,6 +1401,7 @@ function buildVpsDetailContext({
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
+  telemetryUptimes,
   vpsRuleValues,
 }: {
   agent: AgentView;
@@ -1397,6 +1420,7 @@ function buildVpsDetailContext({
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
+  telemetryUptimes: TelemetryUptimeRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
 }) {
   const clientId = agent.id;
@@ -1446,6 +1470,8 @@ function buildVpsDetailContext({
   const tunnels = telemetryTunnels
     .filter((tunnel) => tunnel.client_id === clientId || tunnel.peer_client_id === clientId)
     .sort(newestFirst((tunnel) => tunnel.observed_at));
+  const uptime =
+    telemetryUptimes.find((record) => record.client_id === clientId) ?? null;
   const relatedConfigurationSources = configurationSources.filter(
     (source) => source.client_id === clientId,
   );
@@ -1489,7 +1515,7 @@ function buildVpsDetailContext({
       when: transfer.observed_at,
     })),
     ...relatedNetworkObservations.map((observation) => ({
-      detail: `${networkObservationLabel(observation.kind)} · ${observation.interface_name ?? "interface n/a"} · ${formatCompactTime(observation.observed_at)}`,
+      detail: `${networkObservationLabel(observation.kind)} · ${observation.interface_name ?? "interface -"} · ${formatCompactTime(observation.observed_at)}`,
       id: observation.id,
       jobId: observation.job_id ?? undefined,
       kind: "network" as const,
@@ -1530,6 +1556,7 @@ function buildVpsDetailContext({
     runtimeApplyState,
     configurationSources: relatedConfigurationSources,
     tunnels,
+    uptime,
     vpsRules,
   };
 }
@@ -2007,13 +2034,13 @@ function readableDetailToken(value: string | null | undefined): string {
 
 function percent(used: number, total: number) {
   if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
-    return "n/a";
+    return "-";
   }
   return `${Math.max(0, Math.min(100, Math.round((used / total) * 100)))}%`;
 }
 
 function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value < 0) return "n/a";
+  if (!Number.isFinite(value) || value < 0) return "-";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let next = value;
   let unitIndex = 0;

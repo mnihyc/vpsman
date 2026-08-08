@@ -3475,7 +3475,7 @@ function AuthEventDetailGrid({ event }: { event: OperatorAuthEventRecord }) {
       </span>
       <span>
         <strong>Operator ID</strong>
-        <span className="monoValue">{event.operator_id ?? "n/a"}</span>
+        <span className="monoValue">{event.operator_id ?? "-"}</span>
       </span>
       <span>
         <strong>Result</strong>

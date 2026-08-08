@@ -240,6 +240,7 @@ export function displayNameOrUnnamed(
 
 export function formatBillingRenewal(
   value: string | null | undefined,
+  periodCode?: string | null,
 ): string | null {
   const cycle = value?.trim();
   if (!cycle) return null;
@@ -247,6 +248,9 @@ export function formatBillingRenewal(
   if (day) return `Renews day ${Number(day[1])}`;
   const anchored = /^(\d{1,2})-(\d{1,2})$/.exec(cycle);
   if (anchored) {
+    if (periodCode === "y" || periodCode === "year") {
+      return `Renews ${anchored[2].padStart(2, "0")}-${anchored[1].padStart(2, "0")}`;
+    }
     const month = [
       "Jan",
       "Feb",
@@ -264,6 +268,119 @@ export function formatBillingRenewal(
     if (month) return `Renews ${Number(anchored[1])} ${month}`;
   }
   return `Renewal anchor ${cycle}`;
+}
+
+export type TrafficQuotaState = "finite" | "unlimited" | "unset";
+
+export type TrafficLimitingQuota = {
+  direction: "RX" | "TX" | "Total";
+  percent: number;
+  quota: number;
+  used: number;
+};
+
+export type TrafficUnlimitedQuota = {
+  direction: "RX" | "TX" | "Total";
+  used: number;
+};
+
+export function trafficLimitingQuota(traffic: {
+  quota_rx_bytes?: number | null;
+  quota_total_bytes?: number | null;
+  quota_tx_bytes?: number | null;
+  rx_bytes?: number | null;
+  total_bytes?: number | null;
+  tx_bytes?: number | null;
+}): TrafficLimitingQuota | null {
+  const candidates = [
+    {
+      direction: "Total" as const,
+      quota: traffic.quota_total_bytes,
+      used: traffic.total_bytes,
+    },
+    {
+      direction: "RX" as const,
+      quota: traffic.quota_rx_bytes,
+      used: traffic.rx_bytes,
+    },
+    {
+      direction: "TX" as const,
+      quota: traffic.quota_tx_bytes,
+      used: traffic.tx_bytes,
+    },
+  ].flatMap(({ direction, quota, used }) =>
+    typeof quota === "number" &&
+    Number.isFinite(quota) &&
+    quota > 0 &&
+    typeof used === "number" &&
+    Number.isFinite(used) &&
+    used >= 0
+      ? [{ direction, percent: (used / quota) * 100, quota, used }]
+      : [],
+  );
+  return (
+    candidates.reduce<TrafficLimitingQuota | null>(
+      (limiting, candidate) =>
+        limiting === null || candidate.percent > limiting.percent
+          ? candidate
+          : limiting,
+      null,
+    ) ?? null
+  );
+}
+
+export function trafficQuotaState(traffic: {
+  quota_rx_bytes?: number | null;
+  quota_total_bytes?: number | null;
+  quota_tx_bytes?: number | null;
+}): TrafficQuotaState {
+  const quotas = [
+    traffic.quota_rx_bytes,
+    traffic.quota_tx_bytes,
+    traffic.quota_total_bytes,
+  ];
+  if (quotas.some((quota) => typeof quota === "number" && quota > 0)) {
+    return "finite";
+  }
+  return quotas.some((quota) => quota === -1) ? "unlimited" : "unset";
+}
+
+export function trafficUnlimitedQuota(traffic: {
+  quota_rx_bytes?: number | null;
+  quota_total_bytes?: number | null;
+  quota_tx_bytes?: number | null;
+  rx_bytes?: number | null;
+  total_bytes?: number | null;
+  tx_bytes?: number | null;
+}): TrafficUnlimitedQuota | null {
+  const candidates = [
+    {
+      direction: "Total" as const,
+      quota: traffic.quota_total_bytes,
+      used: traffic.total_bytes,
+    },
+    {
+      direction: "RX" as const,
+      quota: traffic.quota_rx_bytes,
+      used: traffic.rx_bytes,
+    },
+    {
+      direction: "TX" as const,
+      quota: traffic.quota_tx_bytes,
+      used: traffic.tx_bytes,
+    },
+  ];
+  for (const candidate of candidates) {
+    if (
+      candidate.quota === -1 &&
+      typeof candidate.used === "number" &&
+      Number.isFinite(candidate.used) &&
+      candidate.used >= 0
+    ) {
+      return { direction: candidate.direction, used: candidate.used };
+    }
+  }
+  return null;
 }
 
 export function formatVirtualizationLabel(value: string): string {

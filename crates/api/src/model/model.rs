@@ -222,6 +222,13 @@ pub(crate) struct TelemetrySampleView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct TelemetryUptimeView {
+    pub(crate) client_id: String,
+    pub(crate) uptime_secs: u64,
+    pub(crate) observed_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct TelemetryNetworkRateView {
     pub(crate) client_id: String,
     pub(crate) interface: String,

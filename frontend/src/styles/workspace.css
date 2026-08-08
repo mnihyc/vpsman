@@ -2399,26 +2399,25 @@
 }
 
 .vpsMonitorAuxFacts {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) repeat(2, minmax(0, 0.75fr));
+  display: flex;
   min-width: 0;
   border-top: 1px solid var(--border-subtle);
 }
 
-.vpsMonitorAuxFacts.publicMonitoringAuxFacts {
-  display: flex;
-}
-
-.publicMonitoringAuxFacts > span {
+.vpsMonitorAuxFacts > span {
   flex: 1 1 68px;
 }
 
-.publicMonitoringAuxFacts > span[data-fact-kind="billing"] {
-  flex: 2 1 128px;
+.vpsMonitorAuxFacts > span[data-fact-kind="billing"] {
+  flex: 2.5 1 142px;
 }
 
-.publicMonitoringAuxFacts > span[data-fact-kind="connection"] {
-  flex: 0.6 1 44px;
+.vpsMonitorAuxFacts > span[data-fact-kind="connection"] {
+  flex: 0.45 1 38px;
+}
+
+.vpsMonitorAuxFacts > span[data-fact-kind="uptime"] {
+  flex: 0.7 1 56px;
 }
 
 .vpsMonitorAuxFacts > span {
@@ -2440,6 +2439,26 @@
   font-size: 9px;
   font-style: normal;
   font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vpsMonitorAuxFactHeading {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+}
+
+.vpsMonitorAuxFactHeading b {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.vpsMonitorAuxFactHeading span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2503,12 +2522,16 @@
 }
 
 span.vpsMonitorSparkline.empty {
-  height: auto;
+  height: 18px;
   overflow: hidden;
-  color: var(--muted);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.vpsMonitorFlowFact > span.vpsMonitorSparkline.empty {
+  height: 9px;
+}
+
+.publicMonitoringPing > span.vpsMonitorSparkline.empty {
+  height: 12px;
 }
 
 .vpsMonitorTraffic,
@@ -2587,6 +2610,23 @@ span.vpsMonitorSparkline.empty {
 
 .vpsMonitorTrafficTrack.missing > span {
   width: 0 !important;
+}
+
+.unlimitedTrafficTrack {
+  border: 1px solid var(--primary-border);
+  background: var(--primary-soft);
+  box-shadow: inset 0 1px 2px var(--primary-border);
+  box-sizing: border-box;
+}
+
+.unlimitedTrafficTrack > span,
+.unlimitedTrafficTrack > i {
+  width: 100% !important;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--primary-selected) 0 11px,
+    transparent 11px 15px
+  ) !important;
 }
 
 .vpsMonitorTraffic.exceeded {
@@ -2695,6 +2735,7 @@ span.vpsMonitorSparkline.empty {
 .vpsMonitorCard.compact .vpsMonitorPing.down,
 .vpsMonitorCard.compact .vpsMonitorPing.error,
 .publicMonitoringCard.compact .publicMonitoringTraffic.warning,
+.publicMonitoringCard.compact .publicMonitoringTraffic.unconfigured,
 .publicMonitoringCard.compact .publicMonitoringTraffic.overQuota,
 .publicMonitoringCard.compact .publicMonitoringPing.warning,
 .publicMonitoringCard.compact .publicMonitoringPing.failed,
@@ -3142,6 +3183,10 @@ span.vpsMonitorSparkline.empty {
   display: none;
 }
 
+.publicMonitoringCard.comfortable .publicMonitoringTraffic > small {
+  display: block;
+}
+
 .publicMonitoringTraffic.warning > small,
 .publicMonitoringTraffic.overQuota > small {
   display: block;
@@ -3155,6 +3200,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringTraffic.warning:not(.overQuota),
+.publicMonitoringTraffic.unconfigured,
 .publicMonitoringPing.warning:not(.failed):not(.down):not(.error) {
   border: 1px solid var(--warning-border);
   border-radius: 8px;
@@ -3337,6 +3383,26 @@ span.vpsMonitorSparkline.empty {
   font-weight: 700;
 }
 
+.publicMonitoringKpiLabel {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+}
+
+.publicMonitoringKpiLabel b {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.publicMonitoringKpiLabel span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .publicMonitoringKpiStrip strong {
   color: var(--text);
   font-size: 12px;
@@ -3405,6 +3471,15 @@ span.vpsMonitorSparkline.empty {
 .publicMonitoringSectionSelector {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0;
+}
+
+.publicMonitoringHistoryControls {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 24px;
+  border-top: 2px solid var(--border);
+  padding-top: 20px;
 }
 
 .publicMonitoringDetailHeader button,

@@ -148,49 +148,10 @@ export function buildOperation(
     throw new Error("Resumable download is orchestrated by the browser transfer workflow");
   }
   if (mode === "network_traffic_import_vnstat") {
-    const interfaces = Array.from(
-      new Set(
-        networkTrafficImportInterfacesText
-          .split(/[\n,]+/)
-          .map((interfaceName) => interfaceName.trim())
-          .filter(Boolean),
-      ),
+    return buildNetworkTrafficImportOperation(
+      networkTrafficImportInterfacesText,
+      networkTrafficImportStartDate,
     );
-    if (interfaces.length === 0) {
-      throw new Error("vnStat import needs at least one host interface");
-    }
-    if (interfaces.length > 16) {
-      throw new Error("vnStat import supports at most 16 host interfaces");
-    }
-    if (interfaces.some((interfaceName) => !/^[A-Za-z0-9_.:-]{1,64}$/.test(interfaceName))) {
-      throw new Error(
-        "Interface names may contain only letters, digits, '_', '-', '.', or ':'",
-      );
-    }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(networkTrafficImportStartDate)) {
-      throw new Error("vnStat import start date is required");
-    }
-    const startUnix = Date.parse(`${networkTrafficImportStartDate}T00:00:00Z`) / 1000;
-    if (
-      !Number.isSafeInteger(startUnix) ||
-      startUnix < 60 ||
-      new Date(startUnix * 1000).toISOString().slice(0, 10) !==
-        networkTrafficImportStartDate
-    ) {
-      throw new Error("vnStat import start date is invalid");
-    }
-    const currentMinuteUnix = Math.floor(Date.now() / 60_000) * 60;
-    if (startUnix >= currentMinuteUnix) {
-      throw new Error("vnStat import start must be before the current UTC minute");
-    }
-    if (currentMinuteUnix - startUnix > 35 * 24 * 60 * 60) {
-      throw new Error("vnStat import start exceeds the 35-day lookback limit");
-    }
-    return {
-      type: "network_traffic_import_vnstat",
-      interfaces,
-      start_unix: startUnix,
-    };
   }
   if (mode === "user_sessions") {
     return { type: "user_sessions" };
@@ -272,6 +233,51 @@ export function buildOperation(
     throw new Error("Command argv is empty");
   }
   return { type: "shell", argv, pty: shellPty };
+}
+
+export function buildNetworkTrafficImportOperation(
+  interfacesText: string,
+  startDate: string,
+  currentMinuteUnix = Math.floor(Date.now() / 60_000) * 60,
+): Extract<JobOperation, { type: "network_traffic_import_vnstat" }> {
+  const interfaces = Array.from(
+    new Set(
+      interfacesText
+        .split(/[\n,]+/)
+        .map((interfaceName) => interfaceName.trim())
+        .filter(Boolean),
+    ),
+  );
+  if (interfaces.length === 0) {
+    throw new Error("vnStat import needs at least one host interface");
+  }
+  if (interfaces.length > 16) {
+    throw new Error("vnStat import supports at most 16 host interfaces");
+  }
+  if (interfaces.some((interfaceName) => !/^[A-Za-z0-9_.:-]{1,64}$/.test(interfaceName))) {
+    throw new Error(
+      "Interface names may contain only letters, digits, '_', '-', '.', or ':'",
+    );
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    throw new Error("vnStat import start date is required");
+  }
+  const startUnix = Date.parse(`${startDate}T00:00:00Z`) / 1000;
+  if (
+    !Number.isSafeInteger(startUnix) ||
+    startUnix < 60 ||
+    new Date(startUnix * 1000).toISOString().slice(0, 10) !== startDate
+  ) {
+    throw new Error("vnStat import start date is invalid");
+  }
+  if (startUnix >= currentMinuteUnix) {
+    throw new Error("vnStat import start must be before the current UTC minute");
+  }
+  return {
+    type: "network_traffic_import_vnstat",
+    interfaces,
+    start_unix: startUnix,
+  };
 }
 
 export function parseBackupPaths(value: string): string[] {

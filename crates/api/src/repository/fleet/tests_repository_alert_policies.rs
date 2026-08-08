@@ -11,12 +11,12 @@ use super::{
     parse_stored_network_rate_selector_spec, parse_traffic_selector, parse_traffic_selector_list,
     parse_vps_rule_value, policy_identifier_value, policy_state_is_alert_eligible,
     policy_webhook_repair_is_recent, resolve_network_rate_interface_selection,
-    traffic_accounting_for_client, validate_billing_rule_group, NetworkRateSelectorReference,
-    NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
-    TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
-    TrafficStreamRequest, VpsRuleValueRecord, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
-    VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    traffic_accounting_for_client, traffic_cycle_starts_for_clients, validate_billing_rule_group,
+    NetworkRateSelectorReference, NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord,
+    PolicyRuleStateRecord, TrafficCounterSampleRecord, TrafficCounterStreamUsage,
+    TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
+    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
 
 #[test]
@@ -59,7 +59,8 @@ fn billing_price_and_cycle_are_canonical_and_period_aware() {
 fn explicit_disabled_billing_and_unlimited_quota_are_not_unset() {
     let disabled = parse_billing_price("-1").unwrap();
     assert_eq!(disabled.raw, "-1");
-    assert_eq!(disabled.display, "n/a");
+    assert_eq!(disabled.display, "-");
+    assert_eq!(disabled.json["display"], "-");
     assert!(disabled.json["disabled"].as_bool().unwrap());
     assert!(validate_billing_rule_group(Some("-1"), None).is_ok());
     assert!(validate_billing_rule_group(Some("-1"), Some("7")).is_err());
@@ -68,6 +69,22 @@ fn explicit_disabled_billing_and_unlimited_quota_are_not_unset() {
     assert_eq!(unlimited.raw, "-1");
     assert_eq!(unlimited.json["bytes"], -1);
     assert_eq!(unlimited.display, "Unlimited");
+}
+
+#[test]
+fn traffic_reset_day_accepts_explicit_no_reset_without_weakening_monthly_validation() {
+    let no_reset = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "-1").unwrap();
+    assert_eq!(no_reset.raw, "-1");
+    assert_eq!(no_reset.json, json!({"day": -1}));
+    assert_eq!(no_reset.display, "No reset");
+
+    let monthly = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "31").unwrap();
+    assert_eq!(monthly.json, json!({"day": 31}));
+    assert_eq!(monthly.display, "31 UTC");
+
+    for invalid in ["-2", "0", "32"] {
+        assert!(parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, invalid).is_err());
+    }
 }
 
 #[test]
@@ -241,6 +258,136 @@ fn traffic_stream_aggregation_preserves_usage_across_resets_and_epochs() {
     assert_eq!(aggregated[0].last_sample_unix, 150);
     assert_eq!(aggregated[0].rx_counter_epochs_seen, 2);
     assert_eq!(aggregated[0].tx_counter_epochs_seen, 2);
+}
+
+#[test]
+fn no_reset_traffic_uses_epoch_lower_bound_and_preserves_counter_reset_gaps() {
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let rules = vec![parsed_rule_for(
+        "edge-a",
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        "-1",
+    )];
+    assert_eq!(
+        traffic_cycle_starts_for_clients(["edge-a"], &rules, now),
+        vec![("edge-a".to_string(), 0)]
+    );
+
+    let mut samples = vec![
+        sample(60, 100, 200, 0, 0),
+        sample(31_536_000, 160, 260, 0, 0),
+        sample(31_536_060, 10, 300, 1, 0),
+        sample(63_072_000, 40, 340, 1, 0),
+        sample(63_072_060, 50, 5, 1, 1),
+        sample(94_608_000, 70, 25, 1, 1),
+        sample(94_608_060, 5, 30, 2, 1),
+        sample(126_144_000, 15, 50, 2, 1),
+    ];
+    samples[0].sample_source = "vnstat_import:test".to_string();
+    samples[1].sample_source = "vnstat_import:test".to_string();
+    samples[2].sample_source = "interface_counters".to_string();
+    samples.reverse();
+
+    let usage = aggregate_memory_traffic_counter_usage(
+        &samples,
+        &[TrafficStreamRequest {
+            client_id: "edge-a".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            cycle_start_unix: NO_RESET_TRAFFIC_START_UNIX,
+        }],
+        126_144_000,
+    );
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].cycle_rx, 130);
+    assert_eq!(usage[0].cycle_tx, 185);
+    assert_eq!(usage[0].latest_rx, 15);
+    assert_eq!(usage[0].latest_tx, 50);
+    assert_eq!(usage[0].last_sample_unix, 126_144_000);
+    assert_eq!(usage[0].rx_counter_epochs_seen, 2);
+    assert_eq!(usage[0].tx_counter_epochs_seen, 2);
+}
+
+#[test]
+fn no_reset_accounting_has_no_cycle_boundaries_while_monthly_and_missing_semantics_remain() {
+    let now = Utc.with_ymd_and_hms(2026, 8, 9, 12, 0, 0).single().unwrap();
+    let current_usage = usage("eth0", now.timestamp());
+    let mut no_reset_rules = traffic_rules("eth0");
+    no_reset_rules.retain(|rule| rule.key != VPS_RULE_KEY_TRAFFIC_RESET_DAY);
+    no_reset_rules.push(parsed_rule_for(
+        "edge-a",
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        "-1",
+    ));
+    let no_reset = traffic_accounting_for_client(
+        "edge-a",
+        &no_reset_rules,
+        std::slice::from_ref(&current_usage),
+        now,
+    );
+    assert_eq!(no_reset.reset_day, Some(-1));
+    assert_eq!(no_reset.cycle_start, None);
+    assert_eq!(no_reset.cycle_end, None);
+
+    let monthly =
+        traffic_accounting_for_client("edge-a", &traffic_rules("eth0"), &[current_usage], now);
+    assert_eq!(monthly.reset_day, Some(1));
+    assert_eq!(
+        monthly.cycle_start.as_deref(),
+        Some("2026-08-01T00:00:00+00:00")
+    );
+    assert_eq!(
+        monthly.cycle_end.as_deref(),
+        Some("2026-09-01T00:00:00+00:00")
+    );
+
+    let mut missing_rules = traffic_rules("eth0");
+    missing_rules.retain(|rule| rule.key != VPS_RULE_KEY_TRAFFIC_RESET_DAY);
+    let missing = traffic_accounting_for_client(
+        "edge-a",
+        &missing_rules,
+        &[usage("eth0", now.timestamp())],
+        now,
+    );
+    assert_eq!(missing.reset_day, None);
+    assert_eq!(
+        missing.cycle_start.as_deref(),
+        Some("2026-08-01T00:00:00+00:00")
+    );
+    assert_eq!(
+        missing.cycle_end.as_deref(),
+        Some("2026-09-01T00:00:00+00:00")
+    );
+    assert!(missing
+        .incomplete_reasons
+        .iter()
+        .any(|reason| reason == "traffic.reset_day missing"));
+
+    let february = Utc
+        .with_ymd_and_hms(2026, 2, 15, 12, 0, 0)
+        .single()
+        .unwrap();
+    let mut day_31_rules = traffic_rules("eth0");
+    day_31_rules.retain(|rule| rule.key != VPS_RULE_KEY_TRAFFIC_RESET_DAY);
+    day_31_rules.push(parsed_rule_for(
+        "edge-a",
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        "31",
+    ));
+    let day_31 = traffic_accounting_for_client(
+        "edge-a",
+        &day_31_rules,
+        &[usage("eth0", february.timestamp())],
+        february,
+    );
+    assert_eq!(
+        day_31.cycle_start.as_deref(),
+        Some("2026-01-31T00:00:00+00:00")
+    );
+    assert_eq!(
+        day_31.cycle_end.as_deref(),
+        Some("2026-02-28T00:00:00+00:00")
+    );
 }
 
 #[test]

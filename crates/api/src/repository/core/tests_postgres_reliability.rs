@@ -1,4 +1,9 @@
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::Duration,
+};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use chrono::{Datelike, Utc};
@@ -47,8 +52,10 @@ use crate::{
     model_terminal::TerminalSessionView,
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
+    repository_alert_policies::NO_RESET_TRAFFIC_COUNTER_USAGE_SQL,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
+    repository_network_traffic_import::load_postgres_import_boundary_samples,
     repository_terminal_sessions::upsert_postgres_terminal_session,
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
@@ -4974,11 +4981,13 @@ async fn postgres_traffic_accounting_ignores_more_than_200k_unrelated_old_rows()
     .await
     .unwrap();
     let cycle_start = chrono::DateTime::parse_from_rfc3339(
-        &db.repo
+        db.repo
             .get_traffic_accounting(target_client_id)
             .await
             .unwrap()
-            .cycle_start,
+            .cycle_start
+            .as_deref()
+            .expect("monthly traffic has a cycle start"),
     )
     .unwrap()
     .timestamp();
@@ -5122,6 +5131,347 @@ async fn postgres_traffic_accounting_ignores_more_than_200k_unrelated_old_rows()
     db.cleanup().await;
 }
 
+#[tokio::test]
+async fn postgres_no_reset_traffic_uses_bounded_epoch_seeks_for_multi_year_history() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-no-reset-multi-year";
+    let sample_count = 300_000_i64;
+    let spacing_secs = 360_i64;
+    let end_unix = Utc::now().timestamp().div_euclid(60) * 60 - 60;
+    let start_unix = end_unix - (sample_count - 1) * spacing_secs;
+    assert!(end_unix - start_unix > 3 * 365 * 86_400);
+    insert_client(&db.pool, client_id, None).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES
+            ($1, 'traffic.reset_day', '-1', '{"day":-1}'::jsonb),
+            (
+                $1,
+                'traffic.selectors',
+                'eth0',
+                '{"selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb
+            ),
+            (
+                $1,
+                'traffic.quota.total',
+                '1TB',
+                '{"bytes":1000000000000,"display":"1 TB"}'::jsonb
+            )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id,
+            source_kind,
+            interface,
+            observed_at,
+            rx_bytes,
+            tx_bytes,
+            rx_counter_epoch,
+            tx_counter_epoch,
+            sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'eth0',
+            to_timestamp(($2::bigint + generated.sample::bigint * $3::bigint)::double precision),
+            CASE
+                WHEN generated.sample < 100000 THEN 1000 + generated.sample
+                WHEN generated.sample < 250000 THEN 10 + generated.sample - 100000
+                ELSE 5 + generated.sample - 250000
+            END,
+            CASE
+                WHEN generated.sample < 200000 THEN 2000 + generated.sample * 2
+                ELSE 7 + (generated.sample - 200000) * 3
+            END,
+            CASE
+                WHEN generated.sample < 100000 THEN 0
+                WHEN generated.sample < 250000 THEN 1
+                ELSE 2
+            END,
+            CASE WHEN generated.sample < 200000 THEN 0 ELSE 1 END,
+            CASE
+                WHEN generated.sample < 100000 THEN 'vnstat_import:test'
+                ELSE 'interface_counters'
+            END
+        FROM generate_series(0, $4::bigint - 1) AS generated(sample)
+        "#,
+    )
+    .bind(client_id)
+    .bind(start_unix)
+    .bind(spacing_secs)
+    .bind(sample_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("ANALYZE traffic_counter_samples")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let accounting = db.repo.get_traffic_accounting(client_id).await.unwrap();
+    assert_eq!(accounting.cycle_start, None);
+    assert_eq!(accounting.cycle_end, None);
+    assert_eq!(accounting.rx_bytes, 299_997);
+    assert_eq!(accounting.tx_bytes, 699_995);
+    assert_eq!(accounting.total_bytes, 999_992);
+    assert_eq!(accounting.latest_rx_bytes, 50_004);
+    assert_eq!(accounting.latest_tx_bytes, 300_004);
+    assert_eq!(accounting.counter_epochs_seen, 2);
+
+    let explain_sql =
+        format!("EXPLAIN (ANALYZE, FORMAT JSON) {NO_RESET_TRAFFIC_COUNTER_USAGE_SQL}");
+    let plan: serde_json::Value = sqlx::query_scalar(&explain_sql)
+        .bind(vec![client_id.to_string()])
+        .bind(vec!["host".to_string()])
+        .bind(vec!["eth0".to_string()])
+        .bind(end_unix)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let plan_text = plan.to_string();
+    assert!(!plan_text.contains("WindowAgg"), "{plan_text}");
+    assert!(
+        plan_text.contains("traffic_counter_samples_rx_epoch_lookup_idx"),
+        "{plan_text}"
+    );
+    assert!(
+        plan_text.contains("traffic_counter_samples_tx_epoch_lookup_idx"),
+        "{plan_text}"
+    );
+
+    fn assert_sample_access_is_bounded(node: &serde_json::Value, accesses: &mut usize) {
+        match node {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_sample_access_is_bounded(value, accesses);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                if fields
+                    .get("Relation Name")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("traffic_counter_samples")
+                {
+                    *accesses += 1;
+                    let node_type = fields
+                        .get("Node Type")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    assert!(node_type.contains("Index"), "{node}");
+                    assert!(
+                        fields
+                            .get("Actual Rows")
+                            .and_then(serde_json::Value::as_f64)
+                            .is_some_and(|rows| rows <= 1.0),
+                        "{node}"
+                    );
+                }
+                for value in fields.values() {
+                    assert_sample_access_is_bounded(value, accesses);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut sample_accesses = 0;
+    assert_sample_access_is_bounded(&plan, &mut sample_accesses);
+    assert!(sample_accesses >= 7, "{plan_text}");
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_vnstat_rerun_hydrates_only_non_import_boundary_rows() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-import-bounded-rerun";
+    let start_unix = 1_722_470_400_i64;
+    insert_client(&db.pool, client_id, None).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'eth0',
+            to_timestamp(($2::bigint - (generated.sample::bigint + 1) * 60)::double precision),
+            generated.sample::bigint,
+            generated.sample::bigint * 2,
+            0,
+            0,
+            'vnstat_import:11111111-1111-4111-8111-111111111111'
+        FROM generate_series(1, 50000) AS generated(sample)
+        "#,
+    )
+    .bind(client_id)
+    .bind(start_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        SELECT
+            $1,
+            'host',
+            'eth0',
+            to_timestamp(($2::bigint + generated.sample::bigint * 60)::double precision),
+            50000 + generated.sample::bigint,
+            100000 + generated.sample::bigint,
+            0,
+            0,
+            'vnstat_import:11111111-1111-4111-8111-111111111111'
+        FROM generate_series(0, 9) AS generated(sample)
+        "#,
+    )
+    .bind(client_id)
+    .bind(start_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        VALUES
+            ($1, 'host', 'eth0', to_timestamp(($2::bigint - 60)::double precision), 700, 900, 3, 4, 'interface_counters'),
+            ($1, 'host', 'eth0', to_timestamp(($2::bigint + 600)::double precision), 20, 30, 5, 6, 'interface_counters')
+        "#,
+    )
+    .bind(client_id)
+    .bind(start_unix)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let imported_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM traffic_counter_samples WHERE client_id = $1 AND sample_source LIKE 'vnstat_import:%'",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(imported_rows, 50_010);
+
+    let mut tx = db.pool.begin().await.unwrap();
+    let boundaries = load_postgres_import_boundary_samples(
+        &mut tx,
+        client_id,
+        &["eth0".to_string()],
+        start_unix as u64,
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+
+    assert_eq!(boundaries.len(), 2);
+    assert!(boundaries
+        .iter()
+        .all(|sample| sample.sample_source == "interface_counters"));
+    assert_eq!(boundaries[0].observed_unix, start_unix - 60);
+    assert_eq!(boundaries[0].rx_bytes, 700);
+    assert_eq!(boundaries[1].observed_unix, start_unix + 600);
+    assert_eq!(boundaries[1].tx_bytes, 30);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_v0_2_27_baseline_applies_epoch_indexes_append_only() {
+    let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!("skipping Postgres reliability test: VPSMAN_TEST_POSTGRES_URL is unset");
+            return;
+        }
+    };
+    let baseline_dir = copy_v0_2_27_migration_baseline().unwrap();
+    let db_result = PgReliabilityTestDb::new_with_migrations(&base_url, &baseline_dir).await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+    let db = db_result.expect("failed to create v0.2.27 migration test database");
+
+    let baseline_ledger: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version, encode(checksum, 'hex') FROM _sqlx_migrations WHERE success ORDER BY version",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        baseline_ledger
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        (1_i64..=8).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        baseline_ledger
+            .iter()
+            .find(|(version, _)| *version == 3)
+            .map(|(_, checksum)| checksum.as_str()),
+        Some(V0_2_27_MIGRATION_0003_SHA384)
+    );
+
+    let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir())
+        .await
+        .unwrap();
+    migrator.run(&db.pool).await.unwrap();
+
+    let upgraded_ledger: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT version, encode(checksum, 'hex') FROM _sqlx_migrations WHERE success ORDER BY version",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        upgraded_ledger
+            .iter()
+            .map(|(version, _)| *version)
+            .collect::<Vec<_>>(),
+        (1_i64..=9).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        upgraded_ledger
+            .iter()
+            .find(|(version, _)| *version == 3)
+            .map(|(_, checksum)| checksum.as_str()),
+        Some(V0_2_27_MIGRATION_0003_SHA384)
+    );
+    let indexes_exist: bool = sqlx::query_scalar(
+        r#"
+        SELECT
+            to_regclass('public.traffic_counter_samples_rx_epoch_lookup_idx') IS NOT NULL
+            AND to_regclass('public.traffic_counter_samples_tx_epoch_lookup_idx') IS NOT NULL
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(indexes_exist);
+
+    db.cleanup().await;
+}
+
 impl PgReliabilityTestDb {
     async fn maybe_new() -> Option<Self> {
         let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
@@ -5139,6 +5489,10 @@ impl PgReliabilityTestDb {
     }
 
     async fn new(base_url: &str) -> anyhow::Result<Self> {
+        Self::new_with_migrations(base_url, &workspace_migrations_dir()).await
+    }
+
+    async fn new_with_migrations(base_url: &str, migrations_dir: &Path) -> anyhow::Result<Self> {
         let base_options = PgConnectOptions::from_str(base_url)?;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -5152,7 +5506,7 @@ impl PgReliabilityTestDb {
             .max_connections(4)
             .connect_with(base_options.database(&db_name))
             .await?;
-        let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
+        let migrator = sqlx::migrate::Migrator::new(migrations_dir).await?;
         migrator.run(&pool).await?;
         let repo = Repository::Postgres(pool.clone());
         Ok(Self {
@@ -5202,6 +5556,32 @@ fn workspace_migrations_dir() -> std::path::PathBuf {
         .join("..")
         .join("..")
         .join("migrations")
+}
+
+const V0_2_27_MIGRATION_0003_SHA384: &str =
+    "04f8f145e2a998d010be2e8d44024dd904577180439bd827dc095f4a16e9d144bb6879f5603dbde4ad37d31b7b71f179";
+
+fn copy_v0_2_27_migration_baseline() -> anyhow::Result<PathBuf> {
+    const FILES: [&str; 8] = [
+        "0001_identity_access.sql",
+        "0002_jobs_schedules_commands.sql",
+        "0003_telemetry_alerts_history.sql",
+        "0004_backups_restores.sql",
+        "0005_network_tunnels.sql",
+        "0006_agent_updates.sql",
+        "0007_configuration_presets_file_transfer.sql",
+        "0008_system_metrics.sql",
+    ];
+    let source_dir = workspace_migrations_dir();
+    let target_dir = std::env::temp_dir().join(format!(
+        "vpsman-v0-2-27-migrations-{}",
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir(&target_dir)?;
+    for file in FILES {
+        fs::copy(source_dir.join(file), target_dir.join(file))?;
+    }
+    Ok(target_dir)
 }
 
 fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {

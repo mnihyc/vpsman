@@ -20,7 +20,7 @@ import type {
   TrafficAccountingRecord,
   TrafficHistoryPointView,
 } from "../types";
-import { formatTime, timestampMillis } from "../utils";
+import { formatTime, timestampMillis, trafficQuotaState } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
 import {
   formatByteCount as formatBytes,
@@ -434,7 +434,9 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
           emptyLabel="Network rate history is unavailable for this range"
           exportFileName={`${safeFilePart(data.client.id)}-network-${data.range.window}`}
           title="Network RX / TX"
-          valueFormatter={formatByteRateFromBitsPerSecond}
+          valueFormatter={(value) =>
+            value === null ? "-" : formatByteRateFromBitsPerSecond(value)
+          }
         />
         <MonitoringChart
           className="wideWidget"
@@ -626,24 +628,36 @@ function TrafficCycle({
   const percent = finiteNumber(traffic.cycle_percent);
   const width = percent === null ? 0 : Math.min(100, Math.max(0, percent));
   const overQuota = percent !== null && percent > 100;
+  const quotaState = trafficQuotaState(traffic);
+  const noReset = traffic.reset_day === -1;
+  const trafficWindow = noReset
+    ? "Accumulated total · No reset"
+    : configured && traffic.cycle_start && traffic.cycle_end
+      ? `${formatTime(traffic.cycle_start)} – ${formatTime(traffic.cycle_end)}`
+      : "Authoritative traffic accounting";
 
   return (
-    <div className="dashboardWidgetChart wideWidget vpsMonitoringTrafficCycle">
+    <div
+      className="dashboardWidgetChart wideWidget vpsMonitoringTrafficCycle"
+      title={
+        noReset
+          ? "Traffic totals accumulate across retained accounting evidence and do not reset"
+          : "Traffic totals and quota progress for the current reset cycle"
+      }
+    >
       <div className="dashboardWidgetHeader">
-        <strong>Traffic volume / cycle</strong>
-        <small>
-          {configured
-            ? `${formatTime(traffic.cycle_start)} – ${formatTime(traffic.cycle_end)}`
-            : "Authoritative traffic accounting"}
-        </small>
+        <strong title={trafficWindow}>
+          {noReset ? "Traffic · No reset" : "Traffic volume / cycle"}
+        </strong>
+        <small title={trafficWindow}>{trafficWindow}</small>
       </div>
       {!configured ? (
         <div className="dashboardEmptyChart">Traffic unconfigured</div>
       ) : (
         <>
           <div className="vpsMonitoringTrafficSummary">
-            <span>
-              <small>Observed RX</small>
+            <span title="Received traffic reported by the selected interfaces; quota accounting may count a directional subset">
+              <small title="Reported received traffic">Observed RX</small>
               <strong>{formatBytes(traffic.diagnostic_rx_bytes)}</strong>
               <em>
                 {accountedQuotaDetail(
@@ -653,8 +667,8 @@ function TrafficCycle({
                 )}
               </em>
             </span>
-            <span>
-              <small>Observed TX</small>
+            <span title="Transmitted traffic reported by the selected interfaces; quota accounting may count a directional subset">
+              <small title="Reported transmitted traffic">Observed TX</small>
               <strong>{formatBytes(traffic.diagnostic_tx_bytes)}</strong>
               <em>
                 {accountedQuotaDetail(
@@ -664,8 +678,8 @@ function TrafficCycle({
                 )}
               </em>
             </span>
-            <span>
-              <small>Observed total</small>
+            <span title="Total received and transmitted traffic reported by the selected interfaces">
+              <small title="Reported total traffic">Observed total</small>
               <strong>{formatBytes(traffic.diagnostic_total_bytes)}</strong>
               <em>
                 {accountedQuotaDetail(
@@ -675,17 +689,27 @@ function TrafficCycle({
                 )}
               </em>
             </span>
-            <span>
-              <small>Cycle ends</small>
-              <strong>{formatTime(traffic.cycle_end)}</strong>
+            <span title={noReset ? "Traffic accumulation has no scheduled reset" : "Scheduled end of the current UTC traffic cycle"}>
+              <small title={noReset ? "Reset behavior" : "Current cycle end"}>
+                {noReset ? "Reset" : "Cycle ends"}
+              </small>
+              <strong>
+                {noReset
+                  ? "No reset"
+                  : traffic.cycle_end
+                    ? formatTime(traffic.cycle_end)
+                    : "-"}
+              </strong>
               <em>
-                {traffic.state === "ok"
+                {noReset
+                  ? "Accumulated total"
+                  : traffic.state === "ok"
                   ? "Current accounting evidence"
                   : humanizeMonitoringState(traffic.state)}
               </em>
             </span>
           </div>
-          {percent !== null ? (
+          {percent !== null && quotaState === "finite" ? (
             <div
               className={`vpsMonitoringTrafficProgress${overQuota ? " overLimit" : ""}`}
             >
@@ -697,6 +721,7 @@ function TrafficCycle({
                 aria-valuetext={formatPercent(percent)}
                 className="vpsMonitoringTrafficTrack"
                 role="progressbar"
+                title={`${formatPercent(percent)} of the limiting traffic quota has been used`}
               >
                 <i style={{ width: `${width}%` }} />
               </span>
@@ -704,6 +729,18 @@ function TrafficCycle({
               <small>
                 {overQuota ? "Quota exceeded" : "Limiting quota used"}
               </small>
+            </div>
+          ) : quotaState === "unlimited" ? (
+            <div className="vpsMonitoringTrafficProgress unlimited">
+              <span
+                aria-label="Traffic quota is unlimited"
+                className="vpsMonitoringTrafficTrack unlimitedTrafficTrack"
+                title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from empty progress"
+              >
+                <i />
+              </span>
+              <strong>Unlimited</strong>
+              <small>No traffic limit</small>
             </div>
           ) : (
             <p className="vpsMonitoringTrafficNote incomplete">
@@ -1174,25 +1211,25 @@ function humanizeMonitoringState(value: string): string {
 
 function formatPercent(value: number | null): string {
   return value === null || !Number.isFinite(value)
-    ? "No data"
+    ? "-"
     : `${value.toFixed(value >= 100 ? 0 : 1)}%`;
 }
 
 function formatLoad(value: number | null): string {
   return value === null || !Number.isFinite(value)
-    ? "No data"
+    ? "-"
     : value.toFixed(2);
 }
 
 function formatConnectionCount(value: number | null): string {
   return value === null || !Number.isFinite(value)
-    ? "No data"
+    ? "-"
     : Math.max(0, Math.round(value)).toLocaleString();
 }
 
 function formatMilliseconds(value: number | null): string {
   return value === null || !Number.isFinite(value)
-    ? "No data"
+    ? "-"
     : `${value.toFixed(value >= 100 ? 0 : 1)} ms`;
 }
 
@@ -1201,7 +1238,7 @@ function formatLoss(value: number | null): string {
 }
 
 function formatBytesNullable(value: number | null): string {
-  return value === null ? "No data" : formatBytes(value);
+  return value === null ? "-" : formatBytes(value);
 }
 
 function quotaDetail(used: number, quota: number | null): string {

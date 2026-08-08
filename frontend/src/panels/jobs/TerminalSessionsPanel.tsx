@@ -1701,10 +1701,10 @@ function formatWindow(session: TerminalSessionRecord): string {
 function formatLimits(session: TerminalSessionRecord): string {
   const idle = session.idle_timeout_secs
     ? `Idle timeout ${formatDuration(session.idle_timeout_secs)}`
-    : "Idle timeout n/a";
+    : "Idle timeout -";
   const flow = session.flow_window_bytes
     ? `${formatBytes(session.flow_window_bytes)} flow window`
-    : "Flow window n/a";
+    : "Flow window -";
   return `${idle}; ${flow}`;
 }
 
@@ -1734,7 +1734,7 @@ function formatOutputRetention(session: TerminalSessionRecord): string {
   const input = formatLastInput(session);
   const retained =
     session.output_retained_bytes === null
-      ? "retained n/a"
+      ? "retained -"
       : `${formatBytes(session.output_retained_bytes)} kept`;
   if (!session.output_dropped_bytes) {
     return `${input}; ${retained}`;

@@ -1638,6 +1638,7 @@ fn public_billing_plan(plan: BillingPlanView) -> PublicBillingPlanView {
     PublicBillingPlanView {
         disabled: plan.disabled,
         display: plan.display,
+        period_code: plan.period_code,
         cycle: plan.cycle,
     }
 }
@@ -1825,8 +1826,9 @@ pub(super) fn public_traffic_metric(
     let configured = !row.selectors.is_empty() && row.reset_day.is_some();
     PublicTrafficMetricView {
         configured,
-        cycle_start: configured.then_some(row.cycle_start),
-        cycle_end: configured.then_some(row.cycle_end),
+        reset_day: configured.then_some(row.reset_day).flatten(),
+        cycle_start: configured.then_some(row.cycle_start).flatten(),
+        cycle_end: configured.then_some(row.cycle_end).flatten(),
         rx_bytes: configured.then_some(row.rx_bytes),
         tx_bytes: configured.then_some(row.tx_bytes),
         total_bytes: configured.then_some(row.total_bytes),

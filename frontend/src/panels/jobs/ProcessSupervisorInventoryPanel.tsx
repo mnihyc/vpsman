@@ -1029,8 +1029,8 @@ function formatMemoryPrimary(row: ProcessSupervisorInventoryRecord): string {
 
 function formatProcessCardinality(row: ProcessSupervisorInventoryRecord): string {
   if (row.cgroup_process_count !== null || row.cgroup_pids_current !== null) {
-    const processes = row.cgroup_process_count !== null ? countPhrase(row.cgroup_process_count, "process", "processes") : "processes n/a";
-    const pids = row.cgroup_pids_current !== null ? `${row.cgroup_pids_current} ${row.cgroup_pids_current === 1 ? "PID" : "PIDs"}` : "PIDs n/a";
+    const processes = row.cgroup_process_count !== null ? countPhrase(row.cgroup_process_count, "process", "processes") : "processes -";
+    const pids = row.cgroup_pids_current !== null ? `${row.cgroup_pids_current} ${row.cgroup_pids_current === 1 ? "PID" : "PIDs"}` : "PIDs -";
     return `${processes}, ${pids}`;
   }
   return formatPid(row);
@@ -1038,9 +1038,9 @@ function formatProcessCardinality(row: ProcessSupervisorInventoryRecord): string
 
 function formatResourceSecondary(row: ProcessSupervisorInventoryRecord): string {
   const parts = [
-    row.cgroup_cpu_weight !== null ? `CPU weight ${row.cgroup_cpu_weight}` : "CPU weight n/a",
-    row.cgroup_memory_current_bytes !== null ? `${formatBytes(row.cgroup_memory_current_bytes)} memory` : "Memory n/a",
-    row.cgroup_status ? `cgroup ${row.cgroup_status.replace(/_/g, " ")}` : "cgroup n/a",
+    row.cgroup_cpu_weight !== null ? `CPU weight ${row.cgroup_cpu_weight}` : "CPU weight -",
+    row.cgroup_memory_current_bytes !== null ? `${formatBytes(row.cgroup_memory_current_bytes)} memory` : "Memory -",
+    row.cgroup_status ? `cgroup ${row.cgroup_status.replace(/_/g, " ")}` : "cgroup -",
   ];
   return parts.join("; ");
 }

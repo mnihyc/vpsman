@@ -50,12 +50,16 @@ import {
   formatCompactTime,
   formatFullTime,
   formatVirtualizationLabel,
+  trafficLimitingQuota,
+  trafficUnlimitedQuota,
+  trafficQuotaState,
   timestampMillis,
 } from "./utils";
 import { agentStatusPresentation } from "./agentDisplayState";
 import {
   formatByteCount as formatBytes,
   formatByteRateFromBitsPerSecond,
+  formatUptime,
 } from "./telemetryMetrics";
 
 type PublicMonitoringSharePageProps = {
@@ -759,10 +763,19 @@ export function PublicMonitoringSharePage({
               aria-label="Shared fleet current totals"
             >
               {fleetSnapshot.locations ? (
-                <span>
-                  <small>Locations</small>
-                  <strong>{fleetSnapshot.locations.values.length}</strong>
-                  <em>
+                <span title="Distinct locations disclosed by this Shared view">
+                  <small title="Distinct shared VPS locations">Locations</small>
+                  <strong
+                    title={`${fleetSnapshot.locations.values.length} distinct shared locations`}
+                  >
+                    {fleetSnapshot.locations.values.length}
+                  </strong>
+                  <em
+                    title={formatPublicLocationSummary(
+                      fleetSnapshot.locations.values,
+                      fleetSnapshot.locations.unspecified,
+                    )}
+                  >
                     {formatPublicLocationSummary(
                       fleetSnapshot.locations.values,
                       fleetSnapshot.locations.unspecified,
@@ -771,33 +784,49 @@ export function PublicMonitoringSharePage({
                 </span>
               ) : null}
               {fleetSnapshot.network ? (
-                <span>
-                  <small>Realtime speed</small>
-                  <strong>
+                <span title="Aggregate current receive and transmit rates from fresh shared interface evidence">
+                  <small title="Aggregate shared receive and transmit rates">
+                    Realtime speed
+                  </small>
+                  <strong
+                    title={`Receive rate ${formatOptionalRate(fleetSnapshot.network.rxBps)}`}
+                  >
                     ↓{" "}
-                    {formatByteRateFromBitsPerSecond(
-                      fleetSnapshot.network.rxBps,
-                    )}
+                    {formatOptionalRate(fleetSnapshot.network.rxBps)}
                   </strong>
-                  <em>
+                  <em
+                    title={`Transmit rate ${formatOptionalRate(fleetSnapshot.network.txBps)}; ${fleetSnapshot.network.freshCount} VPSs have fresh evidence`}
+                  >
                     ↑{" "}
-                    {formatByteRateFromBitsPerSecond(
-                      fleetSnapshot.network.txBps,
-                    )}{" "}
+                    {formatOptionalRate(fleetSnapshot.network.txBps)}{" "}
                     · {fleetSnapshot.network.freshCount} fresh
                     {cardsComplete ? "" : " · partial"}
                   </em>
                 </span>
               ) : null}
               {fleetSnapshot.traffic ? (
-                <span>
-                  <small>Current-cycle traffic</small>
-                  <strong>
+                <span title="Aggregate configured traffic accounting, including reset cycles and no-reset totals">
+                  <small title="Aggregate shared traffic accounting">
+                    Traffic
+                  </small>
+                  <strong
+                    title={
+                      fleetSnapshot.traffic.count > 0
+                        ? `${formatBytes(fleetSnapshot.traffic.bytes)} across ${fleetSnapshot.traffic.count} configured VPSs`
+                        : "No configured traffic accounting; - is shown"
+                    }
+                  >
                     {fleetSnapshot.traffic.count > 0
                       ? formatBytes(fleetSnapshot.traffic.bytes)
-                      : "n/a"}
+                      : "-"}
                   </strong>
-                  <em>
+                  <em
+                    title={
+                      fleetSnapshot.traffic.count > 0
+                        ? `${fleetSnapshot.traffic.count} VPSs have configured traffic accounting`
+                        : "No VPS in this view has configured traffic accounting"
+                    }
+                  >
                     {fleetSnapshot.traffic.count > 0
                       ? `${fleetSnapshot.traffic.count} configured${cardsComplete ? "" : " · partial"}`
                       : "No configured accounting"}
@@ -1040,7 +1069,8 @@ function PublicMonitoringCardView({
             percent={cpuPercent}
             showCaption={false}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(cpuPercent)}
+            title="CPU time used during the latest shared reporting interval; - means no usable CPU sample was shared"
+            value={formatOptionalPercent(cpuPercent)}
           />
           <PublicMetric
             caption={maximumCapacityCaption(resource?.memory_total_bytes)}
@@ -1050,7 +1080,8 @@ function PublicMonitoringCardView({
             percent={memoryUsed}
             showCaption={false}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(memoryUsed)}
+            title="Used memory as a percentage of the maximum reported RAM capacity; - means memory evidence was not shared"
+            value={formatOptionalPercent(memoryUsed)}
           />
           <PublicMetric
             caption={maximumCapacityCaption(resource?.disk_total_bytes)}
@@ -1060,7 +1091,8 @@ function PublicMonitoringCardView({
             percent={diskUsed}
             showCaption={false}
             stale={Boolean(resourceProblem)}
-            value={formatPercent(diskUsed)}
+            title="Used disk space as a percentage of the maximum reported disk capacity; - means disk evidence was not shared"
+            value={formatOptionalPercent(diskUsed)}
           />
           <PublicMetric
             caption={
@@ -1082,6 +1114,7 @@ function PublicMonitoringCardView({
               ) : undefined
             }
             stale={Boolean(resourceProblem)}
+            title="Linux load average divided by reported CPU cores; - means load evidence was not shared"
             value={
               resource
                 ? density === "compact"
@@ -1089,7 +1122,7 @@ function PublicMonitoringCardView({
                       .map(formatLoad)
                       .join("/")
                   : formatLoad(resource.load_1)
-                : "No data"
+                : "-"
             }
           />
         </div>
@@ -1107,7 +1140,8 @@ function PublicMonitoringCardView({
               <MiniSparkline label="RX activity" tone="rx" values={rxHistory} />
             }
             stale={Boolean(networkProblem)}
-            value={formatByteRateFromBitsPerSecond(card.network?.rx_bps)}
+            title={publicNetworkRateTitle("received", card.network)}
+            value={formatOptionalRate(card.network?.rx_bps)}
           />
           <PublicFact
             icon={<Network size={13} />}
@@ -1116,15 +1150,16 @@ function PublicMonitoringCardView({
               <MiniSparkline label="TX activity" tone="tx" values={txHistory} />
             }
             stale={Boolean(networkProblem)}
-            value={formatByteRateFromBitsPerSecond(card.network?.tx_bps)}
+            title={publicNetworkRateTitle("sent", card.network)}
+            value={formatOptionalRate(card.network?.tx_bps)}
           />
           {density === "comfortable" ? (
             <small className="publicMonitoringFreshness">
               {card.network?.rate_expected === false
                 ? "Network rates not selected"
                 : card.network?.observed_at
-                ? `Updated ${formatCompactTime(card.network.observed_at)}`
-                : "Network data unavailable"}
+                  ? `Updated ${formatCompactTime(card.network.observed_at)}`
+                  : "Network data unavailable"}
             </small>
           ) : null}
         </div>
@@ -1141,9 +1176,11 @@ function PublicMonitoringCardView({
               key={fact.label}
               title={fact.title}
             >
-              <small>{fact.label}</small>
+              <small className="vpsMonitorAuxFactHeading">
+                <b>{fact.label}</b>
+                {fact.context ? <span> · {fact.context}</span> : null}
+              </small>
               <strong>{fact.value}</strong>
-              {fact.detail ? <em>{fact.detail}</em> : null}
             </span>
           ))}
         </div>
@@ -1158,7 +1195,7 @@ function PublicMonitoringCardView({
         />
       ) : null}
 
-      {warnings.length ? (
+      {density === "comfortable" && warnings.length ? (
         <div
           className="publicMonitoringWarnings"
           role="status"
@@ -1181,6 +1218,7 @@ function PublicMetric({
   showCaption,
   sparkline,
   stale = false,
+  title,
   value,
 }: {
   caption: string;
@@ -1191,6 +1229,7 @@ function PublicMetric({
   showCaption: boolean;
   sparkline?: ReactNode;
   stale?: boolean;
+  title: string;
   value: string;
 }) {
   return (
@@ -1204,6 +1243,7 @@ function PublicMetric({
       showCaption={showCaption}
       sparkline={sparkline}
       stale={stale}
+      title={title}
       value={value}
     />
   );
@@ -1214,12 +1254,14 @@ function PublicFact({
   label,
   sparkline,
   stale = false,
+  title,
   value,
 }: {
   icon?: ReactNode;
   label: string;
   sparkline?: ReactNode;
   stale?: boolean;
+  title: string;
   value: string;
 }) {
   return (
@@ -1228,7 +1270,7 @@ function PublicFact({
       label={label}
       sparkline={sparkline}
       stale={stale}
-      title={value}
+      title={title}
       value={value}
     />
   );
@@ -1240,43 +1282,62 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
       <div
         className="publicMonitoringTraffic missing"
         aria-label="Traffic unavailable"
+        title="Traffic is shared, but current traffic configuration and accounting evidence are unavailable"
       >
         <div className="publicMonitoringTrafficHeading">
           <small className="vpsMonitorRowHeading" title="Traffic unavailable">
-            <strong>Traffic unavailable</strong>
+            <strong>Traffic</strong>
           </small>
+          <span className="vpsMonitorRowEvidence">
+            <strong title="Current traffic evidence is unavailable">-</strong>
+          </span>
         </div>
+        <span
+          aria-label="Traffic progress is unavailable"
+          className="vpsMonitorMetricTrack missing"
+          title="No traffic progress can be drawn without current accounting evidence"
+        >
+          <span />
+        </span>
       </div>
     );
   }
+  const quotaState = traffic.configured ? trafficQuotaState(traffic) : "unset";
   const percent = traffic.configured
     ? finiteNumber(traffic.cycle_percent)
     : null;
-  const fill = percent === null ? 0 : Math.max(0, Math.min(100, percent));
+  const quotaPercent = quotaState === "finite" ? percent : null;
+  const fill =
+    quotaPercent === null ? 0 : Math.max(0, Math.min(100, quotaPercent));
   const problem = publicTrafficProblem(traffic);
   const portSpeed = traffic.port_speed?.display;
   const cycleSummary = traffic.configured ? trafficCycleSummary(traffic) : "";
-  const resetContext =
-    traffic.configured && traffic.cycle_end
-      ? formatTrafficReset(traffic.cycle_end)
-      : null;
+  const resetContext = traffic.configured
+    ? traffic.reset_day === -1
+      ? "No reset"
+      : traffic.cycle_end
+        ? formatTrafficReset(traffic.cycle_end)
+        : null
+    : null;
   const trafficDetail = traffic.configured
-    ? (problem ??
-      `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`)
+    ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day === -1 ? " · accumulated total; no reset" : traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
     : "Authoritative traffic accounting is not configured for this VPS.";
   return (
     <div
       aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
-      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${resetContext ? " contextual" : ""}${problem ? " warning" : ""}${percent !== null && percent > 100 ? " overQuota" : ""}`}
+      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${resetContext ? " contextual" : ""}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
+      title={trafficDetail}
     >
       <div className="publicMonitoringTrafficHeading">
         <small
           className="vpsMonitorRowHeading"
-          title={traffic.configured ? "Traffic" : "Traffic unconfigured"}
+          title={
+            traffic.configured
+              ? `Traffic accounting${resetContext ? `; ${resetContext}` : ""}`
+              : "Traffic accounting is unconfigured"
+          }
         >
-          <strong>
-            {traffic.configured ? "Traffic" : "Traffic unconfigured"}
-          </strong>
+          <strong>Traffic</strong>
           {resetContext ? ` · ${resetContext}` : ""}
         </small>
         <span className="vpsMonitorRowEvidence">
@@ -1290,22 +1351,51 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
           ) : null}
           {cycleSummary ? (
             <strong title={cycleSummary}>{cycleSummary}</strong>
-          ) : null}
+          ) : (
+            <strong title="Traffic accounting is unconfigured">
+              Unconfigured
+            </strong>
+          )}
         </span>
       </div>
-      {percent !== null ? (
+      {quotaPercent !== null ? (
         <span
-          aria-label={`Traffic quota use: ${formatPercent(percent)}`}
+          aria-label={`Traffic quota use: ${formatPercent(quotaPercent)}`}
           aria-valuemax={100}
           aria-valuemin={0}
           aria-valuenow={fill}
-          aria-valuetext={formatPercent(percent)}
+          aria-valuetext={formatPercent(quotaPercent)}
           className="vpsMonitorMetricTrack"
           role="meter"
+          title={`${formatPercent(quotaPercent)} of the limiting traffic quota has been used`}
         >
           <span style={{ width: `${fill}%` }} />
         </span>
-      ) : null}
+      ) : quotaState === "unlimited" ? (
+        <span
+          aria-label="Traffic quota is unlimited"
+          className="vpsMonitorMetricTrack unlimitedTrafficTrack"
+          title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from an empty track"
+        >
+          <span />
+        </span>
+      ) : (
+        <span
+          aria-label={
+            traffic.configured
+              ? "Traffic quota progress is unavailable"
+              : "Traffic accounting is unconfigured"
+          }
+          className="vpsMonitorMetricTrack missing"
+          title={
+            traffic.configured
+              ? "No finite or unlimited traffic quota is available"
+              : "Traffic accounting is unconfigured; this empty track is not zero percent"
+          }
+        >
+          <span />
+        </span>
+      )}
       <small title={trafficDetail}>{trafficDetail}</small>
     </div>
   );
@@ -1323,12 +1413,18 @@ function PublicPingRow({
       <div
         className="publicMonitoringPing missing"
         aria-label="Primary Ping unconfigured"
+        title="No primary Ping target is configured for this VPS"
       >
         <Radio aria-hidden="true" size={14} />
-        <small className="vpsMonitorRowHeading">
+        <small
+          className="vpsMonitorRowHeading"
+          title="Primary Ping target is unconfigured"
+        >
           <strong>Ping</strong> · Unconfigured
         </small>
-        <span>No primary Ping target is available.</span>
+        <span title="Configure and share a primary Ping target to show latency and loss">
+          -
+        </span>
       </div>
     );
   }
@@ -1352,6 +1448,7 @@ function PublicPingRow({
     <div
       aria-label={`Primary Ping ${ping.target_name}: ${statusLabel}`}
       className={`publicMonitoringPing ${safeClassToken(ping.state)} ${safeClassToken(effectiveStatus)}${problem ? " warning" : ""}`}
+      title={`${ping.target_name}: ${presentedDetail}; ${statusDetail}`}
     >
       <Radio aria-hidden="true" size={14} />
       <small
@@ -1552,70 +1649,72 @@ function PublicMonitoringDetailPanel({
       </header>
       <PublicMonitoringKpiStrip card={card} visibility={visibility} />
       <PublicMonitoringInformationGroups card={card} visibility={visibility} />
-      {resourcesAvailable && pingAvailable ? (
-        <div
-          aria-label="Shared VPS detail section"
-          className="dashboardSectionSelector publicMonitoringSectionSelector"
-        >
-          <button
-            aria-pressed={section === "resources"}
-            className={section === "resources" ? "active" : ""}
-            onClick={() => setSection("resources")}
-            type="button"
+      <div className="publicMonitoringHistoryControls">
+        {resourcesAvailable && pingAvailable ? (
+          <div
+            aria-label="Shared VPS detail section"
+            className="dashboardSectionSelector publicMonitoringSectionSelector"
           >
-            <strong>Resources</strong>
-            <small>{resourceSectionSummary}</small>
-          </button>
-          <button
-            aria-pressed={section === "ping"}
-            className={section === "ping" ? "active" : ""}
-            onClick={() => setSection("ping")}
-            type="button"
-          >
-            <strong>Ping</strong>
-            <small>Targets · latency · loss</small>
-          </button>
+            <button
+              aria-pressed={section === "resources"}
+              className={section === "resources" ? "active" : ""}
+              onClick={() => setSection("resources")}
+              type="button"
+            >
+              <strong>Resources</strong>
+              <small>{resourceSectionSummary}</small>
+            </button>
+            <button
+              aria-pressed={section === "ping"}
+              className={section === "ping" ? "active" : ""}
+              onClick={() => setSection("ping")}
+              type="button"
+            >
+              <strong>Ping</strong>
+              <small>Targets · latency · loss</small>
+            </button>
+          </div>
+        ) : null}
+        <div className="observabilityMetricsControls publicMonitoringRangeControls">
+          <MonitoringRangeTabs
+            ariaLabel="History range"
+            onChange={onWindowChange}
+            value={window}
+          />
         </div>
-      ) : null}
-      <div className="observabilityMetricsControls publicMonitoringRangeControls">
-        <MonitoringRangeTabs
-          ariaLabel="History range"
-          onChange={onWindowChange}
-          value={window}
-        />
+        {window === "custom" ? (
+          <div className="publicMonitoringCustomRange">
+            <label>
+              <span>Start</span>
+              <input
+                id="public-monitoring-custom-start"
+                name="public-monitoring-custom-start"
+                onChange={(event) => onCustomStartChange(event.target.value)}
+                type="datetime-local"
+                value={customStart}
+              />
+            </label>
+            <label>
+              <span>End</span>
+              <input
+                id="public-monitoring-custom-end"
+                name="public-monitoring-custom-end"
+                onChange={(event) => onCustomEndChange(event.target.value)}
+                type="datetime-local"
+                value={customEnd}
+              />
+            </label>
+            <button onClick={onApplyCustom} type="button">
+              Apply range
+            </button>
+            {customError ? (
+              <span className="panelError" role="alert">
+                {customError}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
       </div>
-      {window === "custom" ? (
-        <div className="publicMonitoringCustomRange">
-          <label>
-            <span>Start</span>
-            <input
-              id="public-monitoring-custom-start"
-              name="public-monitoring-custom-start"
-              onChange={(event) => onCustomStartChange(event.target.value)}
-              type="datetime-local"
-              value={customStart}
-            />
-          </label>
-          <label>
-            <span>End</span>
-            <input
-              id="public-monitoring-custom-end"
-              name="public-monitoring-custom-end"
-              onChange={(event) => onCustomEndChange(event.target.value)}
-              type="datetime-local"
-              value={customEnd}
-            />
-          </label>
-          <button onClick={onApplyCustom} type="button">
-            Apply range
-          </button>
-          {customError ? (
-            <span className="panelError" role="alert">
-              {customError}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
       {error ? (
         <p className="panelError" role="alert">
           {error}
@@ -1693,11 +1792,11 @@ function PublicMonitoringDetailPanel({
                             ]
                               .map(formatLoad)
                               .join(" / ")
-                          : "No data"
+                          : "-"
                       }
                       times={resourceTimeline.times}
                       valueFormatter={(value) =>
-                        value === null ? "No data" : formatNumber(value)
+                        value === null ? "-" : formatNumber(value)
                       }
                     />
                     <PublicChart
@@ -1787,9 +1886,7 @@ function PublicMonitoringDetailPanel({
                       summary={`TCP ${formatPublicSocketCount(card.resources?.tcp_sockets)} · UDP ${formatPublicSocketCount(card.resources?.udp_sockets)}`}
                       times={resourceTimeline.times}
                       valueFormatter={(value) =>
-                        value === null
-                          ? "No data"
-                          : formatPublicSocketCount(value)
+                        value === null ? "-" : formatPublicSocketCount(value)
                       }
                       wide
                     />
@@ -1830,9 +1927,9 @@ function PublicMonitoringDetailPanel({
                             ),
                           },
                         ]}
-                        summary={`↓ ${formatByteRateFromBitsPerSecond(card.network?.rx_bps)} · ↑ ${formatByteRateFromBitsPerSecond(card.network?.tx_bps)}`}
+                        summary={`↓ ${formatOptionalRate(card.network?.rx_bps)} · ↑ ${formatOptionalRate(card.network?.tx_bps)}`}
                         times={networkTimeline.times}
-                        valueFormatter={formatByteRateFromBitsPerSecond}
+                        valueFormatter={formatOptionalRate}
                       />
                     ) : null}
                     {detail.traffic !== undefined &&
@@ -1881,7 +1978,7 @@ function PublicMonitoringDetailPanel({
                           }
                           times={trafficTimeline.times}
                           valueFormatter={(value) =>
-                            value === null ? "No data" : formatBytes(value)
+                            value === null ? "-" : formatBytes(value)
                           }
                         />
                         {currentTrafficConfigured ? (
@@ -2045,7 +2142,7 @@ function PublicMonitoringDetailPanel({
                 valueFormatter={
                   pingMetric === "latency"
                     ? (value) =>
-                        value === null ? "No data" : `${formatNumber(value)} ms`
+                        value === null ? "-" : `${formatNumber(value)} ms`
                     : (value) => formatPercent(value)
                 }
                 visibleSeriesKeys={selectedPingTargetNames}
@@ -2068,31 +2165,39 @@ function PublicMonitoringKpiStrip({
 }) {
   const resource = card.resources;
   const facts: Array<{
+    context?: string;
     detail: string;
     kind: "billing" | "connection" | "ping" | "traffic" | "uptime";
     label: string;
     value: string;
   }> = [];
-  if (visibility?.billing && card.billing) {
-    const renewal = formatBillingRenewal(card.billing.cycle);
+  if (visibility?.billing) {
+    const renewal = formatBillingRenewal(
+      card.billing?.cycle,
+      card.billing?.period_code,
+    );
+    const billingValue =
+      card.billing && !card.billing.disabled ? card.billing.display : "-";
     facts.push({
-      detail: renewal ?? "Configured billing rule",
+      context: renewal ?? undefined,
+      detail: card.billing
+        ? card.billing.disabled
+          ? "Billing is explicitly disabled"
+          : (renewal ?? "Configured billing rule")
+        : "Billing is shared but no billing rule is configured; - is shown",
       kind: "billing",
       label: "Billing",
-      value: renewal
-        ? `${card.billing.display} · ${renewal}`
-        : card.billing.display,
+      value: billingValue,
     });
   }
-  const uptime = finiteNumber(card.system_information?.uptime_secs);
-  if (visibility?.system_information && uptime !== null && uptime >= 0) {
+  if (visibility?.system_information) {
     facts.push({
       detail: card.system_information?.uptime_observed_at
         ? `Observed ${formatCompactTime(card.system_information.uptime_observed_at)}`
-        : "Latest reported uptime",
+        : "Latest reported uptime is unavailable",
       kind: "uptime",
       label: "Uptime",
-      value: formatUptime(uptime),
+      value: formatUptime(card.system_information?.uptime_secs),
     });
   }
   const traffic = card.traffic;
@@ -2104,7 +2209,7 @@ function PublicMonitoringKpiStrip({
     trafficTotal >= 0
   ) {
     facts.push({
-      detail: `${trafficCycleSummary(traffic)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`,
+      detail: `${trafficCycleSummary(traffic)}${traffic.reset_day === -1 ? " · accumulated total; no reset" : traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`,
       kind: "traffic",
       label: "Traffic",
       value: formatBytes(trafficTotal),
@@ -2122,7 +2227,7 @@ function PublicMonitoringKpiStrip({
     facts.push({
       detail: resource?.connections_observed_at
         ? `Observed ${formatCompactTime(resource.connections_observed_at)}`
-        : "Latest socket-table evidence",
+        : "Latest socket-table evidence is unavailable",
       kind: "connection",
       label: "Connections",
       value: connections.join(" · "),
@@ -2154,7 +2259,10 @@ function PublicMonitoringKpiStrip({
           key={fact.label}
           title={`${fact.value}. ${fact.detail}`}
         >
-          <small>{fact.label}</small>
+          <small className="publicMonitoringKpiLabel">
+            <b>{fact.label}</b>
+            {fact.context ? <span> · {fact.context}</span> : null}
+          </small>
           <strong>{fact.value}</strong>
         </span>
       ))}
@@ -2175,17 +2283,23 @@ function PublicMonitoringInformationGroups({
   const groups: Array<{ facts: InformationFact[]; label: string }> = [];
   const hardware: InformationFact[] = [];
   if (visibility?.system_information && information?.cpu_model) {
-    hardware.push({ label: "CPU", value: information.cpu_model });
+    hardware.push({
+      label: "CPU",
+      title: "CPU model reported by the agent",
+      value: information.cpu_model,
+    });
   }
   if (visibility?.resources && resource && resource.cpu_cores > 0) {
     hardware.push({
       label: "Cores",
+      title: "Maximum CPU core capacity reported in current resource evidence",
       value: resource.cpu_cores.toLocaleString(),
     });
   }
   if (visibility?.resources && resource && resource.memory_total_bytes > 0) {
     hardware.push({
       label: "RAM",
+      title: "Average used-memory percentage and maximum reported RAM capacity",
       value: resourceUsageSummary(
         resource.memory_used_ratio_avg,
         resource.memory_total_bytes,
@@ -2199,6 +2313,7 @@ function PublicMonitoringInformationGroups({
   ) {
     hardware.push({
       label: "Swap",
+      title: "Average used-swap percentage and maximum reported swap capacity",
       value:
         resource.swap_total_bytes === 0
           ? "None"
@@ -2213,14 +2328,27 @@ function PublicMonitoringInformationGroups({
   const system: InformationFact[] = [];
   if (visibility?.system_information && information) {
     if (information.os_name)
-      system.push({ label: "OS", value: information.os_name });
+      system.push({
+        label: "OS",
+        title: "Operating system reported by the agent",
+        value: information.os_name,
+      });
     if (information.kernel_release)
-      system.push({ label: "Kernel", value: information.kernel_release });
+      system.push({
+        label: "Kernel",
+        title: "Kernel release reported by the agent",
+        value: information.kernel_release,
+      });
     if (information.architecture)
-      system.push({ label: "Architecture", value: information.architecture });
+      system.push({
+        label: "Architecture",
+        title: "Machine architecture reported by the agent",
+        value: information.architecture,
+      });
     if (information.virtualization)
       system.push({
         label: "Virtualization",
+        title: "Virtualization environment reported by the agent",
         value: formatVirtualizationLabel(information.virtualization),
       });
   }
@@ -2231,6 +2359,8 @@ function PublicMonitoringInformationGroups({
       facts: [
         {
           label: "Reported filesystems",
+          title:
+            "Average used-disk percentage and maximum aggregate filesystem capacity",
           value: resourceUsageSummary(
             resource.disk_used_ratio_avg,
             resource.disk_total_bytes,
@@ -2245,13 +2375,15 @@ function PublicMonitoringInformationGroups({
   if (visibility?.network && card.network && card.network.rx_bps !== null) {
     network.push({
       label: "RX",
-      value: formatByteRateFromBitsPerSecond(card.network.rx_bps),
+      title: publicNetworkRateTitle("received", card.network),
+      value: formatOptionalRate(card.network.rx_bps),
     });
   }
   if (visibility?.network && card.network && card.network.tx_bps !== null) {
     network.push({
       label: "TX",
-      value: formatByteRateFromBitsPerSecond(card.network.tx_bps),
+      title: publicNetworkRateTitle("sent", card.network),
+      value: formatOptionalRate(card.network.tx_bps),
     });
   }
   if (visibility?.traffic && card.traffic?.port_speed) {
@@ -2269,11 +2401,17 @@ function PublicMonitoringInformationGroups({
       className="publicMonitoringInformationGroups"
     >
       {groups.map((group) => (
-        <section key={group.label}>
-          <h3>{group.label}</h3>
+        <section
+          key={group.label}
+          title={`${group.label} information shared for this VPS`}
+        >
+          <h3 title={`${group.label} information`}>{group.label}</h3>
           <dl>
             {group.facts.map((fact) => (
-              <div key={fact.label} title={fact.title ?? fact.value}>
+              <div
+                key={fact.label}
+                title={`${fact.label}: ${fact.value}. ${fact.title ?? "Shared current evidence"}`}
+              >
                 <dt>{fact.label}</dt>
                 <dd>{fact.value}</dd>
               </div>
@@ -2294,34 +2432,39 @@ function PublicTrafficCycle({
 }) {
   if (!traffic?.configured) return null;
   const percent = finiteNumber(traffic?.cycle_percent);
-  const fill = percent === null ? 0 : Math.max(0, Math.min(100, percent));
-  const overQuota = percent !== null && percent > 100;
-  const quotas = [
-    traffic.quota_rx_bytes,
-    traffic.quota_tx_bytes,
-    traffic.quota_total_bytes,
-  ];
-  const hasFiniteQuota = quotas.some(
-    (quota) => quota !== undefined && quota > 0,
-  );
-  const hasUnlimitedQuota = quotas.some((quota) => quota === -1);
+  const quotaState = trafficQuotaState(traffic);
+  const quotaPercent = quotaState === "finite" ? percent : null;
+  const fill =
+    quotaPercent === null ? 0 : Math.max(0, Math.min(100, quotaPercent));
+  const overQuota = quotaPercent !== null && quotaPercent > 100;
   const limitingQuota = trafficLimitingQuota(traffic);
   const limitValue = limitingQuota
-    ? `${limitingQuota.label} ${formatBytes(limitingQuota.quota)}`
-    : hasFiniteQuota
-      ? "Unavailable"
-      : hasUnlimitedQuota
+    ? `${limitingQuota.direction} ${formatBytes(limitingQuota.quota)}`
+    : quotaState === "finite"
+      ? "-"
+      : quotaState === "unlimited"
         ? "Unlimited"
-        : "Not set";
+        : "-";
   const cycleWindow =
-    traffic.cycle_start && traffic.cycle_end
-      ? `${formatCompactTime(traffic.cycle_start)} – ${formatCompactTime(traffic.cycle_end)}`
-      : "Current accounting cycle";
+    traffic.reset_day === -1
+      ? "Accumulated total · No reset"
+      : traffic.cycle_start && traffic.cycle_end
+        ? `${formatCompactTime(traffic.cycle_start)} – ${formatCompactTime(traffic.cycle_end)}`
+        : "Current accounting cycle";
   return (
-    <div className="dashboardWidgetChart vpsMonitoringTrafficCycle publicMonitoringTrafficCycle">
+    <div
+      className="dashboardWidgetChart vpsMonitoringTrafficCycle publicMonitoringTrafficCycle"
+      title={
+        traffic.reset_day === -1
+          ? "Traffic totals accumulate across retained accounting evidence and do not reset"
+          : "Traffic totals and quota progress for the current reset cycle"
+      }
+    >
       <div className="dashboardWidgetHeader publicMonitoringTrafficCycleHeader">
         <div>
-          <strong>Traffic cycle</strong>
+          <strong title={cycleWindow}>
+            {traffic.reset_day === -1 ? "Traffic · No reset" : "Traffic cycle"}
+          </strong>
           <small title={cycleWindow}>{cycleWindow}</small>
         </div>
         {traffic.port_speed ? (
@@ -2353,35 +2496,48 @@ function PublicTrafficCycle({
           label="Limit"
           title={
             limitingQuota
-              ? `${limitingQuota.label} is the most-used finite quota at ${formatPercent(limitingQuota.percent)}`
+              ? `${limitingQuota.direction} is the most-used finite quota at ${formatPercent(limitingQuota.percent)}`
               : "No finite limiting quota is available"
           }
           value={limitValue}
         />
       </div>
-      {percent !== null ? (
+      {quotaPercent !== null ? (
         <div
           className={`vpsMonitoringTrafficProgress${overQuota ? " overLimit" : ""}`}
         >
           <span
-            aria-label={`${formatPercent(percent)} of the limiting traffic quota used`}
+            aria-label={`${formatPercent(quotaPercent)} of the limiting traffic quota used`}
             aria-valuemax={100}
             aria-valuemin={0}
             aria-valuenow={fill}
-            aria-valuetext={formatPercent(percent)}
+            aria-valuetext={formatPercent(quotaPercent)}
             className="vpsMonitoringTrafficTrack"
             role="progressbar"
+            title={`${formatPercent(quotaPercent)} of the limiting traffic quota has been used`}
           >
             <i style={{ width: `${fill}%` }} />
           </span>
-          <strong>{formatPercent(percent)}</strong>
+          <strong>{formatPercent(quotaPercent)}</strong>
           <small>{overQuota ? "Quota exceeded" : "Limit used"}</small>
         </div>
-      ) : hasFiniteQuota ? (
+      ) : quotaState === "unlimited" ? (
+        <div className="vpsMonitoringTrafficProgress unlimited">
+          <span
+            aria-label="Traffic quota is unlimited"
+            className="vpsMonitoringTrafficTrack unlimitedTrafficTrack"
+            title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from empty progress"
+          >
+            <i />
+          </span>
+          <strong>Unlimited</strong>
+          <small>No traffic limit</small>
+        </div>
+      ) : quotaState === "finite" ? (
         <p className="vpsMonitoringTrafficNote incomplete">
           Limiting quota utilization is unavailable.
         </p>
-      ) : hasUnlimitedQuota ? null : (
+      ) : (
         <p className="vpsMonitoringTrafficNote incomplete">
           Accounting is active without a quota.
         </p>
@@ -3085,76 +3241,35 @@ function maximumCapacity(total: number | null | undefined): string | undefined {
 
 function trafficCycleSummary(traffic: PublicTrafficMetric): string {
   if (!traffic.configured) return "Unconfigured";
-  const countedTotal = finiteNumber(traffic.total_bytes);
-  const diagnosticTotal = finiteNumber(traffic.diagnostic_total_bytes);
-  if (countedTotal === null || countedTotal < 0 || diagnosticTotal === null)
-    return "Current total unavailable";
   const limitingQuota = trafficLimitingQuota(traffic);
   if (limitingQuota) {
-    const quotaLabel =
-      limitingQuota.label === "Total"
-        ? "quota"
-        : `${limitingQuota.label} quota`;
-    return diagnosticTotal === countedTotal && limitingQuota.label === "Total"
-      ? `${formatBytes(diagnosticTotal)} / ${formatBytes(limitingQuota.quota)} · ${formatPercent(limitingQuota.percent)}`
-      : `${formatBytes(diagnosticTotal)} observed · ${quotaLabel} ${formatPercent(limitingQuota.percent)}`;
+    return `${formatBytes(limitingQuota.used)} / ${formatBytes(limitingQuota.quota)} · ${limitingQuota.direction} · ${formatPercent(limitingQuota.percent)}`;
   }
+  const countedTotal = finiteNumber(traffic.total_bytes);
+  if (countedTotal === null || countedTotal < 0)
+    return "Current total unavailable";
   const quotas = [
     traffic.quota_total_bytes,
     traffic.quota_rx_bytes,
     traffic.quota_tx_bytes,
   ];
   if (quotas.some((quota) => quota === -1)) {
-    return `${formatBytes(diagnosticTotal)} / Unlimited`;
+    const unlimited = trafficUnlimitedQuota(traffic);
+    return unlimited
+      ? `${formatBytes(unlimited.used)} / Unlimited · ${unlimited.direction}`
+      : `${formatBytes(countedTotal)} / Unlimited`;
   }
   if (quotas.some((quota) => quota !== undefined && quota > 0)) {
-    return `${formatBytes(diagnosticTotal)} observed · quota evidence incomplete`;
+    return `${formatBytes(countedTotal)} · quota evidence incomplete`;
   }
-  return `${formatBytes(diagnosticTotal)} observed · quota unavailable`;
-}
-
-function trafficLimitingQuota(traffic: PublicTrafficMetric): {
-  label: "RX" | "TX" | "Total";
-  percent: number;
-  quota: number;
-} | null {
-  const candidates = [
-    {
-      label: "Total" as const,
-      quota: finiteNumber(traffic.quota_total_bytes),
-      used: finiteNumber(traffic.total_bytes),
-    },
-    {
-      label: "RX" as const,
-      quota: finiteNumber(traffic.quota_rx_bytes),
-      used: finiteNumber(traffic.rx_bytes),
-    },
-    {
-      label: "TX" as const,
-      quota: finiteNumber(traffic.quota_tx_bytes),
-      used: finiteNumber(traffic.tx_bytes),
-    },
-  ].flatMap(({ label, quota, used }) =>
-    quota !== null && quota > 0 && used !== null && used >= 0
-      ? [{ label, percent: (used / quota) * 100, quota }]
-      : [],
-  );
-  return (
-    candidates.reduce<(typeof candidates)[number] | null>(
-      (limiting, candidate) =>
-        limiting === null || candidate.percent > limiting.percent
-          ? candidate
-          : limiting,
-      null,
-    ) ?? null
-  );
+  return `${formatBytes(countedTotal)} · quota unavailable`;
 }
 
 function formatPublicSocketCount(value: number | null | undefined) {
   const finite = finiteNumber(value);
   return finite !== null && finite >= 0
     ? Math.round(finite).toLocaleString()
-    : "n/a";
+    : "-";
 }
 
 function publicConnectionTitle(
@@ -3165,61 +3280,92 @@ function publicConnectionTitle(
   return `${protocol} entries in the agent's Linux network-namespace socket tables; TCP includes every state and listeners. ${freshness ?? "Current telemetry"}.`;
 }
 
+function publicNetworkRateTitle(
+  direction: "received" | "sent",
+  network: PublicNetworkMetric | undefined,
+): string {
+  if (network?.rate_expected === false) {
+    return `Network ${direction} rate is intentionally not selected; - is shown`;
+  }
+  if (
+    !network ||
+    finiteNumber(direction === "received" ? network.rx_bps : network.tx_bps) ===
+      null
+  ) {
+    return `Network ${direction} rate is unavailable; - is shown`;
+  }
+  const freshness = publicFreshnessProblem(
+    network.observed_at,
+    `Network ${direction} rate`,
+  );
+  return `Interval-average network ${direction} rate${freshness ? `; ${freshness.toLocaleLowerCase()}` : "; current shared telemetry"}`;
+}
+
 function publicMonitoringAuxiliaryFacts(
   card: PublicMonitoringCard,
   visibility: PublicMonitoringShareView["visibility"] | undefined,
 ): Array<{
-  detail?: string;
+  context?: string;
   kind: "billing" | "connection" | "uptime";
   label: string;
   title: string;
   value: string;
 }> {
   const facts: Array<{
-    detail?: string;
+    context?: string;
     kind: "billing" | "connection" | "uptime";
     label: string;
     title: string;
     value: string;
   }> = [];
-  if (visibility?.billing && card.billing) {
-    const renewal = formatBillingRenewal(card.billing.cycle);
+  if (visibility?.billing) {
+    const renewal = formatBillingRenewal(
+      card.billing?.cycle,
+      card.billing?.period_code,
+    );
+    const value =
+      card.billing && !card.billing.disabled ? card.billing.display : "-";
     facts.push({
-      detail: renewal ?? undefined,
+      context: renewal ?? undefined,
       kind: "billing",
       label: "Billing",
-      title: renewal
-        ? `${card.billing.display} · ${renewal}`
-        : card.billing.display,
-      value: card.billing.display,
+      title: card.billing
+        ? card.billing.disabled
+          ? "Billing is explicitly disabled; - is shown"
+          : renewal
+            ? `${value} · ${renewal}`
+            : `${value}; no renewal anchor is configured`
+        : "Billing is shared but no billing rule is configured; - is shown",
+      value,
     });
   }
   const resource = card.resources;
-  if (visibility?.resources && resource && resource.tcp_sockets !== null) {
+  if (visibility?.resources) {
     facts.push({
       kind: "connection",
       label: "TCP",
-      title: publicConnectionTitle("TCP", resource?.connections_observed_at),
+      title: resource
+        ? publicConnectionTitle("TCP", resource.connections_observed_at)
+        : "TCP connection telemetry is unavailable",
       value: formatPublicSocketCount(resource?.tcp_sockets),
     });
-  }
-  if (visibility?.resources && resource && resource.udp_sockets !== null) {
     facts.push({
       kind: "connection",
       label: "UDP",
-      title: publicConnectionTitle("UDP", resource?.connections_observed_at),
+      title: resource
+        ? publicConnectionTitle("UDP", resource.connections_observed_at)
+        : "UDP connection telemetry is unavailable",
       value: formatPublicSocketCount(resource?.udp_sockets),
     });
   }
-  const uptime = finiteNumber(card.system_information?.uptime_secs);
-  if (visibility?.system_information && uptime !== null && uptime >= 0) {
+  if (visibility?.system_information) {
     facts.push({
       kind: "uptime",
       label: "Uptime",
       title: card.system_information?.uptime_observed_at
         ? `Observed ${formatFullTime(card.system_information.uptime_observed_at)}`
-        : "Latest reported uptime",
-      value: formatUptime(uptime),
+        : "Latest reported uptime is unavailable",
+      value: formatUptime(card.system_information?.uptime_secs),
     });
   }
   return facts;
@@ -3227,28 +3373,27 @@ function publicMonitoringAuxiliaryFacts(
 
 function formatOptionalBytes(value: number | null | undefined): string {
   const finite = finiteNumber(value);
-  return finite === null || finite < 0 ? "Unavailable" : formatBytes(finite);
-}
-
-function formatUptime(value: number): string {
-  const seconds = Math.max(0, Math.floor(value));
-  const days = Math.floor(seconds / 86_400);
-  const hours = Math.floor((seconds % 86_400) / 3_600);
-  const minutes = Math.floor((seconds % 3_600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return `${seconds}s`;
+  return finite === null || finite < 0 ? "-" : formatBytes(finite);
 }
 
 function formatPercent(value: number | null): string {
   return value === null || !Number.isFinite(value)
-    ? "No data"
+    ? "-"
     : `${value >= 100 ? value.toFixed(0) : value.toFixed(1)}%`;
 }
 
+function formatOptionalPercent(value: number | null | undefined): string {
+  const finite = finiteNumber(value);
+  return finite === null ? "-" : formatPercent(finite);
+}
+
+function formatOptionalRate(value: number | null | undefined): string {
+  const finite = finiteNumber(value);
+  return finite === null ? "-" : formatByteRateFromBitsPerSecond(finite);
+}
+
 function formatLoad(value: number): string {
-  return Number.isFinite(value) ? formatNumber(value) : "No data";
+  return Number.isFinite(value) ? formatNumber(value) : "-";
 }
 
 function formatNumber(value: number): string {

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{types::Json as SqlJson, Row};
+use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
 use uuid::Uuid;
 
 use crate::{
@@ -90,6 +90,221 @@ struct TrafficStreamRequest {
     cycle_start_unix: i64,
 }
 
+const NO_RESET_TRAFFIC_START_UNIX: i64 = 0;
+
+// Counter epochs are monotonic by every canonical ingest/import path. For an
+// unbounded cycle, the valid deltas in one epoch therefore reduce exactly to
+// its last counter minus its first. Each lateral lookup below reads one index
+// endpoint per reset epoch instead of sorting every retained minute sample.
+pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
+    WITH requested AS (
+        SELECT client_id, source_kind, interface
+        FROM UNNEST(
+            $1::text[],
+            $2::text[],
+            $3::text[]
+        ) AS request(client_id, source_kind, interface)
+    ),
+    latest AS (
+        SELECT
+            requested.client_id,
+            requested.source_kind,
+            requested.interface,
+            sample.rx_bytes AS latest_rx,
+            sample.tx_bytes AS latest_tx,
+            sample.rx_counter_epoch,
+            sample.tx_counter_epoch,
+            EXTRACT(EPOCH FROM sample.observed_at)::bigint AS last_sample_unix
+        FROM requested
+        JOIN LATERAL (
+            SELECT
+                sample.observed_at,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = requested.client_id
+              AND sample.source_kind = requested.source_kind
+              AND sample.interface = requested.interface
+              AND sample.observed_at <= to_timestamp($4)
+            ORDER BY sample.observed_at DESC
+            LIMIT 1
+        ) sample ON TRUE
+    ),
+    rx_usage AS (
+        SELECT
+            latest.client_id,
+            latest.source_kind,
+            latest.interface,
+            epoch_usage.cycle_rx,
+            epoch_usage.rx_counter_epochs_seen
+        FROM latest
+        JOIN LATERAL (
+            SELECT
+                COALESCE(SUM(
+                    GREATEST(epoch.last_bytes - epoch.first_bytes, 0)
+                ), 0)::bigint AS cycle_rx,
+                (1 + COUNT(*) FILTER (
+                    WHERE epoch.previous_source IS NOT NULL
+                      AND NOT (
+                          epoch.previous_source LIKE 'vnstat_import:%'
+                          AND epoch.first_source NOT LIKE 'vnstat_import:%'
+                      )
+                ))::bigint AS rx_counter_epochs_seen
+            FROM (
+                SELECT
+                    first_sample.rx_bytes AS first_bytes,
+                    first_sample.sample_source AS first_source,
+                    last_sample.rx_bytes AS last_bytes,
+                    previous_sample.sample_source AS previous_source
+                FROM generate_series(
+                    (
+                        SELECT sample.rx_counter_epoch
+                        FROM traffic_counter_samples sample
+                        WHERE sample.client_id = latest.client_id
+                          AND sample.source_kind = latest.source_kind
+                          AND sample.interface = latest.interface
+                          AND sample.observed_at <= to_timestamp($4)
+                        ORDER BY sample.rx_counter_epoch ASC, sample.observed_at ASC
+                        LIMIT 1
+                    ),
+                    latest.rx_counter_epoch
+                ) AS epochs(counter_epoch)
+                JOIN LATERAL (
+                    SELECT sample.rx_bytes, sample.sample_source
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.rx_counter_epoch = epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.observed_at ASC
+                    LIMIT 1
+                ) first_sample ON TRUE
+                JOIN LATERAL (
+                    SELECT sample.rx_bytes
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.rx_counter_epoch = epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.observed_at DESC
+                    LIMIT 1
+                ) last_sample ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT sample.sample_source
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.rx_counter_epoch < epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.rx_counter_epoch DESC, sample.observed_at DESC
+                    LIMIT 1
+                ) previous_sample ON TRUE
+            ) epoch
+        ) epoch_usage ON TRUE
+    ),
+    tx_usage AS (
+        SELECT
+            latest.client_id,
+            latest.source_kind,
+            latest.interface,
+            epoch_usage.cycle_tx,
+            epoch_usage.tx_counter_epochs_seen
+        FROM latest
+        JOIN LATERAL (
+            SELECT
+                COALESCE(SUM(
+                    GREATEST(epoch.last_bytes - epoch.first_bytes, 0)
+                ), 0)::bigint AS cycle_tx,
+                (1 + COUNT(*) FILTER (
+                    WHERE epoch.previous_source IS NOT NULL
+                      AND NOT (
+                          epoch.previous_source LIKE 'vnstat_import:%'
+                          AND epoch.first_source NOT LIKE 'vnstat_import:%'
+                      )
+                ))::bigint AS tx_counter_epochs_seen
+            FROM (
+                SELECT
+                    first_sample.tx_bytes AS first_bytes,
+                    first_sample.sample_source AS first_source,
+                    last_sample.tx_bytes AS last_bytes,
+                    previous_sample.sample_source AS previous_source
+                FROM generate_series(
+                    (
+                        SELECT sample.tx_counter_epoch
+                        FROM traffic_counter_samples sample
+                        WHERE sample.client_id = latest.client_id
+                          AND sample.source_kind = latest.source_kind
+                          AND sample.interface = latest.interface
+                          AND sample.observed_at <= to_timestamp($4)
+                        ORDER BY sample.tx_counter_epoch ASC, sample.observed_at ASC
+                        LIMIT 1
+                    ),
+                    latest.tx_counter_epoch
+                ) AS epochs(counter_epoch)
+                JOIN LATERAL (
+                    SELECT sample.tx_bytes, sample.sample_source
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.tx_counter_epoch = epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.observed_at ASC
+                    LIMIT 1
+                ) first_sample ON TRUE
+                JOIN LATERAL (
+                    SELECT sample.tx_bytes
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.tx_counter_epoch = epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.observed_at DESC
+                    LIMIT 1
+                ) last_sample ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT sample.sample_source
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = latest.client_id
+                      AND sample.source_kind = latest.source_kind
+                      AND sample.interface = latest.interface
+                      AND sample.tx_counter_epoch < epochs.counter_epoch
+                      AND sample.observed_at <= to_timestamp($4)
+                    ORDER BY sample.tx_counter_epoch DESC, sample.observed_at DESC
+                    LIMIT 1
+                ) previous_sample ON TRUE
+            ) epoch
+        ) epoch_usage ON TRUE
+    )
+    SELECT
+        latest.client_id,
+        latest.source_kind,
+        latest.interface,
+        rx_usage.cycle_rx,
+        tx_usage.cycle_tx,
+        latest.latest_rx,
+        latest.latest_tx,
+        latest.last_sample_unix,
+        rx_usage.rx_counter_epochs_seen,
+        tx_usage.tx_counter_epochs_seen
+    FROM latest
+    JOIN rx_usage
+      ON rx_usage.client_id = latest.client_id
+     AND rx_usage.source_kind = latest.source_kind
+     AND rx_usage.interface = latest.interface
+    JOIN tx_usage
+      ON tx_usage.client_id = latest.client_id
+     AND tx_usage.source_kind = latest.source_kind
+     AND tx_usage.interface = latest.interface
+    ORDER BY latest.client_id ASC, latest.source_kind ASC, latest.interface ASC
+"#;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TrafficHistoryStream {
     source_kind: String,
@@ -109,6 +324,21 @@ struct TrafficCounterStreamUsage {
     last_sample_unix: i64,
     rx_counter_epochs_seen: i64,
     tx_counter_epochs_seen: i64,
+}
+
+fn traffic_counter_stream_usage_from_row(row: PgRow) -> Result<TrafficCounterStreamUsage> {
+    Ok(TrafficCounterStreamUsage {
+        client_id: row.try_get("client_id")?,
+        source_kind: row.try_get("source_kind")?,
+        interface: row.try_get("interface")?,
+        cycle_rx: row.try_get("cycle_rx")?,
+        cycle_tx: row.try_get("cycle_tx")?,
+        latest_rx: row.try_get("latest_rx")?,
+        latest_tx: row.try_get("latest_tx")?,
+        last_sample_unix: row.try_get("last_sample_unix")?,
+        rx_counter_epochs_seen: row.try_get("rx_counter_epochs_seen")?,
+        tx_counter_epochs_seen: row.try_get("tx_counter_epochs_seen")?,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -2212,24 +2442,30 @@ impl Repository {
                 now_unix,
             )),
             Self::Postgres(pool) => {
-                let client_ids = requests
+                let (no_reset_requests, monthly_requests): (Vec<_>, Vec<_>) = requests
                     .iter()
-                    .map(|request| request.client_id.clone())
-                    .collect::<Vec<_>>();
-                let source_kinds = requests
-                    .iter()
-                    .map(|request| request.source_kind.clone())
-                    .collect::<Vec<_>>();
-                let interfaces = requests
-                    .iter()
-                    .map(|request| request.interface.clone())
-                    .collect::<Vec<_>>();
-                let cycle_start_values = requests
-                    .iter()
-                    .map(|request| request.cycle_start_unix)
-                    .collect::<Vec<_>>();
-                let rows = sqlx::query(
-                    r#"
+                    .partition(|request| request.cycle_start_unix == NO_RESET_TRAFFIC_START_UNIX);
+                let mut usages = Vec::with_capacity(requests.len());
+
+                if !monthly_requests.is_empty() {
+                    let client_ids = monthly_requests
+                        .iter()
+                        .map(|request| request.client_id.clone())
+                        .collect::<Vec<_>>();
+                    let source_kinds = monthly_requests
+                        .iter()
+                        .map(|request| request.source_kind.clone())
+                        .collect::<Vec<_>>();
+                    let interfaces = monthly_requests
+                        .iter()
+                        .map(|request| request.interface.clone())
+                        .collect::<Vec<_>>();
+                    let cycle_start_values = monthly_requests
+                        .iter()
+                        .map(|request| request.cycle_start_unix)
+                        .collect::<Vec<_>>();
+                    let rows = sqlx::query(
+                        r#"
                     WITH requested AS (
                         SELECT client_id, source_kind, interface, cycle_start_unix
                         FROM UNNEST(
@@ -2394,30 +2630,55 @@ impl Repository {
                      AND latest.interface = usage.interface
                     ORDER BY usage.client_id ASC, usage.source_kind ASC, usage.interface ASC
                     "#,
-                )
-                .bind(client_ids)
-                .bind(source_kinds)
-                .bind(interfaces)
-                .bind(cycle_start_values)
-                .bind(now_unix)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(TrafficCounterStreamUsage {
-                            client_id: row.try_get("client_id")?,
-                            source_kind: row.try_get("source_kind")?,
-                            interface: row.try_get("interface")?,
-                            cycle_rx: row.try_get("cycle_rx")?,
-                            cycle_tx: row.try_get("cycle_tx")?,
-                            latest_rx: row.try_get("latest_rx")?,
-                            latest_tx: row.try_get("latest_tx")?,
-                            last_sample_unix: row.try_get("last_sample_unix")?,
-                            rx_counter_epochs_seen: row.try_get("rx_counter_epochs_seen")?,
-                            tx_counter_epochs_seen: row.try_get("tx_counter_epochs_seen")?,
-                        })
-                    })
-                    .collect()
+                    )
+                    .bind(client_ids)
+                    .bind(source_kinds)
+                    .bind(interfaces)
+                    .bind(cycle_start_values)
+                    .bind(now_unix)
+                    .fetch_all(pool)
+                    .await?;
+                    usages.extend(
+                        rows.into_iter()
+                            .map(traffic_counter_stream_usage_from_row)
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                }
+
+                if !no_reset_requests.is_empty() {
+                    let client_ids = no_reset_requests
+                        .iter()
+                        .map(|request| request.client_id.clone())
+                        .collect::<Vec<_>>();
+                    let source_kinds = no_reset_requests
+                        .iter()
+                        .map(|request| request.source_kind.clone())
+                        .collect::<Vec<_>>();
+                    let interfaces = no_reset_requests
+                        .iter()
+                        .map(|request| request.interface.clone())
+                        .collect::<Vec<_>>();
+                    let rows = sqlx::query(NO_RESET_TRAFFIC_COUNTER_USAGE_SQL)
+                        .bind(client_ids)
+                        .bind(source_kinds)
+                        .bind(interfaces)
+                        .bind(now_unix)
+                        .fetch_all(pool)
+                        .await?;
+                    usages.extend(
+                        rows.into_iter()
+                            .map(traffic_counter_stream_usage_from_row)
+                            .collect::<Result<Vec<_>>>()?,
+                    );
+                }
+
+                usages.sort_by(|left, right| {
+                    left.client_id
+                        .cmp(&right.client_id)
+                        .then_with(|| left.source_kind.cmp(&right.source_kind))
+                        .then_with(|| left.interface.cmp(&right.interface))
+                });
+                Ok(usages)
             }
         }
     }
@@ -3206,7 +3467,11 @@ fn traffic_cycle_starts_for_clients<'a>(
             let reset_day = reset_days.get(client_id).copied().unwrap_or(1);
             (
                 client_id.to_string(),
-                cycle_bounds(reset_day, now).0.timestamp(),
+                if reset_day == -1 {
+                    NO_RESET_TRAFFIC_START_UNIX
+                } else {
+                    cycle_bounds(reset_day, now).0.timestamp()
+                },
             )
         })
         .collect()
@@ -3271,11 +3536,90 @@ fn add_traffic_selector_requests<'a>(
     }
 }
 
-fn aggregate_memory_traffic_counter_usage(
+#[derive(Clone, Copy)]
+struct MemoryCounterEpochEndpoints<'a> {
+    first: &'a TrafficCounterSampleRecord,
+    last: &'a TrafficCounterSampleRecord,
+}
+
+impl<'a> MemoryCounterEpochEndpoints<'a> {
+    fn new(sample: &'a TrafficCounterSampleRecord) -> Self {
+        Self {
+            first: sample,
+            last: sample,
+        }
+    }
+
+    fn observe(&mut self, sample: &'a TrafficCounterSampleRecord) {
+        if sample.observed_unix < self.first.observed_unix {
+            self.first = sample;
+        }
+        if sample.observed_unix > self.last.observed_unix {
+            self.last = sample;
+        }
+    }
+}
+
+#[derive(Default)]
+struct MemoryNoResetStreamAccumulator<'a> {
+    latest: Option<&'a TrafficCounterSampleRecord>,
+    rx_epochs: BTreeMap<i64, MemoryCounterEpochEndpoints<'a>>,
+    tx_epochs: BTreeMap<i64, MemoryCounterEpochEndpoints<'a>>,
+}
+
+impl<'a> MemoryNoResetStreamAccumulator<'a> {
+    fn observe(&mut self, sample: &'a TrafficCounterSampleRecord) {
+        if self
+            .latest
+            .is_none_or(|latest| sample.observed_unix > latest.observed_unix)
+        {
+            self.latest = Some(sample);
+        }
+        self.rx_epochs
+            .entry(sample.rx_counter_epoch)
+            .and_modify(|endpoints| endpoints.observe(sample))
+            .or_insert_with(|| MemoryCounterEpochEndpoints::new(sample));
+        self.tx_epochs
+            .entry(sample.tx_counter_epoch)
+            .and_modify(|endpoints| endpoints.observe(sample))
+            .or_insert_with(|| MemoryCounterEpochEndpoints::new(sample));
+    }
+}
+
+fn memory_no_reset_direction_usage(
+    epochs: &BTreeMap<i64, MemoryCounterEpochEndpoints<'_>>,
+    rx_direction: bool,
+) -> (i64, i64) {
+    let mut usage = 0_i64;
+    let mut epochs_seen = i64::from(!epochs.is_empty());
+    let mut previous_source = None::<&str>;
+    for endpoints in epochs.values() {
+        let (first_bytes, last_bytes) = if rx_direction {
+            (endpoints.first.rx_bytes, endpoints.last.rx_bytes)
+        } else {
+            (endpoints.first.tx_bytes, endpoints.last.tx_bytes)
+        };
+        if last_bytes >= first_bytes {
+            usage = usage.saturating_add(last_bytes - first_bytes);
+        }
+        if previous_source.is_some_and(|source| {
+            !is_intentional_vnstat_import_boundary(source, &endpoints.first.sample_source)
+        }) {
+            epochs_seen = epochs_seen.saturating_add(1);
+        }
+        previous_source = Some(&endpoints.last.sample_source);
+    }
+    (usage, epochs_seen)
+}
+
+fn aggregate_memory_no_reset_traffic_counter_usage(
     samples: &[TrafficCounterSampleRecord],
     requests: &[TrafficStreamRequest],
     now_unix: i64,
 ) -> Vec<TrafficCounterStreamUsage> {
+    if requests.is_empty() {
+        return Vec::new();
+    }
     let mut request_indices = HashMap::<(&str, &str, &str), Vec<usize>>::new();
     for (index, request) in requests.iter().enumerate() {
         request_indices
@@ -3287,8 +3631,9 @@ fn aggregate_memory_traffic_counter_usage(
             .or_default()
             .push(index);
     }
-    let mut selected_by_request = vec![Vec::new(); requests.len()];
-    let mut baselines = vec![None::<TrafficCounterSampleRecord>; requests.len()];
+    let mut accumulators = (0..requests.len())
+        .map(|_| MemoryNoResetStreamAccumulator::default())
+        .collect::<Vec<_>>();
     for sample in samples
         .iter()
         .filter(|sample| sample.observed_unix <= now_unix)
@@ -3301,7 +3646,88 @@ fn aggregate_memory_traffic_counter_usage(
             continue;
         };
         for index in indices {
-            if sample.observed_unix >= requests[*index].cycle_start_unix {
+            accumulators[*index].observe(sample);
+        }
+    }
+
+    requests
+        .iter()
+        .zip(accumulators)
+        .filter_map(|(request, accumulator)| {
+            let latest = accumulator.latest?;
+            let (cycle_rx, rx_counter_epochs_seen) =
+                memory_no_reset_direction_usage(&accumulator.rx_epochs, true);
+            let (cycle_tx, tx_counter_epochs_seen) =
+                memory_no_reset_direction_usage(&accumulator.tx_epochs, false);
+            Some(TrafficCounterStreamUsage {
+                client_id: request.client_id.clone(),
+                source_kind: request.source_kind.clone(),
+                interface: request.interface.clone(),
+                cycle_rx,
+                cycle_tx,
+                latest_rx: latest.rx_bytes,
+                latest_tx: latest.tx_bytes,
+                last_sample_unix: latest.observed_unix,
+                rx_counter_epochs_seen,
+                tx_counter_epochs_seen,
+            })
+        })
+        .collect()
+}
+
+fn aggregate_memory_traffic_counter_usage(
+    samples: &[TrafficCounterSampleRecord],
+    requests: &[TrafficStreamRequest],
+    now_unix: i64,
+) -> Vec<TrafficCounterStreamUsage> {
+    let no_reset_requests = requests
+        .iter()
+        .filter(|request| request.cycle_start_unix == NO_RESET_TRAFFIC_START_UNIX)
+        .cloned()
+        .collect::<Vec<_>>();
+    let monthly_requests = requests
+        .iter()
+        .filter(|request| request.cycle_start_unix != NO_RESET_TRAFFIC_START_UNIX)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut rows =
+        aggregate_memory_no_reset_traffic_counter_usage(samples, &no_reset_requests, now_unix);
+    if monthly_requests.is_empty() {
+        rows.sort_by(|left, right| {
+            left.client_id
+                .cmp(&right.client_id)
+                .then_with(|| left.source_kind.cmp(&right.source_kind))
+                .then_with(|| left.interface.cmp(&right.interface))
+        });
+        return rows;
+    }
+
+    let mut request_indices = HashMap::<(&str, &str, &str), Vec<usize>>::new();
+    for (index, request) in monthly_requests.iter().enumerate() {
+        request_indices
+            .entry((
+                request.client_id.as_str(),
+                request.source_kind.as_str(),
+                request.interface.as_str(),
+            ))
+            .or_default()
+            .push(index);
+    }
+    let mut selected_by_request = vec![Vec::new(); monthly_requests.len()];
+    let mut baselines = vec![None::<TrafficCounterSampleRecord>; monthly_requests.len()];
+    for sample in samples
+        .iter()
+        .filter(|sample| sample.observed_unix <= now_unix)
+    {
+        let Some(indices) = request_indices.get(&(
+            sample.client_id.as_str(),
+            sample.source_kind.as_str(),
+            sample.interface.as_str(),
+        )) else {
+            continue;
+        };
+        for index in indices {
+            if sample.observed_unix >= monthly_requests[*index].cycle_start_unix {
                 selected_by_request[*index].push(sample.clone());
             } else if baselines[*index]
                 .as_ref()
@@ -3312,9 +3738,10 @@ fn aggregate_memory_traffic_counter_usage(
         }
     }
 
-    let mut rows = Vec::new();
-    for ((request, mut selected), baseline) in
-        requests.iter().zip(selected_by_request).zip(baselines)
+    for ((request, mut selected), baseline) in monthly_requests
+        .iter()
+        .zip(selected_by_request)
+        .zip(baselines)
     {
         if let Some(baseline) = baseline {
             selected.push(baseline);
@@ -3604,11 +4031,18 @@ fn parse_vps_rule_value_with_legacy_selector_support(
             let day = raw
                 .parse::<i32>()
                 .context("traffic.reset_day must be an integer")?;
-            anyhow::ensure!((1..=31).contains(&day), "traffic_reset_day_invalid");
+            anyhow::ensure!(
+                day == -1 || (1..=31).contains(&day),
+                "traffic_reset_day_invalid"
+            );
             Ok(ParsedRuleValue {
                 raw: raw.to_string(),
                 json: json!({"day": day}),
-                display: format!("{day} UTC"),
+                display: if day == -1 {
+                    "No reset".to_string()
+                } else {
+                    format!("{day} UTC")
+                },
             })
         }
         VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL
@@ -3847,8 +4281,8 @@ fn parse_billing_price(input: &str) -> Result<ParsedRuleValue> {
     if price.disabled {
         return Ok(ParsedRuleValue {
             raw: "-1".to_string(),
-            json: json!({"disabled": true, "display": "n/a"}),
-            display: "n/a".to_string(),
+            json: json!({"disabled": true, "display": "-"}),
+            display: "-".to_string(),
         });
     }
     let amount = price.price.context("billing_plan_price_required")?;
@@ -4358,7 +4792,7 @@ fn traffic_accounting_for_client_with_selector_override(
     let quota_total = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL);
     let quota_rx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_RX);
     let quota_tx = quota_value(&rule_map, VPS_RULE_KEY_TRAFFIC_QUOTA_TX);
-    let (cycle_start, cycle_end) = cycle_bounds(reset_day.unwrap_or(1), now);
+    let cycle_bounds = (reset_day != Some(-1)).then(|| cycle_bounds(reset_day.unwrap_or(1), now));
     let mut rx_bytes = 0_i64;
     let mut tx_bytes = 0_i64;
     let mut diagnostic_rx_bytes = 0_i64;
@@ -4544,8 +4978,8 @@ fn traffic_accounting_for_client_with_selector_override(
             .map(|selector| selector.canonical.clone())
             .collect(),
         selector_hash,
-        cycle_start: cycle_start.to_rfc3339(),
-        cycle_end: cycle_end.to_rfc3339(),
+        cycle_start: cycle_bounds.map(|(start, _)| start.to_rfc3339()),
+        cycle_end: cycle_bounds.map(|(_, end)| end.to_rfc3339()),
         reset_day,
         rx_bytes,
         tx_bytes,

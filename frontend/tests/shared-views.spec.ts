@@ -89,7 +89,7 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   const visibilityCheckbox = (label: string) =>
     createDrawer
       .locator(".consoleField")
-      .filter({ has: createDrawer.getByText(label, { exact: true }) })
+      .filter({ hasText: label })
       .getByRole("checkbox");
   await visibilityCheckbox("System information").check();
   for (const label of ["Resources", "Network rate", "Traffic", "Ping"]) {
@@ -236,11 +236,12 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await page.getByRole("button", { name: "Revoke now" }).click();
   await expect(page.getByText("Revoked 2 shared views.")).toBeVisible();
   await page.getByRole("tab", { name: /^Revoked · 3/ }).click();
+  const revokedGrid = page.getByLabel("Revoked shared views data grid");
   await expect(
-    page.getByText("Customer status", { exact: true }),
+    revokedGrid.getByText("Customer status", { exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByText("Regional customer view", { exact: true }),
+    revokedGrid.getByText("Regional customer view", { exact: true }),
   ).toBeVisible();
 });
 
@@ -382,6 +383,9 @@ test("public cards keep an intentionally empty network-rate selection neutral", 
   const card = page.getByRole("link", {
     name: /Shared edge · Online shared monitoring card/,
   });
+  await expect(
+    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence > strong"),
+  ).toContainText("· Total · 25.0%");
   await expect(card).toBeVisible();
   await expect(card.getByText("Online", { exact: true })).toBeVisible();
   await expect(card.getByText("Online · Warning", { exact: true })).toHaveCount(
@@ -391,8 +395,20 @@ test("public cards keep an intentionally empty network-rate selection neutral", 
   await expect(card.getByText("Network rates not selected")).toBeVisible();
   await expect(card.getByText("Needs attention")).toHaveCount(0);
   await expect(
-    card.getByLabel("Current network rate for Shared edge").getByText("n/a"),
+    card.getByLabel("Current network rate for Shared edge").getByText("-"),
   ).toHaveCount(2);
+  const realtimeSpeed = page
+    .getByText("Realtime speed", { exact: true })
+    .locator("..");
+  await expect(realtimeSpeed).toContainText("↓ -");
+  await expect(realtimeSpeed).toContainText("↑ -");
+
+  await card.click();
+  await expect(
+    page
+      .getByRole("region", { name: "Network RX / TX chart" })
+      .locator(".dashboardWidgetHeader > small"),
+  ).toHaveText("↓ - · ↑ -");
 });
 
 test("public monitoring reuses the Unicode country flag renderer", async ({
@@ -453,22 +469,19 @@ test("public monitoring keeps grid and detail history state without exposing hid
   );
   const publicPing = card.locator(".publicMonitoringPing");
   await expect(publicPing.locator(".vpsMonitorRowHeading")).toContainText(
-    "Ping · Panel API",
-  );
-  await expect(publicPing.locator(":scope > span")).toHaveAttribute(
-    "title",
-    /\S/,
+    "Ping · Customer gateway",
   );
   await expect(
-    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+    publicPing.locator(':scope > span:not([role="img"])'),
   ).toHaveAttribute(
     "title",
     /\S/,
   );
   await expect(
-    card.locator(
-      ".publicMonitoringPing > small:not(.vpsMonitorRowHeading)",
-    ),
+    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+  ).toHaveAttribute("title", /\S/);
+  await expect(
+    card.locator(".publicMonitoringPing > small:not(.vpsMonitorRowHeading)"),
   ).toContainText("Reachable");
   await expect(card.getByText("Ok", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Billing", { exact: true })).toHaveCount(0);
@@ -550,7 +563,7 @@ test("public monitoring keeps grid and detail history state without exposing hid
   await detail.getByRole("button", { name: "Select all" }).click();
   await detail
     .getByRole("button", {
-      name: /Resources resources · network · traffic/,
+      name: /Resources .*network · traffic/i,
     })
     .click();
 
@@ -625,6 +638,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   ).toBeVisible();
   await expect(card.getByText(/Last sample 18\.5 ms/)).toBeVisible();
   await expect(card).toContainText("Primary Ping disabled");
+  await expect(card.locator(".publicMonitoringWarnings")).toHaveCount(0);
   await expect(
     card.getByLabel("Current resources for Shared edge"),
   ).toBeVisible();
@@ -634,6 +648,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     "(47 GiB)",
   ]);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(card.locator(".publicMonitoringWarnings")).toHaveCount(1);
   const resourceMetrics = card.locator(".vpsMonitorMetric");
   for (const index of [0, 1, 2]) {
     await expect(
@@ -647,15 +662,25 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   await expect(card).not.toContainText("reported cores");
   await expect(card.getByText("TCP", { exact: true })).toBeVisible();
   await expect(card.getByText("Unlimited", { exact: false })).toBeVisible();
-  const cardBilling = card.getByText("Billing", { exact: true }).locator("..");
+  const cardBilling = card.locator('[data-fact-kind="billing"]');
   await expect(cardBilling).toContainText("35.00 ¥/m");
   await expect(cardBilling).toContainText("Renews day 15");
+  await expect(cardBilling.locator("em")).toHaveCount(0);
   await expect(
     card.locator(".publicMonitoringTraffic").getByRole("meter"),
   ).toHaveCount(0);
-  const cardUptime = card.getByText("Uptime", { exact: true }).locator("..");
+  await expect(
+    card
+      .locator(".publicMonitoringTraffic")
+      .getByLabel("Traffic quota is unlimited"),
+  ).toBeVisible();
+  await expect(
+    card.locator(".publicMonitoringTraffic .unlimitedTrafficTrack > span"),
+  ).toHaveCSS("background-image", /repeating-linear-gradient/);
+  const cardUptime = card.locator('[data-fact-kind="uptime"]');
   await expect(cardUptime).toContainText("8d");
   await expect(card).not.toContainText("/ 0 B");
+  await expect(card).not.toContainText(/No (recent|continuous) history/);
   await expect(
     card.getByLabel("Primary Ping Customer gateway: Disabled"),
   ).toBeVisible();
@@ -669,17 +694,19 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   await expect(detail.getByText("AMD EPYC 7B13")).toBeVisible();
   await expect(detail.getByText("6.12.38-amd64")).toBeVisible();
   await expect(detail.getByText("KVM", { exact: true })).toBeVisible();
-  await expect(
-    detail.getByText(/35\.00 ¥\/m · Renews day 15/).first(),
-  ).toBeVisible();
+  const detailBilling = detail
+    .getByLabel("Current shared VPS evidence")
+    .locator('[data-fact-kind="billing"]');
+  await expect(detailBilling).toContainText("Billing · Renews day 15");
+  await expect(detailBilling).toContainText("35.00 ¥/m");
   await expect(detail.getByText("Swap", { exact: true })).toBeVisible();
   await expect(detail.getByText("None", { exact: true })).toBeVisible();
   await expect(
     detail.getByText("RAM", { exact: true }).locator(".."),
-  ).toHaveAttribute("title", "25.0% (3.7 GiB)");
+  ).toHaveAttribute("title", /RAM: 25\.0% \(3\.7 GiB\).*used-memory/);
   await expect(
     detail.getByText("Reported filesystems", { exact: true }).locator(".."),
-  ).toHaveAttribute("title", "40.0% (47 GiB)");
+  ).toHaveAttribute("title", /40\.0% \(47 GiB\).*filesystem capacity/);
   await expect(detail.locator(".publicMonitoringDetailHeader")).toContainText(
     "Online · Warning · Updated just now · Read-only history",
   );
@@ -725,10 +752,17 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   ).toBeVisible();
   await detail
     .getByRole("button", {
-      name: /Resources resources · network · traffic/,
+      name: /Resources .*network · traffic/i,
     })
     .click();
-  await expect(detail.getByText("Unlimited", { exact: true })).toBeVisible();
+  await expect(
+    detail.getByText("Unlimited", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    detail
+      .locator(".publicMonitoringTrafficCycle")
+      .getByLabel("Traffic quota is unlimited"),
+  ).toBeVisible();
   await expect(detail).not.toContainText("/ 0 B");
   await expect(detail).not.toContainText(
     "Traffic is accounted for, but no quota is configured.",
@@ -754,7 +788,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     memoryChart.locator("table.srOnly tbody tr").last().locator("td").nth(1),
-  ).toHaveText("No data");
+  ).toHaveText("-");
   const diskChart = detail.getByRole("region", {
     name: "Aggregate reported disk used chart",
   });
@@ -763,6 +797,18 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   );
 
   const range = detail.getByRole("group", { name: "History range" });
+  await expect(detail.locator(".publicMonitoringHistoryControls")).toHaveCSS(
+    "border-top-width",
+    "2px",
+  );
+  await expect(detail.locator(".publicMonitoringHistoryControls")).toHaveCSS(
+    "margin-top",
+    "24px",
+  );
+  await expect(detail.locator(".publicMonitoringHistoryControls")).toHaveCSS(
+    "padding-top",
+    "20px",
+  );
   await expect(range.getByRole("button")).toHaveText([
     "15m",
     "1h",
@@ -800,11 +846,20 @@ test("public monitoring does not present an unconfigured traffic cycle as author
   await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
 
   const card = page.getByRole("link", {
-    name: /Shared edge · Online shared monitoring card/,
+    name: /Shared edge · Online(?: · Warning)? shared monitoring card/,
   });
+  const traffic = card.locator(".publicMonitoringTraffic.unconfigured");
+  await expect(traffic.getByText("Traffic", { exact: true })).toBeVisible();
   await expect(
-    card.getByText("Traffic unconfigured", { exact: true }),
+    traffic.getByText("Unconfigured", { exact: true }),
   ).toBeVisible();
+  await expect(traffic.locator(".vpsMonitorMetricTrack.missing")).toBeVisible();
+  await expect(traffic).toHaveCSS("background-color", /rgb/);
+  await expect(card.getByText("Online", { exact: true })).toBeVisible();
+  await expect(card.getByText("Online · Warning", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(card.locator(".publicMonitoringWarnings")).toHaveCount(0);
   await card.click();
 
   const detail = page.getByRole("region", {
@@ -857,19 +912,109 @@ test("public monitoring identifies the most-used finite directional traffic quot
   await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
 
   const card = page.getByRole("link", {
-    name: /Shared edge · Online shared monitoring card/,
+    name: /Shared edge · Online · Warning shared monitoring card/,
   });
-  await expect(card.locator(".publicMonitoringTraffic")).toContainText(
-    "TX limit 125%",
+  await expect(
+    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence > strong"),
+  ).toHaveText("1000 B / 800 B · TX · 125%");
+  await expect(
+    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence"),
+  ).not.toContainText(/observed/i);
+  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(card.locator(".publicMonitoringTraffic > small")).toContainText(
+    "RX 2.0 KiB · TX 1000 B",
   );
   await card.click();
 
   const cycle = page.locator(".publicMonitoringTrafficCycle");
   await expect(cycle.getByText("TX 800 B", { exact: true })).toBeVisible();
+  await expect(
+    cycle.getByText("Observed RX", { exact: true }).locator(".."),
+  ).toContainText("2.0 KiB");
+  await expect(
+    cycle.getByText("Observed TX", { exact: true }).locator(".."),
+  ).toContainText("1000 B");
+  await expect(
+    cycle.getByText("Counted total", { exact: true }).locator(".."),
+  ).toContainText("1000 B");
   await expect(cycle).not.toContainText("Unlimited");
 });
 
-test("public monitoring omits empty billing and system groups even when shared", async ({
+test("public monitoring uses counted directional traffic for an unlimited summary", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { directionalUnlimited: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  const traffic = card.locator(".publicMonitoringTraffic");
+  await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
+    "1000 B / Unlimited · TX",
+  );
+  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(traffic.locator(":scope > small")).toContainText(
+    "RX 2.0 KiB · TX 1000 B",
+  );
+
+  await card.click();
+  const cycle = page.locator(".publicMonitoringTrafficCycle");
+  await expect(
+    cycle.getByText("Observed RX", { exact: true }).locator(".."),
+  ).toContainText("2.0 KiB");
+  await expect(
+    cycle.getByText("Observed TX", { exact: true }).locator(".."),
+  ).toContainText("1000 B");
+  await expect(
+    cycle.getByText("Counted total", { exact: true }).locator(".."),
+  ).toContainText("1000 B");
+});
+
+test("public monitoring presents no-reset accumulation without a synthetic cycle", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { noResetTraffic: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  const traffic = card.locator(".publicMonitoringTraffic");
+  await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText(
+    "Traffic · No reset",
+  );
+  await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
+    "2.9 KiB / 12 KiB · Total · 25.0%",
+  );
+
+  await card.click();
+  const cycle = page.locator(".publicMonitoringTrafficCycle");
+  await expect(
+    cycle.getByText("Traffic · No reset", { exact: true }),
+  ).toBeVisible();
+  await expect(cycle).toContainText("Accumulated total · No reset");
+  await expect(cycle).not.toContainText("Current accounting cycle");
+});
+
+test("public monitoring formats a yearly renewal anchor as month-day", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, {
+    annualBilling: true,
+    supplementalVisibility: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  const billing = card.locator('[data-fact-kind="billing"]');
+  await expect(billing).toContainText("120.00 USD/y");
+  await expect(billing).toContainText("Renews 06-15");
+});
+
+test("public monitoring keeps enabled billing and system facts visible when evidence is missing", async ({
   page,
 }) => {
   await installPublicMonitoringApiMock(page, {
@@ -881,17 +1026,35 @@ test("public monitoring omits empty billing and system groups even when shared",
     name: /Shared edge · Online shared monitoring card/,
   });
   await expect(card).toBeVisible();
-  await expect(card.getByText("Billing", { exact: true })).toHaveCount(0);
-  await expect(card.getByText("Uptime", { exact: true })).toHaveCount(0);
+  await expect(card.locator('[data-fact-kind="billing"]')).toContainText(
+    "Billing-",
+  );
+  await expect(card.locator('[data-fact-kind="uptime"]')).toContainText(
+    "Uptime-",
+  );
   await card.click();
 
   const detail = page.getByRole("region", {
     name: "Read-only history for Shared edge",
   });
   await expect(detail).toBeVisible();
-  await expect(detail.getByText("System", { exact: true })).toHaveCount(0);
-  await expect(detail).not.toContainText("Billing unavailable");
-  await expect(detail).not.toContainText("System information unavailable");
+  const currentEvidence = detail.getByLabel("Current shared VPS evidence");
+  await expect(
+    currentEvidence.locator('[data-fact-kind="billing"]'),
+  ).toContainText("Billing-");
+  await expect(
+    currentEvidence.locator('[data-fact-kind="uptime"]'),
+  ).toContainText("Uptime-");
+  const information = detail.getByLabel("Shared VPS system information");
+  await expect(
+    information.getByRole("heading", { name: "Hardware", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    information.getByRole("heading", { name: "System", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    information.getByRole("heading", { name: "Storage", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("public monitoring mirrors fleet tag, provider, and sort controls when identity is shared", async ({
@@ -1250,22 +1413,28 @@ async function installSharedViewApiMock(page: Page) {
 async function installPublicMonitoringApiMock(
   page: Page,
   {
+    annualBilling = false,
     cardCount = 1,
     detailAllowed = true,
+    directionalUnlimited = false,
     edgeCases = false,
     identityContext = false,
     mixedTrafficQuotas = false,
     networkRateExpected = true,
+    noResetTraffic = false,
     retainTrafficHistory = false,
     supplementalVisibility = edgeCases,
     trafficConfigured = true,
   }: {
+    annualBilling?: boolean;
     cardCount?: number;
     detailAllowed?: boolean;
+    directionalUnlimited?: boolean;
     edgeCases?: boolean;
     identityContext?: boolean;
     mixedTrafficQuotas?: boolean;
     networkRateExpected?: boolean;
+    noResetTraffic?: boolean;
     retainTrafficHistory?: boolean;
     supplementalVisibility?: boolean;
     trafficConfigured?: boolean;
@@ -1358,6 +1527,7 @@ async function installPublicMonitoringApiMock(
       : undefined,
     traffic: {
       configured: true,
+      reset_day: 14,
       cycle_end: new Date(now + 20 * 24 * 60 * 60 * 1_000).toISOString(),
       cycle_percent: 25,
       cycle_start: new Date(now - 10 * 24 * 60 * 60 * 1_000).toISOString(),
@@ -1384,6 +1554,7 @@ async function installPublicMonitoringApiMock(
       cycle: "15",
       disabled: false,
       display: "35.00 ¥/m",
+      period_code: "m",
     };
     card.system_information = {
       architecture: "x86_64",
@@ -1435,6 +1606,31 @@ async function installPublicMonitoringApiMock(
     card.traffic.quota_rx_bytes = 4_000;
     card.traffic.quota_total_bytes = -1;
     card.traffic.quota_tx_bytes = 800;
+    card.traffic.rx_bytes = 0;
+    card.traffic.total_bytes = 1_000;
+    card.traffic.tx_bytes = 1_000;
+  }
+  if (directionalUnlimited && card.traffic) {
+    delete card.traffic.cycle_percent;
+    card.traffic.quota_total_bytes = undefined;
+    card.traffic.quota_tx_bytes = -1;
+    card.traffic.rx_bytes = 0;
+    card.traffic.total_bytes = 1_000;
+    card.traffic.tx_bytes = 1_000;
+  }
+  if (annualBilling) {
+    share.visibility.billing = true;
+    card.billing = {
+      cycle: "15-06",
+      disabled: false,
+      display: "120.00 USD/y",
+      period_code: "y",
+    };
+  }
+  if (noResetTraffic && card.traffic) {
+    card.traffic.reset_day = -1;
+    delete card.traffic.cycle_start;
+    delete card.traffic.cycle_end;
   }
   const detail: PublicMonitoringDetailView = {
     client_key: publicClientKey,

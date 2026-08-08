@@ -80,7 +80,10 @@ import {
 } from "../searchExpression";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { scrollIntoViewWithMotion } from "../motion";
-import { formatByteRateFromBitsPerSecond } from "../telemetryMetrics";
+import {
+  formatByteRateFromBitsPerSecond,
+  formatUptime,
+} from "../telemetryMetrics";
 import {
   resolveNetworkRateInterfaces,
   selectedNetworkRates,
@@ -123,6 +126,9 @@ import {
   lifecycleOutcomeFailureReason,
   runPanelAction,
   shortId,
+  trafficLimitingQuota,
+  trafficQuotaState,
+  trafficUnlimitedQuota,
   type VpsNameDisplayMode,
 } from "../utils";
 import {
@@ -173,15 +179,24 @@ import type {
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
+  TelemetryUptimeRecord,
   TagMutationResponse,
   TagView,
   VpsRuleValueRecord,
 } from "../types";
 
 type FleetDetailTab =
-  "Overview" | "Telemetry" | "Traffic & Rules" | "Jobs" | "Network" | "Config";
+  | "Overview"
+  | "Telemetry"
+  | "Traffic & Rules"
+  | "Jobs"
+  | "Network"
+  | "Config";
 type FleetSelectionStatsMode =
-  "telemetry" | "network" | "overview" | "capabilities";
+  | "telemetry"
+  | "network"
+  | "overview"
+  | "capabilities";
 
 type FleetMutationTargetSnapshot = {
   agent: AgentView;
@@ -325,6 +340,7 @@ export function FleetWorkspace({
   telemetryNetworkRates,
   telemetryRollups,
   telemetryTunnels,
+  telemetryUptimes,
   privilegeMaterial,
   wsState,
 }: {
@@ -422,6 +438,7 @@ export function FleetWorkspace({
   telemetryNetworkRates: TelemetryNetworkRateRecord[];
   telemetryRollups: TelemetryRollupRecord[];
   telemetryTunnels: TelemetryTunnelRecord[];
+  telemetryUptimes: TelemetryUptimeRecord[];
   privilegeMaterial: PrivilegeMaterial | null;
   wsState: string;
 }) {
@@ -507,6 +524,10 @@ export function FleetWorkspace({
     () => latestTelemetryTunnelsByClient(telemetryTunnels),
     [telemetryTunnels],
   );
+  const uptimeByClient = useMemo(
+    () => new Map(telemetryUptimes.map((record) => [record.client_id, record])),
+    [telemetryUptimes],
+  );
   const trafficByClient = useMemo(
     () =>
       new Map(trafficAccounting.map((record) => [record.client_id, record])),
@@ -553,9 +574,11 @@ export function FleetWorkspace({
   const latestRollupsRef = useRef(latestRollups);
   const trafficByClientRef = useRef(trafficByClient);
   const policyAlertsByClientRef = useRef(policyAlertsByClient);
+  const uptimeByClientRef = useRef(uptimeByClient);
   latestRollupsRef.current = latestRollups;
   trafficByClientRef.current = trafficByClient;
   policyAlertsByClientRef.current = policyAlertsByClient;
+  uptimeByClientRef.current = uptimeByClient;
   const tagDisplayOrder = useMemo(() => buildTagDisplayOrder(tags), [tags]);
   const fleetSubpageBase = activeSubpage.split(":")[0];
   const policyFilterClientId = activeSubpage.startsWith("policies:id:")
@@ -701,6 +724,38 @@ export function FleetWorkspace({
             <small>{formatLastSeenDetail(agent.last_seen_at)}</small>
           </span>
         ),
+      },
+      {
+        id: "uptime",
+        header: "Uptime",
+        size: 112,
+        minSize: 96,
+        sortValue: (agent) =>
+          uptimeByClientRef.current.get(agent.id)?.uptime_secs ?? -1,
+        searchValue: (agent) => {
+          const uptime = uptimeByClientRef.current.get(agent.id);
+          return uptime
+            ? `${formatUptime(uptime.uptime_secs)} ${formatCompactTime(uptime.observed_at)}`
+            : "";
+        },
+        cell: (agent) => {
+          const uptime = uptimeByClientRef.current.get(agent.id);
+          const uptimeTitle = uptime
+            ? `Agent-reported uptime ${formatUptime(uptime.uptime_secs)}; sampled ${formatCompactTime(uptime.observed_at)}`
+            : "Agent-reported uptime is unavailable; - is shown";
+          return (
+            <span className="historyPrimary" title={uptimeTitle}>
+              <strong title={uptimeTitle}>
+                {formatUptime(uptime?.uptime_secs)}
+              </strong>
+              {uptime ? (
+                <small
+                  title={`Uptime sample time ${formatCompactTime(uptime.observed_at)}`}
+                >{`Observed ${formatCompactTime(uptime.observed_at)}`}</small>
+              ) : null}
+            </span>
+          );
+        },
       },
       {
         id: "tags",
@@ -866,9 +921,7 @@ export function FleetWorkspace({
           `${agent.internal_build_number ?? ""} ${agent.arch ?? ""} ${agent.capabilities.privilege_mode}`,
         cell: (agent) => (
           <span className="historyPrimary">
-            <strong>
-              {agent.internal_build_number ?? "Unknown"}
-            </strong>
+            <strong>{agent.internal_build_number ?? "Unknown"}</strong>
             <small>
               {[agent.arch ?? "arch unknown", privilegeModeLabel(agent)]
                 .filter(Boolean)
@@ -1245,8 +1298,10 @@ export function FleetWorkspace({
             `${fleetTargetLabel(deleteSnapshot.targets, outcome.client_id)}: ${outcome.error ?? "the API did not confirm deletion"}`,
         ),
         ...completed.flatMap((outcome) => [
-          ...outcome.response!.runtime_sync
-            .filter((runtimeOutcome) => runtimeOutcome.status !== "queued")
+          ...outcome
+            .response!.runtime_sync.filter(
+              (runtimeOutcome) => runtimeOutcome.status !== "queued",
+            )
             .map(
               (runtimeOutcome) =>
                 `Tunnel cleanup for ${runtimeOutcome.client_id}: ${dispatchFailureReason(
@@ -1255,8 +1310,10 @@ export function FleetWorkspace({
                   "Runtime apply job",
                 )}`,
             ),
-          ...outcome.response!.post_commit
-            .filter((postCommitOutcome) => postCommitOutcome.status !== "completed")
+          ...outcome
+            .response!.post_commit.filter(
+              (postCommitOutcome) => postCommitOutcome.status !== "completed",
+            )
             .map((postCommitOutcome) =>
               lifecycleOutcomeFailureReason(postCommitOutcome, "VPS deletion"),
             ),
@@ -1287,10 +1344,10 @@ export function FleetWorkspace({
           completed.length === 0
             ? "danger"
             : failureReasons.length > 0
-            ? "warning"
-            : queuedSyncs.length > 0
-              ? "progress"
-              : "success",
+              ? "warning"
+              : queuedSyncs.length > 0
+                ? "progress"
+                : "success",
       });
       clearDeleteReview();
       if (completed.length > 0) {
@@ -1505,6 +1562,7 @@ export function FleetWorkspace({
               latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
               latestRollup={latestRollups.get(agent.id) ?? null}
               latestTunnels={latestTunnels.get(agent.id) ?? []}
+              uptime={uptimeByClient.get(agent.id) ?? null}
               mutateTagsForAgents={mutateTagsForAgents}
               onCreateJob={onCreateJob}
               onLoadJobOutputs={onLoadJobOutputs}
@@ -1776,9 +1834,8 @@ function FleetInstancesPanel({
   const previousDeleteOutcomeRef = useRef<string | null>(null);
   const mutationOutcomeMessage =
     lifecycleError ?? deleteError ?? deleteFeedback?.message ?? null;
-  const mutationOutcomeTone = lifecycleError || deleteError
-    ? "danger"
-    : (deleteFeedback?.tone ?? "info");
+  const mutationOutcomeTone =
+    lifecycleError || deleteError ? "danger" : (deleteFeedback?.tone ?? "info");
   const stableAgents = useMemo(
     () =>
       [...agents].sort(
@@ -1844,6 +1901,7 @@ function FleetInstancesPanel({
           tags: false,
           traffic_now: false,
           traffic_state: false,
+          uptime: false,
         }}
         defaultPageSize={20}
         empty={
@@ -2011,6 +2069,7 @@ function FleetInstanceDetail({
   telemetryTunnelsTruncated,
   trafficAccounting,
   trafficAccountingTruncated,
+  uptime,
   vpsRuleValues,
   vpsRuleValuesTruncated,
   vpsNameDisplayMode,
@@ -2062,6 +2121,7 @@ function FleetInstanceDetail({
   telemetryTunnelsTruncated: boolean;
   trafficAccounting: TrafficAccountingRecord | null;
   trafficAccountingTruncated: boolean;
+  uptime: TelemetryUptimeRecord | null;
   vpsRuleValues: VpsRuleValueRecord[];
   vpsRuleValuesTruncated: boolean;
   vpsNameDisplayMode: VpsNameDisplayMode;
@@ -2481,6 +2541,23 @@ function FleetInstanceDetail({
               icon={<AlertTriangle size={18} />}
               label="Contact evidence"
               value={displayState.detail}
+            />
+            <DetailLine
+              icon={<Clock3 size={18} />}
+              label="Uptime"
+              value={
+                <span
+                  title={
+                    uptime
+                      ? `Agent-reported uptime ${formatUptime(uptime.uptime_secs)}; sampled ${formatCompactTime(uptime.observed_at)}`
+                      : "Agent-reported uptime is unavailable; - is shown"
+                  }
+                >
+                  {uptime
+                    ? `${formatUptime(uptime.uptime_secs)} · observed ${formatCompactTime(uptime.observed_at)}`
+                    : "-"}
+                </span>
+              }
             />
             <DetailLine
               icon={<Network size={18} />}
@@ -3311,15 +3388,23 @@ function TrafficRulesDetail({
         <span>
           <strong>Cycle start</strong>
           <span>
-            {trafficAccounting?.cycle_start ??
-              (trafficMissingUnderCap ? unknownTrafficPage : "not configured")}
+            {trafficAccounting?.reset_day === -1
+              ? "No reset"
+              : (trafficAccounting?.cycle_start ??
+                (trafficMissingUnderCap
+                  ? unknownTrafficPage
+                  : "not configured"))}
           </span>
         </span>
         <span>
           <strong>Cycle end</strong>
           <span>
-            {trafficAccounting?.cycle_end ??
-              (trafficMissingUnderCap ? unknownTrafficPage : "not configured")}
+            {trafficAccounting?.reset_day === -1
+              ? "No reset"
+              : (trafficAccounting?.cycle_end ??
+                (trafficMissingUnderCap
+                  ? unknownTrafficPage
+                  : "not configured"))}
           </span>
         </span>
         <span>
@@ -4900,9 +4985,7 @@ export function FleetAlertPolicyManager({
     onEditorOpenChange?.(focusedEditor && open);
   }
 
-  function enterPolicyWorkflow(
-    surface: "editor" | "details" | "table",
-  ) {
+  function enterPolicyWorkflow(surface: "editor" | "details" | "table") {
     invalidatePolicyReviewGeneration();
     setDryRunPending(false);
     setDryRunPreview(null);
@@ -5850,7 +5933,10 @@ function IssuedPolicyAlertList({
 }
 
 type NotificationRegistryTab =
-  "channels" | "webhooks" | "deliveries" | "maintenance";
+  | "channels"
+  | "webhooks"
+  | "deliveries"
+  | "maintenance";
 
 export function FleetNotificationsHub({
   agents,
@@ -6558,9 +6644,7 @@ export function FleetAlertNotificationManager({
     }
   }
 
-  function requestEnableChannels(
-    rows: FleetAlertNotificationChannelRecord[],
-  ) {
+  function requestEnableChannels(rows: FleetAlertNotificationChannelRecord[]) {
     if (channelWorkflowBusy) return;
     const disabledRows = rows.filter((channel) => !channel.enabled);
     if (disabledRows.length === 0) return;
@@ -6846,8 +6930,8 @@ export function FleetAlertNotificationManager({
         {
           label: "Delivery",
           value: saveSnapshot
-              ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
-              : "-",
+            ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
+            : "-",
         },
         {
           label: "Cooldown",
@@ -8384,8 +8468,7 @@ export function WebhookRuleManager({
       description: (rows) =>
         `Disable ${rows.filter((rule) => rule.enabled).length} enabled selected webhook rule records.`,
       disabled: (rows) =>
-        webhookWorkflowBusy ||
-        rows.filter((rule) => rule.enabled).length === 0,
+        webhookWorkflowBusy || rows.filter((rule) => rule.enabled).length === 0,
       icon: <PowerOff size={14} />,
       onSelect: (rows) => {
         enterWebhookWorkflow("table");
@@ -8514,9 +8597,9 @@ export function WebhookRuleManager({
                     />
                   </div>
                 ) : null}
-                  <button
-                    className="secondaryAction"
-                    type="button"
+                <button
+                  className="secondaryAction"
+                  type="button"
                   onClick={() => {
                     const rule = rules.find(
                       (candidate) => candidate.id === detailRuleId,
@@ -9838,26 +9921,23 @@ function cycleUsageSummary(
   if (!traffic) {
     return "not configured";
   }
-  if (traffic.cycle_percent == null) {
-    return traffic.state === "incomplete"
-      ? "incomplete"
-      : formatBytes(traffic.total_bytes);
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) {
+    const percent =
+      limitingQuota.percent >= 100
+        ? limitingQuota.percent.toFixed(0)
+        : limitingQuota.percent.toFixed(1);
+    return `${formatBytes(limitingQuota.used)} / ${formatBytes(limitingQuota.quota)} · ${limitingQuota.direction} · ${percent}%`;
   }
-  const quotaLabel =
-    traffic.quota_total_bytes != null
-      ? `${formatBytes(traffic.total_bytes)} / ${formatBytes(
-          traffic.quota_total_bytes,
-        )}`
-      : traffic.quota_tx_bytes != null && traffic.tx_bytes >= traffic.rx_bytes
-        ? `${formatBytes(traffic.tx_bytes)} TX / ${formatBytes(
-            traffic.quota_tx_bytes,
-          )} TX`
-        : traffic.quota_rx_bytes != null
-          ? `${formatBytes(traffic.rx_bytes)} RX / ${formatBytes(
-              traffic.quota_rx_bytes,
-            )} RX`
-          : formatBytes(traffic.total_bytes);
-  return `${quotaLabel} · ${traffic.cycle_percent.toFixed(0)}%`;
+  if (trafficQuotaState(traffic) === "unlimited") {
+    const unlimited = trafficUnlimitedQuota(traffic);
+    return unlimited
+      ? `${formatBytes(unlimited.used)} / Unlimited · ${unlimited.direction}`
+      : `${formatBytes(traffic.total_bytes)} / Unlimited`;
+  }
+  return traffic.state === "incomplete"
+    ? "incomplete"
+    : formatBytes(traffic.total_bytes);
 }
 
 function trafficStateForClient(
@@ -9907,6 +9987,13 @@ function quotaSummary(
   if (!traffic) {
     return "not set";
   }
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) {
+    return `${limitingQuota.direction} ${formatBytes(limitingQuota.quota)}`;
+  }
+  if (trafficQuotaState(traffic) === "unlimited") {
+    return "Unlimited";
+  }
   const parts = [
     traffic.quota_total_bytes == null
       ? null
@@ -9924,6 +10011,9 @@ function quotaSummary(
 function resetDaySummary(
   traffic: TrafficAccountingRecord | null | undefined,
 ): string {
+  if (traffic?.reset_day === -1) {
+    return "No reset";
+  }
   if (!traffic?.reset_day) {
     return "not set";
   }
@@ -10404,7 +10494,7 @@ function tunnelRowClass(tunnel: TelemetryTunnelRecord): string {
 
 function formatTunnelRuntime(tunnel: TelemetryTunnelRecord): string {
   const state = tunnel.operstate ?? "state unknown";
-  const mtu = typeof tunnel.mtu === "number" ? `mtu ${tunnel.mtu}` : "mtu n/a";
+  const mtu = typeof tunnel.mtu === "number" ? `mtu ${tunnel.mtu}` : "mtu -";
   return `${state}; ${mtu}`;
 }
 
@@ -10440,9 +10530,9 @@ function formatTunnelLatencyDetail(tunnel: TelemetryTunnelRecord): string {
     .join(", ");
   return [
     addressFamilyLabel(tunnel.latency_primary_family),
-    tunnel.latency_target ?? "target n/a",
+    tunnel.latency_target ?? "target -",
     `checked ${checked}`,
-    windows || "windows n/a",
+    windows || "windows -",
     telemetryReasonLabel(tunnel.latency_reason),
   ]
     .filter(Boolean)

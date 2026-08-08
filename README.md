@@ -292,8 +292,9 @@ cards use a materially denser metric hierarchy. Both show exact values alongside
 visual CPU, RAM, aggregate disk, load, network, configured traffic, and primary
 Ping evidence. When explicitly shared and available, the same compact surfaces
 also present billing-cycle, uptime, connection-count, swap, and normalized
-system-information evidence without inventing empty facts. Selecting a card
-opens the canonical VPS detail with shared
+system-information evidence. Shared-but-unavailable current facts remain
+visible as `-`, while data groups outside the immutable share scope remain
+absent. Selecting a card opens the canonical VPS detail with shared
 **15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
 **All**, and **Custom** ranges. 15m is the rolling realtime view.
 

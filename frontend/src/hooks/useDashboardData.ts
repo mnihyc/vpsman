@@ -945,6 +945,7 @@ export function useDashboardData(activeView: ActiveView) {
     updateSuiteConfig: system.updateSuiteConfig,
     telemetryNetworkRates: fleet.telemetryNetworkRates,
     telemetryTunnels: fleet.telemetryTunnels,
+    telemetryUptimes: fleet.telemetryUptimes,
     tags: inventory.tags,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,

@@ -11,6 +11,7 @@ build = "build.rs"
 anyhow.workspace = true
 base64.workspace = true
 bytes.workspace = true
+chrono.workspace = true
 clap.workspace = true
 hex.workspace = true
 libc.workspace = true
@@ -26,6 +27,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vpsman-common = { path = "../common" }
+
+[dev-dependencies]
+chrono-tz.workspace = true
 
 [build-dependencies]
 vpsman-build-support = { path = "../../build/build-support" }

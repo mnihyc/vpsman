@@ -14,6 +14,7 @@ use crate::{
         MonitoringShareVisitorRecord, PingRollupView, PingTargetAssignmentRecord,
         PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
         PingTargetRecord, PingTargetRuntimeSyncView, PingTargetView, SystemInformationView,
+        TelemetryUptimeView,
     },
     model_monitoring::CurrentPingView,
     repository::Repository,
@@ -30,6 +31,92 @@ use crate::{
 };
 
 impl Repository {
+    pub(crate) async fn list_latest_telemetry_uptimes(&self) -> Result<Vec<TelemetryUptimeView>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut visible_clients = memory
+                    .agents
+                    .read()
+                    .await
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<HashSet<_>>();
+                let hidden_clients = memory.hidden_clients.read().await;
+                visible_clients.retain(|client_id| !hidden_clients.contains(client_id));
+                drop(hidden_clients);
+                let samples = memory.telemetry_samples.read().await;
+                let mut latest = HashMap::<String, &crate::model::TelemetrySampleView>::new();
+                for sample in samples
+                    .iter()
+                    .filter(|sample| visible_clients.contains(&sample.client_id))
+                {
+                    let replace = latest.get(&sample.client_id).is_none_or(|current| {
+                        parse_timestamp_unix(&sample.observed_at)
+                            .cmp(&parse_timestamp_unix(&current.observed_at))
+                            .then_with(|| sample.id.cmp(&current.id))
+                            .is_gt()
+                    });
+                    if replace {
+                        latest.insert(sample.client_id.clone(), sample);
+                    }
+                }
+                let mut uptimes = latest
+                    .into_values()
+                    .filter_map(telemetry_uptime_from_sample)
+                    .collect::<Vec<_>>();
+                uptimes.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+                Ok(uptimes)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client.id AS client_id,
+                        latest.observed_at::text AS observed_at,
+                        latest.payload
+                    FROM visible_clients client
+                    JOIN LATERAL (
+                        SELECT sample.observed_at, sample.payload
+                        FROM telemetry_samples sample
+                        WHERE sample.client_id = client.id
+                        ORDER BY sample.observed_at DESC, sample.id DESC
+                        LIMIT 1
+                    ) latest ON TRUE
+                    ORDER BY client.id
+                    "#,
+                )
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .filter_map(|row| {
+                        let client_id = match row.try_get("client_id") {
+                            Ok(client_id) => client_id,
+                            Err(error) => return Some(Err(error.into())),
+                        };
+                        let observed_at = match row.try_get("observed_at") {
+                            Ok(observed_at) => observed_at,
+                            Err(error) => return Some(Err(error.into())),
+                        };
+                        let payload: serde_json::Value = match row.try_get("payload") {
+                            Ok(payload) => payload,
+                            Err(error) => return Some(Err(error.into())),
+                        };
+                        payload
+                            .get("uptime_secs")
+                            .and_then(serde_json::Value::as_u64)
+                            .map(|uptime_secs| {
+                                Ok(TelemetryUptimeView {
+                                    client_id,
+                                    uptime_secs,
+                                    observed_at,
+                                })
+                            })
+                    })
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn monitoring_system_information_for_clients(
         &self,
         client_ids: &[String],
@@ -53,8 +140,10 @@ impl Repository {
                     let latest_sample = samples
                         .iter()
                         .filter(|sample| sample.client_id == *client_id)
-                        .max_by_key(|sample| {
-                            parse_timestamp_unix(&sample.observed_at).unwrap_or(0)
+                        .max_by(|left, right| {
+                            parse_timestamp_unix(&left.observed_at)
+                                .cmp(&parse_timestamp_unix(&right.observed_at))
+                                .then_with(|| left.id.cmp(&right.id))
                         });
                     let uptime_secs = latest_sample
                         .and_then(|sample| sample.payload.get("uptime_secs"))
@@ -96,7 +185,7 @@ impl Repository {
                         SELECT sample.payload, sample.observed_at
                         FROM telemetry_samples sample
                         WHERE sample.client_id = client.id
-                        ORDER BY sample.observed_at DESC
+                        ORDER BY sample.observed_at DESC, sample.id DESC
                         LIMIT 1
                     ) latest ON TRUE
                     WHERE client.id = ANY($1::text[])
@@ -2092,6 +2181,16 @@ impl Repository {
             }
         }
     }
+}
+
+fn telemetry_uptime_from_sample(
+    sample: &crate::model::TelemetrySampleView,
+) -> Option<TelemetryUptimeView> {
+    Some(TelemetryUptimeView {
+        client_id: sample.client_id.clone(),
+        uptime_secs: sample.payload.get("uptime_secs")?.as_u64()?,
+        observed_at: sample.observed_at.clone(),
+    })
 }
 
 impl Repository {

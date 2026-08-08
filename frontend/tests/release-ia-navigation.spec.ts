@@ -1980,7 +1980,12 @@ test("fleet monitor keeps unsettled evidence neutral while cards load", async ({
     "the loading lifecycle is density-independent and is covered once on desktop",
   );
   await installConsoleApiMock(page, {
-    agentListOverride: makeMonitorAgentFixtures(2).slice(1),
+    agentListOverride: makeMonitorAgentFixtures(2)
+      .slice(1)
+      .map((agent) => ({
+        ...agent,
+        last_seen_at: new Date().toISOString(),
+      })),
     monitoringCardsDelayMs: 1_500,
   });
   await gotoConsoleHome(page);
@@ -2026,14 +2031,48 @@ test("fleet monitor keeps an intentionally empty rate selection out of partial t
     .getByRole("button", { name: "Comfortable" })
     .click();
   await expect(card.locator(".vpsMonitorFlowFacts strong")).toHaveText([
-    "n/a",
-    "n/a",
+    "-",
+    "-",
   ]);
   await expect(card.locator(".telemetryEvidence")).not.toHaveClass(/partial/);
   await expect(card.locator(".telemetryEvidence")).toHaveAttribute(
     "title",
     /no live-rate interfaces are selected/i,
   );
+});
+
+test("fleet monitor presents no-reset traffic as accumulated evidence", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the no-reset card and detail contract is density-independent",
+  );
+  await installConsoleApiMock(page, {
+    trafficAccountingOverride: {
+      cycle_end: null,
+      cycle_start: null,
+      reset_day: -1,
+    },
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const card = page
+    .getByLabel("VPS monitor cards")
+    .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
+    .first();
+  await expect(
+    card.locator(".vpsMonitorTraffic .vpsMonitorRowHeading"),
+  ).toHaveText("Traffic · No reset");
+  await card.click();
+  await page.getByRole("tab", { name: "Resources", exact: true }).click();
+  const traffic = page.locator(".vpsMonitoringTrafficCycle");
+  await expect(
+    traffic.getByText("Traffic · No reset", { exact: true }),
+  ).toBeVisible();
+  await expect(traffic).toContainText("Accumulated total · No reset");
+  await expect(traffic).not.toContainText("Current accounting cycle");
 });
 
 test("fleet monitor cards are density-distinct and open canonical detail", async ({
@@ -2064,14 +2103,30 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
     .first();
   await expect(edgeCard).toHaveAttribute("role", "link");
-  await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
-    "Renews day 14",
+  const billingFact = edgeCard.locator(
+    '.vpsMonitorAuxFacts > [data-fact-kind="billing"]',
   );
+  await expect(billingFact.locator(".vpsMonitorAuxFactHeading")).toHaveText(
+    "Billing · Renews day 14",
+  );
+  await expect(billingFact.locator(":scope > strong")).toHaveText("29.90 ¥/m");
+  await expect(billingFact.locator(":scope > em")).toHaveCount(0);
+  await expect(
+    monitor
+      .locator(".vpsMonitorCard", { hasText: "core-fra-02" })
+      .locator('[data-fact-kind="billing"]'),
+  ).toContainText("Billing-");
+  await expect(
+    edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"] strong'),
+  ).toHaveText("8d 3h");
   const snapshot = page.getByLabel("VPS cards current totals");
   await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
   await expect(
     edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
   ).toHaveAttribute("title", /\S/);
+  await expect(
+    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
+  ).toContainText("· Total · 80.3%");
   await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveAttribute(
     "title",
     /\S/,
@@ -2147,7 +2202,11 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(edgeCard.locator(".vpsMonitorAuxFacts")).toContainText(
     "Renews day 14",
   );
+  await expect(
+    edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"] strong'),
+  ).toHaveText("8d 3h");
   await expect(edgeCard).toContainText("1m load");
+  await expect(edgeCard).not.toContainText(/No (recent|continuous) history/);
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
   for (const index of [0, 1, 2]) {
@@ -7120,7 +7179,7 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
   ).toBeVisible();
   const endpointVisibility = page.getByLabel("Plan endpoint visibility");
   await expect(
-    endpointVisibility.getByText("N/A", { exact: true }),
+    endpointVisibility.getByText("-", { exact: true }),
   ).toBeVisible();
   await expect(
     endpointVisibility.getByText("Unavailable", { exact: true }),

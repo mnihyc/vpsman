@@ -16,7 +16,6 @@ use vpsman_common::{
     NETWORK_SPEED_TEST_MIN_MAX_BYTES, NETWORK_SPEED_TEST_MIN_PORT,
     NETWORK_SPEED_TEST_MIN_RATE_LIMIT_KBPS, NETWORK_SPEED_TEST_UNLIMITED_MAX_BYTES,
     NETWORK_SPEED_TEST_UNLIMITED_RATE_LIMIT_KBPS, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
-    NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
 };
 
 use crate::{
@@ -446,7 +445,7 @@ pub(crate) struct NetworkTrafficImportVnstatCommand {
     pub(crate) interfaces: Vec<String>,
     #[arg(
         long,
-        help = "Import start as YYYY-MM-DD (UTC midnight) or an RFC3339 timestamp aligned to a minute; the end is derived from each interface's first live agent sample"
+        help = "Import start as YYYY-MM-DD (UTC midnight) or an RFC3339 timestamp aligned to a minute; there is no fixed lookback limit, and the end is derived from each interface's first live agent sample"
     )]
     pub(crate) start: String,
     #[arg(long, default_value = "VPSMAN_SUPER_PASSWORD")]
@@ -817,12 +816,6 @@ pub(crate) fn network_traffic_import_vnstat(
         start_unix < now_minute,
         "--start must be before the current UTC minute"
     );
-    anyhow::ensure!(
-        now_minute.saturating_sub(start_unix) <= NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
-        "--start exceeds the {} day import lookback limit",
-        NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS / 86_400
-    );
-
     let operation = JobCommand::NetworkTrafficImportVnstat {
         interfaces: request.interfaces,
         start_unix,

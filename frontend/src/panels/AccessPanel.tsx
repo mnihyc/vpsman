@@ -2742,7 +2742,7 @@ function GatewaySessionDetailGrid({
       <span>
         <strong>Noise key</strong>
         <span className="monoValue">
-          {session.noise_public_key_hex ?? "n/a"}
+          {session.noise_public_key_hex ?? "-"}
         </span>
       </span>
     </div>

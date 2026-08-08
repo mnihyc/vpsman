@@ -3420,7 +3420,7 @@ type VpsRuleFieldDefinition = {
 
 const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
   {
-    help: "Optional card price, for example 29.90 CNY/m, 48 USD/q, 60 €/hy, or 99 USD/y. Use -1 to explicitly disable billing display as n/a; blank leaves the rule unset.",
+    help: "Optional card price, for example 29.90 CNY/m, 48 USD/q, 60 €/hy, or 99 USD/y. Use -1 to explicitly disable billing and show -; blank leaves the rule unset.",
     inputMode: "text",
     key: "billing.price",
     label: "Billing price",
@@ -3448,14 +3448,14 @@ const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
     placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
   },
   {
-    help: "Day of month in UTC when the traffic accounting cycle resets.",
+    help: "Day of month in UTC when traffic accounting resets. Use -1 for no reset; totals then accumulate from the earliest retained counter evidence.",
     inputMode: "numeric",
     key: "traffic.reset_day",
     label: "Reset day",
-    placeholder: "14",
+    placeholder: "-1 or 14",
   },
   {
-    help: "Total monthly traffic quota. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
+    help: "Total traffic quota for the current reset cycle or accumulated no-reset total. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
     inputMode: "text",
     key: "traffic.quota.total",
     label: "Total quota",
@@ -3663,7 +3663,8 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   traffic_selector_direction_overlap:
     "Do not select the same interface direction more than once.",
   traffic_selector_too_many_items: "Use no more than 16 selectors.",
-  traffic_reset_day_invalid: "Traffic reset day must be between 1 and 31.",
+  traffic_reset_day_invalid:
+    "Traffic reset day must be -1 for no reset, or between 1 and 31.",
   byte_size_empty: "Enter a traffic quota or use -1 for unlimited.",
   byte_size_number_invalid: "Traffic quota must start with a valid number.",
   byte_size_unit_invalid: "Use bytes, KB, MB, GB, TB, KiB, MiB, GiB, or TiB.",

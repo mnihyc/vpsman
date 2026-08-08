@@ -979,8 +979,8 @@ export type TrafficAccountingRecord = {
   client_id: string;
   selectors: string[];
   selector_hash: string;
-  cycle_start: string;
-  cycle_end: string;
+  cycle_start: string | null;
+  cycle_end: string | null;
   reset_day: number | null;
   rx_bytes: number;
   tx_bytes: number;

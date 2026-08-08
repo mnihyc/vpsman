@@ -42,6 +42,25 @@ export function formatByteCount(value: number): string {
   return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;
 }
 
+export function formatUptime(value: number | null | undefined): string {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value) ||
+    value < 0
+  ) {
+    return "-";
+  }
+  const seconds = Math.floor(value);
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
+}
+
 export function resourceMetricDefinition(metric: DashboardResourceMetric): string {
   switch (metric) {
     case "cpu_load":

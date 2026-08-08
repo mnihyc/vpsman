@@ -53,7 +53,7 @@ async fn monitoring_system_information_combines_session_facts_with_latest_uptime
         .write()
         .await
         .push(crate::model::TelemetrySampleView {
-            id: Uuid::new_v4(),
+            id: Uuid::from_u128(1),
             client_id: "v-1".to_string(),
             observed_at: "200".to_string(),
             cpu_load_1: 0.1,
@@ -74,6 +74,31 @@ async fn monitoring_system_information_combines_session_facts_with_latest_uptime
     assert_eq!(view.virtualization.as_deref(), Some("kvm"));
     assert_eq!(view.uptime_secs, Some(86_400));
     assert_eq!(view.uptime_observed_at.as_deref(), Some("200"));
+
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(crate::model::TelemetrySampleView {
+            id: Uuid::from_u128(2),
+            client_id: "v-1".to_string(),
+            observed_at: "200".to_string(),
+            cpu_load_1: 0.1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            payload: serde_json::json!({"uptime_secs": 25}),
+        });
+    let same_timestamp_view = repo
+        .monitoring_system_information_for_clients(&["v-1".to_string()])
+        .await
+        .unwrap()
+        .remove("v-1")
+        .unwrap();
+    assert_eq!(same_timestamp_view.uptime_secs, Some(25));
+    assert_eq!(
+        same_timestamp_view.uptime_observed_at.as_deref(),
+        Some("200")
+    );
 
     memory.agents.write().await[0].status = "revoked".to_string();
     assert!(repo
@@ -114,6 +139,105 @@ async fn monitoring_system_information_combines_session_facts_with_latest_uptime
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn latest_telemetry_uptimes_use_only_each_visible_clients_newest_raw_sample() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    memory.agents.write().await.extend([
+        uptime_test_agent("visible-reboot"),
+        uptime_test_agent("newest-missing"),
+        uptime_test_agent("same-timestamp"),
+        uptime_test_agent("hidden-deleted"),
+    ]);
+    memory
+        .hidden_clients
+        .write()
+        .await
+        .insert("hidden-deleted".to_string());
+
+    let sample = |id: u128, client_id: &str, observed_at: &str, payload: serde_json::Value| {
+        crate::model::TelemetrySampleView {
+            id: Uuid::from_u128(id),
+            client_id: client_id.to_string(),
+            observed_at: observed_at.to_string(),
+            cpu_load_1: 0.1,
+            memory_total_bytes: 1,
+            memory_available_bytes: 1,
+            payload,
+        }
+    };
+    memory.telemetry_samples.write().await.extend([
+        sample(
+            1,
+            "visible-reboot",
+            "100",
+            serde_json::json!({"uptime_secs": 50_000}),
+        ),
+        sample(
+            2,
+            "visible-reboot",
+            "200",
+            serde_json::json!({"uptime_secs": 25}),
+        ),
+        sample(
+            3,
+            "newest-missing",
+            "100",
+            serde_json::json!({"uptime_secs": 9_000}),
+        ),
+        sample(4, "newest-missing", "200", serde_json::json!({})),
+        sample(
+            5,
+            "same-timestamp",
+            "250",
+            serde_json::json!({"uptime_secs": 900}),
+        ),
+        sample(
+            6,
+            "same-timestamp",
+            "250",
+            serde_json::json!({"uptime_secs": 12}),
+        ),
+        sample(
+            7,
+            "hidden-deleted",
+            "300",
+            serde_json::json!({"uptime_secs": 300}),
+        ),
+        sample(8, "orphan", "400", serde_json::json!({"uptime_secs": 400})),
+    ]);
+
+    let uptimes = repo.list_latest_telemetry_uptimes().await.unwrap();
+
+    assert_eq!(uptimes.len(), 2);
+    assert_eq!(uptimes[0].client_id, "same-timestamp");
+    assert_eq!(uptimes[0].uptime_secs, 12);
+    assert_eq!(uptimes[0].observed_at, "250");
+    assert_eq!(uptimes[1].client_id, "visible-reboot");
+    assert_eq!(uptimes[1].uptime_secs, 25);
+    assert_eq!(uptimes[1].observed_at, "200");
+}
+
+fn uptime_test_agent(client_id: &str) -> crate::model::AgentView {
+    crate::model::AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    }
 }
 
 #[test]

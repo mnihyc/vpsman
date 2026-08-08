@@ -2,19 +2,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use sqlx::{Postgres, QueryBuilder, Row};
+use sqlx::{postgres::PgRow, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 use vpsman_common::{
     NetworkTrafficImportBucket, NetworkTrafficImportResult,
     NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
-    NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
 };
 
 use crate::{model_alert_policies::TrafficCounterSampleRecord, repository::Repository};
 
 pub(crate) const VNSTAT_IMPORT_SOURCE_PREFIX: &str = "vnstat_import:";
 const IMPORT_INSERT_BATCH_ROWS: usize = 500;
-const MAX_IMPORT_BUCKET_DURATION_SECS: u64 = 25 * 60 * 60;
+const MAX_IMPORT_BUCKET_DURATION_SECS: u64 = 367 * 24 * 60 * 60;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NetworkTrafficImportSummary {
@@ -26,16 +25,36 @@ struct PreparedInterfaceImport {
     interface: String,
     start_unix: u64,
     end_unix: u64,
-    samples: Vec<TrafficCounterSampleRecord>,
+    initial_rx_bytes: i64,
+    initial_tx_bytes: i64,
+    include_baseline: bool,
+    import_source: String,
+    traffic: ExpandedMinuteTraffic,
     imported_rx_bytes: u64,
     imported_tx_bytes: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct MinuteAssignment {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MinuteAssignmentSegment {
+    start_unix: u64,
+    end_unix: u64,
     rx_bytes: u64,
     tx_bytes: u64,
-    assigned: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ExpandedMinuteTraffic {
+    segments: Vec<MinuteAssignmentSegment>,
+    minute_count: u64,
+    total_rx_bytes: u64,
+    total_tx_bytes: u64,
+}
+
+#[derive(Debug)]
+struct AssignmentState {
+    assigned_rx_bytes: u64,
+    assigned_tx_bytes: u64,
+    uncovered_ranges: Vec<(u64, u64)>,
 }
 
 impl Repository {
@@ -56,7 +75,7 @@ impl Repository {
                 let prepared = prepare_imports(
                     job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &samples,
                 )?;
-                apply_memory_import(&mut samples, client_id, &prepared);
+                apply_memory_import(&mut samples, client_id, &prepared)?;
                 let epochs = samples
                     .iter()
                     .filter(|sample| {
@@ -93,48 +112,10 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_traffic_counter_streams(&mut tx, client_id).await?;
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        client_id,
-                        source_kind,
-                        interface,
-                        observed_at::text AS observed_at,
-                        EXTRACT(EPOCH FROM observed_at)::bigint AS observed_unix,
-                        rx_bytes,
-                        tx_bytes,
-                        rx_counter_epoch,
-                        tx_counter_epoch,
-                        sample_source
-                    FROM traffic_counter_samples
-                    WHERE client_id = $1
-                      AND source_kind = 'host'
-                      AND interface = ANY($2::text[])
-                    ORDER BY interface ASC, observed_at ASC
-                    FOR UPDATE
-                    "#,
+                let existing = load_postgres_import_boundary_samples(
+                    &mut tx, client_id, interfaces, start_unix,
                 )
-                .bind(client_id)
-                .bind(interfaces)
-                .fetch_all(&mut *tx)
                 .await?;
-                let existing = rows
-                    .into_iter()
-                    .map(|row| {
-                        Ok(TrafficCounterSampleRecord {
-                            client_id: row.try_get("client_id")?,
-                            source_kind: row.try_get("source_kind")?,
-                            interface: row.try_get("interface")?,
-                            observed_at: row.try_get("observed_at")?,
-                            observed_unix: row.try_get("observed_unix")?,
-                            rx_bytes: row.try_get("rx_bytes")?,
-                            tx_bytes: row.try_get("tx_bytes")?,
-                            rx_counter_epoch: row.try_get("rx_counter_epoch")?,
-                            tx_counter_epoch: row.try_get("tx_counter_epoch")?,
-                            sample_source: row.try_get("sample_source")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
                 let prepared = prepare_imports(
                     job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &existing,
                 )?;
@@ -153,7 +134,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 for item in &prepared {
-                    insert_postgres_import_samples(&mut tx, &item.samples).await?;
+                    insert_postgres_import_samples(&mut tx, client_id, item).await?;
                     recompute_postgres_stream_epochs(&mut tx, client_id, &item.interface).await?;
                 }
                 sqlx::query(
@@ -181,6 +162,107 @@ impl Repository {
             }
         }
     }
+}
+
+const POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL: &str = r#"
+    SELECT
+        boundary.client_id,
+        boundary.source_kind,
+        boundary.interface,
+        boundary.observed_at::text AS observed_at,
+        EXTRACT(EPOCH FROM boundary.observed_at)::bigint AS observed_unix,
+        boundary.rx_bytes,
+        boundary.tx_bytes,
+        boundary.rx_counter_epoch,
+        boundary.tx_counter_epoch,
+        boundary.sample_source
+    FROM unnest($2::text[]) AS requested(interface)
+    CROSS JOIN LATERAL (
+        SELECT sample.*
+        FROM traffic_counter_samples sample
+        WHERE sample.client_id = $1
+          AND sample.source_kind = 'host'
+          AND sample.interface = requested.interface
+          AND sample.sample_source NOT LIKE 'vnstat_import:%'
+          AND sample.observed_at < to_timestamp($3::double precision)
+        ORDER BY sample.observed_at DESC
+        LIMIT 1
+        FOR UPDATE OF sample
+    ) boundary
+    ORDER BY boundary.interface ASC
+"#;
+
+const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
+    SELECT
+        boundary.client_id,
+        boundary.source_kind,
+        boundary.interface,
+        boundary.observed_at::text AS observed_at,
+        EXTRACT(EPOCH FROM boundary.observed_at)::bigint AS observed_unix,
+        boundary.rx_bytes,
+        boundary.tx_bytes,
+        boundary.rx_counter_epoch,
+        boundary.tx_counter_epoch,
+        boundary.sample_source
+    FROM unnest($2::text[]) AS requested(interface)
+    CROSS JOIN LATERAL (
+        SELECT sample.*
+        FROM traffic_counter_samples sample
+        WHERE sample.client_id = $1
+          AND sample.source_kind = 'host'
+          AND sample.interface = requested.interface
+          AND sample.sample_source NOT LIKE 'vnstat_import:%'
+          AND sample.observed_at >= to_timestamp($3::double precision)
+        ORDER BY sample.observed_at ASC
+        LIMIT 1
+        FOR UPDATE OF sample
+    ) boundary
+    ORDER BY boundary.interface ASC
+"#;
+
+pub(crate) async fn load_postgres_import_boundary_samples(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    client_id: &str,
+    interfaces: &[String],
+    start_unix: u64,
+) -> Result<Vec<TrafficCounterSampleRecord>> {
+    let start_unix = i64::try_from(start_unix)
+        .context("network_traffic_import_invalid:start_timestamp_out_of_range")?;
+    let mut samples = Vec::with_capacity(interfaces.len().saturating_mul(2));
+    for query in [
+        POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL,
+        POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL,
+    ] {
+        let rows = sqlx::query(query)
+            .bind(client_id)
+            .bind(interfaces)
+            .bind(start_unix)
+            .fetch_all(&mut **tx)
+            .await?;
+        samples.extend(
+            rows.into_iter()
+                .map(postgres_traffic_counter_sample)
+                .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?,
+        );
+    }
+    Ok(samples)
+}
+
+fn postgres_traffic_counter_sample(
+    row: PgRow,
+) -> std::result::Result<TrafficCounterSampleRecord, sqlx::Error> {
+    Ok(TrafficCounterSampleRecord {
+        client_id: row.try_get("client_id")?,
+        source_kind: row.try_get("source_kind")?,
+        interface: row.try_get("interface")?,
+        observed_at: row.try_get("observed_at")?,
+        observed_unix: row.try_get("observed_unix")?,
+        rx_bytes: row.try_get("rx_bytes")?,
+        tx_bytes: row.try_get("tx_bytes")?,
+        rx_counter_epoch: row.try_get("rx_counter_epoch")?,
+        tx_counter_epoch: row.try_get("tx_counter_epoch")?,
+        sample_source: row.try_get("sample_source")?,
+    })
 }
 
 pub(crate) async fn lock_postgres_traffic_counter_streams(
@@ -223,11 +305,7 @@ fn validate_result_contract(
         start_unix >= 60 && start_unix.is_multiple_of(60),
         "start_not_minute_aligned",
     )?;
-    invalid_ensure(
-        floor_minute(now_unix).saturating_sub(start_unix)
-            <= NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS,
-        "range_exceeds_lookback_limit",
-    )?;
+    invalid_ensure(start_unix < floor_minute(now_unix), "start_not_in_past")?;
 
     let requested = interfaces.iter().cloned().collect::<BTreeSet<_>>();
     invalid_ensure(requested.len() == interfaces.len(), "duplicate_interface")?;
@@ -332,8 +410,9 @@ fn prepare_imports(
             "vnstat_source_not_updated_through_live_boundary",
         )?;
 
-        let (minute_deltas, imported_rx_bytes, imported_tx_bytes) =
-            expand_buckets_to_minutes(buckets, interface, start_unix, first_live_unix)?;
+        let traffic = expand_buckets_to_minutes(buckets, interface, start_unix, first_live_unix)?;
+        let imported_rx_bytes = traffic.total_rx_bytes;
+        let imported_tx_bytes = traffic.total_tx_bytes;
         let previous = existing
             .iter()
             .filter(|sample| {
@@ -344,52 +423,49 @@ fn prepare_imports(
                     && sample.observed_unix < i64::try_from(start_unix).unwrap_or(i64::MAX)
             })
             .max_by_key(|sample| sample.observed_unix);
-        let mut cumulative_rx = previous.map_or(0, |sample| sample.rx_bytes);
-        let mut cumulative_tx = previous.map_or(0, |sample| sample.tx_bytes);
+        let cumulative_rx = previous.map_or(0, |sample| sample.rx_bytes);
+        let cumulative_tx = previous.map_or(0, |sample| sample.tx_bytes);
         invalid_ensure(
             cumulative_rx >= 0 && cumulative_tx >= 0,
             "negative_counter_baseline",
         )?;
-
-        let mut samples =
-            Vec::with_capacity(minute_deltas.len() + if previous.is_none() { 1 } else { 0 });
-        if previous.is_none() {
-            samples.push(sample_record(
-                client_id,
-                interface,
-                start_unix - 60,
-                0,
-                0,
-                &import_source,
-            )?);
-        }
-        for (observed_unix, rx_delta, tx_delta) in minute_deltas {
-            cumulative_rx =
-                cumulative_rx
-                    .checked_add(i64::try_from(rx_delta).context(
-                        "network_traffic_import_invalid:rx_delta_exceeds_database_range",
-                    )?)
-                    .context("network_traffic_import_invalid:rx_counter_overflow")?;
-            cumulative_tx =
-                cumulative_tx
-                    .checked_add(i64::try_from(tx_delta).context(
-                        "network_traffic_import_invalid:tx_delta_exceeds_database_range",
-                    )?)
-                    .context("network_traffic_import_invalid:tx_counter_overflow")?;
-            samples.push(sample_record(
-                client_id,
-                interface,
-                observed_unix,
-                cumulative_rx,
-                cumulative_tx,
-                &import_source,
-            )?);
-        }
+        cumulative_rx
+            .checked_add(
+                i64::try_from(imported_rx_bytes)
+                    .context("network_traffic_import_invalid:rx_delta_exceeds_database_range")?,
+            )
+            .context("network_traffic_import_invalid:rx_counter_overflow")?;
+        cumulative_tx
+            .checked_add(
+                i64::try_from(imported_tx_bytes)
+                    .context("network_traffic_import_invalid:tx_delta_exceeds_database_range")?,
+            )
+            .context("network_traffic_import_invalid:tx_counter_overflow")?;
+        sample_record(
+            client_id,
+            interface,
+            start_unix - 60,
+            cumulative_rx,
+            cumulative_tx,
+            &import_source,
+        )?;
+        sample_record(
+            client_id,
+            interface,
+            first_live_unix - 60,
+            cumulative_rx,
+            cumulative_tx,
+            &import_source,
+        )?;
         prepared.push(PreparedInterfaceImport {
             interface: interface.clone(),
             start_unix,
             end_unix: first_live_unix,
-            samples,
+            initial_rx_bytes: cumulative_rx,
+            initial_tx_bytes: cumulative_tx,
+            include_baseline: previous.is_none(),
+            import_source: import_source.clone(),
+            traffic,
             imported_rx_bytes,
             imported_tx_bytes,
         });
@@ -397,14 +473,12 @@ fn prepare_imports(
     Ok(prepared)
 }
 
-type MinuteTrafficRows = Vec<(u64, u64, u64)>;
-
 fn expand_buckets_to_minutes(
     buckets: &[NetworkTrafficImportBucket],
     interface: &str,
     start_unix: u64,
     end_unix: u64,
-) -> Result<(MinuteTrafficRows, u64, u64)> {
+) -> Result<ExpandedMinuteTraffic> {
     invalid_ensure(end_unix > start_unix, "empty_range")?;
     let mut relevant = Vec::new();
     let mut identities = BTreeSet::new();
@@ -460,96 +534,94 @@ fn expand_buckets_to_minutes(
         span_start <= start_unix && span_end >= end_unix,
         "vnstat_history_does_not_cover_range",
     )?;
-    let span_minutes = usize::try_from((span_end - span_start) / 60)
-        .context("network_traffic_import_invalid:minute_count_out_of_range")?;
-    let maximum_span_minutes = usize::try_from(
-        (NETWORK_TRAFFIC_IMPORT_MAX_LOOKBACK_SECS + 2 * MAX_IMPORT_BUCKET_DURATION_SECS) / 60,
-    )
-    .unwrap_or(usize::MAX);
-    invalid_ensure(
-        span_minutes <= maximum_span_minutes,
-        "minute_count_exceeds_limit",
-    )?;
-    let mut assignments = vec![MinuteAssignment::default(); span_minutes];
+    let mut assignments = Vec::new();
 
     for bucket in relevant {
-        let first = usize::try_from((bucket.start_unix - span_start) / 60)
-            .context("network_traffic_import_invalid:bucket_index_out_of_range")?;
-        let count = usize::try_from(u64::from(bucket.duration_secs) / 60)
-            .context("network_traffic_import_invalid:bucket_duration_out_of_range")?;
-        let last = first
-            .checked_add(count)
-            .context("network_traffic_import_invalid:bucket_index_overflow")?;
-        invalid_ensure(last <= assignments.len(), "bucket_index_out_of_range")?;
-
-        let cells = &mut assignments[first..last];
-        let assigned_rx = cells.iter().try_fold(0_u64, |total, cell| {
-            total
-                .checked_add(cell.rx_bytes)
-                .context("network_traffic_import_invalid:assigned_rx_overflow")
-        })?;
-        let assigned_tx = cells.iter().try_fold(0_u64, |total, cell| {
-            total
-                .checked_add(cell.tx_bytes)
-                .context("network_traffic_import_invalid:assigned_tx_overflow")
-        })?;
+        let bucket_end = bucket
+            .start_unix
+            .checked_add(u64::from(bucket.duration_secs))
+            .context("network_traffic_import_invalid:bucket_end_overflow")?;
+        let state = assignment_state_in_range(&assignments, bucket.start_unix, bucket_end)?;
         invalid_ensure(
-            assigned_rx <= bucket.rx_bytes && assigned_tx <= bucket.tx_bytes,
+            state.assigned_rx_bytes <= bucket.rx_bytes
+                && state.assigned_tx_bytes <= bucket.tx_bytes,
             "finer_bucket_total_exceeds_coarse_bucket",
         )?;
-        let uncovered = cells.iter().filter(|cell| !cell.assigned).count();
+        let uncovered = state
+            .uncovered_ranges
+            .iter()
+            .try_fold(0_u64, |total, (start, end)| {
+                total
+                    .checked_add((end - start) / 60)
+                    .context("network_traffic_import_invalid:uncovered_minute_count_overflow")
+            })?;
         if uncovered == 0 {
             invalid_ensure(
-                assigned_rx == bucket.rx_bytes && assigned_tx == bucket.tx_bytes,
+                state.assigned_rx_bytes == bucket.rx_bytes
+                    && state.assigned_tx_bytes == bucket.tx_bytes,
                 "fully_covered_bucket_total_mismatch",
             )?;
             continue;
         }
 
-        distribute_residual(
-            cells,
-            bucket.rx_bytes - assigned_rx,
-            bucket.tx_bytes - assigned_tx,
+        let added = distribute_residual(
+            &state.uncovered_ranges,
+            bucket.rx_bytes - state.assigned_rx_bytes,
+            bucket.tx_bytes - state.assigned_tx_bytes,
             uncovered,
         )?;
+        merge_assignment_segments(&mut assignments, added)?;
     }
 
-    let requested_first = usize::try_from((start_unix - span_start) / 60)
-        .context("network_traffic_import_invalid:requested_start_index_out_of_range")?;
-    let requested_count = usize::try_from((end_unix - start_unix) / 60)
-        .context("network_traffic_import_invalid:requested_minute_count_out_of_range")?;
-    let requested_last = requested_first
-        .checked_add(requested_count)
-        .context("network_traffic_import_invalid:requested_end_index_overflow")?;
-    invalid_ensure(
-        requested_last <= assignments.len(),
-        "requested_range_out_of_bounds",
-    )?;
-
-    let mut minute_rows = Vec::with_capacity(requested_count);
+    let mut requested_segments = Vec::new();
+    let mut cursor = start_unix;
     let mut total_rx = 0_u64;
     let mut total_tx = 0_u64;
-    for (offset, cell) in assignments[requested_first..requested_last]
-        .iter()
-        .enumerate()
-    {
-        if !cell.assigned {
-            let gap_unix = start_unix
-                .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX).saturating_mul(60));
-            anyhow::bail!("network_traffic_import_invalid:vnstat_history_gap_at_{gap_unix}");
+    for segment in assignments {
+        if segment.end_unix <= cursor || segment.start_unix >= end_unix {
+            continue;
         }
-        let observed_unix = start_unix
-            .checked_add(u64::try_from(offset).unwrap_or(u64::MAX).saturating_mul(60))
-            .context("network_traffic_import_invalid:minute_timestamp_overflow")?;
+        if segment.start_unix > cursor {
+            anyhow::bail!("network_traffic_import_invalid:vnstat_history_gap_at_{cursor}");
+        }
+        let clipped = MinuteAssignmentSegment {
+            start_unix: cursor.max(segment.start_unix),
+            end_unix: end_unix.min(segment.end_unix),
+            rx_bytes: segment.rx_bytes,
+            tx_bytes: segment.tx_bytes,
+        };
+        let minutes = (clipped.end_unix - clipped.start_unix) / 60;
         total_rx = total_rx
-            .checked_add(cell.rx_bytes)
+            .checked_add(
+                clipped
+                    .rx_bytes
+                    .checked_mul(minutes)
+                    .context("network_traffic_import_invalid:rx_total_overflow")?,
+            )
             .context("network_traffic_import_invalid:rx_total_overflow")?;
         total_tx = total_tx
-            .checked_add(cell.tx_bytes)
+            .checked_add(
+                clipped
+                    .tx_bytes
+                    .checked_mul(minutes)
+                    .context("network_traffic_import_invalid:tx_total_overflow")?,
+            )
             .context("network_traffic_import_invalid:tx_total_overflow")?;
-        minute_rows.push((observed_unix, cell.rx_bytes, cell.tx_bytes));
+        cursor = clipped.end_unix;
+        push_assignment_segment(&mut requested_segments, clipped)?;
+        if cursor == end_unix {
+            break;
+        }
     }
-    Ok((minute_rows, total_rx, total_tx))
+    if cursor < end_unix {
+        anyhow::bail!("network_traffic_import_invalid:vnstat_history_gap_at_{cursor}");
+    }
+    Ok(ExpandedMinuteTraffic {
+        segments: requested_segments,
+        minute_count: (end_unix - start_unix) / 60,
+        total_rx_bytes: total_rx,
+        total_tx_bytes: total_tx,
+    })
 }
 
 fn validate_same_resolution_buckets_do_not_overlap(
@@ -572,27 +644,157 @@ fn validate_same_resolution_buckets_do_not_overlap(
     Ok(())
 }
 
+fn assignment_state_in_range(
+    assignments: &[MinuteAssignmentSegment],
+    start_unix: u64,
+    end_unix: u64,
+) -> Result<AssignmentState> {
+    let mut assigned_rx = 0_u64;
+    let mut assigned_tx = 0_u64;
+    let mut uncovered = Vec::new();
+    let mut cursor = start_unix;
+    for segment in assignments {
+        if segment.end_unix <= start_unix {
+            continue;
+        }
+        if segment.start_unix >= end_unix {
+            break;
+        }
+        let overlap_start = start_unix.max(segment.start_unix);
+        let overlap_end = end_unix.min(segment.end_unix);
+        if cursor < overlap_start {
+            uncovered.push((cursor, overlap_start));
+        }
+        let minutes = (overlap_end - overlap_start) / 60;
+        assigned_rx = assigned_rx
+            .checked_add(
+                segment
+                    .rx_bytes
+                    .checked_mul(minutes)
+                    .context("network_traffic_import_invalid:assigned_rx_overflow")?,
+            )
+            .context("network_traffic_import_invalid:assigned_rx_overflow")?;
+        assigned_tx = assigned_tx
+            .checked_add(
+                segment
+                    .tx_bytes
+                    .checked_mul(minutes)
+                    .context("network_traffic_import_invalid:assigned_tx_overflow")?,
+            )
+            .context("network_traffic_import_invalid:assigned_tx_overflow")?;
+        cursor = cursor.max(overlap_end);
+    }
+    if cursor < end_unix {
+        uncovered.push((cursor, end_unix));
+    }
+    Ok(AssignmentState {
+        assigned_rx_bytes: assigned_rx,
+        assigned_tx_bytes: assigned_tx,
+        uncovered_ranges: uncovered,
+    })
+}
+
 fn distribute_residual(
-    cells: &mut [MinuteAssignment],
+    uncovered_ranges: &[(u64, u64)],
     residual_rx: u64,
     residual_tx: u64,
-    uncovered: usize,
-) -> Result<()> {
-    let uncovered_u64 = u64::try_from(uncovered)
-        .context("network_traffic_import_invalid:uncovered_minute_count_out_of_range")?;
-    invalid_ensure(uncovered_u64 > 0, "uncovered_minute_count_invalid")?;
-    let rx_base = residual_rx / uncovered_u64;
-    let rx_remainder = residual_rx % uncovered_u64;
-    let tx_base = residual_tx / uncovered_u64;
-    let tx_remainder = residual_tx % uncovered_u64;
-    let mut index = 0_u64;
-    for cell in cells.iter_mut().filter(|cell| !cell.assigned) {
-        cell.rx_bytes = rx_base + u64::from(index < rx_remainder);
-        cell.tx_bytes = tx_base + u64::from(index < tx_remainder);
-        cell.assigned = true;
-        index = index.saturating_add(1);
+    uncovered: u64,
+) -> Result<Vec<MinuteAssignmentSegment>> {
+    invalid_ensure(uncovered > 0, "uncovered_minute_count_invalid")?;
+    let rx_base = residual_rx / uncovered;
+    let rx_remainder = residual_rx % uncovered;
+    let tx_base = residual_tx / uncovered;
+    let tx_remainder = residual_tx % uncovered;
+    let mut rank = 0_u64;
+    let mut segments = Vec::new();
+    for &(start_unix, end_unix) in uncovered_ranges {
+        let minutes = (end_unix - start_unix) / 60;
+        let mut cuts = vec![0, minutes];
+        for remainder in [rx_remainder, tx_remainder] {
+            if remainder > rank && remainder < rank.saturating_add(minutes) {
+                cuts.push(remainder - rank);
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        for pair in cuts.windows(2) {
+            let first = pair[0];
+            let last = pair[1];
+            if first == last {
+                continue;
+            }
+            let segment_start = start_unix
+                .checked_add(first.saturating_mul(60))
+                .context("network_traffic_import_invalid:minute_timestamp_overflow")?;
+            let segment_end = start_unix
+                .checked_add(last.saturating_mul(60))
+                .context("network_traffic_import_invalid:minute_timestamp_overflow")?;
+            push_assignment_segment(
+                &mut segments,
+                MinuteAssignmentSegment {
+                    start_unix: segment_start,
+                    end_unix: segment_end,
+                    rx_bytes: rx_base + u64::from(rank + first < rx_remainder),
+                    tx_bytes: tx_base + u64::from(rank + first < tx_remainder),
+                },
+            )?;
+        }
+        rank = rank
+            .checked_add(minutes)
+            .context("network_traffic_import_invalid:uncovered_minute_count_overflow")?;
     }
-    invalid_ensure(index == uncovered_u64, "uncovered_minute_count_changed")
+    invalid_ensure(rank == uncovered, "uncovered_minute_count_changed")?;
+    Ok(segments)
+}
+
+fn merge_assignment_segments(
+    assignments: &mut Vec<MinuteAssignmentSegment>,
+    added: Vec<MinuteAssignmentSegment>,
+) -> Result<()> {
+    let mut existing = std::mem::take(assignments).into_iter().peekable();
+    let mut added = added.into_iter().peekable();
+    while existing.peek().is_some() || added.peek().is_some() {
+        let take_existing = match (existing.peek(), added.peek()) {
+            (Some(left), Some(right)) => left.start_unix <= right.start_unix,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        let segment = if take_existing {
+            existing.next().expect("peeked assignment segment")
+        } else {
+            added.next().expect("peeked added segment")
+        };
+        push_assignment_segment(assignments, segment)?;
+    }
+    Ok(())
+}
+
+fn push_assignment_segment(
+    segments: &mut Vec<MinuteAssignmentSegment>,
+    segment: MinuteAssignmentSegment,
+) -> Result<()> {
+    invalid_ensure(
+        segment.start_unix < segment.end_unix
+            && segment.start_unix.is_multiple_of(60)
+            && segment.end_unix.is_multiple_of(60),
+        "assignment_segment_invalid",
+    )?;
+    if let Some(previous) = segments.last_mut() {
+        invalid_ensure(
+            previous.end_unix <= segment.start_unix,
+            "assignment_segment_overlap",
+        )?;
+        if previous.end_unix == segment.start_unix
+            && previous.rx_bytes == segment.rx_bytes
+            && previous.tx_bytes == segment.tx_bytes
+        {
+            previous.end_unix = segment.end_unix;
+            return Ok(());
+        }
+    }
+    segments.push(segment);
+    Ok(())
 }
 
 fn sample_record(
@@ -624,11 +826,107 @@ fn sample_record(
     })
 }
 
+struct PreparedImportSampleIter<'a> {
+    client_id: &'a str,
+    prepared: &'a PreparedInterfaceImport,
+    segment_index: usize,
+    next_unix: u64,
+    cumulative_rx: i64,
+    cumulative_tx: i64,
+    baseline_pending: bool,
+}
+
+impl PreparedInterfaceImport {
+    fn samples<'a>(&'a self, client_id: &'a str) -> PreparedImportSampleIter<'a> {
+        PreparedImportSampleIter {
+            client_id,
+            prepared: self,
+            segment_index: 0,
+            next_unix: self.start_unix,
+            cumulative_rx: self.initial_rx_bytes,
+            cumulative_tx: self.initial_tx_bytes,
+            baseline_pending: self.include_baseline,
+        }
+    }
+}
+
+impl Iterator for PreparedImportSampleIter<'_> {
+    type Item = Result<TrafficCounterSampleRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.baseline_pending {
+            self.baseline_pending = false;
+            return Some(sample_record(
+                self.client_id,
+                &self.prepared.interface,
+                self.prepared.start_unix - 60,
+                self.cumulative_rx,
+                self.cumulative_tx,
+                &self.prepared.import_source,
+            ));
+        }
+        if self.next_unix >= self.prepared.end_unix {
+            return None;
+        }
+        while self
+            .prepared
+            .traffic
+            .segments
+            .get(self.segment_index)
+            .is_some_and(|segment| segment.end_unix <= self.next_unix)
+        {
+            self.segment_index += 1;
+        }
+        let Some(segment) = self.prepared.traffic.segments.get(self.segment_index) else {
+            return Some(Err(anyhow::anyhow!(
+                "network_traffic_import_invalid:prepared_history_gap"
+            )));
+        };
+        if segment.start_unix > self.next_unix || segment.end_unix <= self.next_unix {
+            return Some(Err(anyhow::anyhow!(
+                "network_traffic_import_invalid:prepared_history_gap"
+            )));
+        }
+        self.cumulative_rx = match i64::try_from(segment.rx_bytes)
+            .ok()
+            .and_then(|delta| self.cumulative_rx.checked_add(delta))
+        {
+            Some(value) => value,
+            None => {
+                return Some(Err(anyhow::anyhow!(
+                    "network_traffic_import_invalid:rx_counter_overflow"
+                )))
+            }
+        };
+        self.cumulative_tx = match i64::try_from(segment.tx_bytes)
+            .ok()
+            .and_then(|delta| self.cumulative_tx.checked_add(delta))
+        {
+            Some(value) => value,
+            None => {
+                return Some(Err(anyhow::anyhow!(
+                    "network_traffic_import_invalid:tx_counter_overflow"
+                )))
+            }
+        };
+        let observed_unix = self.next_unix;
+        self.next_unix = self.next_unix.saturating_add(60);
+        Some(sample_record(
+            self.client_id,
+            &self.prepared.interface,
+            observed_unix,
+            self.cumulative_rx,
+            self.cumulative_tx,
+            &self.prepared.import_source,
+        ))
+    }
+}
+
 fn apply_memory_import(
     samples: &mut Vec<TrafficCounterSampleRecord>,
     client_id: &str,
     prepared: &[PreparedInterfaceImport],
-) {
+) -> Result<()> {
     let interfaces = prepared
         .iter()
         .map(|item| item.interface.as_str())
@@ -640,11 +938,14 @@ fn apply_memory_import(
             && is_vnstat_import_source(&sample.sample_source))
     });
     for item in prepared {
-        samples.extend(item.samples.iter().cloned());
+        for sample in item.samples(client_id) {
+            samples.push(sample?);
+        }
     }
     for interface in interfaces {
         recompute_memory_stream_epochs(samples, client_id, interface);
     }
+    Ok(())
 }
 
 fn recompute_memory_stream_epochs(
@@ -684,33 +985,50 @@ fn recompute_memory_stream_epochs(
 
 async fn insert_postgres_import_samples(
     tx: &mut sqlx::Transaction<'_, Postgres>,
+    client_id: &str,
+    prepared: &PreparedInterfaceImport,
+) -> Result<()> {
+    let mut chunk = Vec::with_capacity(IMPORT_INSERT_BATCH_ROWS);
+    for sample in prepared.samples(client_id) {
+        chunk.push(sample?);
+        if chunk.len() == IMPORT_INSERT_BATCH_ROWS {
+            insert_postgres_import_sample_chunk(tx, &chunk).await?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        insert_postgres_import_sample_chunk(tx, &chunk).await?;
+    }
+    Ok(())
+}
+
+async fn insert_postgres_import_sample_chunk(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
     samples: &[TrafficCounterSampleRecord],
 ) -> Result<()> {
-    for chunk in samples.chunks(IMPORT_INSERT_BATCH_ROWS) {
-        let mut builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO traffic_counter_samples (client_id, source_kind, interface, observed_at, rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source) ",
-        );
-        builder.push_values(chunk, |mut values, sample| {
-            let observed_at = Utc
-                .timestamp_opt(sample.observed_unix, 0)
-                .single()
-                .expect("validated import timestamp");
-            values
-                .push_bind(&sample.client_id)
-                .push_bind(&sample.source_kind)
-                .push_bind(&sample.interface)
-                .push_bind(observed_at)
-                .push_bind(sample.rx_bytes)
-                .push_bind(sample.tx_bytes)
-                .push_bind(sample.rx_counter_epoch)
-                .push_bind(sample.tx_counter_epoch)
-                .push_bind(&sample.sample_source);
-        });
-        builder.push(
-            " ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET rx_bytes = EXCLUDED.rx_bytes, tx_bytes = EXCLUDED.tx_bytes, rx_counter_epoch = EXCLUDED.rx_counter_epoch, tx_counter_epoch = EXCLUDED.tx_counter_epoch, sample_source = EXCLUDED.sample_source",
-        );
-        builder.build().execute(&mut **tx).await?;
-    }
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "INSERT INTO traffic_counter_samples (client_id, source_kind, interface, observed_at, rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source) ",
+    );
+    builder.push_values(samples, |mut values, sample| {
+        let observed_at = Utc
+            .timestamp_opt(sample.observed_unix, 0)
+            .single()
+            .expect("validated import timestamp");
+        values
+            .push_bind(&sample.client_id)
+            .push_bind(&sample.source_kind)
+            .push_bind(&sample.interface)
+            .push_bind(observed_at)
+            .push_bind(sample.rx_bytes)
+            .push_bind(sample.tx_bytes)
+            .push_bind(sample.rx_counter_epoch)
+            .push_bind(sample.tx_counter_epoch)
+            .push_bind(&sample.sample_source);
+    });
+    builder.push(
+        " ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET rx_bytes = EXCLUDED.rx_bytes, tx_bytes = EXCLUDED.tx_bytes, rx_counter_epoch = EXCLUDED.rx_counter_epoch, tx_counter_epoch = EXCLUDED.tx_counter_epoch, sample_source = EXCLUDED.sample_source",
+    );
+    builder.build().execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -782,7 +1100,7 @@ async fn recompute_postgres_stream_epochs(
 fn import_summary(prepared: &[PreparedInterfaceImport]) -> NetworkTrafficImportSummary {
     let minutes = prepared
         .iter()
-        .map(|item| (item.end_unix - item.start_unix) / 60)
+        .map(|item| item.traffic.minute_count)
         .sum::<u64>();
     let rx = prepared
         .iter()

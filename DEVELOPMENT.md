@@ -120,7 +120,7 @@ Every update must keep these boundaries explicit:
   transport and must share the same authorization, gateway-ACK binding, and
   evidence semantics rather than becoming a second control model.
 - Keep periodic fleet refreshes on `/api/v1/fleet/snapshot`: `live` carries the
-  five frequently refreshed sources and `full` adds the existing detail
+  six frequently refreshed sources and `full` adds the existing detail
   sources. Preserve the global 15-second cadence and its existing triggers,
   keep each source in an independent data/error envelope, and do not
   reintroduce browser-side request fan-out for these refreshes.
@@ -226,7 +226,13 @@ Every update must keep these boundaries explicit:
   traffic-counter sample model, never as a selectable runtime backend. Derive
   the import end independently from each interface's first retained live agent
   sample, preserve that live boundary, and replace only prior vnStat-imported
-  rows when an operator reruns the import.
+  rows when an operator reruns the import. Do not impose a fixed-day lookback:
+  accept any past UTC minute fully covered by the retained five-minute, hourly,
+  daily, monthly, or yearly database rows, and keep historical minute expansion,
+  rerun boundary discovery, and PostgreSQL insertion bounded in memory.
+- Keep `traffic.reset_day=-1` as the explicit no-reset accounting mode. It has
+  no synthetic cycle boundaries and derives usage from all retained valid
+  deltas; `1..31` and an unset reset day retain their existing meanings.
 - Keep declared-tunnel automatic reachability and manual Network probes in the
   existing `network_observations` model. Automatic records have no job/sequence
   link and must carry source, endpoint side, topology identity, packet/latency
@@ -523,12 +529,15 @@ Do not conclude when the push succeeds:
   sample count is zero, and uptime's observation time is exposed only with a
   valid uptime value.
 - **Category:** public boundary. **Decision:** billing and normalized system
-  information are independent opt-in share groups. Public output omits missing
-  facts and allowlists only display-safe fields; it never forwards hostname,
-  addresses, raw host files, capabilities, build/process identities, or
-  per-interface evidence. Recoverably revoked VPSs retain the same public-safe
-  system facts as the canonical visible-client projection; hidden or deleted
-  VPSs do not.
+  information are independent opt-in share groups. A disabled visibility group
+  is absent; an enabled group retains its standard current-fact structure and
+  uses `-` for evidence that was not reported. Named domain states such as
+  `Unlimited`, `Unconfigured`, `Disabled`, `None`, and an explicitly disabled
+  billing value remain distinct from missing evidence. Public output allowlists
+  only display-safe fields; it never forwards hostname, addresses, raw host
+  files, capabilities, build/process identities, or per-interface evidence.
+  Recoverably revoked VPSs retain the same public-safe system facts as the
+  canonical visible-client projection; hidden or deleted VPSs do not.
 - **Category:** traffic truthfulness. **Decision:** unconfigured current
   accounting exposes no retained totals, cycle, or quota as current. Retained
   counter history can still be queried but is explicitly labeled as prior

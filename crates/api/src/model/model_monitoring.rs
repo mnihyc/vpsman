@@ -378,6 +378,8 @@ pub(crate) struct PublicBillingPlanView {
     pub(crate) disabled: bool,
     pub(crate) display: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) period_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cycle: Option<String>,
 }
 
@@ -497,6 +499,8 @@ pub(crate) struct PublicNetworkPointView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PublicTrafficMetricView {
     pub(crate) configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reset_day: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cycle_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

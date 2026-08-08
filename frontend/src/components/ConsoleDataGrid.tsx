@@ -164,7 +164,10 @@ export function ConsoleDataGrid<T>({
     preferences.columnSizing ?? {},
   );
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(
-    preferences.columnVisibility ?? defaultColumnVisibility ?? {},
+    {
+      ...(defaultColumnVisibility ?? {}),
+      ...(preferences.columnVisibility ?? {}),
+    },
   );
   const [columnOrder, setColumnOrder] = useState<string[]>(
     preferences.columnOrder ?? [],

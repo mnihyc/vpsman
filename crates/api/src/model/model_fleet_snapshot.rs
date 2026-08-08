@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     model::{
         AgentView, FleetAlertView, FleetSummary, TelemetryNetworkRateView, TelemetryRollupView,
-        TelemetryTunnelView,
+        TelemetryTunnelView, TelemetryUptimeView,
     },
     model_alert_notifications::{
         FleetAlertNotificationChannelView, FleetAlertNotificationDeliveryView,
@@ -51,6 +51,7 @@ pub(crate) struct FleetSnapshotResponse {
     pub(crate) telemetry_rollups: FleetSnapshotSource<Vec<TelemetryRollupView>>,
     pub(crate) telemetry_network_rates: FleetSnapshotSource<Vec<TelemetryNetworkRateView>>,
     pub(crate) telemetry_tunnels: FleetSnapshotSource<Vec<TelemetryTunnelView>>,
+    pub(crate) telemetry_uptimes: FleetSnapshotSource<Vec<TelemetryUptimeView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alerts: Option<FleetSnapshotSource<Vec<FleetAlertView>>>,
     #[serde(skip_serializing_if = "Option::is_none")]

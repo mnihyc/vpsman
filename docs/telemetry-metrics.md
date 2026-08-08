@@ -127,7 +127,7 @@ per-interface evidence: raw interface diagnostics, APIs, and CSV remain
 complete.
 
 If the default reference has no configured `traffic.selectors`, aggregate RX
-and TX display as **n/a**. That is an intentional empty selection, not partial
+and TX display as **-**. That is an intentional empty selection, not partial
 telemetry. An explicit all or non-empty interface selection with missing
 samples remains incomplete and is surfaced as such.
 
@@ -156,6 +156,10 @@ state; they never silently sum arbitrary interfaces as billing traffic.
 - RX, TX, and total bytes remain exact even when usage exceeds a quota. A visual
   progress track may fill completely, but the numeric percentage and totals may
   exceed 100%.
+- `traffic.reset_day=-1` keeps accounting configured without a calendar reset.
+  Its total is the sum of valid deltas from all retained counter evidence;
+  cycle start and end are absent, and counter-reset intervals remain gaps. Days
+  `1` through `31` retain the existing UTC monthly-cycle behavior.
 - Each selected source/interface counter stream is differenced independently.
   Diagnostic RX and TX are visible on cards and detail and by default in
   history, while the derived Total history series is selectable through the
@@ -190,27 +194,45 @@ the end independently for each interface from its first retained live agent
 sample; an operator-supplied end could create a gap or overlap and is therefore
 not part of the command.
 
-The agent reads the retained five-minute, hourly, and daily vnStat JSON in one
-snapshot per interface. The API reconciles overlapping resolutions from finest
-to coarsest, preserves each aggregate byte total, and distributes only the
-unresolved coarse residual across uncovered minutes. It then inserts cumulative
-synthetic host-interface samples before the first live sample. The synthetic to
-live transition is an intentional counter epoch boundary: no bridge delta is
-counted and it is not reported as a counter reset.
+The agent reads the retained five-minute, hourly, daily, monthly, and yearly
+vnStat JSON in one snapshot per interface. It also reads vnStat's effective
+calendar configuration once per import, so `MonthRotate`,
+`MonthRotateAffectsYears`, local-versus-UTC storage, and sparse trafficless
+periods are interpreted consistently with the source database. Monthly and
+yearly rows use their natural calendar boundaries rather than the next retained
+row, and the first partial period begins at the database's first complete
+minute while preserving its full byte total. Old history therefore remains
+usable after daily rows expire without stretching a sparse row across a missing
+period. If rotated month periods do not also rotate year periods, the single
+monthly row that crosses a year boundary is omitted when aligned year rows
+supply the requested span; if yearly collection is disabled, the month remains
+authoritative. This keeps the aggregate hierarchy reconcilable. The API
+reconciles overlapping resolutions from finest to coarsest,
+preserves each aggregate byte total, and distributes only the unresolved coarse
+residual across uncovered minutes. It then inserts cumulative synthetic
+host-interface samples before the first live sample. The synthetic to live
+transition is an intentional counter epoch boundary: no bridge delta is counted
+and it is not reported as a counter reset.
 
 The import requires complete retained coverage of the requested range and a
 live agent sample that establishes its end. Rerunning it replaces only prior
 `vnstat_import:*` samples for the selected interfaces. Normal agent collection
 continues unchanged afterward; vnStat is not polled periodically by vpsman.
+There is no fixed import lookback: the earliest accepted start is the earliest
+UTC minute fully covered by the retained vnStat database. Long ranges are
+expanded and inserted in bounded batches rather than allocating the complete
+minute span in memory.
 
 The optional display rules next to traffic do not alter accounting:
 
 - `billing.price` accepts an amount, currency symbol or three-letter code, and
-  `/m`, `/q`, `/h` or `/hy`, or `/y`. `-1` explicitly displays billing as
-  **n/a**; an unset rule shows no billing fact.
+  `/m`, `/q`, `/h` or `/hy`, or `/y`. `-1` and an unset rule display billing as
+  **-** on operator monitoring cards. A Shared view shows that placeholder only
+  when Billing is included in its visibility.
 - `billing.cycle` is an optional renewal anchor, independent of traffic reset:
   a day for monthly billing, or day-month for quarterly, half-yearly, and yearly
-  billing.
+  billing. Yearly renewal labels render the stored day-month anchor as
+  month-day (`15-06` becomes `06-15`).
 - `network.port_speed` accepts an explicit bit-rate unit such as `400 Mbps` or
   `1.5 Gbps`. It is display-only on monitoring cards. A new tunnel-plan draft
   may use one endpoint's value, or the lower of two values, as a convenience;
@@ -306,12 +328,14 @@ bandwidth as evidence, not as automatic discovery of link capacity.
 
 Shared monitoring views reuse these definitions but expose only the immutable
 metric visibility groups selected when the share was created. Billing and
-normalized system information are separate, opt-in groups; an unset billing
-rule or absent system fact is omitted rather than rendered as a misleading
-placeholder. They never expose real VPS IDs, network-address fields, raw host
-files, internal configuration, actions, jobs, terminals, files, backups, audit
-data, or operator identity. Operator-entered display and Ping target names
-appear as entered.
+normalized system information are separate, opt-in groups. A group that was
+not shared is absent. A shared current fact remains in its established place
+and renders `-` when no evidence was reported; explicit states such as
+`Unlimited`, `Unconfigured`, `Disabled`, or `None` are never collapsed into
+that placeholder. Shared views never expose real VPS IDs, network-address
+fields, raw host files, internal configuration, actions, jobs, terminals,
+files, backups, audit data, or operator identity. Operator-entered display and
+Ping target names appear as entered.
 
 ## Fleet Alert Read-Model Bounds
 

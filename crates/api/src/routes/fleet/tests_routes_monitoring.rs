@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::{
     enrich_monitoring_share_target_evidence, monitoring_range, network_rate_is_current,
-    public_network_metric, public_traffic_metric, ClientMonitoringQuery,
+    public_billing_plan, public_network_metric, public_traffic_metric, ClientMonitoringQuery,
 };
 use axum::{
     body::Body,
@@ -15,7 +15,7 @@ use tower::ServiceExt;
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AgentView, MonitoringShareView, MonitoringShareVisibilityRequest,
+        AgentView, BillingPlanView, MonitoringShareView, MonitoringShareVisibilityRequest,
         MonitoringShareVisibilityView, PublicBillingPlanView, PublicMonitoringCardView,
         PublicMonitoringDataView, PublicMonitoringDetailView, PublicMonitoringRangeView,
         PublicMonitoringShareBootstrapView, PublicMonitoringShareView, PublicNetworkMetricView,
@@ -365,6 +365,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     let billing = PublicBillingPlanView {
         disabled: false,
         display: "5.00 USD/m".to_string(),
+        period_code: Some("m".to_string()),
         cycle: Some("day 1 monthly".to_string()),
     };
     let system_information = PublicSystemInformationView {
@@ -379,6 +380,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     };
     let traffic = PublicTrafficMetricView {
         configured: true,
+        reset_day: Some(1),
         cycle_start: Some("1".to_string()),
         cycle_end: Some("2".to_string()),
         rx_bytes: Some(1),
@@ -530,7 +532,11 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         &["bucket_secs", "bucket_start", "rx_bps", "tx_bps"],
     );
     assert_serialized_keys("port speed", &port_speed, &["bps", "display"]);
-    assert_serialized_keys("billing", &billing, &["cycle", "disabled", "display"]);
+    assert_serialized_keys(
+        "billing",
+        &billing,
+        &["cycle", "disabled", "display", "period_code"],
+    );
     assert_serialized_keys(
         "system information",
         &system_information,
@@ -561,6 +567,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "quota_rx_bytes",
             "quota_total_bytes",
             "quota_tx_bytes",
+            "reset_day",
             "rx_bytes",
             "state",
             "total_bytes",
@@ -661,6 +668,7 @@ fn assert_serialized_keys(label: &str, value: &impl serde::Serialize, expected: 
 fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
     let traffic = PublicTrafficMetricView {
         configured: false,
+        reset_day: None,
         cycle_start: None,
         cycle_end: None,
         rx_bytes: None,
@@ -694,8 +702,8 @@ fn public_traffic_keeps_diagnostics_separate_from_billing_totals() {
             client_id: "v-1".to_string(),
             selectors: vec!["eth0+tx".to_string()],
             selector_hash: "selector-hash".to_string(),
-            cycle_start: "1".to_string(),
-            cycle_end: "2".to_string(),
+            cycle_start: Some("1".to_string()),
+            cycle_end: Some("2".to_string()),
             reset_day: Some(1),
             rx_bytes: 0,
             tx_bytes: 200,
@@ -727,4 +735,62 @@ fn public_traffic_keeps_diagnostics_separate_from_billing_totals() {
     assert_eq!(projected.diagnostic_tx_bytes, Some(200));
     assert_eq!(projected.diagnostic_total_bytes, Some(300));
     assert_eq!(projected.cycle_percent, Some(20.0));
+    assert_eq!(projected.reset_day, Some(1));
+}
+
+#[test]
+fn public_no_reset_traffic_exposes_sentinel_without_inventing_cycle_bounds() {
+    let projected = public_traffic_metric(
+        TrafficAccountingRecord {
+            client_id: "v-1".to_string(),
+            selectors: vec!["eth0".to_string()],
+            selector_hash: "selector-hash".to_string(),
+            cycle_start: None,
+            cycle_end: None,
+            reset_day: Some(-1),
+            rx_bytes: 100,
+            tx_bytes: 200,
+            total_bytes: 300,
+            diagnostic_rx_bytes: 100,
+            diagnostic_tx_bytes: 200,
+            diagnostic_total_bytes: 300,
+            latest_rx_bytes: 1_000,
+            latest_tx_bytes: 2_000,
+            latest_total_bytes: 3_000,
+            quota_rx_bytes: None,
+            quota_tx_bytes: None,
+            quota_total_bytes: Some(-1),
+            cycle_percent: None,
+            state: "ok".to_string(),
+            incomplete_reasons: Vec::new(),
+            last_sample_at: Some("2".to_string()),
+            counter_epochs_seen: 1,
+            updated_at: "2".to_string(),
+            selector_breakdown: Vec::new(),
+        },
+        None,
+    );
+
+    assert!(projected.configured);
+    assert_eq!(projected.reset_day, Some(-1));
+    assert_eq!(projected.cycle_start, None);
+    assert_eq!(projected.cycle_end, None);
+    assert_eq!(projected.total_bytes, Some(300));
+}
+
+#[test]
+fn public_billing_projection_allowlists_period_code_for_cycle_formatting() {
+    let projected = public_billing_plan(BillingPlanView {
+        disabled: false,
+        price: Some("120.00".to_string()),
+        currency: Some("USD".to_string()),
+        currency_display: Some("USD".to_string()),
+        period: Some("year".to_string()),
+        period_code: Some("y".to_string()),
+        cycle: Some("15-06".to_string()),
+        display: "120.00 USD/y".to_string(),
+    });
+
+    assert_eq!(projected.period_code.as_deref(), Some("y"));
+    assert_eq!(projected.cycle.as_deref(), Some("15-06"));
 }

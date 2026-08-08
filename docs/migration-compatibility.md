@@ -20,6 +20,7 @@ export/import into a fresh database.
 | `0006_agent_updates.sql` | Agent update release and artifact-verification state. |
 | `0007_configuration_presets_file_transfer.sql` | System/custom configuration presets, explicit per-VPS overrides, runtime-config apply state, tunnel-plan adapter definitions, file-transfer sessions, and source artifacts. |
 | `0008_system_metrics.sql` | Durable 60-second control-plane metric rollups for the System dashboard. |
+| `0009_traffic_counter_epoch_indexes.sql` | Covering counter-epoch indexes that keep no-reset traffic accounting bounded. |
 
 `scripts/audit-migrations.sh` verifies sequential filenames, a documented role
 for every migration, unique index names, trailing newlines, and unsafe DDL

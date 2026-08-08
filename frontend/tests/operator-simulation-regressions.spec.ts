@@ -840,13 +840,17 @@ test("invalidates a VPS rules preview as soon as its draft changes", async ({
   const editor = page.locator(".consoleDetailPanel", {
     hasText: "Bulk rule editor",
   });
-  await editor.getByLabel("Total quota").fill("4TB");
+  await editor
+    .getByRole("textbox", { name: "Total quota", exact: true })
+    .fill("4TB");
   await activate(
     editor.getByRole("button", { name: "Preview changes", exact: true }),
   );
   await expect(page.locator(".vpsRulesPreviewBlock")).toBeVisible();
 
-  await editor.getByLabel("Total quota").fill("5TB");
+  await editor
+    .getByRole("textbox", { name: "Total quota", exact: true })
+    .fill("5TB");
   await expect(page.locator(".vpsRulesPreviewBlock")).toHaveCount(0);
   await expect(page.locator(".vpsRulesActionFeedback")).toHaveCount(0);
 });

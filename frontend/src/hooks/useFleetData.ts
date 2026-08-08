@@ -38,6 +38,7 @@ import type {
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TelemetryTunnelRecord,
+  TelemetryUptimeRecord,
 } from "../types";
 
 const FLEET_ERROR_SOURCE_ORDER = ["core", "detail", "telemetry"] as const;
@@ -56,6 +57,7 @@ type FleetSnapshotRecord = {
   telemetry_rollups: FleetSnapshotSource<TelemetryRollupRecord[]>;
   telemetry_network_rates: FleetSnapshotSource<TelemetryNetworkRateRecord[]>;
   telemetry_tunnels: FleetSnapshotSource<TelemetryTunnelRecord[]>;
+  telemetry_uptimes: FleetSnapshotSource<TelemetryUptimeRecord[]>;
   fleet_alerts?: FleetSnapshotSource<FleetAlertRecord[]>;
   fleet_alert_states?: FleetSnapshotSource<FleetAlertStateRecord[]>;
   fleet_alert_policies?: FleetSnapshotSource<FleetAlertPolicyRecord[]>;
@@ -116,6 +118,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   >([]);
   const [telemetryTunnels, setTelemetryTunnels] = useState<
     TelemetryTunnelRecord[]
+  >([]);
+  const [telemetryUptimes, setTelemetryUptimes] = useState<
+    TelemetryUptimeRecord[]
   >([]);
   const [apiError, setApiError] = useState<string | null>(null);
   const [fleetCoreEvidenceAvailable, setFleetCoreEvidenceAvailable] =
@@ -194,12 +199,21 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           ),
         );
       }
+      if (snapshot.telemetry_uptimes.data) {
+        setTelemetryUptimes(
+          withoutDeletedClients(
+            snapshot.telemetry_uptimes.data,
+            deletedClientIds.current,
+          ),
+        );
+      }
       publishFleetError(
         "telemetry",
         snapshotSourceErrorSummary("Some live fleet sources are unavailable", [
           ["telemetry rollups", snapshot.telemetry_rollups],
           ["network rates", snapshot.telemetry_network_rates],
           ["tunnel telemetry", snapshot.telemetry_tunnels],
+          ["uptime telemetry", snapshot.telemetry_uptimes],
         ]),
       );
     },
@@ -363,6 +377,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setTelemetryRollups([]);
         setTelemetryNetworkRates([]);
         setTelemetryTunnels([]);
+        setTelemetryUptimes([]);
         setFleetCoreEvidenceAvailable(false);
         setFleetAlertsEvidenceAvailable(false);
         setConfigPolicyEvidenceAvailable(false);
@@ -427,6 +442,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           setTelemetryRollups([]);
           setTelemetryNetworkRates([]);
           setTelemetryTunnels([]);
+          setTelemetryUptimes([]);
           setFleetCoreEvidenceAvailable(false);
           setFleetAlertsEvidenceAvailable(false);
           fleetSourceErrors.current = { core: "Operator login required" };
@@ -570,6 +586,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           current.filter((record) => !deletedIds.has(record.client_id)),
         );
         setTelemetryTunnels((current) =>
+          current.filter((record) => !deletedIds.has(record.client_id)),
+        );
+        setTelemetryUptimes((current) =>
           current.filter((record) => !deletedIds.has(record.client_id)),
         );
         await loadFleet();
@@ -945,6 +964,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setTelemetryRollups([]);
     setTelemetryNetworkRates([]);
     setTelemetryTunnels([]);
+    setTelemetryUptimes([]);
     setFleetCoreEvidenceAvailable(false);
     setFleetAlertsEvidenceAvailable(false);
     setConfigPolicyEvidenceAvailable(false);
@@ -977,6 +997,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     telemetryNetworkRates,
     telemetryRollups,
     telemetryTunnels,
+    telemetryUptimes,
     upsertFleetAlertPolicy,
     dryRunFleetAlertPolicy,
     deleteFleetAlertPolicy,

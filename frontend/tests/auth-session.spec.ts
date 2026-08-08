@@ -435,6 +435,7 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
       telemetry_network_rates: available([]),
       telemetry_rollups: available([]),
       telemetry_tunnels: available([]),
+      telemetry_uptimes: available([]),
     };
     if (mode === "full") {
       for (const key of [

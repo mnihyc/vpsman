@@ -23,6 +23,7 @@ import type {
   MonitoringCardsPageView,
   PingRollupView,
   PortSpeedView,
+  SystemInformationView,
   TelemetryNetworkRateRecord,
   TelemetryRollupRecord,
   TrafficAccountingRecord,
@@ -30,6 +31,7 @@ import type {
 import {
   formatByteCount as formatBytes,
   formatByteRateFromBitsPerSecond,
+  formatUptime,
   INTERFACE_RATE_DEFINITION,
 } from "../telemetryMetrics";
 import { useHistoryEntryState } from "../historyEntryState";
@@ -44,6 +46,9 @@ import {
   displayNameOrUnnamed,
   formatBillingRenewal,
   formatTime,
+  trafficLimitingQuota,
+  trafficQuotaState,
+  trafficUnlimitedQuota,
   timestampMillis,
 } from "../utils";
 
@@ -553,7 +558,7 @@ export function FleetMonitorPanel({
   const trafficTotal =
     fleetSnapshot.trafficCount > 0
       ? formatBytes(fleetSnapshot.trafficBytes)
-      : "n/a";
+      : "-";
   const trafficSummary =
     fleetSnapshot.trafficCount > 0
       ? `${fleetSnapshot.trafficCount} configured VPS${fleetSnapshot.trafficCount === 1 ? "" : "s"}`
@@ -629,19 +634,23 @@ export function FleetMonitorPanel({
           aria-label={`${title} current totals`}
         >
           <span>
-            <small>Locations</small>
+            <small title="Distinct configured VPS locations">Locations</small>
             <strong title={`${fleetSnapshot.locations.length} locations`}>
               {fleetSnapshot.locations.length}
             </strong>
             <em title={locationSummary}>{locationSummary}</em>
           </span>
           <span>
-            <small>Realtime speed</small>
+            <small title="Aggregate current receive and transmit rates from fresh selected interfaces">
+              Realtime speed
+            </small>
             <strong title={rxSummary}>{rxSummary}</strong>
             <em title={txSummary}>{txSummary}</em>
           </span>
           <span>
-            <small>Current-cycle traffic</small>
+            <small title="Aggregate configured traffic accounting, including reset cycles and no-reset totals">
+              Traffic
+            </small>
             <strong title={trafficTotal}>{trafficTotal}</strong>
             <em title={trafficSummary}>{trafficSummary}</em>
           </span>
@@ -786,6 +795,7 @@ export function FleetMonitorPanel({
                     monitoringLoading,
                   )}
                   showCountryFlags={showCountryFlags}
+                  systemInformation={monitoringCard?.system_information ?? null}
                   traffic={monitoringCard?.traffic ?? null}
                 />
               );
@@ -821,6 +831,7 @@ export type VpsMonitorCardProps = {
   signals: VpsMonitorCardSignal;
   showCountryFlags: boolean;
   statusCategory: Exclude<FleetMonitorStatusFilter, "all">;
+  systemInformation: SystemInformationView | null;
   traffic: TrafficAccountingRecord | null;
 };
 
@@ -881,6 +892,7 @@ export function VpsMonitorCard({
   signals,
   showCountryFlags,
   statusCategory,
+  systemInformation,
   traffic,
 }: VpsMonitorCardProps) {
   const displayState = agentDisplayState(agent);
@@ -942,11 +954,14 @@ export function VpsMonitorCard({
     trafficConfigured && traffic?.cycle_percent !== null
       ? finiteMetric(traffic?.cycle_percent)
       : null;
+  const quotaState =
+    trafficConfigured && traffic ? trafficQuotaState(traffic) : "unset";
+  const quotaPercent = quotaState === "finite" ? trafficPercent : null;
   const trafficWarning = trafficWarningRank(traffic);
   const trafficProblem =
     trafficWarning > 0 && traffic
-      ? trafficPercent !== null && trafficPercent > 100
-        ? `Quota exceeded at ${trafficPercent.toFixed(trafficPercent >= 10 ? 0 : 1)}%`
+      ? quotaPercent !== null && quotaPercent > 100
+        ? `Quota exceeded at ${quotaPercent.toFixed(quotaPercent >= 10 ? 0 : 1)}%`
         : (traffic.incomplete_reasons[0] ?? `Traffic evidence ${traffic.state}`)
       : null;
   const pingWarning = pingWarningRank(primaryPing);
@@ -1006,12 +1021,20 @@ export function VpsMonitorCard({
         ? "Unavailable"
         : formatPrimaryPing(primaryPing);
   const trafficReset =
-    trafficConfigured && traffic ? formatTrafficReset(traffic.cycle_end) : null;
-  const trafficHeadingContext = density === "compact" ? trafficReset : null;
+    trafficConfigured && traffic
+      ? traffic.reset_day === -1
+        ? "No reset"
+        : formatTrafficReset(traffic.cycle_end)
+      : null;
+  const trafficHeadingContext =
+    density === "compact" || traffic?.reset_day === -1 ? trafficReset : null;
   const trafficHeading = `Traffic${trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}`;
   const trafficDetail =
     trafficConfigured && traffic
-      ? (trafficProblem ?? formatTrafficReset(traffic.cycle_end))
+      ? (trafficProblem ??
+        (traffic.reset_day === -1
+          ? "Accumulated total · No reset"
+          : formatTrafficReset(traffic.cycle_end)))
       : null;
   const pingHeadingContext = primaryPing?.target_name ?? null;
   const pingHeading = `Ping${pingHeadingContext ? ` · ${pingHeadingContext}` : ""}`;
@@ -1152,28 +1175,56 @@ export function VpsMonitorCard({
       </div>
       <div
         className="vpsMonitorAuxFacts"
-        aria-label={`Connection and billing facts for ${displayNameOrUnnamed(agent.display_name)}`}
+        aria-label={`Connection, uptime, and billing facts for ${displayNameOrUnnamed(agent.display_name)}`}
       >
         <span
-          title={billing ? billingTitle(billing) : "Billing is not configured"}
+          data-fact-kind="billing"
+          title={
+            billing
+              ? billingTitle(billing)
+              : "Billing is not configured; - is shown."
+          }
         >
-          <small>Billing</small>
-          <strong>{billing?.display ?? "—"}</strong>
-          {billing?.cycle ? (
-            <em>{formatBillingRenewal(billing.cycle)}</em>
-          ) : null}
+          <small className="vpsMonitorAuxFactHeading">
+            <b>Billing</b>
+            {billing?.cycle && !billing.disabled ? (
+              <span>
+                {` · ${formatBillingRenewal(billing.cycle, billing.period_code)}`}
+              </span>
+            ) : null}
+          </small>
+          <strong>
+            {billing && !billing.disabled ? billing.display : "-"}
+          </strong>
         </span>
-        <span title={connectionCountTitle("TCP", connectionsTelemetryState)}>
+        <span
+          data-fact-kind="connection"
+          title={connectionCountTitle("TCP", connectionsTelemetryState)}
+        >
           <small>TCP</small>
           <strong>{formatSocketCount(rollup?.tcp_sockets_latest)}</strong>
         </span>
-        <span title={connectionCountTitle("UDP", connectionsTelemetryState)}>
+        <span
+          data-fact-kind="connection"
+          title={connectionCountTitle("UDP", connectionsTelemetryState)}
+        >
           <small>UDP</small>
           <strong>{formatSocketCount(rollup?.udp_sockets_latest)}</strong>
         </span>
+        <span
+          data-fact-kind="uptime"
+          title={
+            systemInformation?.uptime_observed_at
+              ? `Observed ${formatTime(systemInformation.uptime_observed_at)}`
+              : "Latest reported uptime is unavailable"
+          }
+        >
+          <small>Uptime</small>
+          <strong>{formatUptime(systemInformation?.uptime_secs)}</strong>
+        </span>
       </div>
       <div
-        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficWarning > 0 ? " warning" : ""}${trafficPercent !== null && trafficPercent > 100 ? " exceeded" : ""}`}
+        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
       >
         <span>
           <small
@@ -1201,40 +1252,44 @@ export function VpsMonitorCard({
         </span>
         <span
           aria-label={
-            trafficPercent === null
-              ? undefined
-              : `Traffic quota ${trafficPercent.toFixed(1)} percent`
+            quotaPercent === null
+              ? quotaState === "unlimited"
+                ? "Traffic quota is unlimited"
+                : undefined
+              : `Traffic quota ${quotaPercent.toFixed(1)} percent`
           }
-          aria-valuemax={trafficPercent === null ? undefined : 100}
-          aria-valuemin={trafficPercent === null ? undefined : 0}
+          aria-valuemax={quotaPercent === null ? undefined : 100}
+          aria-valuemin={quotaPercent === null ? undefined : 0}
           aria-valuenow={
-            trafficPercent === null
+            quotaPercent === null
               ? undefined
-              : Math.min(100, Math.max(0, trafficPercent))
+              : Math.min(100, Math.max(0, quotaPercent))
           }
           aria-valuetext={
-            trafficPercent === null
+            quotaPercent === null
               ? undefined
-              : `${trafficPercent.toFixed(1)} percent`
+              : `${quotaPercent.toFixed(1)} percent`
           }
-          className={`vpsMonitorTrafficTrack${trafficPercent === null ? " missing" : ""}`}
-          role={trafficPercent === null ? undefined : "meter"}
+          className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}`}
+          role={quotaPercent === null ? undefined : "meter"}
           title={
             monitoringState === "loading"
               ? "Reading traffic configuration and current accounting evidence"
               : monitoringState === "unavailable"
                 ? "Monitoring card evidence is unavailable; traffic configuration is not inferred"
-                : trafficConfigured && traffic
-                  ? formatTrafficTitle(traffic)
-                  : "Traffic accounting rules and reset cycle are not configured"
+                : quotaState === "unlimited" && traffic
+                  ? `${formatTrafficTitle(traffic)} Traffic quota is unlimited.`
+                  : trafficConfigured && traffic
+                    ? formatTrafficTitle(traffic)
+                    : "Traffic accounting rules and reset cycle are not configured"
           }
         >
-          <span style={{ width: `${Math.min(100, trafficPercent ?? 0)}%` }} />
+          <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
         </span>
         {trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
-            title={`Observed current-cycle traffic: RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
+            title={`${traffic.reset_day === -1 ? "Accumulated" : "Current-cycle"} traffic: RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
           >
             ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
             {formatBytes(traffic.diagnostic_tx_bytes)}
@@ -1445,7 +1500,14 @@ export function MiniSparkline({
     (value): value is number => value !== null && Number.isFinite(value),
   );
   if (finite.length < 2) {
-    return <span className="vpsMonitorSparkline empty">No recent history</span>;
+    return (
+      <span
+        aria-label={`${label} is unavailable`}
+        className="vpsMonitorSparkline empty"
+        role="img"
+        title={`${label} needs at least two recent samples`}
+      />
+    );
   }
   const maximum = Math.max(...finite, 1);
   const denominator = Math.max(1, values.length - 1);
@@ -1464,7 +1526,12 @@ export function MiniSparkline({
   if (current.length > 1) segments.push(current.join(" "));
   if (segments.length === 0) {
     return (
-      <span className="vpsMonitorSparkline empty">No continuous history</span>
+      <span
+        aria-label={`${label} is unavailable`}
+        className="vpsMonitorSparkline empty"
+        role="img"
+        title={`${label} has no continuous pair of recent samples`}
+      />
     );
   }
   return (
@@ -2387,7 +2454,7 @@ function sumNetworkRate(
 }
 
 function formatPercent(value: number | null) {
-  return value === null ? "n/a" : `${Math.round(value)}%`;
+  return value === null ? "-" : `${Math.round(value)}%`;
 }
 
 function formatMaximumCapacity(total: number | null | undefined) {
@@ -2402,22 +2469,22 @@ function formatMaximumCapacityCaption(total: number | null | undefined) {
 }
 
 function formatTrafficUsage(traffic: TrafficAccountingRecord) {
-  const percent = traffic.cycle_percent;
   const used = formatBytes(traffic.total_bytes);
-  if (traffic.quota_total_bytes === -1) {
-    return `${used} / Unlimited`;
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) {
+    const percent =
+      limitingQuota.percent >= 100
+        ? limitingQuota.percent.toFixed(0)
+        : limitingQuota.percent.toFixed(1);
+    return `${formatBytes(limitingQuota.used)} / ${formatBytes(limitingQuota.quota)} · ${limitingQuota.direction} · ${percent}%`;
   }
-  const directionalQuotas = [traffic.quota_rx_bytes, traffic.quota_tx_bytes];
-  if (
-    traffic.quota_total_bytes === null &&
-    directionalQuotas.some((quota) => quota === -1) &&
-    directionalQuotas.every((quota) => quota === null || quota === -1)
-  ) {
-    return `${used} / Unlimited`;
+  if (trafficQuotaState(traffic) === "unlimited") {
+    const unlimited = trafficUnlimitedQuota(traffic);
+    return unlimited
+      ? `${formatBytes(unlimited.used)} / Unlimited · ${unlimited.direction}`
+      : `${used} / Unlimited`;
   }
-  if (traffic.quota_total_bytes !== null && percent !== null) {
-    return `${used} / ${formatBytes(traffic.quota_total_bytes)} · ${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
-  }
+  const percent = traffic.cycle_percent;
   return percent === null
     ? `${used} used`
     : `${used} used · limiting quota ${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
@@ -2426,7 +2493,7 @@ function formatTrafficUsage(traffic: TrafficAccountingRecord) {
 function formatSocketCount(value: number | null | undefined) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value).toLocaleString()
-    : "n/a";
+    : "-";
 }
 
 function connectionCountTitle(
@@ -2438,10 +2505,10 @@ function connectionCountTitle(
 
 function billingTitle(billing: BillingPlanView) {
   if (billing.disabled) {
-    return "Billing is explicitly disabled with -1; the card therefore shows n/a.";
+    return "Billing is explicitly disabled with -1; the card therefore shows -.";
   }
   return billing.cycle
-    ? `${billing.display}; ${formatBillingRenewal(billing.cycle)}. Billing cycle is independent of the traffic reset day.`
+    ? `${billing.display}; ${formatBillingRenewal(billing.cycle, billing.period_code)}. Billing cycle is independent of the traffic reset day.`
     : `${billing.display}; no renewal anchor is configured. Billing cycle is independent of the traffic reset day.`;
 }
 
@@ -2451,10 +2518,15 @@ function formatTrafficTitle(traffic: TrafficAccountingRecord) {
     traffic.cycle_percent !== null && traffic.cycle_percent > 100
       ? ` Quota exceeded by ${(traffic.cycle_percent - 100).toFixed(1)}%.`
       : "";
-  return `${state} authoritative traffic-accounting cycle. Observed RX ${formatBytes(traffic.diagnostic_rx_bytes)}; observed TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
+  const window =
+    traffic.reset_day === -1
+      ? "accumulated traffic with no reset"
+      : "authoritative traffic-accounting cycle";
+  return `${state} ${window}. RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
 }
 
-export function formatTrafficReset(cycleEnd: string) {
+export function formatTrafficReset(cycleEnd: string | null | undefined) {
+  if (!cycleEnd) return "Reset time unavailable";
   const end = timestampMillis(cycleEnd);
   if (!Number.isFinite(end)) return "Reset time unavailable";
   const remaining = end - Date.now();
@@ -2464,7 +2536,7 @@ export function formatTrafficReset(cycleEnd: string) {
 }
 
 function formatPrimaryPing(ping: CurrentPingView | null) {
-  if (!ping) return "Unconfigured";
+  if (!ping) return "-";
   if (!ping.enabled || ping.state === "disabled") return "Disabled";
   if (ping.state === "pending" || ping.checked_at === null)
     return "Waiting for first result";
@@ -2480,11 +2552,11 @@ function formatPrimaryPing(ping: CurrentPingView | null) {
 }
 
 function formatLoad(value: number | null) {
-  return value === null ? "n/a" : value.toFixed(2);
+  return value === null ? "-" : value.toFixed(2);
 }
 
 function formatRateOrUnavailable(value: number | null) {
-  return value === null ? "n/a" : formatByteRateFromBitsPerSecond(value);
+  return value === null ? "-" : formatByteRateFromBitsPerSecond(value);
 }
 
 function networkMetricTitle(
