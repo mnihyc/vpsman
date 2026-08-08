@@ -509,6 +509,7 @@ async fn run_agent_listener(
 
     loop {
         let (stream, peer) = listener.accept().await?;
+        let peer = canonicalize_peer_addr(peer);
         let Some(permit) =
             try_acquire_agent_connection_permit(&connection_permits, &api_client, peer)
         else {
@@ -524,6 +525,16 @@ async fn run_agent_listener(
                 warn!(%peer, %error, "agent session ended with error");
             }
         });
+    }
+}
+
+fn canonicalize_peer_addr(peer: SocketAddr) -> SocketAddr {
+    match peer {
+        SocketAddr::V6(peer_v6) => peer_v6
+            .ip()
+            .to_ipv4_mapped()
+            .map_or(peer, |ip| SocketAddr::new(ip.into(), peer_v6.port())),
+        SocketAddr::V4(_) => peer,
     }
 }
 

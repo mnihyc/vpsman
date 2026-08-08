@@ -111,6 +111,17 @@ fn gateway_bind_defaults_to_loopback() {
 }
 
 #[test]
+fn socket_peer_canonicalization_only_unmaps_ipv4_mapped_ipv6() {
+    let ipv4 = "192.0.2.10:59443".parse().unwrap();
+    let ipv4_mapped = "[::ffff:192.0.2.10]:59443".parse().unwrap();
+    let ipv6 = "[2001:db8::10]:59443".parse().unwrap();
+
+    assert_eq!(canonicalize_peer_addr(ipv4), ipv4);
+    assert_eq!(canonicalize_peer_addr(ipv4_mapped), ipv4);
+    assert_eq!(canonicalize_peer_addr(ipv6), ipv6);
+}
+
+#[test]
 fn runtime_mode_requires_identity_key_and_privilege_verifier() {
     let mut args = test_args();
 

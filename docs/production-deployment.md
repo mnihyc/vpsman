@@ -21,10 +21,12 @@ tar -xzf "vpsman-deploy-${VPSMAN_RELEASE_TAG}.tar.gz"
 cd "vpsman-deploy-${VPSMAN_RELEASE_TAG}"
 ```
 
-The control-plane host currently needs x86-64 Linux, Docker Engine with
-Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `sha384sum`,
-`tar`, and `unzip`. ARM64 remains supported for agents and the standalone
-`vpsctl` artifact, but the published server bundle is currently x86-64 only.
+The control-plane host currently needs x86-64 Linux, rootful Docker Engine 27
+or newer with Compose, `cmp`, `curl`, `diff`, `flock`, `python3`, `sha384sum`,
+`tar`, and `unzip`. The gateway's dedicated IPv6-enabled Docker network relies
+on Engine-managed address allocation. ARM64 remains supported for agents and
+the standalone `vpsctl` artifact, but the published server bundle is currently
+x86-64 only.
 
 The exact release's `version.json` selects the vpsman application payloads, but
 the shipped Compose file currently uses upstream major/minor image tags rather
@@ -92,13 +94,26 @@ should stop working. HTTPS is required for public use, including the secure
 visitor cookie used for access evidence.
 
 Remote agents need a reachable raw TCP endpoint; this is not an HTTP/WebSocket
-route. Set a deliberate publish mapping such as
-`VPSMAN_GATEWAY_PUBLISH=0.0.0.0:9443:9443`, restrict the host firewall to the
-expected source networks where practical, configure NAT forwarding when
-needed, and advertise the externally reachable endpoint to agents. Agent
-traffic is authenticated and encrypted with the configured Noise identities,
-but that does not replace host firewalling, rate limiting, monitoring, or key
-rotation.
+route. An unqualified host-port mapping such as
+`VPSMAN_GATEWAY_PUBLISH=59443:9443` publishes the gateway on both IPv4 and IPv6
+at port 59443. An explicit mapping such as
+`VPSMAN_GATEWAY_PUBLISH=127.0.0.1:9443:9443` remains IPv4 loopback-only. Restrict
+the host firewall for both address families to the expected source networks
+where practical, configure NAT forwarding when needed, and advertise the
+externally reachable endpoint to agents. Agent traffic is authenticated and
+encrypted with the configured Noise identities, but that does not replace host
+firewalling, rate limiting, monitoring, or key rotation.
+
+The bundled Compose model gives only the raw gateway a dual-stack ingress
+network; the internal API network remains IPv4-only. Existing deployments must
+merge this Compose change and recreate the gateway container because
+`update.sh` intentionally does not overwrite deployment files. The existing
+`.env` value `VPSMAN_GATEWAY_PUBLISH=59443:9443` already has the intended
+dual-stack meaning and does not need to change. After recreation, verify source
+attribution with a canary agent connecting through each externally advertised
+address. A localhost or host-hairpin test can report a Docker bridge address and
+is not evidence of the external path. Corrected socket attribution applies to
+new connections; historical session and audit evidence is not rewritten.
 
 ## Control-Plane Backup
 

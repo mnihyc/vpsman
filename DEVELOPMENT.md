@@ -361,6 +361,10 @@ client -> external TLS provider -> bundled Nginx -> private API
 - Nginx reaches `http://api:8080` through Docker DNS.
 - Do not pin frontend/API container addresses or add a fixed subnet to
   implement proxy trust.
+- Keep raw agent ingress on its dedicated dual-stack Docker network so the
+  gateway records the accepted socket peer. Canonicalize only IPv4-mapped IPv6;
+  do not derive this identity from HTTP forwarding headers or make the private
+  backend network dual-stack.
 - If API is ever exposed directly, this trust model must be redesigned before
   that exposure is accepted.
 
