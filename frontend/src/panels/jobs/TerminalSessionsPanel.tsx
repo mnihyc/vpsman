@@ -1473,7 +1473,8 @@ function XtermReplay({
   resetKey: string;
   text: string;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const fitHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const onDataRef = useRef(onData);
@@ -1486,7 +1487,7 @@ function XtermReplay({
   inputEnabledRef.current = inputEnabled;
 
   useEffect(() => {
-    if (!containerRef.current) {
+    if (!fitHostRef.current) {
       return;
     }
     const terminal = new Terminal({
@@ -1504,7 +1505,7 @@ function XtermReplay({
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
-    terminal.open(containerRef.current);
+    terminal.open(fitHostRef.current);
     const dataSubscription = terminal.onData((data) => onDataRef.current(data));
     let resizeTimer: number | null = null;
     const terminalResizeSubscription = terminal.onResize(({ cols, rows }) => {
@@ -1523,9 +1524,9 @@ function XtermReplay({
     window.setTimeout(() => fit.fit(), 0);
     const resize = () => fit.fit();
     const resizeObserver = new ResizeObserver(() => fit.fit());
-    resizeObserver.observe(containerRef.current);
+    resizeObserver.observe(fitHostRef.current);
     const blurWhenPointerLeavesTerminal = (event: PointerEvent) => {
-      const container = containerRef.current;
+      const container = shellRef.current;
       if (
         !container ||
         !(event.target instanceof Node) ||
@@ -1600,7 +1601,11 @@ function XtermReplay({
     window.setTimeout(() => fitRef.current?.fit(), 0);
   }, [resetKey, text]);
 
-  return <div aria-label={label} className="xtermReplay" ref={containerRef} />;
+  return (
+    <div aria-label={label} className="xtermReplay" ref={shellRef}>
+      <div className="xtermFitHost" ref={fitHostRef} />
+    </div>
+  );
 }
 
 type TerminalReplayPreview = {

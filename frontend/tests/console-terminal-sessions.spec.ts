@@ -656,6 +656,33 @@ test("keeps terminal emulator resizable and target impact compact", async ({
   await expect(
     terminal.evaluate((element) => getComputedStyle(element).overflow),
   ).resolves.toBe("hidden");
+  const terminalFitHost = terminal.locator(".xtermFitHost");
+  const terminalScreen = terminalFitHost.locator(".xterm-screen");
+  const expectFittedRowsInsideShell = async () => {
+    const geometry = await terminal.evaluate((shell) => {
+      const fitHost = shell.querySelector<HTMLElement>(".xtermFitHost");
+      const screen = shell.querySelector<HTMLElement>(".xterm-screen");
+      if (!fitHost || !screen) {
+        return null;
+      }
+      const shellBox = shell.getBoundingClientRect();
+      const hostBox = fitHost.getBoundingClientRect();
+      const screenBox = screen.getBoundingClientRect();
+      return {
+        bottomInset: shellBox.bottom - hostBox.bottom,
+        hostBottom: hostBox.bottom,
+        screenBottom: screenBox.bottom,
+      };
+    });
+    expect(geometry).not.toBeNull();
+    expect(geometry!.screenBottom).toBeLessThanOrEqual(
+      geometry!.hostBottom + 0.5,
+    );
+    expect(geometry!.bottomInset).toBeGreaterThanOrEqual(12);
+  };
+  await expect(terminalFitHost).toBeVisible();
+  await expect(terminalScreen).toBeVisible();
+  await expectFittedRowsInsideShell();
   await terminal.evaluate((element) => {
     (element as HTMLElement).style.height = "460px";
   });
@@ -669,6 +696,7 @@ test("keeps terminal emulator resizable and target impact compact", async ({
       ),
     )
     .toBe(true);
+  await expectFittedRowsInsideShell();
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   const impact = page.locator(".commandComposer .targetImpactPreview");

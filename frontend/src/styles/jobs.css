@@ -3763,16 +3763,22 @@
 
 .xtermReplay {
   min-width: 0;
-  height: 260px;
-  min-height: 180px;
+  height: 262px;
+  min-height: 182px;
   max-height: 70vh;
   margin: 12px 18px 14px;
   overflow: hidden;
   resize: vertical;
   border: 1px solid var(--text-secondary);
   border-radius: 8px;
-  padding: 10px;
+  padding: 10px 10px 12px;
   background: var(--text);
+}
+
+.xtermFitHost {
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .terminalInputFeedback {
@@ -3877,7 +3883,7 @@
   }
 }
 
-.xtermReplay .xterm {
+.xtermFitHost > .xterm {
   height: 100%;
 }
 
