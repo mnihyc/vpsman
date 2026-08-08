@@ -27,7 +27,8 @@ import type {
   WebhookRuleProcessRequest,
   WebhookRuleRecord,
   WebhookRuleRequest,
-  DeleteAgentRequest,
+  DeleteAgentBatchOutcome,
+  DeleteAgentBatchTarget,
   DeleteAgentResponse,
   VpsRuleValueRecord,
   VpsRulesBulkUnsetRequest,
@@ -499,45 +500,83 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, loadFleet],
   );
 
-  const deleteAgent = useCallback(
-    async (clientId: string, request: DeleteAgentRequest) => {
-      const response = await apiPost<DeleteAgentResponse>(
-        `/api/v1/agents/${encodeURIComponent(clientId)}/delete`,
-        apiToken,
-        request,
-      );
-      if (apiTokenRef.current !== apiToken) {
-        return response;
+  const deleteAgents = useCallback(
+    async (
+      targets: DeleteAgentBatchTarget[],
+    ): Promise<DeleteAgentBatchOutcome[]> => {
+      const outcomes: DeleteAgentBatchOutcome[] = [];
+      for (let index = 0; index < targets.length; index += 1) {
+        const target = targets[index];
+        try {
+          const response = await apiPost<DeleteAgentResponse>(
+            `/api/v1/agents/${encodeURIComponent(target.client_id)}/delete`,
+            apiToken,
+            target.request,
+          );
+          outcomes.push({
+            client_id: target.client_id,
+            response,
+            error: null,
+          });
+          deletedClientIds.current.add(response.client_id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          outcomes.push({
+            client_id: target.client_id,
+            response: null,
+            error: message,
+          });
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            for (const skipped of targets.slice(index + 1)) {
+              outcomes.push({
+                client_id: skipped.client_id,
+                response: null,
+                error: "Not attempted because the operator session expired.",
+              });
+            }
+            break;
+          }
+        }
       }
-      deletedClientIds.current.add(response.client_id);
-      setAgents((current) =>
-        current.filter((agent) => agent.id !== response.client_id),
+
+      const deletedIds = new Set(
+        outcomes.flatMap((outcome) =>
+          outcome.response ? [outcome.response.client_id] : [],
+        ),
       );
-      setFleetAlerts((current) =>
-        current.filter((alert) => alert.client_id !== response.client_id),
-      );
-      setVpsRuleValues((current) =>
-        current.filter((rule) => rule.client_id !== response.client_id),
-      );
-      setTrafficAccounting((current) =>
-        current.filter((record) => record.client_id !== response.client_id),
-      );
-      setPolicyAlerts((current) =>
-        current.filter((alert) => alert.client_id !== response.client_id),
-      );
-      setTelemetryRollups((current) =>
-        current.filter((record) => record.client_id !== response.client_id),
-      );
-      setTelemetryNetworkRates((current) =>
-        current.filter((record) => record.client_id !== response.client_id),
-      );
-      setTelemetryTunnels((current) =>
-        current.filter((record) => record.client_id !== response.client_id),
-      );
-      await loadFleet();
-      return response;
+      if (apiTokenRef.current === apiToken && deletedIds.size > 0) {
+        setAgents((current) =>
+          current.filter((agent) => !deletedIds.has(agent.id)),
+        );
+        setFleetAlerts((current) =>
+          current.filter(
+            (alert) => !alert.client_id || !deletedIds.has(alert.client_id),
+          ),
+        );
+        setVpsRuleValues((current) =>
+          current.filter((rule) => !deletedIds.has(rule.client_id)),
+        );
+        setTrafficAccounting((current) =>
+          current.filter((record) => !deletedIds.has(record.client_id)),
+        );
+        setPolicyAlerts((current) =>
+          current.filter((alert) => !deletedIds.has(alert.client_id)),
+        );
+        setTelemetryRollups((current) =>
+          current.filter((record) => !deletedIds.has(record.client_id)),
+        );
+        setTelemetryNetworkRates((current) =>
+          current.filter((record) => !deletedIds.has(record.client_id)),
+        );
+        setTelemetryTunnels((current) =>
+          current.filter((record) => !deletedIds.has(record.client_id)),
+        );
+        await loadFleet();
+      }
+      return outcomes;
     },
-    [apiToken, loadFleet],
+    [apiToken, loadFleet, onUnauthorized],
   );
 
   const upsertFleetAlertPolicy = useCallback(
@@ -582,6 +621,15 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         "/api/v1/vps-rules/dry-run",
         apiToken,
         request,
+      ),
+    [apiToken],
+  );
+
+  const loadEffectiveVpsRules = useCallback(
+    async (clientId: string) =>
+      apiGet<VpsRuleValueRecord[]>(
+        `/api/v1/vps-rules/effective/${encodeURIComponent(clientId)}`,
+        apiToken,
       ),
     [apiToken],
   );
@@ -919,7 +967,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetAlertNotifications,
     webhookRules,
     webhookRuleDeliveries,
-    deleteAgent,
+    deleteAgents,
     loadFleet,
     loadFleetTelemetry,
     fleetCoreEvidenceAvailable,
@@ -932,6 +980,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     upsertFleetAlertPolicy,
     dryRunFleetAlertPolicy,
     deleteFleetAlertPolicy,
+    loadEffectiveVpsRules,
     dryRunVpsRules,
     bulkUpsertVpsRules,
     bulkUnsetVpsRules,

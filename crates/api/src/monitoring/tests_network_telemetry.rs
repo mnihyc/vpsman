@@ -4,7 +4,8 @@ use vpsman_common::{
     plan_tunnel, AgentCapabilitySnapshot, AgentHello, AgentMetrics, AgentPrivilegeMode, DiskStat,
     GatewayTelemetryIngest, MemoryStat, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
     RuntimeTunnelAdapterHealthStat, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
-    TelemetryEnvelope, TunnelAddressPair, TunnelKind, TunnelPlanInput,
+    TelemetryEnvelope, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+    TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 
 #[tokio::test]
@@ -345,6 +346,82 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
         after_swap_removal.swap_used_ratio_max,
         before_swap_removal.swap_used_ratio_max
     );
+}
+
+#[tokio::test]
+async fn duplicate_telemetry_replays_missing_automatic_reachability_idempotently() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::ExternalObserved).await;
+    let plan = repo.get_tunnel_plan(plan_id).await.unwrap().unwrap();
+    let gateway_session_id = uuid::Uuid::new_v4();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    seed_memory_telemetry_source(
+        &memory,
+        "edge-a",
+        "gateway-a",
+        gateway_session_id,
+        process_incarnation_id,
+    )
+    .await;
+    let observed_unix = crate::unix_now();
+    let observation_id = uuid::Uuid::new_v4();
+    let event = GatewayTelemetryIngest {
+        gateway_id: "gateway-a".to_string(),
+        gateway_session_id,
+        process_incarnation_id,
+        telemetry_seq: 1,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: "edge-a".to_string(),
+            metrics: AgentMetrics {
+                observed_unix,
+                hostname: "edge-a".to_string(),
+                tunnel_reachability: vec![TunnelReachabilityObservation {
+                    id: observation_id,
+                    source: TunnelReachabilitySource::Automatic,
+                    plan_id,
+                    topology_identity_hash:
+                        crate::repository_network_observations::topology_identity_hash_for_plan(
+                            &plan,
+                        ),
+                    endpoint_side: TunnelEndpointSide::Left,
+                    peer_client_id: "edge-b".to_string(),
+                    interface_name: "wg0".to_string(),
+                    address_family: TunnelAddressFamily::Ipv4,
+                    target: "10.255.0.1".to_string(),
+                    measured_unix: observed_unix,
+                    stale_after_secs: 180,
+                    transmitted: 3,
+                    received: 3,
+                    latency_min_ms: Some(1.0),
+                    latency_avg_ms: Some(2.0),
+                    latency_max_ms: Some(3.0),
+                    latency_mdev_ms: Some(0.1),
+                    packet_loss_ratio: 0.0,
+                    healthy: true,
+                    reason: None,
+                }],
+                ..AgentMetrics::default()
+            },
+        },
+    };
+
+    assert!(repo.record_telemetry(&event).await.unwrap());
+    assert_eq!(memory.network_observations.read().await.len(), 1);
+
+    // Model the narrow failure window where the telemetry watermark committed
+    // but its secondary automatic-evidence insert did not.
+    memory.network_observations.write().await.clear();
+    assert!(!repo.record_telemetry(&event).await.unwrap());
+    assert_eq!(memory.network_observations.read().await.len(), 1);
+    assert_eq!(
+        memory.network_observations.read().await[0].id,
+        observation_id
+    );
+
+    assert!(!repo.record_telemetry(&event).await.unwrap());
+    assert_eq!(memory.network_observations.read().await.len(), 1);
 }
 
 #[tokio::test]

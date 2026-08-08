@@ -403,10 +403,11 @@ pub(crate) struct ProcessSupervisorInventoryView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct NetworkObservationView {
     pub(crate) id: Uuid,
-    pub(crate) job_id: Uuid,
+    pub(crate) job_id: Option<Uuid>,
     pub(crate) client_id: String,
-    pub(crate) seq: i32,
+    pub(crate) seq: Option<i32>,
     pub(crate) kind: String,
+    pub(crate) source: String,
     pub(crate) role: Option<String>,
     pub(crate) plan_id: Option<Uuid>,
     pub(crate) topology_identity_hash: Option<String>,
@@ -414,13 +415,23 @@ pub(crate) struct NetworkObservationView {
     pub(crate) interface_name: Option<String>,
     pub(crate) peer_client_id: Option<String>,
     pub(crate) target: Option<String>,
+    pub(crate) endpoint_side: Option<String>,
+    pub(crate) address_family: Option<String>,
+    pub(crate) stale_after_secs: Option<i64>,
     pub(crate) healthy: Option<bool>,
+    pub(crate) transmitted: Option<i32>,
+    pub(crate) received: Option<i32>,
+    pub(crate) latency_min_ms: Option<f64>,
     pub(crate) latency_avg_ms: Option<f64>,
+    pub(crate) latency_max_ms: Option<f64>,
+    pub(crate) latency_mdev_ms: Option<f64>,
     pub(crate) packet_loss_ratio: Option<f64>,
+    pub(crate) reason: Option<String>,
     pub(crate) throughput_mbps: Option<f64>,
     pub(crate) bytes: Option<i64>,
     pub(crate) metadata: serde_json::Value,
     pub(crate) observed_at: String,
+    pub(crate) received_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -433,6 +444,8 @@ pub(crate) struct NetworkObservationTrendView {
     pub(crate) client_id: String,
     pub(crate) peer_client_id: Option<String>,
     pub(crate) sample_count: i64,
+    pub(crate) automatic_count: i64,
+    pub(crate) manual_count: i64,
     pub(crate) healthy_count: i64,
     pub(crate) degraded_count: i64,
     pub(crate) latency_avg_ms: Option<f64>,
@@ -840,6 +853,20 @@ pub(crate) struct AllocateTunnelEndpointsResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct HistoryQuery {
     pub(crate) limit: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct NetworkEvidenceQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) window: Option<String>,
+    pub(crate) start_unix: Option<i64>,
+    pub(crate) end_unix: Option<i64>,
+    pub(crate) plan_ids: Option<String>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) health: Option<String>,
+    pub(crate) q: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

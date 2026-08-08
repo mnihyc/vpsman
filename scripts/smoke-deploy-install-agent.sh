@@ -353,6 +353,13 @@ env \
 test -x "$agent_home/bin/vpsman-agent"
 test -f "$agent_home/config/agent.toml"
 test -f "$agent_home/systemd/vpsman-agent.service"
+grep -Fqx 'Environment=VPSMAN_AGENT_RESTART_MODE=signal_only' \
+  "$agent_home/systemd/vpsman-agent.service"
+grep -Fqx 'Environment=VPSMAN_AGENT_STOP_MODE=restart_prevent_exit_64' \
+  "$agent_home/systemd/vpsman-agent.service"
+grep -Fqx 'SuccessExitStatus=64' "$agent_home/systemd/vpsman-agent.service"
+grep -Fqx 'RestartPreventExitStatus=64' "$agent_home/systemd/vpsman-agent.service"
+grep -Fqx 'Restart=always' "$agent_home/systemd/vpsman-agent.service"
 grep -Fq 'tcp_addr = "127.0.0.1:9443"' "$agent_home/config/agent.toml"
 grep -Fq 'tcp_addr = "gw.example.com:9443"' "$agent_home/config/agent.toml"
 grep -Fq 'tcp_addr = "[2001:db8::1]:9443"' "$agent_home/config/agent.toml"

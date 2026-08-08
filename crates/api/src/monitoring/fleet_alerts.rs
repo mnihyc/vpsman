@@ -540,11 +540,10 @@ fn append_tunnel_alerts(alerts: &mut Vec<FleetAlertView>, tunnels: &[TelemetryTu
                 "warning",
                 tunnel,
                 "tunnel_traffic_degraded",
-                "Tunnel traffic source is degraded",
-                tunnel
-                    .traffic_reason
-                    .clone()
-                    .unwrap_or_else(|| "selected traffic source is not reporting ok".to_string()),
+                "Tunnel interface counters are degraded",
+                tunnel.traffic_reason.clone().unwrap_or_else(|| {
+                    "tunnel interface counters are not reporting ok".to_string()
+                }),
                 json!({
                     "traffic_source": &tunnel.traffic_source,
                     "traffic_status": &tunnel.traffic_status,

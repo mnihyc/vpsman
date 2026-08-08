@@ -555,6 +555,82 @@
   flex: 0 0 auto;
 }
 
+.networkEvidenceRangeControls {
+  display: flex;
+  align-items: center;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--canvas);
+}
+
+.observabilityMetricsControls > .networkEvidenceRangeControls {
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.networkEvidenceRangeControls > .timeRangeTabs {
+  flex: 1 1 440px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.networkEvidenceRangeControls > .timeRangeTabs button {
+  flex: 0 0 auto;
+}
+
+.networkEvidenceCustomRange {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.networkEvidenceCustomRange label {
+  display: grid;
+  gap: 4px;
+  min-width: min(100%, 190px);
+}
+
+.networkEvidenceCustomRange label > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.networkEvidenceCustomRange input {
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 9px;
+}
+
+.observabilityMetricsRefreshState {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 16px;
+}
+
+.observabilityMetricsRefreshState span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .fleetMetricsScopeSummary {
   display: block;
   max-width: min(38vw, 320px);
@@ -619,6 +695,14 @@
   border-radius: 0;
   background: transparent;
   padding: 0;
+}
+
+.dashboardControlBar.networkMetricsAdvancedFilterGrid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.networkMetricsAdvancedFilterGrid .dashboardScopeHint {
+  grid-column: span 2;
 }
 
 .observabilityMetricsSummary {

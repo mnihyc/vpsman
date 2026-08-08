@@ -1881,7 +1881,7 @@ export function App() {
         lastLiveEvent={dashboard.lastLiveEvent}
         onCreateJob={dashboard.createJob}
         onBulkMutateTags={dashboard.bulkMutateTags}
-        onDeleteAgent={dashboard.deleteAgent}
+        onDeleteAgents={dashboard.deleteAgents}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
         onNavigatePanel={selectReleaseDestination}
@@ -2087,6 +2087,7 @@ export function App() {
         onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
         onBulkUpsertVpsRules={dashboard.bulkUpsertVpsRules}
         onDryRunVpsRules={dashboard.dryRunVpsRules}
+        onLoadEffectiveVpsRules={dashboard.loadEffectiveVpsRules}
         onRenderRuntimeConfigPatchGenerator={
           dashboard.renderRuntimeConfigPatchGenerator
         }
@@ -2309,8 +2310,11 @@ export function App() {
     return (
       <NetworkMetricsPanel
         agents={dashboard.agents}
+        error={dashboard.topologyError}
         networkObservations={dashboard.networkObservations}
         networkTrends={dashboard.networkTrends}
+        onLoadNetworkObservations={dashboard.loadNetworkObservations}
+        onLoadNetworkTrends={dashboard.loadNetworkTrends}
         onOpenEvidence={() => selectView("Network", "evidence")}
         onOpenOspf={() => selectView("Network", "ospf")}
         onOpenTests={() => selectView("Network", "tests")}
@@ -2523,7 +2527,7 @@ export function App() {
   function renderNetworkPanel(panelSubpage: string) {
     return (
       <div className="workspace singleColumn">
-        <TopologyPanel
+      <TopologyPanel
           activeSubpage={panelSubpage}
           agents={dashboard.agents}
           apiToken={dashboard.apiToken}
@@ -2581,6 +2585,7 @@ export function App() {
           onLoadNetworkObservations={dashboard.loadNetworkObservations}
           onLoadConfigurationSources={dashboard.loadConfigurationSources}
           onLoadNetworkTrends={dashboard.loadNetworkTrends}
+          onQueryNetworkObservations={dashboard.queryNetworkObservations}
           onLoadOspfRecommendations={dashboard.loadOspfRecommendations}
           onLoadOspfUpdatePlans={dashboard.loadOspfUpdatePlans}
           onLoadRuntimeConfigApplyStates={

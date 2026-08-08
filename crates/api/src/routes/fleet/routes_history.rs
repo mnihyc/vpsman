@@ -655,7 +655,7 @@ pub(crate) async fn export_history(
                 data.insert(
                     domain.as_str().to_string(),
                     json!({
-                        "graph": state.repo.topology_graph(limit).await.map_err(history_export_unavailable)?,
+                        "graph": state.repo.topology_graph(limit, 0, crate::unix_now() as i64, &[]).await.map_err(history_export_unavailable)?,
                         "trends": state.repo.list_network_observation_trends(limit, false).await.map_err(history_export_unavailable)?,
                     }),
                 );

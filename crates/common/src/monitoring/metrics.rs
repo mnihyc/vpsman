@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 // Accepted raw telemetry samples support realtime and short-range inspection.
 // One-minute rollups are the authoritative long-term historical source.
@@ -12,6 +13,8 @@ pub const MAX_TELEMETRY_DISKS: usize = 256;
 pub const MAX_TELEMETRY_NETWORKS: usize = 512;
 pub const MAX_TELEMETRY_TUNNELS: usize = 512;
 pub const MAX_TELEMETRY_PING_RESULTS: usize = 16;
+pub const MAX_TUNNEL_REACHABILITY_OBSERVATIONS: usize = 512;
+pub const MIN_TUNNEL_REACHABILITY_FRESH_SECS: u64 = 45;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct LoadAverage {
@@ -149,6 +152,69 @@ fn default_runtime_tunnel_mutation_policy() -> String {
     "unknown".to_string()
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelReachabilitySource {
+    Automatic,
+    Manual,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct TunnelReachabilityObservation {
+    pub id: Uuid,
+    pub source: TunnelReachabilitySource,
+    pub plan_id: Uuid,
+    pub topology_identity_hash: String,
+    pub endpoint_side: crate::TunnelEndpointSide,
+    pub peer_client_id: String,
+    pub interface_name: String,
+    pub address_family: crate::TunnelAddressFamily,
+    pub target: String,
+    pub measured_unix: u64,
+    pub stale_after_secs: u64,
+    pub transmitted: u32,
+    pub received: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_min_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_avg_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_mdev_ms: Option<f64>,
+    pub packet_loss_ratio: f64,
+    pub healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl TunnelReachabilityObservation {
+    pub fn values_are_coherent(&self) -> bool {
+        self.topology_identity_hash.len() == 64
+            && self
+                .topology_identity_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && !self.peer_client_id.trim().is_empty()
+            && !self.interface_name.trim().is_empty()
+            && !self.target.trim().is_empty()
+            && self.stale_after_secs >= MIN_TUNNEL_REACHABILITY_FRESH_SECS
+            && self.received <= self.transmitted
+            && self.packet_loss_ratio.is_finite()
+            && (0.0..=1.0).contains(&self.packet_loss_ratio)
+            && [
+                self.latency_min_ms,
+                self.latency_avg_ms,
+                self.latency_max_ms,
+                self.latency_mdev_ms,
+            ]
+            .into_iter()
+            .flatten()
+            .all(|value| value.is_finite() && value >= 0.0)
+            && (!self.healthy || (self.received > 0 && self.latency_avg_ms.is_some()))
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PingTargetResult {
     pub target_id: String,
@@ -190,6 +256,8 @@ pub struct AgentMetrics {
     pub tunnels: Vec<RuntimeTunnelStat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ping_results: Vec<PingTargetResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnel_reachability: Vec<TunnelReachabilityObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_forwarding: Option<crate::PortForwardRuntimeSnapshot>,
 }

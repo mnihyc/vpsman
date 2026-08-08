@@ -1,4 +1,4 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import {
   backupId,
   installConsoleApiMock,
@@ -42,6 +42,20 @@ const tunnelPortSpeedRules: VpsRuleValueRecord[] = [
     value_raw: "400 Mbps",
   },
 ];
+
+const explicitAllNetworkRateRule: VpsRuleValueRecord = {
+  client_id: "agent-sfo-01",
+  key: "network.rate.interfaces",
+  parsed_display: "all reported interfaces",
+  source_id: null,
+  source_kind: "operator",
+  state: "ok",
+  updated_at: "2026-06-02T10:00:00Z",
+  updated_by: "fixture-admin",
+  validation_errors: [],
+  value_json: { mode: "all" },
+  value_raw: "[]",
+};
 
 const bulkTargetUpdateSchedules: ScheduleRecord[] = [
   {
@@ -106,6 +120,11 @@ test.beforeEach(async ({ page }, testInfo) => {
           agentDeleteFailedClientIds: ["agent-fra-02"],
           agentDeleteSyncJobIds: [],
         }
+      : testInfo.tags.includes("@bulk-delete-partial")
+        ? {
+            agentDeleteRequestFailureClientIds: ["agent-fra-02"],
+            agentDeleteSyncJobIds: [],
+          }
       : testInfo.tags.includes("@ospf-planned-baseline")
         ? {
             ospfUpdatePlansOverride: ospfUpdatePlans.map((plan) => ({
@@ -165,6 +184,31 @@ test.beforeEach(async ({ page }, testInfo) => {
     vpsRulesApplyDelayMs: testInfo.tags.includes("@vps-rules-apply-delay")
       ? 1_000
       : undefined,
+    vpsRulesEffectiveDelayMsByClient: testInfo.tags.includes(
+      "@vps-rules-prefill-race",
+    )
+      ? {
+          "agent-fra-02": 150,
+          "agent-sfo-01": 800,
+        }
+      : undefined,
+    vpsRulesEffectiveFailureClientIds: testInfo.tags.includes(
+      "@vps-rules-prefill-error",
+    )
+      ? ["agent-sfo-01"]
+      : undefined,
+    vpsRulesEffectiveGatedClientIds: testInfo.tags.includes(
+      "@vps-rules-prefill-touch",
+    )
+      ? ["agent-sfo-01"]
+      : undefined,
+    vpsRuleValuesAdditional: testInfo.tags.includes(
+      "@vps-rules-prefill-race",
+    )
+      ? tunnelPortSpeedRules
+      : testInfo.tags.includes("@vps-rules-prefill-empty")
+        ? [explicitAllNetworkRateRule]
+        : undefined,
   });
 });
 
@@ -178,6 +222,23 @@ async function checkControl(locator: Locator) {
     if (!input.checked) {
       input.click();
     }
+  });
+}
+
+async function effectiveVpsRuleRequests(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    return (trackedWindow.__vpsmanFetchRequests ?? [])
+      .filter(
+        (request) =>
+          request.method === "GET" &&
+          new URL(request.url, window.location.href).pathname.startsWith(
+            "/api/v1/vps-rules/effective/",
+          ),
+      )
+      .map((request) => request.url);
   });
 }
 
@@ -770,8 +831,10 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   ).toBeVisible();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
-  await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
-  await expect(prompt).toContainText("deactivates VPS access immediately");
+  await expect(prompt.getByText("Delete selected VPSs from panel")).toBeVisible();
+  await expect(prompt).toContainText(
+    "deactivates every selected VPS immediately",
+  );
   await activate(prompt.getByRole("button", { name: "Cancel" }));
   await expect(
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
@@ -785,7 +848,7 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
     page.getByRole("menuitem", { name: "Review VPS deletion" }),
   ).toBeVisible();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
-  await activate(prompt.getByRole("button", { name: "Delete VPS" }));
+  await activate(prompt.getByRole("button", { name: "Delete VPSs" }));
   await expect(
     fleetGrid.locator(".gridBody [role=row]", { hasText: "backup-nyc-03" }),
   ).toHaveCount(0);
@@ -883,6 +946,154 @@ test("deletes a VPS through grid actions and explicit confirmation", async ({
   await expect(page).not.toHaveURL(/process_client=agent-nyc-03/);
 });
 
+test("reviews and tracks bulk agent stop and restart jobs", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk Fleet action-menu behavior is covered in the desktop grid",
+  );
+
+  await page.goto("/");
+  await unlockPrivilegeFromTop(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const fleetGrid = page.getByLabel("VPS instance records data grid");
+  await fleetGrid
+    .getByLabel("Select VPS instance records row agent-sfo-01")
+    .check();
+  await fleetGrid
+    .getByLabel("Select VPS instance records row agent-fra-02")
+    .check();
+
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Stop agent" }).click();
+  const stopPrompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
+  await expect(stopPrompt.getByText("Stop selected agents")).toBeVisible();
+  await expect(stopPrompt).toContainText("2");
+  await expect(stopPrompt).toContainText("start the vpsman-agent service externally");
+  await activate(stopPrompt.getByRole("button", { name: "Stop agents" }));
+
+  const lifecycleResult = page.getByLabel("Agent lifecycle result");
+  await expect(lifecycleResult).toContainText("Agent stop request");
+  await expect(lifecycleResult).toContainText("completed on 2 VPSs");
+  await expect(lifecycleResult).toContainText("Start their agent service externally");
+  let lifecycleRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(lifecycleRequest).toMatchObject({
+    command: "agent_stop",
+    confirmed: true,
+    destructive: true,
+    force_unprivileged: false,
+    max_timeout_secs: 120,
+    operation: { type: "agent_stop" },
+    privileged: true,
+    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
+  });
+  expectPrivilegeAssertion(lifecycleRequest);
+
+  await lifecycleResult.getByRole("button", { name: "Clear results" }).click();
+  await fleetGrid
+    .locator(".gridToolbarActions")
+    .getByRole("button", { name: "Actions", exact: true })
+    .click();
+  await page.getByRole("menuitem", { name: "Restart agent" }).click();
+  const restartPrompt = page.locator(
+    ".fleetInstancesPanel > .confirmationPrompt",
+  );
+  await expect(restartPrompt.getByText("Restart selected agents")).toBeVisible();
+  await expect(restartPrompt).toContainText("reconnect evidence is reported separately");
+  await activate(
+    restartPrompt.getByRole("button", { name: "Restart agents" }),
+  );
+  await expect(page.getByLabel("Agent lifecycle result")).toContainText(
+    "Agent restart request",
+  );
+  lifecycleRequest = await page.evaluate(() => {
+    const requests = (
+      window as unknown as { __vpsmanTestRequests: { jobs: unknown[] } }
+    ).__vpsmanTestRequests;
+    return requests.jobs.at(-1);
+  });
+  expect(lifecycleRequest).toMatchObject({
+    command: "agent_restart",
+    confirmed: true,
+    destructive: true,
+    operation: { type: "agent_restart" },
+    target_client_ids: ["agent-fra-02", "agent-sfo-01"],
+  });
+  expectPrivilegeAssertion(lifecycleRequest);
+});
+
+test(
+  "reports exact partial outcomes for reviewed bulk VPS deletion",
+  { tag: "@bulk-delete-partial" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "bulk Fleet deletion is covered in the desktop grid",
+    );
+
+    await page.goto("/");
+    await unlockPrivilegeFromTop(page);
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    const fleetGrid = page.getByLabel("VPS instance records data grid");
+    await fleetGrid
+      .getByLabel("Select VPS instance records row agent-sfo-01")
+      .check();
+    await fleetGrid
+      .getByLabel("Select VPS instance records row agent-fra-02")
+      .check();
+    await fleetGrid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
+    const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
+    await expect(prompt.getByText("Delete selected VPSs from panel")).toBeVisible();
+    await expect(prompt).toContainText("2");
+    await activate(prompt.getByRole("button", { name: "Delete VPSs" }));
+
+    await expect(
+      fleetGrid.locator(".gridBody [role=row]", { hasText: "edge-sfo-01" }),
+    ).toHaveCount(0);
+    await expect(
+      fleetGrid.locator(".gridBody [role=row]", { hasText: "core-fra-02" }),
+    ).toBeVisible();
+    const partial = page.locator(
+      ".fleetInstancesPanel > .actionFeedbackWarning",
+    );
+    await expect(partial).toContainText("Deleted 1 of 2 selected VPSs");
+    await expect(partial).toContainText("core-fra-02 (agent-fra-02)");
+    await expect(partial).toContainText("Fixture refused the VPS deletion");
+
+    const deleteRequests = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { agentDeletes: unknown[] };
+        }
+      ).__vpsmanTestRequests;
+      return requests.agentDeletes.slice(-2);
+    });
+    expect(deleteRequests).toHaveLength(2);
+    expect(deleteRequests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ client_id: "agent-fra-02", confirmed: true }),
+        expect.objectContaining({ client_id: "agent-sfo-01", confirmed: true }),
+      ]),
+    );
+    for (const request of deleteRequests) {
+      expectPrivilegeAssertion(request);
+    }
+  },
+);
+
 test(
   "surfaces exact tunnel cleanup queue failures after VPS deletion",
   { tag: "@delete-cleanup-queue-failure" },
@@ -897,7 +1108,7 @@ test(
     await openConsoleSubpage(page, "Fleet", "Instances");
     await openDeleteVpsReview(page);
     const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
-    await activate(prompt.getByRole("button", { name: "Delete VPS" }));
+    await activate(prompt.getByRole("button", { name: "Delete VPSs" }));
 
     const warning = page.locator(
       ".fleetInstancesPanel > .actionFeedbackWarning",
@@ -927,13 +1138,13 @@ test(
     await openDeleteVpsReview(page);
     await activate(
       page
-        .getByRole("dialog", { name: "Delete VPS from panel" })
-        .getByRole("button", { name: "Delete VPS" }),
+        .getByRole("dialog", { name: "Delete selected VPSs from panel" })
+        .getByRole("button", { name: "Delete VPSs" }),
     );
 
     await expect(page.locator(".confirmationPromptOverlay")).toHaveCount(0);
     const failure = page.getByRole("alert").filter({
-      hasText: "Delete VPS from panel failed",
+      hasText: "Delete selected VPSs from panel failed",
     });
     await expect(failure).toContainText(
       "Fixture refused the VPS deletion before changing inventory.",
@@ -975,7 +1186,7 @@ test("review prompt display mode follows operator preference", async ({
   await openConsoleSubpage(page, "Fleet", "Instances");
   await openDeleteVpsReview(page);
   await expect(
-    page.getByRole("dialog", { name: "Delete VPS from panel" }),
+    page.getByRole("dialog", { name: "Delete selected VPSs from panel" }),
   ).toBeVisible();
   await expect(page.locator(".confirmationPromptOverlay")).toBeVisible();
   await expect(
@@ -999,7 +1210,7 @@ test("review prompt display mode follows operator preference", async ({
   await openConsoleSubpage(page, "Fleet", "Instances");
   await openDeleteVpsReview(page);
   const inlinePrompt = page.getByRole("region", {
-    name: "Delete VPS from panel",
+    name: "Delete selected VPSs from panel",
   });
   await expect(inlinePrompt).toBeVisible();
   await expect(inlinePrompt).toBeFocused();
@@ -1572,6 +1783,23 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
   await expect(page.getByLabel("VPS rules selector expression")).toHaveValue(
     "id:agent-sfo-01",
   );
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  await expect(editor.getByLabel("Reset day")).toHaveValue("14");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("3TB");
+  await expect(editor.getByLabel("Interfaces / selectors")).toHaveValue(
+    "eth0+tx,ens3",
+  );
+  await expect(editor.getByLabel("Billing price")).toHaveValue("");
+
+  const effectiveRequestsBeforeEnter = await effectiveVpsRuleRequests(page);
+  await editor.getByLabel("Total quota").fill("4TB");
+  await page.getByLabel("VPS rules selector expression").press("Enter");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("4TB");
+  await expect.poll(() => effectiveVpsRuleRequests(page)).toHaveLength(
+    effectiveRequestsBeforeEnter.length,
+  );
 
   await page.reload({ waitUntil: "domcontentloaded" });
   await waitForConsoleShell(page);
@@ -1579,7 +1807,235 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
   await expect(page.getByLabel("VPS rules selector expression")).toHaveValue(
     "id:agent-sfo-01",
   );
+  await expect(editor.getByLabel("Total quota")).toHaveValue("3TB");
 });
+
+test("clears a single-VPS rule prefill for multi-target and empty matches", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "selector-prefill state is shared across responsive layouts",
+  );
+
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  const selector = editor.getByLabel("VPS rules selector expression");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("3TB");
+  const exactTargetRequests = await effectiveVpsRuleRequests(page);
+  expect(
+    exactTargetRequests.some((url) => url.endsWith("/agent-sfo-01")),
+  ).toBe(true);
+
+  await editor.getByRole("button", { name: "Unset values" }).click();
+  await checkControl(editor.getByLabel("Unset traffic.quota.total"));
+  await selector.fill("country:US");
+  await expect(editor.getByLabel("Unset traffic.quota.total")).not.toBeChecked();
+  await editor.getByRole("button", { name: "Set values" }).click();
+  await expect(editor.getByLabel("Reset day")).toHaveValue("");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("");
+  await expect(editor.getByLabel("Interfaces / selectors")).toHaveValue("");
+  await page.waitForTimeout(100);
+  await expect.poll(() => effectiveVpsRuleRequests(page)).toHaveLength(
+    exactTargetRequests.length,
+  );
+
+  await selector.fill("id:missing-vps");
+  await expect(editor.getByLabel("Reset day")).toHaveValue("");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("");
+  await expect(editor.getByLabel("Interfaces / selectors")).toHaveValue("");
+  await page.waitForTimeout(100);
+  await expect.poll(() => effectiveVpsRuleRequests(page)).toHaveLength(
+    exactTargetRequests.length,
+  );
+
+  await selector.fill("country:DE");
+  await expect(editor.getByLabel("Total quota")).toHaveValue("");
+  await expect(editor).toContainText(
+    "No existing VPS rules for agent-fra-02; fields remain blank",
+  );
+  await expect
+    .poll(async () =>
+      (await effectiveVpsRuleRequests(page)).filter((url) =>
+        url.endsWith("/agent-fra-02"),
+      ).length,
+    )
+    .toBeGreaterThan(0);
+});
+
+test(
+  "keeps the latest exact VPS rule prefill when an older response arrives late",
+  { tag: "@vps-rules-prefill-race" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the selector response race is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    await expect(page.locator(".vpsRulesActionFeedback")).toContainText(
+      "Loading existing VPS rules for agent-sfo-01",
+    );
+    await expect
+      .poll(async () =>
+        (await effectiveVpsRuleRequests(page)).some((url) =>
+          url.endsWith("/agent-sfo-01"),
+        ),
+      )
+      .toBe(true);
+
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    await editor
+      .getByLabel("VPS rules selector expression")
+      .fill("id:agent-fra-02");
+    await expect(editor.getByLabel("Port speed")).toHaveValue("400 Mbps");
+    await page.waitForTimeout(850);
+
+    await expect(editor.getByLabel("Port speed")).toHaveValue("400 Mbps");
+    await expect(editor.getByLabel("Reset day")).toHaveValue("");
+    await expect(editor.getByLabel("Total quota")).toHaveValue("");
+    await expect(editor.getByLabel("Interfaces / selectors")).toHaveValue("");
+    const requests = await effectiveVpsRuleRequests(page);
+    expect(
+      requests.some((url) => url.endsWith("/agent-fra-02")),
+    ).toBe(true);
+  },
+);
+
+test(
+  "does not overwrite an operator rule edit when the prefill finishes late",
+  { tag: "@vps-rules-prefill-touch" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the selector response race is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    await expect(editor).toContainText(
+      "Loading existing VPS rules for agent-sfo-01",
+    );
+    await editor.getByLabel("Billing price").fill("77USD/y");
+    await page.evaluate(() => {
+      (
+        window as typeof window & {
+          __releaseVpsRulesEffective?: (clientId: string) => void;
+        }
+      ).__releaseVpsRulesEffective?.("agent-sfo-01");
+    });
+
+    await expect(editor.getByLabel("Billing price")).toHaveValue("77USD/y");
+    await expect(editor.getByLabel("Reset day")).toHaveValue("");
+    await expect(editor.getByLabel("Total quota")).toHaveValue("");
+    await expect(editor).not.toContainText("Loaded 3 existing rules");
+  },
+);
+
+test(
+  "keeps the VPS rule editor usable when existing rules cannot be loaded",
+  { tag: "@vps-rules-prefill-error" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the load failure behavior is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    await expect(editor.locator(".actionFeedbackDanger")).toContainText(
+      "Fixture could not load the selected VPS rules.",
+    );
+    await expect(editor.getByLabel("Total quota")).toHaveValue("");
+    await editor.getByLabel("Billing price").fill("29 USD/m");
+    await expect(editor.getByLabel("Billing price")).toHaveValue("29 USD/m");
+    await expect(
+      editor.getByRole("button", { name: "Preview changes", exact: true }),
+    ).toBeEnabled();
+  },
+);
+
+test("reconciles a confirmed one-VPS unset into the prefilled fields", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the post-apply data reconciliation is viewport-independent",
+  );
+
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  await expect(editor.getByLabel("Total quota")).toHaveValue("3TB");
+  await editor.getByRole("button", { name: "Unset values" }).click();
+  await checkControl(editor.getByLabel("Unset traffic.quota.total"));
+  await editor
+    .getByRole("button", { name: "Preview changes", exact: true })
+    .click();
+  const finalAction = page.getByLabel("VPS rules preview final action");
+  await finalAction.getByRole("button", { name: "Apply 1 change" }).click();
+  const prompt = page.locator(".confirmationPrompt", {
+    hasText: "Confirm VPS rule write",
+  });
+  await prompt.getByRole("button", { name: "Apply 1 change" }).click();
+  await expect(page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"))
+    .toContainText("applied 1 VPS rule changes");
+  await expect(editor).toContainText(
+    "Loaded 2 existing rules for agent-sfo-01",
+  );
+  await editor.getByRole("button", { name: "Set values" }).click();
+  await expect(editor.getByLabel("Total quota")).toHaveValue("");
+  await expect(editor.getByLabel("Reset day")).toHaveValue("14");
+  expect(await editor.getByLabel("VPS rule set values").inputValue()).not.toContain(
+    "traffic.quota.total=",
+  );
+});
+
+test(
+  "keeps explicit all-interface rules distinct from absent prefilled rules",
+  { tag: "@vps-rules-prefill-empty" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the rule-value normalization is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    const liveRateInterfaces = editor.getByLabel("Live rate interfaces");
+    const rawValues = editor.getByLabel("VPS rule set values");
+    await expect(liveRateInterfaces).toHaveValue("[]");
+    await expect(editor.getByLabel("Billing price")).toHaveValue("");
+    let rawText = await rawValues.inputValue();
+    expect(rawText).toContain("network.rate.interfaces=[]");
+    expect(rawText).not.toContain("billing.price=");
+
+    await liveRateInterfaces.fill("");
+    await expect(liveRateInterfaces).toHaveValue("[]");
+    await editor.getByLabel("Total quota").fill("");
+    await expect(editor.getByLabel("Total quota")).toHaveValue("");
+    rawText = await rawValues.inputValue();
+    expect(rawText).toContain("network.rate.interfaces=[]");
+    expect(rawText).not.toContain("traffic.quota.total=");
+  },
+);
 
 test("clears stale alert-policy detail when a routed policy does not exist", async ({
   page,
@@ -1651,6 +2107,10 @@ test(
     await expect(
       editor.getByLabel("VPS rules selector expression"),
     ).toBeVisible();
+    await editor
+      .getByLabel("VPS rules selector expression")
+      .fill("id:agent-sfo-01");
+    await expect(editor.getByLabel("Total quota")).toHaveValue("3TB");
     await expect(page.locator(".vpsRulesMutationScope")).toHaveCSS(
       "border-top-style",
       "solid",
@@ -1743,6 +2203,21 @@ test(
     await expect(
       page.locator(".vpsRulesWorkspace > .fleetPolicyStatus"),
     ).toHaveCount(0);
+    const savedRuleValues = await page.evaluate(async () => {
+      const response = await fetch(
+        "/api/v1/vps-rules/effective/agent-sfo-01",
+      );
+      return response.json();
+    });
+    expect(savedRuleValues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          client_id: "agent-sfo-01",
+          key: "traffic.quota.total",
+          value_raw: "4TB",
+        }),
+      ]),
+    );
 
     await editor.getByRole("button", { name: "Unset values" }).click();
     await checkControl(editor.getByLabel("Unset traffic.quota.total"));
@@ -5947,7 +6422,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   await expect(
     evidence.getByRole("button", { name: "Open OSPF" }),
   ).toBeVisible();
-  await expect(evidence.getByText("Network probe").first()).toBeVisible();
+  await expect(evidence.getByText("Tunnel reachability").first()).toBeVisible();
   await expect(evidence.getByText("1 OSPF update plans")).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(
@@ -5972,6 +6447,8 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   ).toBeVisible();
   const observationTable = evidence.locator(".observationTable");
   await expect(observationTable.getByText("Network speed test")).toBeVisible();
+  await expect(observationTable.getByText("automatic monitor")).toBeVisible();
+  await expect(observationTable.getByText(/manual job 99999999/)).toBeVisible();
   const speedObservationRow = observationTable
     .locator(".historyRow")
     .filter({ hasText: "Network speed test" });

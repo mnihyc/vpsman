@@ -519,6 +519,9 @@ fn validate_schedulable_job_command(command: &JobCommand) -> Result<(), ApiError
             "runtime_config_sync_is_server_issued",
         ));
     }
+    if matches!(command, JobCommand::AgentStop | JobCommand::AgentRestart) {
+        return Err(ApiError::bad_request("agent_lifecycle_not_schedulable"));
+    }
     Ok(())
 }
 

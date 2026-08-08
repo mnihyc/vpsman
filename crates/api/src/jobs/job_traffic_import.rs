@@ -26,12 +26,6 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
     final_output: &CommandOutput,
     inline_outputs: &[(i32, CommandOutput)],
 ) -> Result<NetworkTrafficImportApply> {
-    if !final_output.done
-        || final_output.stream != OutputStream::Status
-        || final_output.exit_code != Some(0)
-    {
-        return Ok(NetworkTrafficImportApply::NotApplicable);
-    }
     let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
         return Ok(NetworkTrafficImportApply::NotApplicable);
     };
@@ -42,6 +36,14 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
     else {
         return Ok(NetworkTrafficImportApply::NotApplicable);
     };
+    if !final_output.done || final_output.exit_code != Some(0) {
+        return Ok(NetworkTrafficImportApply::NotApplicable);
+    }
+    if final_output.stream != OutputStream::Status {
+        return Ok(NetworkTrafficImportApply::Invalid(
+            "network_traffic_import_invalid:final_output_invalid".to_string(),
+        ));
+    }
 
     let result = match serde_json::from_slice::<NetworkTrafficImportResult>(&final_output.data) {
         Ok(result) => result,
@@ -193,3 +195,7 @@ fn command_output_matches(left: &CommandOutput, right: &CommandOutput) -> bool {
         && left.exit_code == right.exit_code
         && left.done == right.done
 }
+
+#[cfg(test)]
+#[path = "tests_job_traffic_import.rs"]
+mod tests;

@@ -880,6 +880,10 @@ impl Repository {
             let check_age = reported_observed_unix.saturating_sub(result.checked_unix);
             result.checked_unix = received_unix.saturating_sub(check_age);
         }
+        for observation in &mut received_metrics.tunnel_reachability {
+            let measurement_age = reported_observed_unix.saturating_sub(observation.measured_unix);
+            observation.measured_unix = received_unix.saturating_sub(measurement_age);
+        }
         received_metrics.observed_unix = received_unix;
         let swap = validated_swap_sample(&received_metrics)?;
         let record_result: Result<bool> = match self {
@@ -919,6 +923,11 @@ impl Repository {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
                         drop(_key_lifecycle_guard);
+                        self.record_automatic_tunnel_reachability(
+                            &event.telemetry.client_id,
+                            &received_metrics.tunnel_reachability,
+                        )
+                        .await?;
                         self.record_port_forward_runtime_from_telemetry(
                             &event.telemetry.client_id,
                             &received_metrics,
@@ -1020,6 +1029,11 @@ impl Repository {
                     TelemetrySequenceClaim::Accepted => {}
                     TelemetrySequenceClaim::Duplicate => {
                         tx.commit().await?;
+                        self.record_automatic_tunnel_reachability(
+                            &event.telemetry.client_id,
+                            &received_metrics.tunnel_reachability,
+                        )
+                        .await?;
                         self.record_port_forward_runtime_from_telemetry(
                             &event.telemetry.client_id,
                             &received_metrics,
@@ -1101,6 +1115,11 @@ impl Repository {
         if !recorded {
             return Ok(false);
         }
+        self.record_automatic_tunnel_reachability(
+            &event.telemetry.client_id,
+            &received_metrics.tunnel_reachability,
+        )
+        .await?;
         self.record_port_forward_runtime_from_telemetry(
             &event.telemetry.client_id,
             &received_metrics,
@@ -1132,6 +1151,9 @@ impl Repository {
         }
         if !metrics.tunnels.is_empty() {
             predicates.push("telemetry.tunnel".to_string());
+        }
+        if !metrics.tunnel_reachability.is_empty() {
+            predicates.push("network.reachability".to_string());
         }
         predicates.sort();
         predicates.dedup();

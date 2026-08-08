@@ -10,6 +10,7 @@ use vpsman_common::{
 };
 
 use crate::{
+    agent_lifecycle::{execute_agent_restart, execute_agent_stop},
     child_process::{
         run_child_with_bounded_output_cancelable, run_child_with_streaming_output_cancelable,
         run_pty_with_bounded_output_cancelable, run_pty_with_streaming_output_cancelable,
@@ -534,6 +535,8 @@ pub(crate) async fn execute_job_command_with_config_cancel_and_output_sink(
             })
             .await
         }
+        JobCommand::AgentStop => execute_agent_stop(job_id),
+        JobCommand::AgentRestart => execute_agent_restart(job_id),
         JobCommand::ConfigRead
         | JobCommand::Backup { .. }
         | JobCommand::Restore { .. }

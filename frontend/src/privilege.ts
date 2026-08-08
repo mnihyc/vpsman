@@ -494,6 +494,9 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["activate", operation.activate ?? true],
         ["restart_agent", operation.restart_agent ?? true],
       ]);
+    case "agent_stop":
+    case "agent_restart":
+      return ordered([["type", operation.type]]);
     case "file_push":
       return ordered([
         ["type", operation.type],

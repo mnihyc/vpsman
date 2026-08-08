@@ -6,6 +6,7 @@ use vpsman_common::{
 };
 
 use super::*;
+use crate::job_request::validate_job_command;
 use crate::repository_jobs::aggregate_job_status_from_statuses;
 
 #[test]
@@ -539,6 +540,19 @@ fn unprivileged_submission_allowlist_includes_read_only_storage_inventory() {
 }
 
 #[test]
+fn agent_lifecycle_commands_are_validated_and_require_privileged_confirmation() {
+    for command in [JobCommand::AgentStop, JobCommand::AgentRestart] {
+        validate_job_command(&command).unwrap();
+        assert!(vpsman_common::job_command_requires_confirmation(&command));
+        assert!(!job_allows_unprivileged_submission(&command));
+        assert_eq!(
+            confirmation_error_code(&command),
+            "agent_lifecycle_confirmation_required"
+        );
+    }
+}
+
+#[test]
 fn routing_jobs_require_the_direct_argv_protocol() {
     for command in [
         network_routing_command(false),
@@ -829,6 +843,7 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         .runtime_status_telemetry_plans
         .push(AgentRuntimeStatusTelemetryPlan {
             plan_id: Some("plan-left-right".to_string()),
+            topology_identity_hash: "0".repeat(64),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
             builtin_credentials: None,

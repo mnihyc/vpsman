@@ -177,6 +177,37 @@ fn update_commands_keep_the_legacy_dispatch_protocol() {
 }
 
 #[test]
+fn agent_lifecycle_commands_use_the_new_exclusive_confirmed_protocol() {
+    for (command, operation_type) in [
+        (JobCommand::AgentStop, "agent_stop"),
+        (JobCommand::AgentRestart, "agent_restart"),
+    ] {
+        assert_eq!(
+            super::job_command_protocol_version(&command),
+            super::AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            super::job_command_dispatch_protocol_version(&command),
+            super::AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            super::job_command_min_supported_protocol_version(&command),
+            super::AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
+        );
+        assert_eq!(super::job_command_operation_type(&command), operation_type);
+        assert_eq!(
+            super::job_command_safety(&command),
+            super::JobCommandSafety::Exclusive
+        );
+        assert!(super::job_command_requires_confirmation(&command));
+        assert_eq!(
+            serde_json::to_value(&command).unwrap(),
+            serde_json::json!({ "type": operation_type })
+        );
+    }
+}
+
+#[test]
 fn unchanged_read_commands_keep_the_legacy_dispatch_protocol() {
     for command in [JobCommand::ConfigRead, JobCommand::NetworkInterfaces] {
         assert_eq!(
@@ -400,6 +431,14 @@ fn command_contracts_are_total_and_strict() {
         Some(true)
     );
     assert_eq!(
+        job_command_requires_confirmation_by_operation_type("agent_stop"),
+        Some(true)
+    );
+    assert_eq!(
+        job_command_requires_confirmation_by_operation_type("agent_restart"),
+        Some(true)
+    );
+    assert_eq!(
         job_command_type_label_from_operation_type("shell"),
         Some("shell_argv")
     );
@@ -438,6 +477,15 @@ fn command_contracts_are_total_and_strict() {
             .map(|(_, safety)| *safety),
         Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
     );
+    for operation_type in ["agent_stop", "agent_restart"] {
+        assert_eq!(
+            job_command_safety_by_operation_type()
+                .iter()
+                .find(|(candidate, _)| *candidate == operation_type)
+                .map(|(_, safety)| *safety),
+            Some(JOB_COMMAND_SAFETY_EXCLUSIVE)
+        );
+    }
 }
 
 #[test]

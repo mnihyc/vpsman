@@ -34,3 +34,27 @@ pub use planner::{
 #[cfg(test)]
 #[path = "tests_network.rs"]
 mod tests;
+
+/// Stable identity for the topology fields that bind reachability evidence.
+/// Endpoint or address-family changes detach old observations; policy-only edits do not.
+pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> String {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "plan_id": plan_id.to_string(),
+        "name": &plan.name,
+        "kind": format!("{:?}", plan.kind),
+        "left_client_id": &plan.left_client_id,
+        "right_client_id": &plan.right_client_id,
+        "interface_name": &plan.interface_name,
+        "left_remote_underlay": &plan.left_remote_underlay,
+        "left_local_underlay": &plan.left_local_underlay,
+        "right_remote_underlay": &plan.right_remote_underlay,
+        "right_local_underlay": &plan.right_local_underlay,
+        "left_tunnel_address": &plan.left_tunnel_address,
+        "right_tunnel_address": &plan.right_tunnel_address,
+        "ipv4_tunnel": &plan.ipv4_tunnel,
+        "ipv6_tunnel": &plan.ipv6_tunnel,
+        "latency_primary_family": format!("{:?}", plan.latency_primary_family),
+    }))
+    .expect("topology identity payload serializes");
+    crate::payload_hash(&payload)
+}

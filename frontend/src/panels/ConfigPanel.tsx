@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -222,6 +223,7 @@ export function ConfigPanel({
   onBulkUnsetVpsRules,
   onBulkUpsertVpsRules,
   onDryRunVpsRules,
+  onLoadEffectiveVpsRules,
   onRenderRuntimeConfigPatchGenerator,
   onResolveBulk,
   onSelectSubpage,
@@ -274,6 +276,7 @@ export function ConfigPanel({
   onDryRunVpsRules: (
     request: VpsRulesDryRunRequest,
   ) => Promise<VpsRulesDryRunResponse>;
+  onLoadEffectiveVpsRules: (clientId: string) => Promise<VpsRuleValueRecord[]>;
   onRenderRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: { values: JsonValue },
@@ -439,6 +442,7 @@ export function ConfigPanel({
             onBulkUnset={onBulkUnsetVpsRules}
             onBulkUpsert={onBulkUpsertVpsRules}
             onDryRun={onDryRunVpsRules}
+            onLoadEffectiveVpsRules={onLoadEffectiveVpsRules}
             trafficAccounting={trafficAccounting}
             vpsRuleValues={vpsRuleValues}
           />
@@ -3857,6 +3861,7 @@ function VpsRulesPanel({
   onBulkUnset,
   onBulkUpsert,
   onDryRun,
+  onLoadEffectiveVpsRules,
   onOpenAlerts,
   trafficAccounting,
   vpsRuleValues,
@@ -3871,6 +3876,7 @@ function VpsRulesPanel({
     request: VpsRulesBulkUpsertRequest,
   ) => Promise<VpsRulesDryRunResponse>;
   onDryRun: (request: VpsRulesDryRunRequest) => Promise<VpsRulesDryRunResponse>;
+  onLoadEffectiveVpsRules: (clientId: string) => Promise<VpsRuleValueRecord[]>;
   onOpenAlerts: () => void;
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
@@ -3880,6 +3886,7 @@ function VpsRulesPanel({
       initialSelectorExpression ??
       readLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY),
   );
+  const selectorExpressionRef = useRef(selectorExpression);
   const [keyFilter, setKeyFilter] = useState("");
   const [stateFilter, setStateFilter] = useState("");
   const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
@@ -3892,11 +3899,19 @@ function VpsRulesPanel({
   const [reviewPromptOpen, setReviewPromptOpen] = useState(false);
   const [reviewPending, setReviewPending] = useState(false);
   const [applyPending, setApplyPending] = useState(false);
-  const pending = reviewPending || applyPending;
+  const [prefillPending, setPrefillPending] = useState(false);
+  const [prefillFeedback, setPrefillFeedback] = useState<{
+    message: string;
+    tone: ActionFeedbackTone;
+  } | null>(null);
+  const pending = reviewPending || applyPending || prefillPending;
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
   const statusFeedbackRef = useRef<HTMLDivElement | null>(null);
   const previousStatusFeedbackRef = useRef<string | null>(null);
+  const selectorDraftGenerationRef = useRef(0);
+  const ruleDraftTouchedRef = useRef(false);
+  const preserveStatusOnNextDraftInvalidationRef = useRef(false);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -3938,6 +3953,18 @@ function VpsRulesPanel({
         : [],
     [agents, parsedSelector.error, selectorExpression],
   );
+  const localSelectorTargetIds = useMemo(
+    () =>
+      localSelectorTargets
+        .map((agent) => agent.id)
+        .sort((left, right) => left.localeCompare(right)),
+    [localSelectorTargets],
+  );
+  const localSelectorResolutionKey = `${selectorExpression}\0${localSelectorTargetIds.join("\0")}`;
+  const localSelectorResolutionKeyRef = useRef(localSelectorResolutionKey);
+  localSelectorResolutionKeyRef.current = localSelectorResolutionKey;
+  const singleResolvedClientId =
+    localSelectorTargetIds.length === 1 ? localSelectorTargetIds[0] : null;
   const agentNameById = useMemo(
     () =>
       new Map(
@@ -4171,23 +4198,107 @@ function VpsRulesPanel({
     [preview],
   );
 
+  const changeSelectorExpression = useCallback((nextExpression: string) => {
+    if (nextExpression === selectorExpressionRef.current) {
+      return;
+    }
+    selectorExpressionRef.current = nextExpression;
+    selectorDraftGenerationRef.current += 1;
+    ruleDraftTouchedRef.current = false;
+    setValuesText("");
+    setUnsetKeys([]);
+    setPrefillPending(false);
+    setPrefillFeedback(null);
+    setSelectorExpression(nextExpression);
+  }, []);
+
   useEffect(() => {
     if (initialSelectorExpression) {
-      setSelectorExpression(initialSelectorExpression);
+      changeSelectorExpression(initialSelectorExpression);
     }
-  }, [initialSelectorExpression]);
+  }, [changeSelectorExpression, initialSelectorExpression]);
+
+  useEffect(() => {
+    selectorDraftGenerationRef.current += 1;
+    const generation = selectorDraftGenerationRef.current;
+    ruleDraftTouchedRef.current = false;
+    setValuesText("");
+    setUnsetKeys([]);
+    setPrefillFeedback(null);
+    if (!singleResolvedClientId) {
+      setPrefillPending(false);
+      return;
+    }
+
+    let active = true;
+    setPrefillPending(true);
+    setPrefillFeedback({
+      message: `Loading existing VPS rules for ${singleResolvedClientId}`,
+      tone: "progress",
+    });
+    void onLoadEffectiveVpsRules(singleResolvedClientId)
+      .then((rows) => {
+        if (
+          !active ||
+          generation !== selectorDraftGenerationRef.current ||
+          ruleDraftTouchedRef.current
+        ) {
+          return;
+        }
+        const values = Object.fromEntries(
+          rows.map((row) => [row.key, row.value_raw]),
+        );
+        setValuesText(serializeVpsRuleTextValues(values));
+        setPrefillPending(false);
+        setPrefillFeedback({
+          message:
+            rows.length > 0
+              ? `Loaded ${rows.length} existing ${rows.length === 1 ? "rule" : "rules"} for ${singleResolvedClientId}`
+              : `No existing VPS rules for ${singleResolvedClientId}; fields remain blank`,
+          tone: "info",
+        });
+      })
+      .catch((error) => {
+        if (
+          !active ||
+          generation !== selectorDraftGenerationRef.current ||
+          ruleDraftTouchedRef.current
+        ) {
+          return;
+        }
+        setPrefillPending(false);
+        setPrefillFeedback({
+          message:
+            error instanceof Error
+              ? `Could not load existing VPS rules: ${error.message}`
+              : "Could not load existing VPS rules",
+          tone: "danger",
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    localSelectorResolutionKey,
+    onLoadEffectiveVpsRules,
+    singleResolvedClientId,
+  ]);
 
   useEffect(() => {
     writeLocalString(CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY, selectorExpression);
   }, [selectorExpression]);
 
   useEffect(() => {
+    const preserveStatus = preserveStatusOnNextDraftInvalidationRef.current;
+    preserveStatusOnNextDraftInvalidationRef.current = false;
     invalidateReviewGeneration();
     setPreview(null);
     setReviewSnapshot(null);
     setReviewPromptOpen(false);
     setReviewPending(false);
-    setStatus(null);
+    if (!preserveStatus) {
+      setStatus(null);
+    }
   }, [
     editMode,
     invalidateReviewGeneration,
@@ -4315,6 +4426,9 @@ function VpsRulesPanel({
       setReviewSnapshot(null);
       return;
     }
+    const reviewedLocalResolutionKey = localSelectorResolutionKey;
+    const reviewedSelectorGeneration = selectorDraftGenerationRef.current;
+    const reviewedSingleClientId = singleResolvedClientId;
     setApplyPending(true);
     setRuleStatus("applying VPS rule changes", "progress");
     try {
@@ -4340,6 +4454,31 @@ function VpsRulesPanel({
         "success",
       );
       setReviewPromptOpen(false);
+      if (
+        reviewedSingleClientId &&
+        selectorDraftGenerationRef.current === reviewedSelectorGeneration &&
+        localSelectorResolutionKeyRef.current === reviewedLocalResolutionKey
+      ) {
+        const refreshedValues = parseVpsRuleTextValues(valuesText);
+        if (snapshot.operation === "upsert") {
+          Object.assign(refreshedValues, snapshot.values);
+        } else {
+          for (const key of snapshot.keys) {
+            delete refreshedValues[key];
+          }
+          preserveStatusOnNextDraftInvalidationRef.current = true;
+          setUnsetKeys([]);
+        }
+        setValuesText(serializeVpsRuleTextValues(refreshedValues));
+        const refreshedCount = Object.keys(refreshedValues).length;
+        setPrefillFeedback({
+          message:
+            refreshedCount > 0
+              ? `Loaded ${refreshedCount} existing ${refreshedCount === 1 ? "rule" : "rules"} for ${reviewedSingleClientId}`
+              : `No existing VPS rules for ${reviewedSingleClientId}; fields remain blank`,
+          tone: "info",
+        });
+      }
     } catch (error) {
       setRuleStatus(
         error instanceof Error ? error.message : "VPS rules apply failed",
@@ -4578,7 +4717,7 @@ function VpsRulesPanel({
                   <button
                     className="secondaryAction compactAction"
                     disabled={applyPending}
-                    onClick={() => setSelectorExpression("")}
+                    onClick={() => changeSelectorExpression("")}
                     type="button"
                   >
                     Clear
@@ -4591,7 +4730,7 @@ function VpsRulesPanel({
                   agents={agents}
                   ariaLabel="VPS rules selector expression"
                   disabled={applyPending}
-                  onChange={setSelectorExpression}
+                  onChange={changeSelectorExpression}
                   placeholder="provider:hetzner && tag:edge"
                   showMatchCount
                   value={selectorExpression}
@@ -4612,6 +4751,11 @@ function VpsRulesPanel({
                 Local match only. Preview changes resolves and binds the
                 authoritative VPS list.
               </small>
+              <ActionFeedback
+                className="localActionFeedback vpsRulesActionFeedback"
+                message={prefillFeedback?.message}
+                tone={prefillFeedback?.tone}
+              />
               {preview ? (
                 <div
                   className="tokenPreview"
@@ -4664,15 +4808,18 @@ function VpsRulesPanel({
                         aria-label={field.label}
                         disabled={applyPending}
                         inputMode={field.inputMode ?? "text"}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          ruleDraftTouchedRef.current = true;
+                          setPrefillPending(false);
+                          setPrefillFeedback(null);
                           setValuesText((current) =>
                             updateVpsRuleTextValue(
                               current,
                               field.key,
                               event.target.value,
                             ),
-                          )
-                        }
+                          );
+                        }}
                         placeholder={field.placeholder}
                         title={field.help}
                         value={typedRuleValues[field.key] ?? ""}
@@ -4686,7 +4833,12 @@ function VpsRulesPanel({
                     aria-label="VPS rule set values"
                     disabled={applyPending}
                     value={valuesText}
-                    onChange={(event) => setValuesText(event.target.value)}
+                    onChange={(event) => {
+                      ruleDraftTouchedRef.current = true;
+                      setPrefillPending(false);
+                      setPrefillFeedback(null);
+                      setValuesText(event.target.value);
+                    }}
                   />
                 </details>
               </section>

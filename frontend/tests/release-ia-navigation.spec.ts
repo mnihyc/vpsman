@@ -2627,6 +2627,25 @@ test("fleet instance row actions expose release VPS workflows", async ({
     testInfo.project.name.includes("mobile"),
     "fleet grid action menu is covered through desktop data-grid behavior",
   );
+
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const actionOrderGrid = page.getByLabel("VPS instance records data grid");
+  await actionOrderGrid
+    .getByLabel("Select VPS instance records row agent-sfo-01")
+    .check();
+  await actionOrderGrid.getByRole("button", { name: /^Actions$/ }).click();
+  const actionLabels = await page
+    .locator(".consoleMenu:visible")
+    .getByRole("menuitem")
+    .allTextContents();
+  expect(actionLabels.slice(-3).map((label) => label.trim())).toEqual([
+    "Stop agent",
+    "Restart agent",
+    "Review VPS deletion",
+  ]);
+  await page.keyboard.press("Escape");
+
   for (const action of [
     { label: "Open detail", heading: "Instance detail" },
     { label: "Open terminal", heading: "Terminal" },

@@ -21,11 +21,14 @@ use vpsman_common::{
     render_tunnel_endpoint_config, AgentConfig, AgentMetrics, AgentPingProbeKind, AgentPingTarget,
     AgentRuntimeStatusTelemetryPlan, ConnectionStat, CpuStat, DiskStat, LoadAverage, MemoryStat,
     NetworkStat, PingTargetResult, RuntimeTunnelAdapterHealthStat, RuntimeTunnelManager,
-    RuntimeTunnelStat, TunnelAddressFamily, TunnelEndpointSide, TunnelKind, MAX_TELEMETRY_DISKS,
+    RuntimeTunnelStat, TunnelAddressFamily, TunnelEndpointSide, TunnelKind,
+    TunnelReachabilityObservation, TunnelReachabilitySource, MAX_TELEMETRY_DISKS,
     MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
+    MAX_TUNNEL_REACHABILITY_OBSERVATIONS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
+use crate::network_probe::parse_ping_measurement;
 use crate::network_runtime::render_runtime_adapter_command;
 use crate::port_forwarding::inspect_port_forwarding;
 use crate::telemetry_custom::{
@@ -219,6 +222,7 @@ pub(crate) struct TelemetryRuntimeState {
     cpu_time_counters: Option<CpuTimeCounters>,
     connection_collection_failed: bool,
     last_adapter_check_unix: HashMap<String, u64>,
+    last_latency_check_unix: HashMap<String, u64>,
     cached_adapter_tunnels: HashMap<String, RuntimeTunnelStat>,
     latency_monitors: HashMap<String, LatencyMonitorState>,
     last_ping_check_unix: HashMap<String, u64>,
@@ -304,6 +308,7 @@ fn collect_linux_metrics(
         connections,
         tunnels: Vec::new(),
         ping_results: Vec::new(),
+        tunnel_reachability: Vec::new(),
         port_forwarding: None,
     })
 }
@@ -511,8 +516,8 @@ async fn run_general_icmp_probe(
     .await
     {
         Ok(ChildRunResult::Completed(output)) => {
-            let parsed = parse_latency_ping_output(&String::from_utf8_lossy(&output.stdout));
-            let loss_ratio = parsed.packet_loss_ratio.unwrap_or(1.0).clamp(0.0, 1.0);
+            let parsed = parse_ping_measurement(&String::from_utf8_lossy(&output.stdout));
+            let loss_ratio = parsed.packet_loss_ratio.clamp(0.0, 1.0);
             let output_limited = output.stdout_truncated || output.stderr_truncated;
             let (status, reason) = if output_limited {
                 ("error", Some("ping_output_limit".to_string()))
@@ -887,9 +892,14 @@ async fn collect_runtime_status_telemetry(
     if !config.network.runtime_status_telemetry_enabled {
         runtime_state.cached_adapter_tunnels.clear();
         runtime_state.last_adapter_check_unix.clear();
+        runtime_state.last_latency_check_unix.clear();
         runtime_state.latency_monitors.clear();
         return;
     }
+    retain_runtime_status_state_for_plans(
+        runtime_state,
+        &config.network.runtime_status_telemetry_plans,
+    );
     let now = metrics.observed_unix;
     let status_interval = config
         .network
@@ -899,35 +909,73 @@ async fn collect_runtime_status_telemetry(
         .network
         .latency_monitoring_interval_secs
         .clamp(15, 3600);
-    let interval = if config.network.latency_monitoring_enabled {
-        status_interval.min(latency_interval)
-    } else {
-        status_interval
-    };
     for telemetry_plan in &config.network.runtime_status_telemetry_plans {
         let key = runtime_status_telemetry_key(telemetry_plan);
-        let due = runtime_state
-            .last_adapter_check_unix
-            .get(&key)
-            .is_none_or(|last| now.saturating_sub(*last) >= interval);
-        if due {
+        let monitoring_enabled =
+            config.network.latency_monitoring_enabled && telemetry_plan.latency_monitoring_enabled;
+        let (status_due, latency_due) = runtime_status_checks_due(
+            runtime_state,
+            &key,
+            now,
+            status_interval,
+            latency_interval,
+            monitoring_enabled,
+        );
+        if status_due {
             let interface_counter = metrics
                 .networks
                 .iter()
                 .find(|stat| stat.interface == telemetry_plan.plan.interface_name)
                 .cloned();
-            let stat = runtime_status_telemetry_stat(
+            let (mut stat, reachability) = runtime_status_telemetry_stat(
                 config,
                 telemetry_plan,
                 now,
                 interface_counter,
                 runtime_state,
                 &key,
+                latency_due,
             )
             .await;
+            if !latency_due {
+                if let Some(cached) = runtime_state.cached_adapter_tunnels.get(&key) {
+                    copy_latency_telemetry(&mut stat, cached);
+                }
+            }
+            if let Some(observation) = reachability {
+                if metrics.tunnel_reachability.len() < MAX_TUNNEL_REACHABILITY_OBSERVATIONS {
+                    metrics.tunnel_reachability.push(observation);
+                }
+            }
             runtime_state
                 .last_adapter_check_unix
                 .insert(key.clone(), now);
+            record_latency_check(runtime_state, &key, now, monitoring_enabled, latency_due);
+            runtime_state
+                .cached_adapter_tunnels
+                .insert(key.clone(), stat.clone());
+            merge_runtime_status_tunnel(metrics, stat);
+        } else if latency_due {
+            let mut stat = runtime_state
+                .cached_adapter_tunnels
+                .get(&key)
+                .cloned()
+                .expect("a latency-only check requires cached runtime status");
+            let reachability = apply_latency_monitoring(
+                config,
+                telemetry_plan,
+                now,
+                &key,
+                runtime_state,
+                &mut stat,
+            )
+            .await;
+            if let Some(observation) = reachability {
+                if metrics.tunnel_reachability.len() < MAX_TUNNEL_REACHABILITY_OBSERVATIONS {
+                    metrics.tunnel_reachability.push(observation);
+                }
+            }
+            record_latency_check(runtime_state, &key, now, monitoring_enabled, true);
             runtime_state
                 .cached_adapter_tunnels
                 .insert(key.clone(), stat.clone());
@@ -938,6 +986,28 @@ async fn collect_runtime_status_telemetry(
     }
 }
 
+fn retain_runtime_status_state_for_plans(
+    runtime_state: &mut TelemetryRuntimeState,
+    plans: &[AgentRuntimeStatusTelemetryPlan],
+) {
+    let current_keys = plans
+        .iter()
+        .map(runtime_status_telemetry_key)
+        .collect::<HashSet<_>>();
+    runtime_state
+        .cached_adapter_tunnels
+        .retain(|key, _| current_keys.contains(key));
+    runtime_state
+        .last_adapter_check_unix
+        .retain(|key, _| current_keys.contains(key));
+    runtime_state
+        .last_latency_check_unix
+        .retain(|key, _| current_keys.contains(key));
+    runtime_state
+        .latency_monitors
+        .retain(|key, _| current_keys.contains(key));
+}
+
 async fn runtime_status_telemetry_stat(
     config: &AgentConfig,
     telemetry_plan: &AgentRuntimeStatusTelemetryPlan,
@@ -945,7 +1015,8 @@ async fn runtime_status_telemetry_stat(
     interface_counter: Option<NetworkStat>,
     runtime_state: &mut TelemetryRuntimeState,
     key: &str,
-) -> RuntimeTunnelStat {
+    check_latency: bool,
+) -> (RuntimeTunnelStat, Option<TunnelReachabilityObservation>) {
     let plan = &telemetry_plan.plan;
     let manager = runtime_manager_label(plan.runtime_control.manager);
     let mut stat = RuntimeTunnelStat {
@@ -983,8 +1054,73 @@ async fn runtime_status_telemetry_stat(
             skipped_adapter_health("external_observed", now, "external_observed")
         }
     });
-    apply_latency_monitoring(config, telemetry_plan, now, key, runtime_state, &mut stat).await;
-    stat
+    let reachability = if check_latency {
+        apply_latency_monitoring(config, telemetry_plan, now, key, runtime_state, &mut stat).await
+    } else {
+        None
+    };
+    (stat, reachability)
+}
+
+fn runtime_status_checks_due(
+    runtime_state: &TelemetryRuntimeState,
+    key: &str,
+    now: u64,
+    status_interval: u64,
+    latency_interval: u64,
+    monitoring_enabled: bool,
+) -> (bool, bool) {
+    let status_due = runtime_state
+        .last_adapter_check_unix
+        .get(key)
+        .is_none_or(|last| now.saturating_sub(*last) >= status_interval);
+    let cached_monitoring_enabled = runtime_state
+        .cached_adapter_tunnels
+        .get(key)
+        .and_then(|stat| stat.latency_monitoring_enabled);
+    let latency_due = if monitoring_enabled {
+        runtime_state
+            .last_latency_check_unix
+            .get(key)
+            .is_none_or(|last| now.saturating_sub(*last) >= latency_interval)
+    } else {
+        cached_monitoring_enabled != Some(false)
+            || runtime_state.last_latency_check_unix.contains_key(key)
+            || runtime_state.latency_monitors.contains_key(key)
+    };
+    (status_due, latency_due)
+}
+
+fn record_latency_check(
+    runtime_state: &mut TelemetryRuntimeState,
+    key: &str,
+    now: u64,
+    monitoring_enabled: bool,
+    checked: bool,
+) {
+    if !checked {
+        return;
+    }
+    if monitoring_enabled {
+        runtime_state
+            .last_latency_check_unix
+            .insert(key.to_string(), now);
+    } else {
+        runtime_state.last_latency_check_unix.remove(key);
+    }
+}
+
+fn copy_latency_telemetry(target: &mut RuntimeTunnelStat, source: &RuntimeTunnelStat) {
+    target.latency_monitoring_enabled = source.latency_monitoring_enabled;
+    target.latency_status = source.latency_status.clone();
+    target.latency_reason = source.latency_reason.clone();
+    target.latency_primary_family = source.latency_primary_family.clone();
+    target.latency_target = source.latency_target.clone();
+    target.latency_checked_unix = source.latency_checked_unix;
+    target.latency_avg_ms = source.latency_avg_ms;
+    target.packet_loss_ratio = source.packet_loss_ratio;
+    target.latency_healthy_windows = source.latency_healthy_windows;
+    target.latency_missed_windows = source.latency_missed_windows;
 }
 
 async fn adapter_health_for_plan(
@@ -1056,8 +1192,13 @@ struct LatencyProbeResult {
     family: TunnelAddressFamily,
     target: String,
     healthy: bool,
+    transmitted: u32,
+    received: u32,
+    latency_min_ms: Option<f64>,
     latency_avg_ms: Option<f64>,
-    packet_loss_ratio: Option<f64>,
+    latency_max_ms: Option<f64>,
+    latency_mdev_ms: Option<f64>,
+    packet_loss_ratio: f64,
     reason: Option<String>,
 }
 
@@ -1167,12 +1308,17 @@ async fn run_latency_probe(
         ChildRunResult::Completed(output) => {
             let output_limited = output.stdout_truncated || output.stderr_truncated;
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let parsed = parse_latency_ping_output(&stdout);
+            let parsed = parse_ping_measurement(&stdout);
             Ok(LatencyProbeResult {
                 family,
                 target: target.to_string(),
                 healthy: parsed.healthy && !output_limited && output.exit_code == Some(0),
+                transmitted: parsed.transmitted,
+                received: parsed.received,
+                latency_min_ms: parsed.latency_min_ms,
                 latency_avg_ms: parsed.latency_avg_ms,
+                latency_max_ms: parsed.latency_max_ms,
+                latency_mdev_ms: parsed.latency_mdev_ms,
                 packet_loss_ratio: parsed.packet_loss_ratio,
                 reason: if output_limited {
                     Some(format!("latency_probe_output_limit:{source}"))
@@ -1190,16 +1336,26 @@ async fn run_latency_probe(
             family,
             target: target.to_string(),
             healthy: false,
+            transmitted: 0,
+            received: 0,
+            latency_min_ms: None,
             latency_avg_ms: None,
-            packet_loss_ratio: None,
+            latency_max_ms: None,
+            latency_mdev_ms: None,
+            packet_loss_ratio: 1.0,
             reason: Some(format!("latency_probe_timeout:{source}")),
         }),
         ChildRunResult::Canceled { reason, .. } => Ok(LatencyProbeResult {
             family,
             target: target.to_string(),
             healthy: false,
+            transmitted: 0,
+            received: 0,
+            latency_min_ms: None,
             latency_avg_ms: None,
-            packet_loss_ratio: None,
+            latency_max_ms: None,
+            latency_mdev_ms: None,
+            packet_loss_ratio: 1.0,
             reason: Some(format!("latency_probe_canceled:{source}:{reason}")),
         }),
     }
@@ -1217,72 +1373,49 @@ fn latency_ping_base_argv(config: &AgentConfig) -> Result<(Vec<String>, &'static
     anyhow::bail!("latency probe binary not found");
 }
 
-#[derive(Default)]
-struct ParsedLatencyPing {
-    healthy: bool,
-    latency_avg_ms: Option<f64>,
-    packet_loss_ratio: Option<f64>,
-}
-
-fn parse_latency_ping_output(stdout: &str) -> ParsedLatencyPing {
-    let mut parsed = ParsedLatencyPing::default();
-    let mut received = None::<u64>;
-    for line in stdout.lines() {
-        if line.contains("packets transmitted") && line.contains("packet loss") {
-            let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
-            received = parts
-                .get(1)
-                .and_then(|part| part.split_whitespace().next())
-                .and_then(|value| value.parse().ok());
-            parsed.packet_loss_ratio = parts
-                .iter()
-                .find_map(|part| part.strip_suffix("% packet loss"))
-                .and_then(|value| value.trim().parse::<f64>().ok())
-                .map(|percent| percent / 100.0);
-        }
-        if let Some((_prefix, values)) = line.split_once(" = ") {
-            let values = values.trim_end_matches(" ms");
-            let samples = values
-                .split('/')
-                .filter_map(|value| value.parse::<f64>().ok())
-                .collect::<Vec<_>>();
-            if samples.len() >= 2 {
-                parsed.latency_avg_ms = Some(samples[1]);
-            }
-        }
-    }
-    parsed.healthy = received.unwrap_or(0) > 0 && parsed.latency_avg_ms.is_some();
-    parsed
-}
-
 fn failed_probe(family: TunnelAddressFamily, target: String, reason: String) -> LatencyProbeResult {
     LatencyProbeResult {
         family,
         target,
         healthy: false,
+        transmitted: 0,
+        received: 0,
+        latency_min_ms: None,
         latency_avg_ms: None,
-        packet_loss_ratio: Some(1.0),
+        latency_max_ms: None,
+        latency_mdev_ms: None,
+        packet_loss_ratio: 1.0,
         reason: Some(reason),
     }
 }
 
-fn merge_failed_probe(
-    primary: LatencyProbeResult,
+fn retain_primary_after_unhealthy_fallback(
+    mut primary: LatencyProbeResult,
     fallback: LatencyProbeResult,
 ) -> LatencyProbeResult {
     let primary_family = primary.family_name().to_string();
     let fallback_family = fallback.family_name().to_string();
-    LatencyProbeResult {
-        family: primary.family,
-        target: primary.target,
-        healthy: false,
-        latency_avg_ms: None,
-        packet_loss_ratio: Some(1.0),
-        reason: Some(format!(
-            "primary_{}_and_fallback_{}_unhealthy",
-            primary_family, fallback_family
-        )),
-    }
+    primary.reason = Some(format!(
+        "primary_{}_and_fallback_{}_unhealthy",
+        primary_family, fallback_family
+    ));
+    primary
+}
+
+fn retain_primary_after_fallback_error(
+    mut primary: LatencyProbeResult,
+    fallback_family: TunnelAddressFamily,
+) -> LatencyProbeResult {
+    let primary_family = primary.family_name().to_string();
+    let fallback_family = match fallback_family {
+        TunnelAddressFamily::Ipv4 => "ipv4",
+        TunnelAddressFamily::Ipv6 => "ipv6",
+    };
+    primary.reason = Some(format!(
+        "primary_{}_unhealthy_and_fallback_{}_probe_failed",
+        primary_family, fallback_family
+    ));
+    primary
 }
 
 async fn apply_latency_monitoring(
@@ -1292,13 +1425,15 @@ async fn apply_latency_monitoring(
     key: &str,
     runtime_state: &mut TelemetryRuntimeState,
     stat: &mut RuntimeTunnelStat,
-) {
+) -> Option<TunnelReachabilityObservation> {
     let monitoring_enabled =
         config.network.latency_monitoring_enabled && telemetry_plan.latency_monitoring_enabled;
+    clear_latency_telemetry(stat);
     stat.latency_monitoring_enabled = Some(monitoring_enabled);
     if !monitoring_enabled {
+        runtime_state.latency_monitors.remove(key);
         stat.latency_status = Some("disabled".to_string());
-        return;
+        return None;
     }
     let plan = &telemetry_plan.plan;
     let Some(LatencyTarget {
@@ -1307,9 +1442,10 @@ async fn apply_latency_monitoring(
         fallback,
     }) = latency_targets(plan, telemetry_plan.endpoint_side)
     else {
+        runtime_state.latency_monitors.remove(key);
         stat.latency_status = Some("unconfigured".to_string());
         stat.latency_reason = Some("no_tunnel_endpoint_for_latency_probe".to_string());
-        return;
+        return None;
     };
     let state = runtime_state
         .latency_monitors
@@ -1321,12 +1457,10 @@ async fn apply_latency_monitoring(
             if let Some((fallback_family, fallback_target)) = fallback {
                 match run_latency_probe(config, fallback_family, &fallback_target).await {
                     Ok(fallback_probe) if fallback_probe.healthy => fallback_probe,
-                    Ok(fallback_probe) => merge_failed_probe(primary, fallback_probe),
-                    Err(error) => failed_probe(
-                        family,
-                        target.clone(),
-                        format!("fallback_probe_failed:{error}"),
-                    ),
+                    Ok(fallback_probe) => {
+                        retain_primary_after_unhealthy_fallback(primary, fallback_probe)
+                    }
+                    Err(_) => retain_primary_after_fallback_error(primary, fallback_family),
                 }
             } else {
                 primary
@@ -1342,7 +1476,7 @@ async fn apply_latency_monitoring(
     stat.latency_target = Some(probe.target.clone());
     stat.latency_checked_unix = Some(now);
     stat.latency_avg_ms = probe.latency_avg_ms;
-    stat.packet_loss_ratio = probe.packet_loss_ratio;
+    stat.packet_loss_ratio = Some(probe.packet_loss_ratio);
     if probe.healthy {
         state.healthy_windows = state.healthy_windows.saturating_add(1);
         state.missed_windows = 0;
@@ -1362,6 +1496,48 @@ async fn apply_latency_monitoring(
     }
     stat.latency_healthy_windows = Some(state.healthy_windows);
     stat.latency_missed_windows = Some(state.missed_windows);
+
+    let plan_id = telemetry_plan.plan_id.as_deref()?.parse().ok()?;
+    Some(TunnelReachabilityObservation {
+        id: uuid::Uuid::new_v4(),
+        source: TunnelReachabilitySource::Automatic,
+        plan_id,
+        topology_identity_hash: telemetry_plan.topology_identity_hash.clone(),
+        endpoint_side: telemetry_plan.endpoint_side,
+        peer_client_id: peer_client_id(plan, telemetry_plan.endpoint_side).to_string(),
+        interface_name: plan.interface_name.clone(),
+        address_family: probe.family,
+        target: probe.target,
+        measured_unix: now,
+        stale_after_secs: (config
+            .network
+            .latency_monitoring_interval_secs
+            .clamp(15, 3600)
+            * 3)
+        .max(180),
+        transmitted: probe.transmitted,
+        received: probe.received,
+        latency_min_ms: probe.latency_min_ms,
+        latency_avg_ms: probe.latency_avg_ms,
+        latency_max_ms: probe.latency_max_ms,
+        latency_mdev_ms: probe.latency_mdev_ms,
+        packet_loss_ratio: probe.packet_loss_ratio,
+        healthy: probe.healthy,
+        reason: stat.latency_reason.clone(),
+    })
+}
+
+fn clear_latency_telemetry(stat: &mut RuntimeTunnelStat) {
+    stat.latency_monitoring_enabled = None;
+    stat.latency_status = None;
+    stat.latency_reason = None;
+    stat.latency_primary_family = None;
+    stat.latency_target = None;
+    stat.latency_checked_unix = None;
+    stat.latency_avg_ms = None;
+    stat.packet_loss_ratio = None;
+    stat.latency_healthy_windows = None;
+    stat.latency_missed_windows = None;
 }
 
 async fn run_adapter_status_telemetry(
@@ -1547,14 +1723,13 @@ fn skipped_adapter_health(
 }
 
 fn runtime_status_telemetry_key(plan: &AgentRuntimeStatusTelemetryPlan) -> String {
-    plan.plan_id.clone().unwrap_or_else(|| {
-        format!(
-            "{}:{}:{}",
-            plan.plan.name,
-            endpoint_side_label(plan.endpoint_side),
-            plan.plan.interface_name
-        )
-    })
+    let plan_identity = plan.plan_id.as_deref().unwrap_or(&plan.plan.name);
+    format!(
+        "{}:{}:{}",
+        plan_identity,
+        plan.topology_identity_hash,
+        endpoint_side_label(plan.endpoint_side)
+    )
 }
 
 fn peer_client_id(plan: &vpsman_common::TunnelPlan, side: TunnelEndpointSide) -> &str {

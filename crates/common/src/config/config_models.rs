@@ -388,6 +388,8 @@ pub struct AgentPingTarget {
 pub struct AgentRuntimeStatusTelemetryPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
+    #[serde(default)]
+    pub topology_identity_hash: String,
     pub endpoint_side: TunnelEndpointSide,
     pub plan: TunnelPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]

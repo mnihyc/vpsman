@@ -451,12 +451,18 @@ assert_probe_observation() {
   jq -e --arg job_id "$network_probe_job_id" --arg client "$client_id" --arg peer "$peer_client_id" '
     any(.[]; .job_id == $job_id
       and .client_id == $client
-      and .kind == "network_probe"
+      and .kind == "tunnel_reachability"
+      and .source == "manual"
+      and .endpoint_side == "left"
+      and .address_family == "ipv4"
       and .plan_name == "postgres-live-status"
       and .interface_name == "pgstat0"
       and .peer_client_id == $peer
       and .target == "127.0.0.3"
       and .healthy == true
+      and .transmitted > 0
+      and .received > 0
+      and .stale_after_secs >= 180
       and .latency_avg_ms != null
       and .packet_loss_ratio == 0)
   ' <<<"$observations_json" >/dev/null
@@ -497,7 +503,8 @@ assert_network_trends() {
   jq -e --arg client "$client_id" --arg peer "$peer_client_id" '
     any(.[]; .client_id == $client
       and .peer_client_id == $peer
-      and .kind == "network_probe"
+      and .kind == "tunnel_reachability"
+      and .manual_count >= 1
       and .plan_name == "postgres-live-status"
       and .interface_name == "pgstat0"
       and .sample_count >= 1

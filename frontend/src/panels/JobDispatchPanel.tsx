@@ -2547,6 +2547,25 @@ function operationReviewItems(
       },
     ];
   }
+  if (operation.type === "network_traffic_import_vnstat") {
+    const interfaces = operation.interfaces.join(", ");
+    const start = new Date(operation.start_unix * 1_000)
+      .toISOString()
+      .replace(".000Z", "Z");
+    return [
+      { label: "Host interfaces", title: interfaces, value: interfaces },
+      { label: "Start", title: start, value: start },
+      {
+        label: "End",
+        value: "First retained live agent counter, independently per interface",
+      },
+      {
+        label: "Effect",
+        value:
+          "Replace prior vnStat imports for these interfaces and backfill one-minute traffic history; live samples remain unchanged",
+      },
+    ];
+  }
   if (operation.type.startsWith("terminal_")) {
     return [
       {

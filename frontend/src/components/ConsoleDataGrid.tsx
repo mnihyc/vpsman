@@ -897,7 +897,7 @@ export function ConsoleDataGrid<T>({
               <DropdownMenu.Portal>
                 <DropdownMenu.Content
                   align="end"
-                  className="consoleMenu"
+                  className="consoleMenu consoleActionMenu"
                   collisionPadding={12}
                   loop
                   sideOffset={6}
@@ -1177,7 +1177,7 @@ export function ConsoleDataGrid<T>({
                   {visibleContextRowActions.length > 0 && (
                     <ContextMenu.Portal>
                       <ContextMenu.Content
-                        className="consoleMenu"
+                        className="consoleMenu consoleActionMenu"
                         collisionPadding={12}
                         loop
                       >

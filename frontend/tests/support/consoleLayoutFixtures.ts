@@ -28,6 +28,8 @@ import type {
   VpsRuleValueRecord,
 } from "../../src/types";
 
+export { sha256Hex } from "./backupArtifactFixture";
+
 type FixtureJobOutput = {
   client_id: string;
   created_at?: string;
@@ -38,8 +40,6 @@ type FixtureJobOutput = {
   seq?: number;
   stream: string;
 };
-
-export { sha256Hex } from "./backupArtifactFixture";
 
 const statusOutput = (value: unknown) =>
   Buffer.from(JSON.stringify(value)).toString("base64");
@@ -1323,7 +1323,7 @@ const fleetAlertPolicies = [
   },
 ];
 
-const vpsRuleValues = [
+const vpsRuleValues: VpsRuleValueRecord[] = [
   {
     client_id: "agent-sfo-01",
     key: "traffic.reset_day",
@@ -2324,35 +2324,6 @@ const runtimeConfigPatchGenerators = [
   {
     actor_id: null,
     built_in: true,
-    category: "Source config",
-    created_at: "2026-06-02T10:00:00Z",
-    description:
-      "Selects the runtime traffic accounting source for selected VPSs.",
-    docs_metadata: {
-      examples: ['runtime_traffic_accounting_source = "vnstat"'],
-      notes: [
-        "Generates an incremental config patch only for the traffic accounting source.",
-      ],
-    },
-    domain: "runtime_traffic_accounting_source",
-    field_schema: {
-      properties: {
-        source: {
-          enum: ["vnstat", "interface_counters"],
-          type: "string",
-        },
-      },
-      required: ["source"],
-      type: "object",
-    },
-    id: "91919191-1111-4111-8111-919191919191",
-    name: "Traffic source",
-    raw_generator_body: "runtime_traffic_accounting_source = {{source}}",
-    updated_at: "2026-06-02T10:00:00Z",
-  },
-  {
-    actor_id: null,
-    built_in: true,
     category: "Update",
     created_at: "2026-06-02T10:00:00Z",
     description:
@@ -3033,14 +3004,23 @@ const networkJobOutputs = {
       client_id: "agent-sfo-01",
       created_at: "2026-05-31T10:08:00Z",
       data_base64: statusOutput({
+        address_family: "ipv4",
         client_id: "agent-sfo-01",
         count: 4,
+        healthy: true,
         interface: "tunab",
         interval_ms: 700,
+        latency_avg_ms: 12.4,
+        latency_max_ms: 14.8,
+        latency_mdev_ms: 1.1,
+        latency_min_ms: 10.9,
+        measured_unix: 1780222080,
+        packet_loss_ratio: 0.0025,
         parsed: {
           healthy: true,
           latency_avg_ms: 12.4,
           latency_max_ms: 14.8,
+          latency_mdev_ms: 1.1,
           latency_min_ms: 10.9,
           packet_loss_ratio: 0.0025,
           received: 4,
@@ -3049,9 +3029,14 @@ const networkJobOutputs = {
         peer_client_id: "agent-fra-02",
         plan: "sfo-fra-gre",
         probe: "icmp_ping",
+        reason: null,
+        received: 4,
         side: "left",
+        source: "manual",
+        stale_after_secs: 180,
         target: "10.255.0.1",
-        type: "network_probe",
+        transmitted: 4,
+        type: "tunnel_reachability",
       }),
       done: true,
       exit_code: 0,
@@ -3136,13 +3121,18 @@ const externalTopologyIdentityHash = "b".repeat(64);
 
 const networkObservations = [
   {
+    address_family: null,
     bytes: 4194304,
     client_id: "agent-fra-02",
+    endpoint_side: "right",
     healthy: true,
     id: "70707070-aaaa-4bbb-8ccc-dddddddddddd",
     interface_name: "tunab",
     job_id: networkSpeedJobId,
     kind: "network_speed_test",
+    latency_max_ms: null,
+    latency_mdev_ms: null,
+    latency_min_ms: null,
     latency_avg_ms: null,
     metadata: {},
     observed_at: "2026-05-31T10:09:00Z",
@@ -3150,20 +3140,31 @@ const networkObservations = [
     peer_client_id: "agent-sfo-01",
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
+    reason: null,
+    received: null,
+    received_at: "2026-05-31T10:09:00Z",
     role: "client",
     seq: 1,
+    source: "manual",
+    stale_after_secs: null,
     target: "10.255.0.0:5201",
     topology_identity_hash: sfoFraTopologyIdentityHash,
+    transmitted: null,
     throughput_mbps: 10.1,
   },
   {
+    address_family: "ipv4",
     bytes: null,
     client_id: "agent-sfo-01",
+    endpoint_side: "left",
     healthy: true,
     id: "90909090-aaaa-4bbb-8ccc-dddddddddddd",
     interface_name: "tunab",
     job_id: networkProbeJobId,
-    kind: "network_probe",
+    kind: "tunnel_reachability",
+    latency_max_ms: 14.8,
+    latency_mdev_ms: 1.1,
+    latency_min_ms: 10.9,
     latency_avg_ms: 12.4,
     metadata: {},
     observed_at: "2026-05-31T10:08:00Z",
@@ -3171,20 +3172,63 @@ const networkObservations = [
     peer_client_id: "agent-fra-02",
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
+    reason: null,
+    received: 4,
+    received_at: "2026-05-31T10:08:00Z",
     role: null,
     seq: 0,
+    source: "manual",
+    stale_after_secs: 180,
     target: "10.255.0.1",
     topology_identity_hash: sfoFraTopologyIdentityHash,
+    transmitted: 4,
     throughput_mbps: null,
   },
   {
+    address_family: "ipv4",
     bytes: null,
     client_id: "agent-fra-02",
+    endpoint_side: "right",
+    healthy: false,
+    id: "92929292-aaaa-4bbb-8ccc-dddddddddddd",
+    interface_name: "tunab",
+    job_id: null,
+    kind: "tunnel_reachability",
+    latency_avg_ms: null,
+    latency_max_ms: null,
+    latency_mdev_ms: null,
+    latency_min_ms: null,
+    metadata: { source: "automatic", type: "tunnel_reachability" },
+    observed_at: "2026-05-31T10:09:30Z",
+    packet_loss_ratio: 1,
+    peer_client_id: "agent-sfo-01",
+    plan_id: tunnelPlans[0].id,
+    plan_name: "sfo-fra-gre",
+    reason: "no_reply",
+    received: 0,
+    received_at: "2026-05-31T10:09:31Z",
+    role: "endpoint",
+    seq: null,
+    source: "automatic",
+    stale_after_secs: 180,
+    target: "10.255.0.0",
+    topology_identity_hash: sfoFraTopologyIdentityHash,
+    transmitted: 3,
+    throughput_mbps: null,
+  },
+  {
+    address_family: null,
+    bytes: null,
+    client_id: "agent-fra-02",
+    endpoint_side: "right",
     healthy: true,
     id: "91919191-aaaa-4bbb-8ccc-dddddddddddd",
     interface_name: "ovpn42",
     job_id: externalNetworkStatusJobId,
     kind: "network_status",
+    latency_max_ms: null,
+    latency_mdev_ms: null,
+    latency_min_ms: null,
     latency_avg_ms: null,
     metadata: {
       applied: false,
@@ -3204,16 +3248,23 @@ const networkObservations = [
     peer_client_id: "agent-sfo-01",
     plan_id: tunnelPlans[1].id,
     plan_name: "external-openvpn-observed",
+    reason: null,
+    received: null,
+    received_at: "2026-05-31T10:07:30Z",
     role: null,
     seq: 0,
+    source: "manual",
+    stale_after_secs: null,
     target: null,
     topology_identity_hash: externalTopologyIdentityHash,
+    transmitted: null,
     throughput_mbps: null,
   },
 ];
 
 const networkTrends = [
   {
+    automatic_count: 0,
     bytes_total: 4194304,
     client_id: "agent-fra-02",
     degraded_count: 0,
@@ -3224,6 +3275,7 @@ const networkTrends = [
     latency_max_ms: null,
     latency_min_ms: null,
     latest_observed_at: "2026-05-31T10:09:00Z",
+    manual_count: 2,
     packet_loss_avg_ratio: null,
     peer_client_id: "agent-sfo-01",
     plan_id: tunnelPlans[0].id,
@@ -3234,21 +3286,45 @@ const networkTrends = [
     throughput_max_mbps: 11.8,
   },
   {
+    automatic_count: 0,
     bytes_total: 0,
     client_id: "agent-sfo-01",
     degraded_count: 0,
     healthy_count: 3,
     interface_name: "tunab",
-    kind: "network_probe",
+    kind: "tunnel_reachability",
     latency_avg_ms: 12.4,
     latency_max_ms: 14.8,
     latency_min_ms: 10.9,
     latest_observed_at: "2026-05-31T10:08:00Z",
+    manual_count: 3,
     packet_loss_avg_ratio: 0.0025,
     peer_client_id: "agent-fra-02",
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     sample_count: 3,
+    topology_identity_hash: sfoFraTopologyIdentityHash,
+    throughput_avg_mbps: null,
+    throughput_max_mbps: null,
+  },
+  {
+    automatic_count: 1,
+    bytes_total: 0,
+    client_id: "agent-fra-02",
+    degraded_count: 1,
+    healthy_count: 0,
+    interface_name: "tunab",
+    kind: "tunnel_reachability",
+    latency_avg_ms: null,
+    latency_max_ms: null,
+    latency_min_ms: null,
+    latest_observed_at: "2026-05-31T10:09:30Z",
+    manual_count: 0,
+    packet_loss_avg_ratio: 1,
+    peer_client_id: "agent-sfo-01",
+    plan_id: tunnelPlans[0].id,
+    plan_name: "sfo-fra-gre",
+    sample_count: 1,
     topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_avg_mbps: null,
     throughput_max_mbps: null,
@@ -3266,13 +3342,17 @@ const topologyGraph = {
       interface_name: "tunab",
       kind: "gre",
       latency_avg_ms: 12.4,
+      latest_latency_avg_ms: 12.4,
+      latest_speed_mbps: 10.1,
       latency_primary_family: "ipv4",
       latency_series_ms: [13.8, 12.9, 12.4],
       left_client_id: "agent-sfo-01",
       left_observed_at: "2026-05-31T10:02:00Z",
       left_runtime_reason: null,
       left_runtime_state: "healthy",
+      left_reachability_observed_at: "2026-05-31T10:08:00Z",
       left_reachability_reason: null,
+      left_reachability_source: "manual",
       left_reachability_state: "reachable",
       left_tunnel_address: "10.255.0.0",
       ipv4_tunnel: { left: "10.255.0.0", right: "10.255.0.1", prefix_len: 31 },
@@ -3289,13 +3369,15 @@ const topologyGraph = {
       packet_loss_avg_ratio: 0.0025,
       plan_id: tunnelPlans[0].id,
       plan_name: "sfo-fra-gre",
-      probe_state: "healthy",
+      reachability_state: "degraded",
       recommended_ospf_cost: 22,
       right_client_id: "agent-fra-02",
       right_observed_at: "2026-05-31T10:02:00Z",
       right_runtime_reason: null,
       right_runtime_state: "healthy",
+      right_reachability_observed_at: "2026-05-31T10:09:30Z",
       right_reachability_reason: "latency_probe_missing_healthy_sample:3/3",
+      right_reachability_source: "automatic",
       right_reachability_state: "probe_failed",
       right_tunnel_address: "10.255.0.1",
       routing_state: "healthy",
@@ -3309,6 +3391,7 @@ const topologyGraph = {
       latest_observed_at: "2026-05-31T10:09:00Z",
     },
   ],
+  end_unix: 1780222200,
   generated_at: "2026-05-31T10:10:00Z",
   nodes: [
     {
@@ -3332,6 +3415,7 @@ const topologyGraph = {
       tunnel_count: 1,
     },
   ],
+  start_unix: 1780135800,
 };
 
 const ospfRecommendations = [
@@ -3420,6 +3504,7 @@ export async function installConsoleApiMock(
     alertStateCoverage?: boolean;
     agentDeleteDelayMs?: number;
     agentDeleteFailedClientIds?: string[];
+    agentDeleteRequestFailureClientIds?: string[];
     agentDeleteRequestFailure?: boolean;
     agentDeleteSyncJobIds?: string[];
     auditDetailOverride?: AuditLogRecord;
@@ -3462,6 +3547,10 @@ export async function installConsoleApiMock(
     portSpeedRulesDelayMs?: number;
     portSpeedRulesOverride?: VpsRuleValueRecord[];
     vpsRulesApplyDelayMs?: number;
+    vpsRulesEffectiveDelayMsByClient?: Record<string, number>;
+    vpsRulesEffectiveFailureClientIds?: string[];
+    vpsRulesEffectiveGatedClientIds?: string[];
+    vpsRuleValuesAdditional?: VpsRuleValueRecord[];
   } = {},
 ) {
   await page.addInitScript(
@@ -3469,6 +3558,7 @@ export async function installConsoleApiMock(
       agentListOverrideFixture,
       agentDeleteDelayMsFixture,
       agentDeleteFailedClientIdsFixture,
+      agentDeleteRequestFailureClientIdsFixture,
       agentDeleteRequestFailureFixture,
       agentDeleteSyncJobIdsFixture,
       agentsFixture,
@@ -3548,11 +3638,34 @@ export async function installConsoleApiMock(
       tunnelPlansFixture,
       portSpeedRulesDelayMsFixture,
       vpsRulesApplyDelayMsFixture,
+      vpsRulesEffectiveDelayMsByClientFixture,
+      vpsRulesEffectiveFailureClientIdsFixture,
+      vpsRulesEffectiveGatedClientIdsFixture,
       vpsRuleValuesFixture,
       webhookDeliveriesFixture,
       webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
+      const vpsRulesEffectiveGateResolvers = new Map<
+        string,
+        () => void
+      >();
+      const vpsRulesEffectiveGates = new Map(
+        vpsRulesEffectiveGatedClientIdsFixture.map((clientId) => [
+          clientId,
+          new Promise<void>((resolve) => {
+            vpsRulesEffectiveGateResolvers.set(clientId, resolve);
+          }),
+        ]),
+      );
+      (
+        window as typeof window & {
+          __releaseVpsRulesEffective?: (clientId: string) => void;
+        }
+      ).__releaseVpsRulesEffective = (clientId) => {
+        vpsRulesEffectiveGateResolvers.get(clientId)?.();
+        vpsRulesEffectiveGateResolvers.delete(clientId);
+      };
       const runtimeTunnelConfig = (clientId: string, enabled: boolean) => ({
         client_id: clientId,
         desired: enabled ? "present" : "absent",
@@ -4591,32 +4704,49 @@ export async function installConsoleApiMock(
               );
         const values =
           (body.values as Record<string, string> | undefined) ?? {};
-        const changes = keys.map((key) => {
-          const after = operation === "unset" ? null : (values[key] ?? "14");
-          const validationErrors =
-            key === "billing.price" && after?.endsWith("/w")
-              ? ["billing_plan_period_invalid"]
-              : [];
-          return {
-            action: operation === "unset" ? "unset" : "set",
-            after,
-            before:
-              vpsRuleValuesFixture.find((row) => row.key === key)?.value_raw ??
-              null,
-            client_id: "agent-sfo-01",
-            display_name: "edge-sfo-01",
-            key,
-            validation: validationErrors.length > 0 ? "invalid" : "ok",
-            validation_errors: validationErrors,
-          };
-        });
+        const targets = resolveBulkTargets(body);
+        const changes = targets.flatMap((target) =>
+          keys.map((key) => {
+            const after =
+              operation === "unset" ? null : (values[key] ?? "14");
+            const before =
+              vpsRuleValuesFixture.find(
+                (row) => row.client_id === target.id && row.key === key,
+              )?.value_raw ?? null;
+            const validationErrors =
+              key === "billing.price" && after?.endsWith("/w")
+                ? ["billing_plan_period_invalid"]
+                : [];
+            return {
+              action:
+                validationErrors.length > 0
+                  ? "invalid"
+                  : operation === "unset"
+                    ? before === null
+                      ? "unchanged"
+                      : "unset"
+                    : before === after
+                      ? "unchanged"
+                      : "set",
+              after,
+              before,
+              client_id: target.id,
+              display_name: target.display_name,
+              key,
+              validation: validationErrors.length > 0 ? "invalid" : "ok",
+              validation_errors: validationErrors,
+            };
+          }),
+        );
         return {
-          changed_row_count: changes.length,
+          changed_row_count: changes.filter((change) =>
+            ["set", "unset"].includes(change.action),
+          ).length,
           changes,
           invalid_row_count: changes.filter(
             (change) => change.validation !== "ok",
           ).length,
-          matched_vps_count: 1,
+          matched_vps_count: targets.length,
           preview_hash:
             "3333333333333333333333333333333333333333333333333333333333333333",
         };
@@ -5173,6 +5303,32 @@ export async function installConsoleApiMock(
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
+        const effectiveVpsRulesMatch = pathname.match(
+          /^\/api\/v1\/vps-rules\/effective\/([^/]+)$/,
+        );
+        if (effectiveVpsRulesMatch && method === "GET") {
+          const clientId = decodeURIComponent(effectiveVpsRulesMatch[1]);
+          await vpsRulesEffectiveGates.get(clientId);
+          const delayMs =
+            vpsRulesEffectiveDelayMsByClientFixture[clientId] ?? 0;
+          if (delayMs > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, delayMs),
+            );
+          }
+          if (vpsRulesEffectiveFailureClientIdsFixture.includes(clientId)) {
+            return jsonResponse(
+              {
+                error: "vps_rules_unavailable",
+                message: "Fixture could not load the selected VPS rules.",
+              },
+              500,
+            );
+          }
+          return jsonResponse(
+            vpsRuleValuesFixture.filter((row) => row.client_id === clientId),
+          );
+        }
         if (pathname === "/api/v1/vps-rules" && method === "GET") {
           const params = new URL(url, window.location.href).searchParams;
           if (
@@ -5202,9 +5358,64 @@ export async function installConsoleApiMock(
               window.setTimeout(resolve, vpsRulesApplyDelayMsFixture),
             );
           }
-          return jsonResponse(
-            buildVpsRulesPreview(body as Record<string, unknown>),
-          );
+          const operation = pathname.endsWith("/bulk-unset")
+            ? "unset"
+            : "upsert";
+          const request = {
+            ...(body as Record<string, unknown>),
+            operation,
+          };
+          const response = buildVpsRulesPreview(request);
+          if (body.confirmed === true && operation === "upsert") {
+            for (const change of response.changes) {
+              if (change.action !== "set" || change.after === null) {
+                continue;
+              }
+              const existing = vpsRuleValuesFixture.find(
+                (row) =>
+                  row.client_id === change.client_id && row.key === change.key,
+              );
+              if (existing) {
+                existing.parsed_display = change.after;
+                existing.updated_at = "2026-06-02T10:02:00Z";
+                existing.updated_by = "fixture-admin";
+                existing.value_json = change.after;
+                existing.value_raw = change.after;
+              } else {
+                vpsRuleValuesFixture.push({
+                  client_id: change.client_id,
+                  key: change.key,
+                  parsed_display: change.after,
+                  source_id: null,
+                  source_kind: "operator",
+                  state: "ok",
+                  updated_at: "2026-06-02T10:02:00Z",
+                  updated_by: "fixture-admin",
+                  validation_errors: [],
+                  value_json: change.after,
+                  value_raw: change.after,
+                });
+              }
+            }
+          }
+          if (body.confirmed === true && operation === "unset") {
+            for (const change of response.changes) {
+              for (
+                let index = vpsRuleValuesFixture.length - 1;
+                index >= 0;
+                index -= 1
+              ) {
+                const row = vpsRuleValuesFixture[index];
+                if (
+                  row.client_id === change.client_id &&
+                  row.key === change.key
+                ) {
+                  vpsRuleValuesFixture.splice(index, 1);
+                }
+              }
+            }
+          }
+          return jsonResponse(response);
         }
         if (pathname === "/api/v1/traffic-accounting" && method === "GET") {
           return jsonResponse(trafficAccountingFixture);
@@ -5689,10 +5900,19 @@ export async function installConsoleApiMock(
               window.setTimeout(resolve, agentDeleteDelayMsFixture),
             );
           }
-          const body = await readJsonBody(input, init);
-          requests.agentDeletes.push(body);
           const clientId = decodeURIComponent(deleteAgentMatch[1]);
-          if (agentDeleteRequestFailureFixture) {
+          const body = (await readJsonBody(input, init)) as Record<
+            string,
+            unknown
+          > | null;
+          requests.agentDeletes.push({
+            client_id: clientId,
+            ...(body ?? {}),
+          });
+          if (
+            agentDeleteRequestFailureFixture ||
+            agentDeleteRequestFailureClientIdsFixture.includes(clientId)
+          ) {
             return jsonResponse(
               {
                 error: "fixture_delete_refused",
@@ -9310,6 +9530,8 @@ export async function installConsoleApiMock(
       agentDeleteDelayMsFixture: options.agentDeleteDelayMs ?? 0,
       agentDeleteFailedClientIdsFixture:
         options.agentDeleteFailedClientIds ?? [],
+      agentDeleteRequestFailureClientIdsFixture:
+        options.agentDeleteRequestFailureClientIds ?? [],
       agentDeleteRequestFailureFixture:
         options.agentDeleteRequestFailure ?? false,
       agentDeleteSyncJobIdsFixture: options.agentDeleteSyncJobIds ?? [
@@ -9507,9 +9729,16 @@ export async function installConsoleApiMock(
       tunnelPlansFixture: tunnelPlans,
       portSpeedRulesDelayMsFixture: options.portSpeedRulesDelayMs ?? 0,
       vpsRulesApplyDelayMsFixture: options.vpsRulesApplyDelayMs ?? 0,
+      vpsRulesEffectiveDelayMsByClientFixture:
+        options.vpsRulesEffectiveDelayMsByClient ?? {},
+      vpsRulesEffectiveFailureClientIdsFixture:
+        options.vpsRulesEffectiveFailureClientIds ?? [],
+      vpsRulesEffectiveGatedClientIdsFixture:
+        options.vpsRulesEffectiveGatedClientIds ?? [],
       vpsRuleValuesFixture: [
         ...vpsRuleValues,
         ...(options.portSpeedRulesOverride ?? []),
+        ...(options.vpsRuleValuesAdditional ?? []),
       ],
       webhookDeliveriesFixture: webhookDeliveries,
       webhookRulesFixture: webhookRules,

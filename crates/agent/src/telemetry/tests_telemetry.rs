@@ -365,13 +365,174 @@ fn decodes_proc_mount_escapes_before_inspection() {
 
 #[test]
 fn parses_latency_probe_output_as_observation_only() {
-    let parsed = parse_latency_ping_output(
+    let parsed = parse_ping_measurement(
         "3 packets transmitted, 2 received, 33.333% packet loss\n\
          rtt min/avg/max/mdev = 10.0/12.5/15.0/1.0 ms\n",
     );
     assert!(parsed.healthy);
     assert_eq!(parsed.latency_avg_ms, Some(12.5));
-    assert!(parsed.packet_loss_ratio.unwrap() > 0.33);
+    assert!(parsed.packet_loss_ratio > 0.33);
+}
+
+#[test]
+fn failed_fallback_preserves_one_coherent_primary_evidence_tuple() {
+    let primary = LatencyProbeResult {
+        family: TunnelAddressFamily::Ipv4,
+        target: "10.0.0.2".to_string(),
+        healthy: false,
+        transmitted: 3,
+        received: 1,
+        latency_min_ms: Some(10.0),
+        latency_avg_ms: Some(10.0),
+        latency_max_ms: Some(10.0),
+        latency_mdev_ms: Some(0.0),
+        packet_loss_ratio: 2.0 / 3.0,
+        reason: Some("latency_probe_exit:Some(1):configured".to_string()),
+    };
+    let fallback = LatencyProbeResult {
+        family: TunnelAddressFamily::Ipv6,
+        target: "fd00::2".to_string(),
+        healthy: false,
+        transmitted: 3,
+        received: 0,
+        latency_min_ms: None,
+        latency_avg_ms: None,
+        latency_max_ms: None,
+        latency_mdev_ms: None,
+        packet_loss_ratio: 1.0,
+        reason: Some("latency_probe_exit:Some(1):configured".to_string()),
+    };
+
+    let retained_after_error =
+        retain_primary_after_fallback_error(primary.clone(), TunnelAddressFamily::Ipv6);
+    let retained = retain_primary_after_unhealthy_fallback(primary, fallback);
+    for evidence in [&retained, &retained_after_error] {
+        assert_eq!(evidence.family, TunnelAddressFamily::Ipv4);
+        assert_eq!(evidence.target, "10.0.0.2");
+        assert_eq!(evidence.transmitted, 3);
+        assert_eq!(evidence.received, 1);
+        assert_eq!(evidence.packet_loss_ratio, 2.0 / 3.0);
+        assert_eq!(evidence.latency_avg_ms, Some(10.0));
+    }
+    assert_eq!(
+        retained.reason.as_deref(),
+        Some("primary_ipv4_and_fallback_ipv6_unhealthy")
+    );
+    assert_eq!(
+        retained_after_error.reason.as_deref(),
+        Some("primary_ipv4_unhealthy_and_fallback_ipv6_probe_failed")
+    );
+}
+
+#[test]
+fn runtime_status_and_latency_checks_keep_independent_cadences() {
+    let key = "plan:topology:left";
+    let mut state = TelemetryRuntimeState::default();
+    state.last_adapter_check_unix.insert(key.to_string(), 100);
+    state.last_latency_check_unix.insert(key.to_string(), 100);
+    state.cached_adapter_tunnels.insert(
+        key.to_string(),
+        RuntimeTunnelStat {
+            latency_monitoring_enabled: Some(true),
+            ..RuntimeTunnelStat::default()
+        },
+    );
+
+    assert_eq!(
+        runtime_status_checks_due(&state, key, 115, 15, 3_600, true),
+        (true, false),
+        "a fast status cadence must not accelerate the Ping cadence"
+    );
+    assert_eq!(
+        runtime_status_checks_due(&state, key, 115, 3_600, 15, true),
+        (false, true),
+        "a fast Ping cadence must not accelerate adapter status checks"
+    );
+    assert_eq!(
+        runtime_status_checks_due(&state, key, 115, 3_600, 3_600, false),
+        (false, true),
+        "disabling monitoring must clear a cached enabled state immediately"
+    );
+}
+
+#[test]
+fn removed_runtime_plan_cannot_reuse_cached_state_when_readded() {
+    let key = "plan:topology:left";
+    let mut state = TelemetryRuntimeState::default();
+    state.last_adapter_check_unix.insert(key.to_string(), 100);
+    state.last_latency_check_unix.insert(key.to_string(), 100);
+    state
+        .cached_adapter_tunnels
+        .insert(key.to_string(), RuntimeTunnelStat::default());
+    state
+        .latency_monitors
+        .insert(key.to_string(), LatencyMonitorState::default());
+
+    retain_runtime_status_state_for_plans(&mut state, &[]);
+
+    assert!(state.last_adapter_check_unix.is_empty());
+    assert!(state.last_latency_check_unix.is_empty());
+    assert!(state.cached_adapter_tunnels.is_empty());
+    assert!(state.latency_monitors.is_empty());
+    assert_eq!(
+        runtime_status_checks_due(&state, key, 101, 3_600, 3_600, true),
+        (true, true),
+        "readding a removed plan must perform fresh status and latency checks"
+    );
+}
+
+#[test]
+fn runtime_status_cache_key_is_scoped_to_topology_and_endpoint() {
+    let plan = vpsman_common::plan_tunnel(&vpsman_common::TunnelPlanInput {
+        name: "left-right".to_string(),
+        interface_name: "tunlr".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: "left-a".to_string(),
+        right_client_id: "right-b".to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.255.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(vpsman_common::TunnelAddressPair {
+            left: "10.255.0.0".to_string(),
+            right: "10.255.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        left_mtu: Some(1476),
+        right_mtu: Some(1476),
+        ospf: None,
+    })
+    .unwrap();
+    let base = AgentRuntimeStatusTelemetryPlan {
+        plan_id: Some("00000000-0000-4000-8000-000000000001".to_string()),
+        topology_identity_hash: "a".repeat(64),
+        endpoint_side: TunnelEndpointSide::Left,
+        plan,
+        builtin_credentials: None,
+        runtime_adapter: None,
+        latency_monitoring_enabled: true,
+    };
+    let mut changed_topology = base.clone();
+    changed_topology.topology_identity_hash = "b".repeat(64);
+    let mut other_side = base.clone();
+    other_side.endpoint_side = TunnelEndpointSide::Right;
+
+    assert_ne!(
+        runtime_status_telemetry_key(&base),
+        runtime_status_telemetry_key(&changed_topology)
+    );
+    assert_ne!(
+        runtime_status_telemetry_key(&base),
+        runtime_status_telemetry_key(&other_side)
+    );
 }
 
 #[test]

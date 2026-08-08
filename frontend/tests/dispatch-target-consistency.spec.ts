@@ -1029,7 +1029,7 @@ test("fleet delete review clears on selection changes and ignores stale review c
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   await sfoRow.getByLabel("Select VPS instance records row").check();
   await page.waitForTimeout(180);
-  await expect(page.getByText("Delete VPS from panel")).toBeHidden();
+  await expect(page.getByText("Delete selected VPSs from panel")).toBeHidden();
 
   await backupRow.getByLabel("Select VPS instance records row").uncheck();
   await fleetGrid
@@ -1038,8 +1038,12 @@ test("fleet delete review clears on selection changes and ignores stale review c
     .click();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
   const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
-  await expect(prompt.getByText("Delete VPS from panel")).toBeVisible();
-  await activate(prompt.getByRole("button", { name: "Delete VPS" }));
+  await expect(
+    prompt.getByText("Delete selected VPSs from panel"),
+  ).toBeVisible();
+  await expect(prompt).toContainText("agent-sfo-01");
+  await expect(prompt).not.toContainText("agent-nyc-03");
+  await activate(prompt.getByRole("button", { name: "Delete VPSs" }));
 
   const deleteRequest = await page.evaluate(() => {
     const requests = (
@@ -1078,7 +1082,9 @@ test("overlay confirmations trap focus and close before accepted delete settles"
     .click();
   await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Delete VPS from panel" });
+  const dialog = page.getByRole("dialog", {
+    name: "Delete selected VPSs from panel",
+  });
   await expect(dialog).toBeVisible();
   await expect(page.locator(".confirmationPromptOverlay")).toBeVisible();
   await expectFocusInside(dialog);
@@ -1089,7 +1095,7 @@ test("overlay confirmations trap focus and close before accepted delete settles"
   await page.keyboard.press("Shift+Tab");
   await expectFocusInside(dialog);
 
-  await activate(dialog.getByRole("button", { name: "Delete VPS" }));
+  await activate(dialog.getByRole("button", { name: "Delete VPSs" }));
   await expect(dialog).toBeHidden();
   await expect(page.locator(".confirmationPromptOverlay")).toBeHidden();
 

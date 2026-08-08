@@ -346,8 +346,6 @@ export function telemetrySourceLabel(
       return "Kernel counters";
     case "interface_counters":
       return "Interface counters";
-    case "vnstat":
-      return "vnStat";
     case null:
     case undefined:
       return "Source unknown";

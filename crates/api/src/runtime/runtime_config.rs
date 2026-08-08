@@ -9,9 +9,10 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
-    validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, JobCommand, RuntimeConfigReconcileResource,
-    RuntimeConfigReconcileScope, RuntimeTunnelManager, TunnelEndpointSide, TunnelKind,
+    tunnel_topology_identity_hash, validate_agent_config_shape, AgentConfig, AgentNetworkConfig,
+    AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, JobCommand,
+    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelManager,
+    TunnelEndpointSide, TunnelKind,
 };
 
 use crate::{
@@ -437,6 +438,7 @@ async fn apply_enabled_tunnel_plans(
             .runtime_status_telemetry_plans
             .push(AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some(plan.id.to_string()),
+                topology_identity_hash: tunnel_topology_identity_hash(plan.id, &plan.plan),
                 endpoint_side,
                 plan: plan.plan.clone(),
                 builtin_credentials,

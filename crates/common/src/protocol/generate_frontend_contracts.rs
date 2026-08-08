@@ -899,6 +899,8 @@ fn contract_golden_vectors() -> io::Result<Vec<ContractGoldenVector>> {
                 restart_agent: true,
             },
         ),
+        golden_vector("agent_stop", JobCommand::AgentStop),
+        golden_vector("agent_restart", JobCommand::AgentRestart),
         golden_vector(
             "file_pull",
             JobCommand::FilePull {

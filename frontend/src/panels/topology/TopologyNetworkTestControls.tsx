@@ -1191,7 +1191,7 @@ function networkExecutionRows(
           },
         ];
       }
-      if (type === "network_probe") {
+      if (type === "tunnel_reachability") {
         const probe = recordValue(parsed.parsed);
         const latencyMin = numberValue(probe.latency_min_ms);
         const latencyAvg = numberValue(probe.latency_avg_ms);
@@ -1450,7 +1450,7 @@ function NetworkTestTrendCharts({
   trends: NetworkObservationTrendRecord[];
 }) {
   const probeTrends = sortedTrends(
-    trends.filter((trend) => trend.kind === "network_probe"),
+    trends.filter((trend) => trend.kind === "tunnel_reachability"),
   );
   const speedTrends = sortedTrends(
     trends.filter((trend) => trend.kind === "network_speed_test"),

@@ -1863,6 +1863,13 @@ h2 {
   z-index: var(--z-dropdown);
 }
 
+.consoleActionMenu {
+  max-height: min(
+    680px,
+    var(--radix-dropdown-menu-content-available-height, calc(100vh - 24px))
+  );
+}
+
 .consoleMenuItem,
 .consoleMenuLabel {
   min-height: 32px;

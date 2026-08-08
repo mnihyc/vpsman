@@ -124,6 +124,20 @@ Every update must keep these boundaries explicit:
   sources. Preserve the global 15-second cadence and its existing triggers,
   keep each source in an independent data/error envelope, and do not
   reintroduce browser-side request fan-out for these refreshes.
+- Keep agent Stop and Restart as protocol-versioned, exclusive, confirmed
+  direct jobs over an exact frozen VPS set; do not make them schedules or
+  generic service actions. A completed target means the agent retained and
+  accepted the lifecycle request, while later disconnect/reconnect evidence
+  remains independent.
+- Packaged systemd units keep crash recovery with `Restart=always`. Stop uses
+  the declared restart-preventing exit contract and must fail explicitly when
+  that contract is absent; never turn Stop into Restart. Restart uses the
+  supervisor signal under systemd and same-PID delayed exec elsewhere so SysV
+  PID-file ownership stays valid. Starting an intentionally stopped agent is an
+  external service-manager action.
+- The in-agent updater replaces only the binary. When lifecycle service-unit
+  contracts change, tell operators to rerun `deploy/install-agent.sh`; pre-v5
+  systemd units intentionally reject Stop until those assets are refreshed.
 
 ### Tunnel ownership changes
 
@@ -208,6 +222,26 @@ Every update must keep these boundaries explicit:
   minute-derived authoritative long-term history. Defaults are 90 and 3,650
   days respectively. Do not introduce an hourly/day authority or a parallel
   retention model.
+- Keep vnStat as a one-time host-interface history import into the existing
+  traffic-counter sample model, never as a selectable runtime backend. Derive
+  the import end independently from each interface's first retained live agent
+  sample, preserve that live boundary, and replace only prior vnStat-imported
+  rows when an operator reruns the import.
+- Keep declared-tunnel automatic reachability and manual Network probes in the
+  existing `network_observations` model. Automatic records have no job/sequence
+  link and must carry source, endpoint side, topology identity, packet/latency
+  evidence, and an explicit freshness window. A failed probe is a retained gap,
+  not missing history or zero latency. Its configured due time is independent
+  from runtime adapter-status telemetry; neither cadence may accelerate the
+  other.
+- Keep topology identity limited to fields that actually change the measured
+  path: plan identity/name/kind, endpoint VPSs, interface, local/remote underlay
+  bindings, tunnel addresses, and primary family. MTU, bandwidth, OSPF policy,
+  and runtime-command edits must not invalidate reachability or speed history.
+- Automatic OSPF requires a fresh newest bilateral reachability window followed
+  by the configured contiguous healthy paired windows. Fetch enough bounded
+  history for the maximum supported cadence/streak; do not require every older
+  member of an otherwise contiguous streak to remain a current-state sample.
 - Materialize the authoritative minute before its accepted sample can be
   pruned. Resource, network, and Ping storage may merge settled adjacent logical
   minutes only when their complete retained values are exactly equivalent.

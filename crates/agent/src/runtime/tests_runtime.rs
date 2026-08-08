@@ -2,10 +2,40 @@ use super::*;
 
 #[test]
 fn ping_targets_bound_telemetry_publish_cadence_to_one_minute() {
-    assert_eq!(effective_telemetry_interval_secs(3_600, true), 60);
-    assert_eq!(effective_telemetry_interval_secs(30, true), 30);
-    assert_eq!(effective_telemetry_interval_secs(3_600, false), 3_600);
-    assert_eq!(effective_telemetry_interval_secs(1, false), 5);
+    let mut network = vpsman_common::AgentNetworkConfig::default();
+    network.ping_targets.push(vpsman_common::AgentPingTarget {
+        id: uuid::Uuid::new_v4().to_string(),
+        generation: 1,
+        name: "gateway".to_string(),
+        host: "192.0.2.1".to_string(),
+        kind: vpsman_common::AgentPingProbeKind::Icmp,
+        port: None,
+    });
+    assert_eq!(effective_telemetry_interval_secs(3_600, &network), 60);
+    assert_eq!(effective_telemetry_interval_secs(30, &network), 30);
+
+    network.ping_targets.clear();
+    assert_eq!(effective_telemetry_interval_secs(3_600, &network), 3_600);
+    assert_eq!(effective_telemetry_interval_secs(1, &network), 5);
+}
+
+#[test]
+fn enabled_runtime_status_and_latency_bound_telemetry_publish_cadence() {
+    let mut network = vpsman_common::AgentNetworkConfig {
+        runtime_status_telemetry_interval_secs: 300,
+        latency_monitoring_interval_secs: 45,
+        runtime_status_telemetry_plans: vec![runtime_sync_test_telemetry_plan(
+            runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1"),
+        )],
+        ..Default::default()
+    };
+    assert_eq!(effective_telemetry_interval_secs(3_600, &network), 45);
+
+    network.runtime_status_telemetry_plans[0].latency_monitoring_enabled = false;
+    assert_eq!(effective_telemetry_interval_secs(3_600, &network), 300);
+
+    network.runtime_status_telemetry_enabled = false;
+    assert_eq!(effective_telemetry_interval_secs(3_600, &network), 3_600);
 }
 
 #[test]
@@ -395,6 +425,7 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
                 vpsman_common::AgentRuntimeUnprivilegedMutationPolicy::TryAll,
             runtime_status_telemetry_plans: vec![vpsman_common::AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some("plan-a".to_string()),
+                topology_identity_hash: "0".repeat(64),
                 endpoint_side: vpsman_common::TunnelEndpointSide::Left,
                 plan,
                 builtin_credentials: None,
@@ -1078,6 +1109,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
     desired.network.runtime_status_telemetry_plans.push(
         vpsman_common::AgentRuntimeStatusTelemetryPlan {
             plan_id: Some("plan-a".to_string()),
+            topology_identity_hash: "0".repeat(64),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
             builtin_credentials: None,
@@ -1208,6 +1240,7 @@ fn runtime_sync_test_telemetry_plan(
 ) -> vpsman_common::AgentRuntimeStatusTelemetryPlan {
     vpsman_common::AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("plan-a".to_string()),
+        topology_identity_hash: "0".repeat(64),
         endpoint_side: vpsman_common::TunnelEndpointSide::Left,
         plan,
         builtin_credentials: None,

@@ -86,9 +86,9 @@ CREATE INDEX tunnel_plans_pending_controller_scan_idx
 
 CREATE TABLE network_observations (
     id UUID PRIMARY KEY,
-    job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    job_id UUID REFERENCES jobs(id) ON DELETE CASCADE,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
-    seq INTEGER NOT NULL,
+    seq INTEGER,
     kind TEXT NOT NULL,
     role TEXT,
     plan_id UUID NOT NULL REFERENCES tunnel_plans(id) ON DELETE RESTRICT,
@@ -97,16 +97,42 @@ CREATE TABLE network_observations (
     interface_name TEXT NOT NULL,
     peer_client_id TEXT NOT NULL,
     target TEXT,
+    endpoint_side TEXT,
+    address_family TEXT,
+    stale_after_secs BIGINT,
     healthy BOOLEAN,
+    transmitted INTEGER,
+    received INTEGER,
+    latency_min_ms DOUBLE PRECISION,
     latency_avg_ms DOUBLE PRECISION,
+    latency_max_ms DOUBLE PRECISION,
+    latency_mdev_ms DOUBLE PRECISION,
     packet_loss_ratio DOUBLE PRECISION,
+    reason TEXT,
     throughput_mbps DOUBLE PRECISION,
     bytes BIGINT,
+    source TEXT NOT NULL DEFAULT 'manual',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (job_id, client_id, seq),
+    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT network_observations_source_check CHECK (source IN ('automatic', 'manual')),
+    CONSTRAINT network_observations_endpoint_side_check
+        CHECK (endpoint_side IS NULL OR endpoint_side IN ('left', 'right')),
+    CONSTRAINT network_observations_address_family_check
+        CHECK (address_family IS NULL OR address_family IN ('ipv4', 'ipv6')),
+    CONSTRAINT network_observations_stale_after_check
+        CHECK (stale_after_secs IS NULL OR stale_after_secs >= 1),
+    CONSTRAINT network_observations_packet_counts_check
+        CHECK (
+            transmitted IS NULL OR received IS NULL
+            OR (transmitted >= 0 AND received >= 0 AND received <= transmitted)
+        ),
     FOREIGN KEY (job_id, client_id) REFERENCES job_targets(job_id, client_id) ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX network_observations_job_sequence_unique
+    ON network_observations (job_id, client_id, seq)
+    WHERE job_id IS NOT NULL AND seq IS NOT NULL;
 
 CREATE INDEX network_observations_kind_observed_idx
     ON network_observations (kind, observed_at DESC, id DESC);
@@ -124,8 +150,11 @@ CREATE INDEX network_observations_peer_client_observed_idx
     ON network_observations (peer_client_id, observed_at DESC, id DESC);
 
 CREATE INDEX network_observations_plan_kind_observed_idx
-    ON network_observations (plan_id, kind, observed_at DESC, id DESC)
-    WHERE kind IN ('network_probe', 'network_speed_test');
+    ON network_observations (plan_id, kind, endpoint_side, observed_at DESC, id DESC)
+    WHERE kind IN ('tunnel_reachability', 'network_speed_test');
+
+CREATE INDEX network_observations_range_filter_idx
+    ON network_observations (observed_at DESC, plan_id, source, kind, client_id);
 
 CREATE INDEX network_observations_plan_identity_kind_observed_idx
     ON network_observations (

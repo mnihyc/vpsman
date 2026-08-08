@@ -24,6 +24,8 @@ test("frontend operation canonicalization matches Rust-generated golden vectors"
       "agent_update_activate",
       "agent_update_rollback",
       "agent_update_check",
+      "agent_stop",
+      "agent_restart",
       "file_pull",
       "file_push",
       "file_push_chunked",

@@ -11,6 +11,7 @@ use vpsman_common::{
     GatewayTerminalOutputIngest, JobCommand, OutputStream, RoutingCostAdapterJobResult,
     RoutingCostAdapterOperation, MAX_RUNTIME_CONFIG_REASON_BYTES, MAX_TELEMETRY_DISKS,
     MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
+    MAX_TUNNEL_REACHABILITY_OBSERVATIONS,
 };
 use vpsman_server_core::{
     target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
@@ -1095,6 +1096,16 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
         || metrics.networks.len() > MAX_TELEMETRY_NETWORKS
         || metrics.tunnels.len() > MAX_TELEMETRY_TUNNELS
         || metrics.ping_results.len() > MAX_TELEMETRY_PING_RESULTS
+        || metrics.tunnel_reachability.len() > MAX_TUNNEL_REACHABILITY_OBSERVATIONS
+        || metrics.tunnel_reachability.iter().any(|observation| {
+            observation.measured_unix == 0
+                || observation.measured_unix > metrics.observed_unix.saturating_add(300)
+                || metrics
+                    .observed_unix
+                    .saturating_sub(observation.measured_unix)
+                    > 3_900
+                || !observation.values_are_coherent()
+        })
         || metrics
             .cpu
             .utilization_ratio

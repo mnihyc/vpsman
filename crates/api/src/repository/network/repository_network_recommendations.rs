@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
@@ -17,7 +17,11 @@ use crate::{
     util::compare_timestamps_desc,
 };
 
-const OSPF_EVIDENCE_WINDOW_MINUTES: i64 = 10;
+const OSPF_SPEED_EVIDENCE_WINDOW_MINUTES: i64 = 10;
+const OSPF_MAX_REACHABILITY_INTERVAL_SECS: i64 = 3_600;
+const OSPF_MAX_HEALTHY_WINDOWS: i64 = 10;
+const OSPF_REACHABILITY_QUERY_HORIZON_SECS: i64 =
+    (OSPF_MAX_HEALTHY_WINDOWS + 1) * OSPF_MAX_REACHABILITY_INTERVAL_SECS;
 const MAX_RECENT_PROBE_SAMPLES_PER_PLAN: usize = 20;
 const MAX_RECENT_SPEED_SAMPLES_PER_PLAN: usize = 10;
 
@@ -270,13 +274,29 @@ impl Repository {
         if plan_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let since = (Utc::now() - Duration::minutes(OSPF_EVIDENCE_WINDOW_MINUTES)).timestamp();
+        let end_unix = Utc::now().timestamp();
+        let since = end_unix.saturating_sub(OSPF_REACHABILITY_QUERY_HORIZON_SECS);
+        let selected = plan_ids.iter().copied().collect::<HashSet<_>>();
+        let plan_topologies = self
+            .list_tunnel_plans()
+            .await?
+            .into_iter()
+            .filter(|plan| selected.contains(&plan.id))
+            .map(|plan| {
+                (
+                    plan.id,
+                    topology_identity_hash_for_plan(&plan),
+                    plan.left_client_id,
+                    plan.right_client_id,
+                )
+            })
+            .collect::<Vec<_>>();
         let observations = self
-            .list_network_observations_for_plans_since(
-                plan_ids,
+            .list_network_observations_for_topology(
+                &plan_topologies,
                 since,
+                end_unix,
                 MAX_RECENT_PROBE_SAMPLES_PER_PLAN,
-                MAX_RECENT_SPEED_SAMPLES_PER_PLAN,
             )
             .await?;
         Ok(observations.into_iter().fold(
@@ -304,19 +324,39 @@ fn recommend_plan_ospf_cost(
         .recommended_ospf_cost
         .expect("OSPF-enabled plans have a planned cost");
     let topology_identity_hash = topology_identity_hash_for_plan(plan);
-    let probe_observations = observations
+    let now_unix = Utc::now().timestamp();
+    let reachability_observations = observations
         .iter()
         .filter(|observation| {
             observation_matches_plan(plan, &topology_identity_hash, observation)
-                && observation.kind == "network_probe"
+                && observation.kind == "tunnel_reachability"
         })
-        .take(MAX_RECENT_PROBE_SAMPLES_PER_PLAN)
         .collect::<Vec<_>>();
+    let probe_windows =
+        current_reachability_windows(reachability_observations.iter().copied(), now_unix);
+    let healthy_probe_streak = probe_windows
+        .iter()
+        .take_while(|window| window.is_healthy())
+        .count();
+    let probe_observations = bucket_reachability_observations(
+        reachability_observations
+            .iter()
+            .copied()
+            .filter(|observation| observation_is_fresh(observation, now_unix)),
+    )
+    .into_iter()
+    .take(MAX_RECENT_PROBE_SAMPLES_PER_PLAN)
+    .collect::<Vec<_>>();
     let speed_observations = observations
         .iter()
         .filter(|observation| {
             observation_matches_plan(plan, &topology_identity_hash, observation)
                 && observation.kind == "network_speed_test"
+                && observation_within_secs(
+                    observation,
+                    now_unix,
+                    Duration::minutes(OSPF_SPEED_EVIDENCE_WINDOW_MINUTES).num_seconds(),
+                )
         })
         .take(MAX_RECENT_SPEED_SAMPLES_PER_PLAN)
         .collect::<Vec<_>>();
@@ -348,15 +388,6 @@ fn recommend_plan_ospf_cost(
         .chain(speed_observations.iter())
         .max_by_key(|observation| parse_observed_at(&observation.observed_at))
         .map(|observation| observation.observed_at.clone());
-    let healthy_probe_streak = probe_observations
-        .iter()
-        .take_while(|observation| {
-            observation.healthy == Some(true)
-                && observation.latency_avg_ms.is_some()
-                && observation.packet_loss_ratio.is_some()
-        })
-        .count();
-
     let (recommended_ospf_cost, effective_bandwidth, confidence, reason) =
         match (latency_avg_ms, packet_loss_avg_ratio) {
         (Some(latency), Some(packet_loss)) => {
@@ -377,9 +408,9 @@ fn recommend_plan_ospf_cost(
                     "latency_only"
                 },
                 if degraded_count > 0 {
-                    "recent probe or speed-test evidence includes degraded samples"
+                    "recent reachability or speed-test evidence includes degraded samples"
                 } else {
-                    "derived from the recent probe and speed-test evidence window"
+                    "derived from the recent reachability and speed-test evidence window"
                 },
             )
         }
@@ -406,7 +437,7 @@ fn recommend_plan_ospf_cost(
             if throughput_avg_mbps.is_some() {
                 "recent throughput exists, but recent latency evidence is unavailable"
             } else {
-                "using the planned cost until recent explicit probe evidence exists"
+                "using the planned cost until recent reachability evidence exists"
             },
         ),
     };
@@ -793,6 +824,184 @@ fn ospf_control_mode(mode: OspfControlMode) -> &'static str {
         OspfControlMode::Reviewed => "reviewed",
         OspfControlMode::Automatic => "automatic",
     }
+}
+
+fn reachability_bucket_secs(observation: &NetworkObservationView) -> i64 {
+    observation
+        .stale_after_secs
+        .unwrap_or(180)
+        .checked_div(3)
+        .unwrap_or(60)
+        .clamp(15, 3_600)
+}
+
+fn observation_is_fresh(observation: &NetworkObservationView, now_unix: i64) -> bool {
+    observation_within_secs(
+        observation,
+        now_unix,
+        observation.stale_after_secs.unwrap_or(180).clamp(1, 10_800),
+    )
+}
+
+fn observation_within_secs(
+    observation: &NetworkObservationView,
+    now_unix: i64,
+    horizon_secs: i64,
+) -> bool {
+    let Some(observed_unix) =
+        parse_observed_at(&observation.observed_at).map(|value| value.timestamp())
+    else {
+        return false;
+    };
+    now_unix.saturating_sub(observed_unix) <= horizon_secs
+}
+
+#[derive(Clone, Copy)]
+struct ReachabilityWindow<'a> {
+    left: &'a NetworkObservationView,
+    right: &'a NetworkObservationView,
+}
+
+impl ReachabilityWindow<'_> {
+    fn is_healthy(&self) -> bool {
+        [self.left, self.right].into_iter().all(|observation| {
+            observation.healthy == Some(true)
+                && observation.latency_avg_ms.is_some()
+                && observation.packet_loss_ratio.is_some()
+        })
+    }
+}
+
+fn bucket_reachability_observations<'a>(
+    observations: impl Iterator<Item = &'a NetworkObservationView>,
+) -> Vec<&'a NetworkObservationView> {
+    let mut candidates = observations
+        .filter_map(|observation| {
+            let observed_unix = parse_observed_at(&observation.observed_at)?.timestamp();
+            Some((observation, observed_unix))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, observed_unix)| std::cmp::Reverse(*observed_unix));
+    let mut seen = HashSet::<(String, i64, i64)>::new();
+    candidates
+        .into_iter()
+        .filter_map(|(observation, observed_unix)| {
+            let cadence_secs = reachability_bucket_secs(observation);
+            let bucket = observed_unix
+                .saturating_add(cadence_secs / 2)
+                .div_euclid(cadence_secs);
+            let endpoint = observation
+                .endpoint_side
+                .clone()
+                .unwrap_or_else(|| observation.client_id.clone());
+            seen.insert((endpoint, cadence_secs, bucket))
+                .then_some(observation)
+        })
+        .collect()
+}
+
+fn current_reachability_windows<'a>(
+    observations: impl Iterator<Item = &'a NetworkObservationView>,
+    now_unix: i64,
+) -> Vec<ReachabilityWindow<'a>> {
+    let mut candidates = observations
+        .filter_map(|observation| {
+            let side = match observation.endpoint_side.as_deref() {
+                Some("left") => "left",
+                Some("right") => "right",
+                _ => return None,
+            };
+            let observed_unix = parse_observed_at(&observation.observed_at)?.timestamp();
+            Some((observation, side, observed_unix))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(_, _, observed_unix)| std::cmp::Reverse(*observed_unix));
+    let Some(cadence_secs) = candidates
+        .first()
+        .map(|(observation, _, _)| reachability_bucket_secs(observation))
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = HashSet::<(&str, i64)>::new();
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for (observation, side, observed_unix) in candidates {
+        if reachability_bucket_secs(observation) != cadence_secs {
+            continue;
+        }
+        let bucket = observed_unix
+            .saturating_add(cadence_secs / 2)
+            .div_euclid(cadence_secs);
+        if !seen.insert((side, bucket)) {
+            continue;
+        }
+        match side {
+            "left" => left.push((observation, observed_unix)),
+            "right" => right.push((observation, observed_unix)),
+            _ => unreachable!("endpoint side was normalized above"),
+        }
+    }
+
+    let tolerance_secs = (cadence_secs / 2).max(1);
+    let mut left_index = 0;
+    let mut right_index = 0;
+    let mut skipped_open_sample = false;
+    let mut previous_pair = None::<(i64, i64)>;
+    let mut windows = Vec::new();
+    while let (Some((left_observation, left_unix)), Some((right_observation, right_unix))) =
+        (left.get(left_index), right.get(right_index))
+    {
+        let separation_secs = left_unix.abs_diff(*right_unix) as i64;
+        if separation_secs > tolerance_secs {
+            let (newer_observation, newer_unix, newer_index) = if left_unix > right_unix {
+                (*left_observation, *left_unix, &mut left_index)
+            } else {
+                (*right_observation, *right_unix, &mut right_index)
+            };
+            let sample_is_open = now_unix.saturating_sub(newer_unix) <= cadence_secs;
+            if windows.is_empty()
+                && !skipped_open_sample
+                && sample_is_open
+                && newer_observation.healthy == Some(true)
+            {
+                *newer_index += 1;
+                skipped_open_sample = true;
+                continue;
+            }
+            break;
+        }
+
+        if windows.is_empty()
+            && (!observation_is_fresh(left_observation, now_unix)
+                || !observation_is_fresh(right_observation, now_unix))
+        {
+            break;
+        }
+        if let Some((previous_left, previous_right)) = previous_pair {
+            let minimum_gap = cadence_secs.saturating_sub(tolerance_secs).max(1);
+            let maximum_gap = cadence_secs.saturating_add(tolerance_secs);
+            let left_gap = previous_left.saturating_sub(*left_unix);
+            let right_gap = previous_right.saturating_sub(*right_unix);
+            if !(minimum_gap..=maximum_gap).contains(&left_gap)
+                || !(minimum_gap..=maximum_gap).contains(&right_gap)
+            {
+                break;
+            }
+        }
+
+        windows.push(ReachabilityWindow {
+            left: left_observation,
+            right: right_observation,
+        });
+        previous_pair = Some((*left_unix, *right_unix));
+        left_index += 1;
+        right_index += 1;
+        if windows.len() == OSPF_MAX_HEALTHY_WINDOWS as usize {
+            break;
+        }
+    }
+    windows
 }
 
 fn observation_matches_plan(

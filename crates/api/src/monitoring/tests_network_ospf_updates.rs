@@ -215,15 +215,14 @@ async fn ospf_evidence_is_bounded_per_plan_instead_of_globally() {
         unreachable!("test uses memory repository")
     };
     let mut observations = memory.network_observations.write().await;
+    observations.extend((0..5_000).flat_map(|_| {
+        [TunnelEndpointSide::Left, TunnelEndpointSide::Right]
+            .map(|side| test_probe_observation(&noisy_plan, &noisy_identity, 5.0, &newer, side))
+    }));
     observations.extend(
-        (0..10_000).map(|_| test_probe_observation(&noisy_plan, &noisy_identity, 5.0, &newer)),
+        [TunnelEndpointSide::Left, TunnelEndpointSide::Right]
+            .map(|side| test_probe_observation(&quiet_plan, &quiet_identity, 42.0, &older, side)),
     );
-    observations.push(test_probe_observation(
-        &quiet_plan,
-        &quiet_identity,
-        42.0,
-        &older,
-    ));
     drop(observations);
 
     let recommendations = repo.list_network_ospf_recommendations(10).await.unwrap();
@@ -428,6 +427,19 @@ async fn record_probe(
     latency_ms: f64,
     degraded: bool,
 ) {
+    let Repository::Memory(memory) = repo else {
+        unreachable!("OSPF tests use the memory repository")
+    };
+    for observation in memory.network_observations.write().await.iter_mut() {
+        if observation.kind == "tunnel_reachability" {
+            let shifted = chrono::DateTime::parse_from_rfc3339(&observation.observed_at)
+                .unwrap()
+                .with_timezone(&Utc)
+                - Duration::seconds(60);
+            observation.observed_at = shifted.to_rfc3339();
+            observation.received_at = observation.observed_at.clone();
+        }
+    }
     repo.record_network_observations(
         job_id,
         "left-a",
@@ -435,11 +447,37 @@ async fn record_probe(
             job_id,
             stream: OutputStream::Status,
             data: serde_json::to_vec(&serde_json::json!({
-                "type": "network_probe",
+                "type": "tunnel_reachability",
                 "plan": plan_name,
                 "interface": "tunab",
                 "peer_client_id": "right-b",
                 "target": "10.255.0.1",
+                "parsed": {
+                    "healthy": !degraded,
+                    "latency_avg_ms": latency_ms,
+                    "packet_loss_ratio": if degraded { 0.1 } else { 0.0 }
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+    let right_job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        right_job_id,
+        "right-b",
+        &[CommandOutput {
+            job_id: right_job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "plan": plan_name,
+                "interface": "tunab",
+                "peer_client_id": "left-a",
+                "target": "10.255.0.0",
                 "parsed": {
                     "healthy": !degraded,
                     "latency_avg_ms": latency_ms,
@@ -465,11 +503,36 @@ async fn record_probe_without_loss(repo: &Repository, plan_name: &str, latency_m
             job_id,
             stream: OutputStream::Status,
             data: serde_json::to_vec(&serde_json::json!({
-                "type": "network_probe",
+                "type": "tunnel_reachability",
                 "plan": plan_name,
                 "interface": "tunab",
                 "peer_client_id": "right-b",
                 "target": "10.255.0.1",
+                "parsed": {
+                    "healthy": true,
+                    "latency_avg_ms": latency_ms
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+    let right_job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        right_job_id,
+        "right-b",
+        &[CommandOutput {
+            job_id: right_job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "plan": plan_name,
+                "interface": "tunab",
+                "peer_client_id": "left-a",
+                "target": "10.255.0.0",
                 "parsed": {
                     "healthy": true,
                     "latency_avg_ms": latency_ms
@@ -489,27 +552,53 @@ fn test_probe_observation(
     topology_identity_hash: &str,
     latency_avg_ms: f64,
     observed_at: &str,
+    side: TunnelEndpointSide,
 ) -> NetworkObservationView {
+    let (client_id, peer_client_id, target, endpoint_side) = match side {
+        TunnelEndpointSide::Left => (
+            plan.left_client_id.clone(),
+            plan.right_client_id.clone(),
+            plan.plan.right_tunnel_address.clone(),
+            "left",
+        ),
+        TunnelEndpointSide::Right => (
+            plan.right_client_id.clone(),
+            plan.left_client_id.clone(),
+            plan.plan.left_tunnel_address.clone(),
+            "right",
+        ),
+    };
     NetworkObservationView {
         id: Uuid::new_v4(),
-        job_id: Uuid::new_v4(),
-        client_id: plan.left_client_id.clone(),
-        seq: 0,
-        kind: "network_probe".to_string(),
+        job_id: Some(Uuid::new_v4()),
+        client_id,
+        seq: Some(0),
+        kind: "tunnel_reachability".to_string(),
+        source: "manual".to_string(),
         role: None,
         plan_id: Some(plan.id),
         topology_identity_hash: Some(topology_identity_hash.to_string()),
         plan_name: Some(plan.name.clone()),
         interface_name: Some(plan.plan.interface_name.clone()),
-        peer_client_id: Some(plan.right_client_id.clone()),
-        target: Some(plan.plan.right_tunnel_address.clone()),
+        peer_client_id: Some(peer_client_id),
+        target: Some(target),
+        endpoint_side: Some(endpoint_side.to_string()),
+        address_family: Some("ipv4".to_string()),
+        stale_after_secs: Some(180),
         healthy: Some(true),
+        transmitted: Some(3),
+        received: Some(3),
+        latency_min_ms: Some(latency_avg_ms),
         latency_avg_ms: Some(latency_avg_ms),
+        latency_max_ms: Some(latency_avg_ms),
+        latency_mdev_ms: Some(0.0),
         packet_loss_ratio: Some(0.0),
+        reason: None,
         throughput_mbps: None,
         bytes: None,
         metadata: serde_json::json!({}),
         observed_at: observed_at.to_string(),
+        received_at: observed_at.to_string(),
     }
 }
 

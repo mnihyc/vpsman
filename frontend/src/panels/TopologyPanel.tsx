@@ -30,6 +30,20 @@ import {
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { VpsCombobox } from "../components/VpsCombobox";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../components/TimeSeriesChart";
+import { NetworkEvidenceRangeControls } from "../components/NetworkEvidenceRangeControls";
+import type { MonitoringWindow } from "../components/MonitoringRangeTabs";
+import { consolePalette } from "../colorPalette";
+import {
+  DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  defaultNetworkEvidenceEndAt,
+  defaultNetworkEvidenceStartAt,
+  networkEvidenceWindowLabel,
+  type NetworkEvidenceQuery,
+} from "../networkEvidence";
 import { scrollIntoViewWithMotion } from "../motion";
 import { tunnelEndpointRuntimeStateBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
@@ -168,6 +182,7 @@ export function TopologyPanel({
   onLoadConfigurationSources,
   onLoadNetworkObservations,
   onLoadNetworkTrends,
+  onQueryNetworkObservations,
   onLoadOspfRecommendations,
   onLoadOspfUpdatePlans,
   onLoadNetworkAdapterDefinitions,
@@ -298,15 +313,16 @@ export function TopologyPanel({
     return (
       <TopologyGraphPanel
         agents={agents}
+        error={error}
         graph={topologyGraph}
         initialSelectedClientId={initialTargetIntent?.clientId ?? null}
         initialSelectionRequestId={initialTargetIntent?.requestId ?? null}
         loading={loading}
         onInitialSelectionConsumed={onInitialTargetIntentConsumed}
         onOpenVpsDetail={onOpenVpsDetail}
-        onRefresh={async () => {
+        onRefresh={async (query) => {
           await Promise.all([
-            onLoadTopologyGraph(),
+            onLoadTopologyGraph(query),
             onLoadRuntimeConfigApplyStates(),
           ]);
         }}
@@ -364,7 +380,9 @@ export function TopologyPanel({
   if (activeSubpage === "evidence") {
     return (
       <TopologyEvidencePanel
+        agents={agents}
         clientLabel={clientLabel}
+        error={error}
         jobs={jobs}
         observations={networkObservations}
         onLoadObservations={onLoadNetworkObservations}
@@ -380,6 +398,7 @@ export function TopologyPanel({
         ospfRecommendations={ospfRecommendations}
         ospfUpdatePlans={ospfUpdatePlans}
         trends={networkTrends}
+        tunnelPlans={tunnelPlans}
       />
     );
   }
@@ -426,6 +445,7 @@ export function TopologyPanel({
       onInitialAdapterKindConsumed={onInitialAdapterKindConsumed}
       onOpenAdapterDefinitions={onOpenAdapterDefinitions}
       onOpenConfigurationSources={onOpenConfigurationSources}
+      onQueryNetworkObservations={onQueryNetworkObservations}
       onRefresh={onRefresh}
       onRotateTunnelPlanCredentials={onRotateTunnelPlanCredentials}
       onSetTunnelPlanEnabled={onSetTunnelPlanEnabled}
@@ -613,6 +633,7 @@ function TunnelPlansWorkspace({
   onInitialAdapterKindConsumed,
   onOpenAdapterDefinitions,
   onOpenConfigurationSources,
+  onQueryNetworkObservations,
   onRefresh,
   onRotateTunnelPlanCredentials,
   onSetTunnelPlanEnabled,
@@ -650,6 +671,9 @@ function TunnelPlansWorkspace({
   onInitialAdapterKindConsumed: () => void;
   onOpenAdapterDefinitions: (domain: NetworkAdapterKind) => void;
   onOpenConfigurationSources: () => void;
+  onQueryNetworkObservations: (
+    query?: NetworkEvidenceQuery,
+  ) => Promise<NetworkObservationRecord[]>;
   onRefresh: () => Promise<void>;
   onRotateTunnelPlanCredentials: (
     target: TunnelPlanRevisionTarget,
@@ -715,7 +739,12 @@ function TunnelPlansWorkspace({
 
   useEffect(() => {
     if (!feedback && !error) return;
-    if (lifecycleSnapshot || deleteSnapshot || credentialRotationSnapshot) return;
+    if (
+      lifecycleSnapshot ||
+      deleteSnapshot ||
+      credentialRotationSnapshot
+    )
+      return;
     const frame = window.requestAnimationFrame(() => {
       if (planFeedbackRef.current) {
         scrollIntoViewWithMotion(planFeedbackRef.current, {
@@ -724,7 +753,13 @@ function TunnelPlansWorkspace({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [credentialRotationSnapshot, deleteSnapshot, error, feedback, lifecycleSnapshot]);
+  }, [
+    credentialRotationSnapshot,
+    deleteSnapshot,
+    error,
+    feedback,
+    lifecycleSnapshot,
+  ]);
 
   function requestLifecycle(
     ids: string[],
@@ -1061,6 +1096,65 @@ function TunnelPlansWorkspace({
         size: 230,
       },
       {
+        id: "latest_latency",
+        header: "Latest latency",
+        cell: (plan) => {
+          const edge = runtimeEdgeByPlan.get(plan.id);
+          return (
+            <span className="historyPrimary">
+              <strong>
+                {edge?.latest_latency_avg_ms == null
+                  ? "-"
+                  : `${formatNetworkMeasurement(edge.latest_latency_avg_ms)} ms`}
+              </strong>
+              <small>
+                {edge?.latest_latency_avg_ms == null
+                  ? "No reachability evidence"
+                  : "Latest in graph range"}
+              </small>
+            </span>
+          );
+        },
+        searchValue: (plan) => {
+          const value = runtimeEdgeByPlan.get(plan.id)?.latest_latency_avg_ms;
+          return value == null ? "no latency evidence" : `${value} ms latency`;
+        },
+        sortValue: (plan) =>
+          runtimeEdgeByPlan.get(plan.id)?.latest_latency_avg_ms ??
+          Number.MAX_SAFE_INTEGER,
+        minSize: 145,
+        size: 165,
+      },
+      {
+        id: "latest_speed",
+        header: "Latest speed",
+        cell: (plan) => {
+          const edge = runtimeEdgeByPlan.get(plan.id);
+          return (
+            <span className="historyPrimary">
+              <strong>
+                {edge?.latest_speed_mbps == null
+                  ? "-"
+                  : `${formatNetworkMeasurement(edge.latest_speed_mbps)} Mbps`}
+              </strong>
+              <small>
+                {edge?.latest_speed_mbps == null
+                  ? "No speed evidence"
+                  : "Latest speed test in graph range"}
+              </small>
+            </span>
+          );
+        },
+        searchValue: (plan) => {
+          const value = runtimeEdgeByPlan.get(plan.id)?.latest_speed_mbps;
+          return value == null ? "no speed evidence" : `${value} Mbps speed`;
+        },
+        sortValue: (plan) =>
+          runtimeEdgeByPlan.get(plan.id)?.latest_speed_mbps ?? -1,
+        minSize: 145,
+        size: 165,
+      },
+      {
         id: "ospf",
         header: "OSPF",
         cell: (plan) => (
@@ -1237,7 +1331,6 @@ function TunnelPlansWorkspace({
           target: { expected_revision: rows[0].revision, plan_id: rows[0].id },
         });
       },
-      separatorBefore: true,
       tone: "danger",
     },
   ];
@@ -1298,6 +1391,7 @@ function TunnelPlansWorkspace({
             <TunnelPlanDetails
               agents={agents}
               agentNameById={agentNameById}
+              onQueryNetworkObservations={onQueryNetworkObservations}
               onUpdateConnectionAssessment={onUpdateTunnelConnectionAssessment}
               plan={plan}
               runtimeEdge={runtimeEdgeByPlan.get(plan.id)}
@@ -1591,12 +1685,16 @@ function TunnelPlansWorkspace({
 function TunnelPlanDetails({
   agents,
   agentNameById,
+  onQueryNetworkObservations,
   onUpdateConnectionAssessment,
   plan,
   runtimeEdge,
 }: {
   agents: AgentView[];
   agentNameById: Map<string, string>;
+  onQueryNetworkObservations: (
+    query?: NetworkEvidenceQuery,
+  ) => Promise<NetworkObservationRecord[]>;
   onUpdateConnectionAssessment: (
     planId: string,
     request: UpdateTunnelConnectionAssessmentRequest,
@@ -1850,6 +1948,11 @@ function TunnelPlanDetails({
         message={assessmentFeedback?.message}
         tone={assessmentFeedback?.tone}
       />
+      <TunnelPlanEvidenceDetails
+        onQueryNetworkObservations={onQueryNetworkObservations}
+        plan={plan}
+        runtimeEdge={runtimeEdge}
+      />
       {(plan.plan.runtime_control?.manager ?? "agent_builtin") ===
         "agent_builtin" &&
         (plan.plan.runtime_topology?.desired_interfaces?.length ?? 0) > 0 && (
@@ -1870,6 +1973,329 @@ function TunnelPlanDetails({
       )}
     </div>
   );
+}
+
+function TunnelPlanEvidenceDetails({
+  onQueryNetworkObservations,
+  plan,
+  runtimeEdge,
+}: {
+  onQueryNetworkObservations: (
+    query?: NetworkEvidenceQuery,
+  ) => Promise<NetworkObservationRecord[]>;
+  plan: TunnelPlanRecord;
+  runtimeEdge?: TopologyGraphEdge;
+}) {
+  const [window, setWindow] = useState<MonitoringWindow>(
+    DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  );
+  const [customStartAt, setCustomStartAt] = useState(
+    defaultNetworkEvidenceStartAt,
+  );
+  const [customEndAt, setCustomEndAt] = useState(defaultNetworkEvidenceEndAt);
+  const [observations, setObservations] = useState<NetworkObservationRecord[]>(
+    [],
+  );
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loadGenerationRef = useRef(0);
+
+  useEffect(() => {
+    if (!runtimeEdge?.topology_identity_hash) return;
+    setObservations((current) =>
+      current.filter(
+        (observation) =>
+          observation.topology_identity_hash ===
+          runtimeEdge.topology_identity_hash,
+      ),
+    );
+  }, [runtimeEdge?.topology_identity_hash]);
+
+  async function loadEvidence(windowOverride = window) {
+    const generation = loadGenerationRef.current + 1;
+    loadGenerationRef.current = generation;
+    setLoading(true);
+    setError(null);
+    try {
+      const rows = await onQueryNetworkObservations({
+        endAt: customEndAt,
+        limit: 10_000,
+        planIds: [plan.id],
+        startAt: customStartAt,
+        window: windowOverride,
+      });
+      if (generation !== loadGenerationRef.current) return;
+      setObservations(
+        rows.filter(
+          (observation) =>
+            !runtimeEdge?.topology_identity_hash ||
+            observation.topology_identity_hash ===
+              runtimeEdge.topology_identity_hash,
+        ),
+      );
+    } catch (loadError) {
+      if (generation !== loadGenerationRef.current) return;
+      setError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Tunnel evidence unavailable",
+      );
+    } finally {
+      if (generation === loadGenerationRef.current) {
+        setLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (window !== "custom") {
+      void loadEvidence(window);
+    }
+    return () => {
+      loadGenerationRef.current += 1;
+    };
+    // Plan generation and graph evidence timestamps are the live identity of this row.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    plan.id,
+    runtimeEdge?.latest_observed_at,
+    runtimeEdge?.left_reachability_observed_at,
+    runtimeEdge?.right_reachability_observed_at,
+    runtimeEdge?.topology_identity_hash,
+  ]);
+
+  function selectWindow(next: MonitoringWindow) {
+    setWindow(next);
+    if (next === "custom") {
+      loadGenerationRef.current += 1;
+      setLoading(false);
+      return;
+    }
+    void loadEvidence(next);
+  }
+
+  const reachability = observations
+    .filter((observation) => observation.kind === "tunnel_reachability")
+    .sort((left, right) => left.observed_at.localeCompare(right.observed_at));
+  const speed = observations
+    .filter((observation) => observation.kind === "network_speed_test")
+    .sort((left, right) => left.observed_at.localeCompare(right.observed_at));
+  const latestReachability = reachability[reachability.length - 1] ?? null;
+  const latestSpeed = speed[speed.length - 1] ?? null;
+  const automaticCount = observations.filter(
+    (observation) =>
+      observation.kind === "tunnel_reachability" &&
+      observation.source === "automatic",
+  ).length;
+  const manualCount = observations.filter(
+    (observation) =>
+      observation.kind === "tunnel_reachability" &&
+      observation.source === "manual",
+  ).length;
+  const latencyLines = tunnelEvidenceLines(
+    reachability,
+    plan,
+    (observation) => observation.latency_avg_ms,
+    "latency",
+  );
+  const speedLines = tunnelEvidenceLines(
+    speed,
+    plan,
+    (observation) => observation.throughput_mbps,
+    "speed",
+  );
+
+  return (
+    <section
+      aria-label={`Evidence summary for ${plan.name}`}
+      className="topologyNetworkTrendCharts tunnelPlanEvidenceDetails"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <div className="topologyNetworkTrendChartsHeader">
+        <div>
+          <strong>Measured tunnel evidence</strong>
+          <span>
+            Automatic monitoring and manual tests share one retained timeline.
+            Current state expires when samples exceed their monitoring window.
+          </span>
+        </div>
+        <button
+          className="secondaryAction compactAction"
+          disabled={loading}
+          onClick={() => void loadEvidence()}
+          type="button"
+        >
+          <RefreshCcw size={14} />
+          Refresh
+        </button>
+      </div>
+      <NetworkEvidenceRangeControls
+        ariaLabel={`Evidence range for ${plan.name}`}
+        endAt={customEndAt}
+        onEndAtChange={setCustomEndAt}
+        onStartAtChange={setCustomStartAt}
+        onWindowChange={selectWindow}
+        startAt={customStartAt}
+        window={window}
+      />
+      {window === "custom" ? (
+        <button
+          className="secondaryAction compactAction"
+          disabled={loading}
+          onClick={() => void loadEvidence("custom")}
+          type="button"
+        >
+          Apply custom range
+        </button>
+      ) : null}
+      <ActionFeedback
+        className="localActionFeedback"
+        message={
+          error ??
+          (loading
+            ? "Loading tunnel evidence"
+            : `${observations.length} observations in ${networkEvidenceWindowLabel(window)}`)
+        }
+        tone={error ? "danger" : loading ? "progress" : "success"}
+      />
+      {observations.length >= 10_000 ? (
+        <ActionFeedback
+          message="This range reached the 10,000-observation display limit. Narrow the range to inspect every sample."
+          tone="warning"
+        />
+      ) : null}
+      <div className="networkMetricStrip" aria-label="Tunnel evidence summary">
+        <Metric
+          label="Reachability"
+          value={tunnelReachabilityEvidenceLabel(runtimeEdge)}
+        />
+        <Metric
+          label="Latest avg latency"
+          value={
+            latestReachability?.latency_avg_ms == null
+              ? "-"
+              : `${formatNetworkMeasurement(latestReachability.latency_avg_ms)} ms`
+          }
+        />
+        <Metric
+          label="Latest loss"
+          value={
+            latestReachability?.packet_loss_ratio == null
+              ? "-"
+              : `${formatNetworkMeasurement(latestReachability.packet_loss_ratio * 100)}%`
+          }
+        />
+        <Metric
+          label="Latest avg speed"
+          value={
+            latestSpeed?.throughput_mbps == null
+              ? "-"
+              : `${formatNetworkMeasurement(latestSpeed.throughput_mbps)} Mbps`
+          }
+        />
+        <Metric label="Automatic pings" value={automaticCount} />
+        <Metric label="Manual probes" value={manualCount} />
+      </div>
+      <div className="topologyNetworkTrendChartGrid">
+        <article className="topologyNetworkTrendChartCard">
+          <div className="topologyNetworkTrendChartHeader">
+            <strong>Latency</strong>
+            <span>
+              {latestReachability
+                ? `${latestReachability.source} · ${formatCompactTime(latestReachability.observed_at)}`
+                : "No samples"}
+            </span>
+          </div>
+          <TimeSeriesChart
+            ariaLabel={`${plan.name} latency evidence`}
+            emptyLabel="No latency samples in this range"
+            height={156}
+            lines={latencyLines}
+            pointsOnly
+            times={reachability.map((observation) => observation.observed_at)}
+            valueFormatter={(value) =>
+              value === null ? "-" : `${formatNetworkMeasurement(value)} ms`
+            }
+          />
+        </article>
+        <article className="topologyNetworkTrendChartCard">
+          <div className="topologyNetworkTrendChartHeader">
+            <strong>Speed test</strong>
+            <span>
+              {latestSpeed
+                ? `manual · ${formatCompactTime(latestSpeed.observed_at)}`
+                : "No samples"}
+            </span>
+          </div>
+          <TimeSeriesChart
+            ariaLabel={`${plan.name} speed-test evidence`}
+            emptyLabel="No speed-test samples in this range"
+            height={156}
+            lines={speedLines}
+            pointsOnly
+            times={speed.map((observation) => observation.observed_at)}
+            valueFormatter={(value) =>
+              value === null ? "-" : `${formatNetworkMeasurement(value)} Mbps`
+            }
+          />
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function tunnelReachabilityEvidenceLabel(edge?: TopologyGraphEdge): string {
+  const left = edge?.left_reachability_state ?? "unknown";
+  const right = edge?.right_reachability_state ?? "unknown";
+  if (left === "probe_failed" || right === "probe_failed") {
+    return "Probe failed";
+  }
+  if (left === "stale" || right === "stale") {
+    return "Stale";
+  }
+  if (left === "reachable" && right === "reachable") {
+    return "Reachable";
+  }
+  if (left === "reachable" || right === "reachable") {
+    return "Partially verified";
+  }
+  if (left === "not_configured" && right === "not_configured") {
+    return "Not configured";
+  }
+  return "Unverified";
+}
+
+function tunnelEvidenceLines(
+  observations: NetworkObservationRecord[],
+  plan: TunnelPlanRecord,
+  valueFor: (observation: NetworkObservationRecord) => number | null,
+  metric: "latency" | "speed",
+): TimeSeriesChartLine[] {
+  const leftLabel = metric === "latency" ? "Left endpoint" : "Left-origin test";
+  const rightLabel =
+    metric === "latency" ? "Right endpoint" : "Right-origin test";
+  return [
+    {
+      color: consolePalette.chart.blue,
+      label: leftLabel,
+      seriesKey: `${metric}:left`,
+      values: observations.map((observation) =>
+        observation.client_id === plan.left_client_id
+          ? valueFor(observation)
+          : null,
+      ),
+    },
+    {
+      color: consolePalette.chart.purple,
+      label: rightLabel,
+      seriesKey: `${metric}:right`,
+      values: observations.map((observation) =>
+        observation.client_id === plan.right_client_id
+          ? valueFor(observation)
+          : null,
+      ),
+    },
+  ];
 }
 
 function TunnelPlanComposer({
@@ -3810,6 +4236,19 @@ function tunnelConnectivityPresentation(
       title: `A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic${reasons ? `; ${reasons}` : ""}.`,
     };
   }
+  if (left === "stale" || right === "stale") {
+    const staleEndpoints = [
+      left === "stale" ? "left" : null,
+      right === "stale" ? "right" : null,
+    ].filter((value): value is string => value !== null);
+    const hasCurrentPeer = left === "reachable" || right === "reachable";
+    return {
+      detail: `${staleEndpoints.join(" and ")} endpoint evidence expired`,
+      label: hasCurrentPeer ? "Partially verified" : "Stale",
+      statusClass: "warning",
+      title: `The ${staleEndpoints.join(" and ")} endpoint's latest reachability sample exceeded its declared monitoring window${reasons ? `; ${reasons}` : ""}.`,
+    };
+  }
   if (left === "reachable" || right === "reachable") {
     return {
       detail: "One endpoint measured",
@@ -5329,6 +5768,13 @@ function integerOr(value: string, fallback: number): number {
   return Math.trunc(numberOr(value, fallback));
 }
 
+function formatNetworkMeasurement(value: number): string {
+  if (!Number.isFinite(value)) return "-";
+  if (Math.abs(value) >= 100) return value.toFixed(0);
+  if (Math.abs(value) >= 10) return value.toFixed(1);
+  return value.toFixed(2);
+}
+
 function safeFilename(value: string): string {
   return (
     value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") ||
@@ -5573,14 +6019,17 @@ type TopologyPanelProps = {
   onInitialTargetIntentConsumed?: (requestId: string) => void;
   onLoadRuntimeConfigApplyStates: () => Promise<void>;
   onLoadConfigurationSources: () => Promise<void>;
-  onLoadNetworkObservations: () => Promise<void>;
-  onLoadNetworkTrends: () => Promise<void>;
+  onLoadNetworkObservations: (query?: NetworkEvidenceQuery) => Promise<void>;
+  onLoadNetworkTrends: (query?: NetworkEvidenceQuery) => Promise<void>;
+  onQueryNetworkObservations: (
+    query?: NetworkEvidenceQuery,
+  ) => Promise<NetworkObservationRecord[]>;
   onLoadOspfRecommendations: () => Promise<void>;
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadNetworkAdapterDefinitions: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onLoadTopologyGraph: () => Promise<void>;
+  onLoadTopologyGraph: (query?: NetworkEvidenceQuery) => Promise<void>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenJobHistory?: () => void;
   onOpenCreateTunnelPlan: () => void;

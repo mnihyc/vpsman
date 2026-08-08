@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ExternalLink,
@@ -7,6 +7,7 @@ import {
   MapIcon,
   RefreshCcw,
   ShieldCheck,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   jobStatusBadgeClass,
@@ -14,11 +15,11 @@ import {
   topologyRuntimeStateBadgeClass,
 } from "../../jobStatusPresentation";
 import { ActionFeedback } from "../../components/ActionFeedback";
-import {
-  formatLowerBoundCount,
-  TOPOLOGY_EVIDENCE_LIMIT,
-} from "../../constants";
+import { NetworkEvidenceRangeControls } from "../../components/NetworkEvidenceRangeControls";
+import type { MonitoringWindow } from "../../components/MonitoringRangeTabs";
+import { VpsCombobox } from "../../components/VpsCombobox";
 import type {
+  AgentView,
   JobHistoryRecord,
   JobOutputRecord,
   JobStatus,
@@ -28,6 +29,7 @@ import type {
   NetworkOspfUpdatePlanRecord,
   TopologyObservationState,
   TopologyRuntimeState,
+  TunnelPlanRecord,
 } from "../../types";
 import {
   decodeOutputPreview,
@@ -38,6 +40,17 @@ import {
   timestampMillis,
 } from "../../utils";
 import { readableTelemetryToken } from "../../topologyRuntime";
+import {
+  DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  NETWORK_EVIDENCE_OBSERVATION_LIMIT,
+  defaultNetworkEvidenceEndAt,
+  defaultNetworkEvidenceStartAt,
+  networkEvidenceWindowLabel,
+  type NetworkEvidenceHealth,
+  type NetworkEvidenceKind,
+  type NetworkEvidenceQuery,
+  type NetworkEvidenceSource,
+} from "../../networkEvidence";
 
 const networkCommands = new Set([
   "runtime_config_sync",
@@ -46,10 +59,12 @@ const networkCommands = new Set([
   "network_speed_test",
 ]);
 
-const NETWORK_EVIDENCE_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_NETWORK_MEASUREMENT_FRESH_AFTER_MS = 10 * 60 * 1_000;
 
 export function TopologyEvidencePanel({
+  agents,
   clientLabel,
+  error,
   jobs,
   observations,
   onLoadObservations,
@@ -65,15 +80,18 @@ export function TopologyEvidencePanel({
   ospfRecommendations,
   ospfUpdatePlans,
   trends,
+  tunnelPlans,
 }: {
+  agents: AgentView[];
   clientLabel: (clientId: string) => string;
+  error: string | null;
   jobs: JobHistoryRecord[];
   observations: NetworkObservationRecord[];
-  onLoadObservations: () => Promise<void>;
+  onLoadObservations: (query?: NetworkEvidenceQuery) => Promise<void>;
   onLoadOspfRecommendations: () => Promise<void>;
   onLoadOspfUpdatePlans: () => Promise<void>;
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
-  onLoadTrends: () => Promise<void>;
+  onLoadTrends: (query?: NetworkEvidenceQuery) => Promise<void>;
   onOpenGraph?: () => void;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenOspfApprovals?: () => void;
@@ -82,6 +100,7 @@ export function TopologyEvidencePanel({
   ospfRecommendations: NetworkOspfRecommendationRecord[];
   ospfUpdatePlans: NetworkOspfUpdatePlanRecord[];
   trends: NetworkObservationTrendRecord[];
+  tunnelPlans: TunnelPlanRecord[];
 }) {
   const networkJobs = useMemo(
     () =>
@@ -92,11 +111,23 @@ export function TopologyEvidencePanel({
     Record<string, JobOutputRecord[]>
   >({});
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [outputError, setOutputError] = useState<string | null>(null);
   const [outputNotice, setOutputNotice] = useState<string | null>(null);
   const [outputLoading, setOutputLoading] = useState(false);
+  const [evidenceWindow, setEvidenceWindow] = useState<MonitoringWindow>(
+    DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  );
+  const [customStartAt, setCustomStartAt] = useState(defaultNetworkEvidenceStartAt);
+  const [customEndAt, setCustomEndAt] = useState(defaultNetworkEvidenceEndAt);
+  const [planId, setPlanId] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [source, setSource] = useState<NetworkEvidenceSource>("");
+  const [kind, setKind] = useState<NetworkEvidenceKind>("");
+  const [health, setHealth] = useState<NetworkEvidenceHealth>("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [appliedPlanId, setAppliedPlanId] = useState("");
+  const refreshGenerationRef = useRef(0);
   const throughputBaselines = useMemo(
     () => buildThroughputBaselineLookup(ospfRecommendations, ospfUpdatePlans),
     [ospfRecommendations, ospfUpdatePlans],
@@ -111,27 +142,24 @@ export function TopologyEvidencePanel({
       throughputBaselines,
     );
   });
+  const selectedPlanIds = appliedPlanId ? new Set([appliedPlanId]) : null;
   const ospfUpdateRows = ospfUpdatePlans
-    .slice(0, 6)
+    .filter((plan) => !selectedPlanIds || selectedPlanIds.has(plan.plan_id))
     .map(buildOspfUpdatePlanRow);
   const ospfRows = ospfRecommendations
-    .slice(0, 6)
+    .filter((recommendation) =>
+      !selectedPlanIds || selectedPlanIds.has(recommendation.plan_id),
+    )
     .map(buildOspfRecommendationRow);
-  const observationRows = observations
-    .slice(0, 8)
-    .map((observation) => buildObservationRow(observation, clientLabel, throughputBaselines));
-  const trendRows = trends
-    .slice(0, 6)
-    .map((trend) => buildTrendRow(trend, clientLabel, throughputBaselines));
+  const observationRows = latestObservationRows(observations).map((observation) =>
+    buildObservationRow(observation, clientLabel, throughputBaselines),
+  );
+  const trendRows = trends.map((trend) =>
+    buildTrendRow(trend, clientLabel, throughputBaselines),
+  );
   const hasUnloadedOutput = rows.some((row) => row.metric === "Output not loaded");
   const hasTrendComparison = trendRows.length > 0;
-  const freshness = buildNetworkEvidenceFreshness([
-    ...networkJobs.map((job) => job.created_at),
-    ...observations.map((observation) => observation.observed_at),
-    ...trends.map((trend) => trend.latest_observed_at),
-    ...ospfRecommendations.map((recommendation) => recommendation.latest_observed_at),
-    ...ospfUpdatePlans.map((plan) => plan.evidence.latest_observed_at),
-  ]);
+  const freshness = buildNetworkEvidenceFreshness(observations);
   const timelineStages = buildTimelineStages({
     commandRows: rows,
     observationRows,
@@ -139,32 +167,41 @@ export function TopologyEvidencePanel({
     ospfUpdateRows,
     trendRows,
   });
-  const probePoints = rows
-    .filter(
-      (row) =>
-        row.kind === "network_probe" && typeof row.latencyAvgMs === "number",
-    )
-    .map((row) => ({
-      jobId: row.job.id,
-      latencyAvgMs: row.latencyAvgMs ?? 0,
-      lossRatio: row.lossRatio ?? null,
-    }))
-    .concat(
-      observations
-        .filter(
-          (observation) =>
-            observation.kind === "network_probe" &&
-            typeof observation.latency_avg_ms === "number",
-        )
-        .map((observation) => ({
-          jobId: observation.id,
-          latencyAvgMs: observation.latency_avg_ms ?? 0,
-          lossRatio: observation.packet_loss_ratio ?? null,
-        })),
-    );
+  const probePoints: Array<{
+    healthy?: boolean | null;
+    jobId: string;
+    latencyAvgMs: number | null;
+    lossRatio: number | null;
+    reason?: string | null;
+  }> = [
+    ...rows
+      .filter(
+        (row) =>
+          row.kind === "network_probe" &&
+          typeof row.latencyAvgMs === "number",
+      )
+      .map((row) => ({
+        jobId: row.job.id,
+        latencyAvgMs: row.latencyAvgMs ?? 0,
+        lossRatio: row.lossRatio ?? null,
+      })),
+    ...observations
+      .filter(
+        (observation) => observation.kind === "tunnel_reachability",
+      )
+      .map((observation) => ({
+        healthy: observation.healthy,
+        jobId: observation.id,
+        latencyAvgMs: observation.latency_avg_ms,
+        lossRatio: observation.packet_loss_ratio ?? null,
+        reason: observation.reason,
+      })),
+  ];
   const maxLatency = Math.max(
     1,
-    ...probePoints.map((point) => point.latencyAvgMs),
+    ...probePoints.flatMap((point) =>
+      typeof point.latencyAvgMs === "number" ? [point.latencyAvgMs] : [],
+    ),
   );
   const latencyGroups = useMemo(
     () => buildLatencyCurveGroups(observations, clientLabel),
@@ -174,80 +211,113 @@ export function TopologyEvidencePanel({
     probePoints.length > 1 && latencyGroups.length === 0;
   const hasMeasurementEvidence =
     hasStandaloneProbeCurve || latencyGroups.length > 0 || trendRows.length > 0;
-  const observationsTruncated =
-    observations.length >= TOPOLOGY_EVIDENCE_LIMIT;
-  const trendsTruncated = trends.length >= TOPOLOGY_EVIDENCE_LIMIT;
-  const recommendationsTruncated =
-    ospfRecommendations.length >= TOPOLOGY_EVIDENCE_LIMIT;
-  const updatePlansTruncated =
-    ospfUpdatePlans.length >= TOPOLOGY_EVIDENCE_LIMIT;
-  const boundedEvidenceLists = [
-    observationsTruncated ? "observations" : null,
-    trendsTruncated ? "trends" : null,
-    recommendationsTruncated ? "OSPF recommendations" : null,
-    updatePlansTruncated ? "OSPF update plans" : null,
-  ].filter((label): label is string => label !== null);
-  const evidenceBoundaryNotice =
-    boundedEvidenceLists.length > 0
-      ? `Loaded the newest ${TOPOLOGY_EVIDENCE_LIMIT} ${boundedEvidenceLists.join(
-          ", ",
-        )}; older records are not included in this view.`
-      : null;
-  const status = ospfUpdatePlans.length > 0
-    ? `${formatLowerBoundCount(
-        ospfUpdatePlans.length,
-        updatePlansTruncated,
-      )}${updatePlansTruncated ? " loaded" : ""} OSPF update plans`
-    : ospfRecommendations.length > 0
-      ? `${formatLowerBoundCount(
-          ospfRecommendations.length,
-          recommendationsTruncated,
-        )}${recommendationsTruncated ? " loaded" : ""} OSPF recommendations`
-      : trends.length > 0
-        ? `${formatLowerBoundCount(
-            observations.length,
-            observationsTruncated,
-          )}${observationsTruncated ? " loaded" : ""} observations / ${formatLowerBoundCount(
-            trends.length,
-            trendsTruncated,
-          )}${trendsTruncated ? " loaded" : ""} trends`
-        : observations.length > 0
-          ? `${formatLowerBoundCount(
-              observations.length,
-              observationsTruncated,
-            )}${observationsTruncated ? " loaded" : ""} persisted observations`
-          : networkJobs.length === 0
-            ? "No network jobs"
-            : `${networkJobs.length} recent network jobs`;
+  const activeEvidenceFilters =
+    Number(Boolean(planId)) +
+    Number(Boolean(clientId)) +
+    Number(Boolean(source)) +
+    Number(Boolean(kind)) +
+    Number(Boolean(health)) +
+    Number(Boolean(searchQuery.trim()));
+  const selectedRangeLabel = networkEvidenceWindowLabel(evidenceWindow);
+  const status = `${observations.length} observations / ${trends.length} trend groups in ${selectedRangeLabel}`;
   const evidenceFeedbackMessage =
-    refreshError ??
-    (refreshing
-      ? "Refreshing network evidence"
-      : ([refreshNotice, evidenceBoundaryNotice].filter(Boolean).join(" ") ||
-        null));
+    refreshError ?? error ?? (refreshing ? "Refreshing network evidence" : null);
   const outputFeedbackMessage =
     outputError ?? (outputLoading ? "Loading retained command output" : outputNotice);
 
-  async function refreshEvidence() {
+  function currentEvidenceQuery(
+    windowOverride: MonitoringWindow = evidenceWindow,
+  ): NetworkEvidenceQuery {
+    return {
+      clientId,
+      endAt: customEndAt,
+      health,
+      kind,
+      limit: NETWORK_EVIDENCE_OBSERVATION_LIMIT,
+      planIds: planId ? [planId] : undefined,
+      query: searchQuery,
+      source,
+      startAt: customStartAt,
+      window: windowOverride,
+    };
+  }
+
+  async function refreshEvidence(windowOverride = evidenceWindow) {
+    const generation = refreshGenerationRef.current + 1;
+    refreshGenerationRef.current = generation;
     setRefreshing(true);
     setRefreshError(null);
-    setRefreshNotice(null);
     try {
+      const query = currentEvidenceQuery(windowOverride);
       await Promise.all([
-        onLoadObservations(),
-        onLoadTrends(),
+        onLoadObservations(query),
+        onLoadTrends({ ...query, limit: 10_000 }),
         onLoadOspfRecommendations(),
         onLoadOspfUpdatePlans(),
       ]);
-      setRefreshNotice("Network evidence refreshed");
+      if (generation !== refreshGenerationRef.current) return;
+      setAppliedPlanId(planId);
     } catch (loadError) {
+      if (generation !== refreshGenerationRef.current) return;
       setRefreshError(
         loadError instanceof Error
           ? loadError.message
           : "Network evidence unavailable",
       );
     } finally {
+      if (generation === refreshGenerationRef.current) {
+        setRefreshing(false);
+      }
+    }
+  }
+
+  function selectEvidenceWindow(next: MonitoringWindow) {
+    setEvidenceWindow(next);
+    if (next === "custom") {
+      refreshGenerationRef.current += 1;
       setRefreshing(false);
+      return;
+    }
+    void refreshEvidence(next);
+  }
+
+  async function resetEvidenceFilters() {
+    const generation = refreshGenerationRef.current + 1;
+    refreshGenerationRef.current = generation;
+    setPlanId("");
+    setClientId("");
+    setSource("");
+    setKind("");
+    setHealth("");
+    setSearchQuery("");
+    setAppliedPlanId("");
+    setRefreshing(true);
+    setRefreshError(null);
+    try {
+      const query: NetworkEvidenceQuery = {
+        endAt: customEndAt,
+        limit: NETWORK_EVIDENCE_OBSERVATION_LIMIT,
+        startAt: customStartAt,
+        window: evidenceWindow,
+      };
+      await Promise.all([
+        onLoadObservations(query),
+        onLoadTrends({ ...query, limit: 10_000 }),
+        onLoadOspfRecommendations(),
+        onLoadOspfUpdatePlans(),
+      ]);
+      if (generation !== refreshGenerationRef.current) return;
+    } catch (loadError) {
+      if (generation !== refreshGenerationRef.current) return;
+      setRefreshError(
+        loadError instanceof Error
+          ? loadError.message
+          : "Network evidence unavailable",
+      );
+    } finally {
+      if (generation === refreshGenerationRef.current) {
+        setRefreshing(false);
+      }
     }
   }
 
@@ -292,7 +362,7 @@ export function TopologyEvidencePanel({
           <button
             className="secondaryAction"
             disabled={refreshing}
-            onClick={refreshEvidence}
+            onClick={() => void refreshEvidence()}
             type="button"
           >
             <RefreshCcw size={17} />
@@ -301,24 +371,144 @@ export function TopologyEvidencePanel({
           <ActionFeedback
             message={evidenceFeedbackMessage}
             tone={
-              refreshError
+              refreshError || error
                 ? "danger"
                 : refreshing
                   ? "progress"
-                  : evidenceBoundaryNotice
-                    ? "info"
-                    : "success"
+                  : "success"
             }
           />
         </div>
       </div>
+      <NetworkEvidenceRangeControls
+        ariaLabel="Network evidence time range"
+        endAt={customEndAt}
+        onEndAtChange={setCustomEndAt}
+        onStartAtChange={setCustomStartAt}
+        onWindowChange={selectEvidenceWindow}
+        startAt={customStartAt}
+        window={evidenceWindow}
+      />
+      <details className="fleetMetricsAdvancedFilters topologyEvidenceFilters">
+        <summary>
+          <SlidersHorizontal size={14} />
+          <span>Advanced filters</span>
+          {activeEvidenceFilters > 0 ? <b>{activeEvidenceFilters}</b> : null}
+        </summary>
+        <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid">
+          <label>
+            <span>Tunnel plan</span>
+            <select
+              aria-label="Network evidence tunnel plan"
+              onChange={(event) => setPlanId(event.target.value)}
+              value={planId}
+            >
+              <option value="">All visible tunnel plans</option>
+              {tunnelPlans.map((plan) => (
+                <option key={plan.id} value={plan.id}>
+                  {plan.name}{plan.enabled ? "" : " · disabled"}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>VPS endpoint</span>
+            <VpsCombobox
+              agents={agents}
+              ariaLabel="Network evidence VPS endpoint"
+              onChange={setClientId}
+              placeholder="All VPS endpoints"
+              value={clientId}
+            />
+          </label>
+          <label>
+            <span>Source</span>
+            <select
+              aria-label="Network evidence source"
+              onChange={(event) =>
+                setSource(event.target.value as NetworkEvidenceSource)
+              }
+              value={source}
+            >
+              <option value="">Automatic and manual</option>
+              <option value="automatic">Automatic monitor</option>
+              <option value="manual">Manual test</option>
+            </select>
+          </label>
+          <label>
+            <span>Measurement</span>
+            <select
+              aria-label="Network evidence measurement kind"
+              onChange={(event) =>
+                setKind(event.target.value as NetworkEvidenceKind)
+              }
+              value={kind}
+            >
+              <option value="">All measurement kinds</option>
+              <option value="tunnel_reachability">Reachability</option>
+              <option value="network_speed_test">Speed test</option>
+              <option value="network_status">Runtime status</option>
+            </select>
+          </label>
+          <label>
+            <span>Health</span>
+            <select
+              aria-label="Network evidence health"
+              onChange={(event) =>
+                setHealth(event.target.value as NetworkEvidenceHealth)
+              }
+              value={health}
+            >
+              <option value="">All states</option>
+              <option value="healthy">Healthy</option>
+              <option value="unhealthy">Unhealthy</option>
+              <option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label>
+            <span>Search</span>
+            <input
+              aria-label="Search network evidence"
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Plan, interface, target, reason"
+              type="search"
+              value={searchQuery}
+            />
+          </label>
+          <div className="dashboardScopeHint">
+            The selected range and filters are applied by the API. With no plan filter, every visible plan is eligible and represented independently.
+          </div>
+          <button
+            className="secondaryAction compactAction"
+            disabled={refreshing}
+            onClick={() => void refreshEvidence()}
+            type="button"
+          >
+            Apply filters
+          </button>
+          <button
+            className="secondaryAction compactAction"
+            disabled={activeEvidenceFilters === 0}
+            onClick={() => void resetEvidenceFilters()}
+            type="button"
+          >
+            Reset filters
+          </button>
+        </div>
+      </details>
+      {observations.length >= NETWORK_EVIDENCE_OBSERVATION_LIMIT ? (
+        <ActionFeedback
+          message="This range reached the 250,000-observation display limit. Narrow the range or filters to inspect every sample."
+          tone="warning"
+        />
+      ) : null}
       {freshness?.stale && (
         <div
           className="topologyEvidenceFreshness warning"
           aria-label="Network evidence freshness"
           title={freshness.latestTimestamp ? `Latest evidence: ${formatFullTime(freshness.latestTimestamp)}` : undefined}
         >
-          <strong>Evidence set was observed {freshness.observedLabel}.</strong>
+          <strong>Reachability evidence was observed {freshness.observedLabel}.</strong>
           <span>{freshness.detail}</span>
         </div>
       )}
@@ -524,7 +714,9 @@ export function TopologyEvidencePanel({
               {probePoints.map((point) => (
                 <span
                   className={
-                    point.lossRatio === null
+                    point.latencyAvgMs === null
+                      ? "gap"
+                      : point.lossRatio === null
                       ? "unknown"
                       : point.lossRatio > 0
                         ? "warn"
@@ -532,13 +724,20 @@ export function TopologyEvidencePanel({
                   }
                   key={point.jobId}
                   style={{
-                    height: `${Math.max(8, Math.round((point.latencyAvgMs / maxLatency) * 44))}px`,
+                    height:
+                      point.latencyAvgMs === null
+                        ? "2px"
+                        : `${Math.max(8, Math.round((point.latencyAvgMs / maxLatency) * 44))}px`,
                   }}
-                  title={`${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
-                    point.lossRatio === null
-                      ? "unknown"
-                      : `${formatMetric(point.lossRatio * 100)}%`
-                  }`}
+                  title={
+                    point.latencyAvgMs === null
+                      ? `Measurement gap${point.reason ? `; ${humanStatus(point.reason)}` : point.healthy === false ? "; probe failed" : ""}`
+                      : `${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
+                          point.lossRatio === null
+                            ? "unknown"
+                            : `${formatMetric(point.lossRatio * 100)}%`
+                        }`
+                  }
                 />
               ))}
             </div>
@@ -561,7 +760,9 @@ export function TopologyEvidencePanel({
                     {group.points.map((point, index) => (
                       <span
                         className={
-                          point.lossRatio === null
+                          point.latencyAvgMs === null
+                            ? "gap"
+                            : point.lossRatio === null
                             ? "unknown"
                             : point.lossRatio > 0
                               ? "warn"
@@ -569,13 +770,20 @@ export function TopologyEvidencePanel({
                         }
                         key={`${group.key}-${index}`}
                         style={{
-                          height: `${Math.max(8, Math.round((point.latencyAvgMs / group.maxLatency) * 38))}px`,
+                          height:
+                            point.latencyAvgMs === null
+                              ? "2px"
+                              : `${Math.max(8, Math.round((point.latencyAvgMs / group.maxLatency) * 38))}px`,
                         }}
-                        title={`${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
-                          point.lossRatio === null
-                            ? "unknown"
-                            : `${formatMetric(point.lossRatio * 100)}%`
-                        }`}
+                        title={
+                          point.latencyAvgMs === null
+                            ? `Measurement gap${point.reason ? `; ${humanStatus(point.reason)}` : point.healthy === false ? "; probe failed" : ""}`
+                            : `${formatMetric(point.latencyAvgMs)} ms avg; packet loss ${
+                                point.lossRatio === null
+                                  ? "unknown"
+                                  : `${formatMetric(point.lossRatio * 100)}%`
+                              }`
+                        }
                       />
                     ))}
                   </div>
@@ -651,7 +859,13 @@ export function TopologyEvidencePanel({
                 <span className="historyPrimary" role="cell">
                   <EvidenceMobileLabel>Observation</EvidenceMobileLabel>
                   <strong>{humanStatus(row.kind)}</strong>
-                  <small>job {shortId(row.jobId)}</small>
+                  <small>
+                    {row.source === "automatic"
+                      ? "automatic monitor"
+                      : row.jobId
+                        ? `manual job ${shortId(row.jobId)}`
+                        : "manual observation"}
+                  </small>
                 </span>
                 <span className="topologyEvidenceStatusCell" role="cell">
                   <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
@@ -826,14 +1040,17 @@ type LatencyCurveGroup = {
   detail: string;
   maxLatency: number;
   points: {
-    latencyAvgMs: number;
+    healthy: boolean | null;
+    latencyAvgMs: number | null;
     lossRatio: number | null;
+    reason: string | null;
   }[];
 };
 
 type ObservationRow = {
   id: string;
-  jobId: string;
+  jobId: string | null;
+  source: string;
   kind: string;
   signalLabel: string;
   signalStatus: TopologyObservationState;
@@ -927,7 +1144,7 @@ function buildTimelineStages({
   trendRows: TrendRow[];
 }): TimelineStage[] {
   const persistedProbeCount = observationRows.filter(
-    (row) => row.kind === "network_probe",
+    (row) => row.kind === "tunnel_reachability",
   ).length;
   const persistedSpeedCount = observationRows.filter(
     (row) => row.kind === "network_speed_test",
@@ -941,7 +1158,9 @@ function buildTimelineStages({
   const unloadedOutputCount = commandRows.filter(
     (row) => row.metric === "Output not loaded",
   ).length;
-  const probeTrend = trendRows.find((row) => row.kind === "network_probe");
+  const probeTrend = trendRows.find(
+    (row) => row.kind === "tunnel_reachability",
+  );
   const speedTrend = trendRows.find((row) => row.kind === "network_speed_test");
   return [
     {
@@ -1283,41 +1502,35 @@ function sampleFreshnessLabel(status: TopologyObservationState, observedAt: stri
 }
 
 function buildNetworkEvidenceFreshness(
-  timestamps: Array<string | null | undefined>,
+  observations: NetworkObservationRecord[],
 ): NetworkEvidenceFreshness | null {
-  const latestTimestamp = latestTimestampValue(timestamps);
-  if (!latestTimestamp) {
+  const latest = observations
+    .filter((observation) => observation.kind === "tunnel_reachability")
+    .reduce<NetworkObservationRecord | null>((current, observation) => {
+      if (!current) {
+        return observation;
+      }
+      return timestampMillis(observation.observed_at) >
+        timestampMillis(current.observed_at)
+        ? observation
+        : current;
+    }, null);
+  if (!latest) {
     return null;
   }
-  const latestMs = timestampMillis(latestTimestamp);
+  const latestMs = timestampMillis(latest.observed_at);
+  const staleAfterMs = Math.max(1, latest.stale_after_secs ?? 180) * 1_000;
   const ageMs = Date.now() - latestMs;
-  const stale = Number.isFinite(ageMs) && ageMs > NETWORK_EVIDENCE_STALE_AFTER_MS;
-  const observedLabel = formatCompactTime(latestTimestamp);
+  const stale = Number.isFinite(ageMs) && ageMs > staleAfterMs;
+  const observedLabel = formatCompactTime(latest.observed_at);
   return {
     detail: stale
-      ? `Latest retained evidence was observed ${observedLabel}; refresh or run tests before applying network changes.`
-      : `Latest retained evidence was observed ${observedLabel}.`,
-    latestTimestamp,
+      ? `The newest reachability sample in this range is older than its ${Math.round(staleAfterMs / 1_000)} second validity window. It remains historical evidence but does not represent current link health.`
+      : `Current reachability evidence is ${latest.source} and was observed ${observedLabel}.`,
+    latestTimestamp: latest.observed_at,
     observedLabel,
     stale,
   };
-}
-
-function latestTimestampValue(timestamps: Array<string | null | undefined>): string | null {
-  let latest: { timestamp: string; ms: number } | null = null;
-  for (const timestamp of timestamps) {
-    if (!timestamp) {
-      continue;
-    }
-    const ms = timestampMillis(timestamp);
-    if (!Number.isFinite(ms)) {
-      continue;
-    }
-    if (!latest || ms > latest.ms) {
-      latest = { timestamp, ms };
-    }
-  }
-  return latest?.timestamp ?? null;
 }
 
 function isEvidenceTimestampStale(timestamp: string | null | undefined): boolean {
@@ -1325,7 +1538,7 @@ function isEvidenceTimestampStale(timestamp: string | null | undefined): boolean
     return false;
   }
   const ms = timestampMillis(timestamp);
-  return Number.isFinite(ms) && Date.now() - ms > NETWORK_EVIDENCE_STALE_AFTER_MS;
+  return Number.isFinite(ms) && Date.now() - ms > DEFAULT_NETWORK_MEASUREMENT_FRESH_AFTER_MS;
 }
 
 function buildTrendRow(
@@ -1393,6 +1606,34 @@ function buildTrendRow(
   };
 }
 
+function latestObservationRows(
+  observations: NetworkObservationRecord[],
+): NetworkObservationRecord[] {
+  const latest = new Map<string, NetworkObservationRecord>();
+  for (const observation of observations) {
+    const key = [
+      observation.plan_id ?? "unplanned",
+      observation.topology_identity_hash ?? "identity",
+      observation.kind,
+      observation.endpoint_side ?? observation.client_id,
+    ].join(":");
+    const current = latest.get(key);
+    if (
+      !current ||
+      timestampMillis(observation.observed_at) >
+        timestampMillis(current.observed_at)
+    ) {
+      latest.set(key, observation);
+    }
+  }
+  return Array.from(latest.values()).sort(
+    (left, right) =>
+      timestampMillis(right.observed_at) - timestampMillis(left.observed_at) ||
+      (left.plan_name ?? "").localeCompare(right.plan_name ?? "") ||
+      left.client_id.localeCompare(right.client_id),
+  );
+}
+
 function buildObservationRow(
   observation: NetworkObservationRecord,
   clientLabel: (clientId: string) => string,
@@ -1404,10 +1645,15 @@ function buildObservationRow(
       : observation.healthy === false
         ? "degraded"
         : "recorded";
-  if (observation.kind === "network_probe") {
+  if (observation.kind === "tunnel_reachability") {
+    const lossDetail =
+      observation.packet_loss_ratio === null
+        ? "loss unavailable"
+        : `${formatMetric(observation.packet_loss_ratio * 100)}% loss`;
     return {
       id: observation.id,
       jobId: observation.job_id,
+      source: observation.source,
       kind: observation.kind,
       signalLabel: humanStatus(signalStatus),
       signalStatus,
@@ -1415,10 +1661,9 @@ function buildObservationRow(
         observation.latency_avg_ms === null
           ? "No latency"
           : `${formatMetric(observation.latency_avg_ms)} ms`,
-      metricDetail:
-        observation.packet_loss_ratio === null
-          ? "loss unavailable"
-          : `${formatMetric(observation.packet_loss_ratio * 100)}% loss`,
+      metricDetail: observation.reason
+        ? `${lossDetail}; ${humanStatus(observation.reason)}`
+        : lossDetail,
       target: observation.target ?? "peer tunnel",
       targetDetail: endpointLabel(
         observation.client_id,
@@ -1453,6 +1698,7 @@ function buildObservationRow(
     return {
       id: observation.id,
       jobId: observation.job_id,
+      source: observation.source,
       kind: observation.kind,
       signalLabel: throughputSampleSignalLabel(signalStatus, observation.observed_at, throughputHealth),
       signalStatus: speedSignalStatus,
@@ -1485,6 +1731,7 @@ function buildObservationRow(
   return {
     id: observation.id,
     jobId: observation.job_id,
+    source: observation.source,
     kind: observation.kind,
     signalLabel: humanStatus(signalStatus),
     signalStatus,
@@ -1513,10 +1760,7 @@ function buildLatencyCurveGroups(
 ): LatencyCurveGroup[] {
   const grouped = new Map<string, NetworkObservationRecord[]>();
   for (const observation of observations) {
-    if (
-      observation.kind !== "network_probe" ||
-      typeof observation.latency_avg_ms !== "number"
-    ) {
+    if (observation.kind !== "tunnel_reachability") {
       continue;
     }
     const key = [
@@ -1537,8 +1781,10 @@ function buildLatencyCurveGroups(
         )
         .slice(-24);
       const points = sorted.map((row) => ({
-        latencyAvgMs: row.latency_avg_ms ?? 0,
+        healthy: row.healthy,
+        latencyAvgMs: row.latency_avg_ms,
         lossRatio: row.packet_loss_ratio ?? null,
+        reason: row.reason,
       }));
       const latest = sorted[sorted.length - 1];
       return {
@@ -1549,17 +1795,23 @@ function buildLatencyCurveGroups(
           latest.peer_client_id,
           clientLabel,
         ),
-        maxLatency: Math.max(1, ...points.map((point) => point.latencyAvgMs)),
+        maxLatency: Math.max(
+          1,
+          ...points.flatMap((point) =>
+            typeof point.latencyAvgMs === "number"
+              ? [point.latencyAvgMs]
+              : [],
+          ),
+        ),
         points,
       };
     })
     .filter((group) => group.points.length > 1)
     .sort(
       (left, right) =>
-        right.points.length - left.points.length ||
-        left.label.localeCompare(right.label),
-    )
-    .slice(0, 8);
+        left.label.localeCompare(right.label) ||
+        left.detail.localeCompare(right.detail),
+    );
 }
 
 function buildEvidenceRow(
@@ -1773,7 +2025,8 @@ function parseStatusOutputs(
 }
 
 function isProbeStatus(value: unknown): value is Record<string, unknown> {
-  return asRecord(value).type === "network_probe";
+  const type = asRecord(value).type;
+  return type === "tunnel_reachability";
 }
 
 function isNetworkStatus(value: unknown): value is Record<string, unknown> {

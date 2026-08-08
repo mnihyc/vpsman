@@ -69,6 +69,9 @@ export function useDashboardData(activeView: ActiveView) {
   const fleetTelemetryReloadedAt = useRef(0);
   const inventoryReloadTimer = useRef<number | null>(null);
   const topologyReloadTimer = useRef<number | null>(null);
+  const networkEvidenceReloadTimer = useRef<number | null>(null);
+  const networkEvidenceReloadedAt = useRef(0);
+  const hasEnabledTunnelPlansRef = useRef(false);
   const refreshAuthRef = useRef<Promise<void> | null>(null);
   const authGenerationRef = useRef(0);
   const clearDashboardDataRef = useRef<() => void>(() => undefined);
@@ -161,6 +164,11 @@ export function useDashboardData(activeView: ActiveView) {
     audit.loadAudits,
     inventory.loadRuntimeConfigApplyStates,
   );
+  useEffect(() => {
+    hasEnabledTunnelPlansRef.current = topology.tunnelPlans.some(
+      (plan) => plan.enabled && !plan.deleted_at,
+    );
+  }, [topology.tunnelPlans]);
   const portForwarding = usePortForwardingData(
     apiToken,
     requireAuth,
@@ -174,6 +182,7 @@ export function useDashboardData(activeView: ActiveView) {
       fleetTelemetryReloadTimer,
       inventoryReloadTimer,
       topologyReloadTimer,
+      networkEvidenceReloadTimer,
     ]) {
       if (timer.current !== null) {
         window.clearTimeout(timer.current);
@@ -262,24 +271,36 @@ export function useDashboardData(activeView: ActiveView) {
       void Promise.all([
         topology.loadTunnelPlans(),
         topology.loadNetworkAdapterDefinitions(),
-        topology.loadTopologyGraph(),
-        topology.loadNetworkObservations(),
-        topology.loadNetworkTrends(),
-        topology.loadOspfRecommendations(),
-        topology.loadOspfUpdatePlans(),
+        topology.refreshNetworkEvidence(true),
         portForwarding.loadPortForwardRules(),
       ]);
     }, 500);
   }, [
-    topology.loadNetworkObservations,
     topology.loadNetworkAdapterDefinitions,
-    topology.loadNetworkTrends,
-    topology.loadOspfRecommendations,
-    topology.loadOspfUpdatePlans,
-    topology.loadTopologyGraph,
+    topology.refreshNetworkEvidence,
     topology.loadTunnelPlans,
     portForwarding.loadPortForwardRules,
   ]);
+
+  const scheduleNetworkEvidenceReload = useCallback(() => {
+    if (
+      networkEvidenceReloadTimer.current !== null ||
+      !hasEnabledTunnelPlansRef.current
+    ) {
+      return;
+    }
+    const elapsed = Date.now() - networkEvidenceReloadedAt.current;
+    const delay = Math.max(0, 60_000 - elapsed);
+    networkEvidenceReloadTimer.current = window.setTimeout(() => {
+      networkEvidenceReloadTimer.current = null;
+      const currentView = activeViewRef.current;
+      if (currentView !== "Network" && currentView !== "Observability") {
+        return;
+      }
+      networkEvidenceReloadedAt.current = Date.now();
+      void topology.refreshNetworkEvidence(currentView === "Network");
+    }, delay);
+  }, [topology.refreshNetworkEvidence]);
 
   useEffect(
     () => () => {
@@ -297,6 +318,9 @@ export function useDashboardData(activeView: ActiveView) {
       }
       if (topologyReloadTimer.current !== null) {
         window.clearTimeout(topologyReloadTimer.current);
+      }
+      if (networkEvidenceReloadTimer.current !== null) {
+        window.clearTimeout(networkEvidenceReloadTimer.current);
       }
     },
     [],
@@ -530,6 +554,9 @@ export function useDashboardData(activeView: ActiveView) {
         }
         if (event.type === "telemetry_updated") {
           scheduleFleetTelemetryReload();
+          if (currentView === "Network" || currentView === "Observability") {
+            scheduleNetworkEvidenceReload();
+          }
         } else if (
           event.type === "agent_updated" ||
           event.type === "job_rejected"
@@ -604,6 +631,7 @@ export function useDashboardData(activeView: ActiveView) {
     scheduleFleetReload,
     scheduleFleetTelemetryReload,
     scheduleInventoryReload,
+    scheduleNetworkEvidenceReload,
     scheduleTopologyReload,
     portForwarding.loadPortForwardRules,
   ]);
@@ -768,7 +796,7 @@ export function useDashboardData(activeView: ActiveView) {
     terminalSessionsTruncated: jobs.terminalSessionsTruncated,
     jobRolloutsTruncated: jobs.jobRolloutsTruncated,
     gatewaySessions: access.gatewaySessions,
-    deleteAgent: fleet.deleteAgent,
+    deleteAgents: fleet.deleteAgents,
     fleetAlertsEvidenceAvailable: fleet.fleetAlertsEvidenceAvailable,
     fleetAlerts: fleet.fleetAlerts,
     fleetAlertStates: fleet.fleetAlertStates,
@@ -841,6 +869,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadRuntimeConfigApplyStates: inventory.loadRuntimeConfigApplyStates,
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
+    queryNetworkObservations: topology.queryNetworkObservations,
     loadNetworkAdapterDefinitions:
       topology.loadNetworkAdapterDefinitions,
     loadNetworkTrends: topology.loadNetworkTrends,
@@ -941,6 +970,7 @@ export function useDashboardData(activeView: ActiveView) {
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,
+    loadEffectiveVpsRules: fleet.loadEffectiveVpsRules,
     dryRunVpsRules: fleet.dryRunVpsRules,
     bulkUpsertVpsRules: fleet.bulkUpsertVpsRules,
     bulkUnsetVpsRules: fleet.bulkUnsetVpsRules,

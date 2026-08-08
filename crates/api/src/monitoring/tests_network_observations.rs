@@ -23,7 +23,7 @@ async fn records_network_observation_summaries_from_status_outputs() {
             job_id,
             stream: OutputStream::Status,
             data: serde_json::to_vec(&serde_json::json!({
-                "type": "network_probe",
+                "type": "tunnel_reachability",
                 "plan": "edge-a-edge-b",
                 "interface": "tunab",
                 "peer_client_id": "right-b",
@@ -45,7 +45,7 @@ async fn records_network_observation_summaries_from_status_outputs() {
     let observations = repo.list_network_observations(10, false).await.unwrap();
 
     assert_eq!(observations.len(), 1);
-    assert_eq!(observations[0].kind, "network_probe");
+    assert_eq!(observations[0].kind, "tunnel_reachability");
     assert_eq!(observations[0].plan_name.as_deref(), Some("edge-a-edge-b"));
     assert_eq!(observations[0].latency_avg_ms, Some(17.25));
     assert_eq!(observations[0].packet_loss_ratio, Some(0.02));
@@ -62,10 +62,11 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
     let job_id = Uuid::new_v4();
     let observation = |id: Uuid, observed_at: &str| NetworkObservationView {
         id,
-        job_id,
+        job_id: Some(job_id),
         client_id: "left-a".to_string(),
-        seq: 0,
-        kind: "network_probe".to_string(),
+        seq: Some(0),
+        kind: "tunnel_reachability".to_string(),
+        source: "manual".to_string(),
         role: None,
         plan_id: Some(plan_id),
         topology_identity_hash: Some("mixed-time".to_string()),
@@ -73,13 +74,23 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
         interface_name: Some("tun-mixed".to_string()),
         peer_client_id: Some("right-b".to_string()),
         target: Some("192.0.2.1".to_string()),
+        endpoint_side: Some("left".to_string()),
+        address_family: Some("ipv4".to_string()),
+        stale_after_secs: Some(180),
         healthy: Some(true),
+        transmitted: Some(3),
+        received: Some(3),
+        latency_min_ms: Some(1.0),
         latency_avg_ms: Some(1.0),
+        latency_max_ms: Some(1.0),
+        latency_mdev_ms: Some(0.0),
         packet_loss_ratio: Some(0.0),
+        reason: None,
         throughput_mbps: None,
         bytes: None,
         metadata: serde_json::json!({}),
         observed_at: observed_at.to_string(),
+        received_at: observed_at.to_string(),
     };
     memory.network_observations.write().await.extend([
         observation(Uuid::new_v4(), "999"),
@@ -88,13 +99,6 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
 
     let latest = repo.list_network_observations(1, false).await.unwrap();
     assert_eq!(latest[0].observed_at, "1970-01-01T00:16:40Z");
-
-    let capped = repo
-        .list_network_observations_for_plans_since(&[plan_id], 0, 1, 1)
-        .await
-        .unwrap();
-    assert_eq!(capped.len(), 1);
-    assert_eq!(capped[0].observed_at, "1970-01-01T00:16:40Z");
 
     let trends = repo
         .list_network_observation_trends(10, false)
@@ -116,7 +120,7 @@ async fn rolls_up_network_observation_trends_by_plan_and_endpoint() {
                 job_id,
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&serde_json::json!({
-                    "type": "network_probe",
+                    "type": "tunnel_reachability",
                     "plan": "edge-a-edge-b",
                     "interface": "tunab",
                     "peer_client_id": "right-b",
@@ -135,7 +139,7 @@ async fn rolls_up_network_observation_trends_by_plan_and_endpoint() {
                 job_id,
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&serde_json::json!({
-                    "type": "network_probe",
+                    "type": "tunnel_reachability",
                     "plan": "edge-a-edge-b",
                     "interface": "tunab",
                     "peer_client_id": "right-b",
@@ -180,7 +184,7 @@ async fn rolls_up_network_observation_trends_by_plan_and_endpoint() {
         .unwrap();
     let probe = trends
         .iter()
-        .find(|trend| trend.kind == "network_probe")
+        .find(|trend| trend.kind == "tunnel_reachability")
         .unwrap();
     let speed = trends
         .iter()
@@ -299,7 +303,7 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
                 job_id,
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&serde_json::json!({
-                    "type": "network_probe",
+                    "type": "tunnel_reachability",
                     "plan": "edge-a-edge-b",
                     "interface": "tunab",
                     "peer_client_id": "right-b",
@@ -343,7 +347,10 @@ async fn topology_graph_combines_plans_endpoint_state_and_observation_trends() {
     let Json(graph) = crate::routes_network::get_topology_graph(
         State(state),
         headers,
-        Query(HistoryQuery { limit: Some(10) }),
+        Query(NetworkEvidenceQuery {
+            limit: Some(10),
+            ..Default::default()
+        }),
     )
     .await
     .unwrap();
@@ -436,10 +443,19 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
                  latency_avg_ms: f64,
                  observed_at: &str| NetworkObservationView {
         id: Uuid::new_v4(),
-        job_id: Uuid::new_v4(),
+        job_id: Some(Uuid::new_v4()),
+        endpoint_side: Some(
+            if client_id == plan.left_client_id {
+                "left"
+            } else {
+                "right"
+            }
+            .to_string(),
+        ),
         client_id,
-        seq: 0,
-        kind: "network_probe".to_string(),
+        seq: Some(0),
+        kind: "tunnel_reachability".to_string(),
+        source: "manual".to_string(),
         role: None,
         plan_id: Some(plan.id),
         topology_identity_hash: Some(topology_identity_hash.to_string()),
@@ -447,13 +463,22 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
         interface_name: Some(plan.plan.interface_name.clone()),
         peer_client_id: Some(peer_client_id.to_string()),
         target: None,
+        address_family: Some("ipv4".to_string()),
+        stale_after_secs: Some(180),
         healthy: Some(healthy),
+        transmitted: Some(3),
+        received: Some(if healthy { 3 } else { 0 }),
+        latency_min_ms: Some(latency_avg_ms),
         latency_avg_ms: Some(latency_avg_ms),
+        latency_max_ms: Some(latency_avg_ms),
+        latency_mdev_ms: Some(0.0),
         packet_loss_ratio: Some(if healthy { 0.0 } else { 0.1 }),
+        reason: (!healthy).then(|| "probe_failed".to_string()),
         throughput_mbps: None,
         bytes: None,
         metadata: serde_json::json!({}),
         observed_at: observed_at.to_string(),
+        received_at: observed_at.to_string(),
     };
     if let Repository::Memory(memory) = &repo {
         memory
@@ -500,7 +525,10 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
         memory.telemetry_tunnels.write().await.push(quiet_telemetry);
     }
 
-    let graph = repo.topology_graph(24).await.unwrap();
+    let graph = repo
+        .topology_graph(24, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     let quiet_edge = graph
         .edges
         .iter()
@@ -511,7 +539,8 @@ async fn topology_graph_keeps_quiet_plan_evidence_beyond_noisy_global_caps() {
     assert_eq!(quiet_edge.degraded_count, 1);
     assert_eq!(quiet_edge.latency_avg_ms, Some(42.0));
     assert_eq!(quiet_edge.latency_series_ms, vec![42.0]);
-    assert_eq!(quiet_edge.probe_state, "degraded");
+    assert_eq!(quiet_edge.left_reachability_state, "stale");
+    assert_eq!(quiet_edge.reachability_state, "recorded");
     assert_eq!(quiet_edge.left_runtime_state, "degraded");
     assert_eq!(
         quiet_edge.left_runtime_reason.as_deref(),
@@ -603,7 +632,7 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
             job_id,
             stream: OutputStream::Status,
             data: serde_json::to_vec(&serde_json::json!({
-                "type": "network_probe",
+                "type": "tunnel_reachability",
                 "plan": "edge-a-edge-b",
                 "interface": "tunab",
                 "peer_client_id": "right-b",
@@ -642,7 +671,10 @@ async fn topology_graph_ignores_observations_from_reused_plan_name_with_differen
     .await
     .unwrap();
 
-    let graph = repo.topology_graph(10).await.unwrap();
+    let graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.edges[0].right_client_id, "right-c");
     assert_eq!(graph.edges[0].sample_count, 0);
@@ -740,7 +772,10 @@ async fn topology_graph_marks_offline_runtime_endpoint_without_agent_observation
         .await
         .unwrap();
 
-    let graph = repo.topology_graph(10).await.unwrap();
+    let graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
 
     assert_eq!(graph.edges.len(), 1);
     assert_eq!(graph.edges[0].health, "degraded");
@@ -793,7 +828,10 @@ async fn topology_graph_uses_exact_plan_bound_endpoint_telemetry() {
         ]);
     }
 
-    let graph = repo.topology_graph(10).await.unwrap();
+    let graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     let edge = &graph.edges[0];
     assert_eq!(edge.left_runtime_state, "healthy");
     assert_eq!(edge.right_runtime_state, "degraded");
@@ -806,14 +844,17 @@ async fn topology_graph_uses_exact_plan_bound_endpoint_telemetry() {
     repo.set_tunnel_plan_enabled(saved.id, saved.revision, false, &operator)
         .await
         .unwrap();
-    let disabled = repo.topology_graph(10).await.unwrap();
+    let disabled = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     assert_eq!(disabled.edges[0].health, "disabled");
     assert_eq!(disabled.edges[0].left_runtime_state, "disabled");
     assert_eq!(disabled.edges[0].right_runtime_state, "disabled");
 }
 
 #[tokio::test]
-async fn failed_latency_probe_does_not_reclassify_converged_runtime_as_failed() {
+async fn runtime_latency_fields_do_not_substitute_for_persisted_reachability() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
         memory.agents.write().await.extend([
@@ -840,15 +881,18 @@ async fn failed_latency_probe_does_not_reclassify_converged_runtime_as_failed() 
         memory.telemetry_tunnels.write().await.extend([left, right]);
     }
 
-    let graph = repo.topology_graph(10).await.unwrap();
+    let graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     let edge = &graph.edges[0];
     assert_eq!(edge.left_runtime_state, "healthy");
     assert_eq!(edge.right_runtime_state, "healthy");
-    assert_eq!(edge.left_reachability_state, "reachable");
-    assert_eq!(edge.right_reachability_state, "probe_failed");
+    assert_eq!(edge.left_reachability_state, "unknown");
+    assert_eq!(edge.right_reachability_state, "unknown");
     assert_eq!(
         edge.right_reachability_reason.as_deref(),
-        Some("icmp_blocked_or_unreachable")
+        Some("no_reachability_observation")
     );
 }
 
@@ -973,7 +1017,10 @@ async fn topology_graph_exposes_explicit_runtime_status_coverage() {
     .await
     .unwrap();
 
-    let graph = repo.topology_graph(10).await.unwrap();
+    let graph = repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     let edge = &graph.edges[0];
 
     assert_eq!(edge.health, "degraded");
@@ -1102,14 +1149,31 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
                 job_id,
                 stream: OutputStream::Status,
                 data: serde_json::to_vec(&serde_json::json!({
-                    "type": "network_probe",
+                    "type": "tunnel_reachability",
+                    "source": "manual",
                     "plan": "edge-a-edge-b",
                     "interface": "tunab",
                     "peer_client_id": "right-b",
                     "target": "10.255.0.1",
+                    "side": "left",
+                    "address_family": "ipv4",
+                    "stale_after_secs": 180,
+                    "healthy": false,
+                    "transmitted": 20,
+                    "received": 19,
+                    "latency_min_ms": 75.0,
+                    "latency_avg_ms": 80.0,
+                    "latency_max_ms": 86.0,
+                    "latency_mdev_ms": 2.5,
+                    "packet_loss_ratio": 0.05,
                     "parsed": {
                         "healthy": false,
+                        "transmitted": 20,
+                        "received": 19,
+                        "latency_min_ms": 75.0,
                         "latency_avg_ms": 80.0,
+                        "latency_max_ms": 86.0,
+                        "latency_mdev_ms": 2.5,
                         "packet_loss_ratio": 0.05
                     }
                 }))
@@ -1140,6 +1204,49 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
     )
     .await
     .unwrap();
+    let right_job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        right_job_id,
+        "right-b",
+        &[CommandOutput {
+            job_id: right_job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "source": "manual",
+                "plan": "edge-a-edge-b",
+                "interface": "tunab",
+                "peer_client_id": "left-a",
+                "target": "10.255.0.0",
+                "side": "right",
+                "address_family": "ipv4",
+                "stale_after_secs": 180,
+                "healthy": false,
+                "transmitted": 20,
+                "received": 19,
+                "latency_min_ms": 75.0,
+                "latency_avg_ms": 80.0,
+                "latency_max_ms": 86.0,
+                "latency_mdev_ms": 2.5,
+                "packet_loss_ratio": 0.05,
+                "parsed": {
+                    "healthy": false,
+                    "transmitted": 20,
+                    "received": 19,
+                    "latency_min_ms": 75.0,
+                    "latency_avg_ms": 80.0,
+                    "latency_max_ms": 86.0,
+                    "latency_mdev_ms": 2.5,
+                    "packet_loss_ratio": 0.05
+                }
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
 
     let recommendations = repo.list_network_ospf_recommendations(10).await.unwrap();
     let recommendation = recommendations
@@ -1158,6 +1265,87 @@ async fn recommends_ospf_cost_from_probe_and_speed_trends() {
     assert_eq!(recommendation.recommended_ospf_cost, expected_cost as i32);
     assert!(recommendation.recommended_ospf_cost > recommendation.plan_ospf_cost);
     assert!(recommendation.cost_delta > 0);
+}
+
+#[tokio::test]
+async fn operational_evidence_hides_deleted_plans_but_history_retains_it() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
+    let operator = topology_test_operator();
+    let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let saved = repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let job_id = Uuid::new_v4();
+    repo.record_network_observations(
+        job_id,
+        "left-a",
+        &[CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "tunnel_reachability",
+                "plan": saved.name,
+                "interface": saved.plan.interface_name,
+                "peer_client_id": saved.right_client_id,
+                "target": "10.255.0.1",
+                "healthy": true,
+                "latency_avg_ms": 2.0,
+                "packet_loss_ratio": 0.0,
+            }))
+            .unwrap(),
+            exit_code: Some(0),
+            done: true,
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.list_network_observations(10, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        repo.list_network_observation_trends(10, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    repo.delete_tunnel_plan(saved.id, saved.revision, &operator)
+        .await
+        .unwrap();
+
+    assert!(repo
+        .list_network_observations(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repo
+        .list_network_observation_trends(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo.list_network_observations(10, false)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(repo
+        .topology_graph(10, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap()
+        .edges
+        .is_empty());
 }
 
 fn test_plan() -> TunnelPlan {

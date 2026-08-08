@@ -1,5 +1,7 @@
 #[path = "runtime/agent_binary_path.rs"]
 mod agent_binary_path;
+#[path = "lifecycle/agent_lifecycle.rs"]
+mod agent_lifecycle;
 #[path = "lifecycle/backup.rs"]
 mod backup;
 #[path = "runtime/build_info.rs"]

@@ -614,10 +614,11 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
     ]);
     let observation = |id: Uuid, client_id: &str, peer_client_id: &str| NetworkObservationView {
         id,
-        job_id: Uuid::new_v4(),
+        job_id: Some(Uuid::new_v4()),
         client_id: client_id.to_string(),
-        seq: 0,
-        kind: "network_probe".to_string(),
+        seq: Some(0),
+        kind: "tunnel_reachability".to_string(),
+        source: "manual".to_string(),
         role: None,
         plan_id: None,
         topology_identity_hash: None,
@@ -625,13 +626,23 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         interface_name: Some("test0".to_string()),
         peer_client_id: Some(peer_client_id.to_string()),
         target: Some("192.0.2.1".to_string()),
+        endpoint_side: None,
+        address_family: Some("ipv4".to_string()),
+        stale_after_secs: Some(180),
         healthy: Some(true),
+        transmitted: Some(3),
+        received: Some(3),
+        latency_min_ms: Some(5.0),
         latency_avg_ms: Some(5.0),
+        latency_max_ms: Some(5.0),
+        latency_mdev_ms: Some(0.0),
         packet_loss_ratio: Some(0.0),
+        reason: None,
         throughput_mbps: None,
         bytes: None,
         metadata: serde_json::json!({}),
         observed_at: "1700000000".to_string(),
+        received_at: "1700000000".to_string(),
     };
     memory.network_observations.write().await.extend([
         observation(direct_observation_id, deleted_client_id, visible_peer_id),
@@ -1794,9 +1805,9 @@ async fn final_network_status_output_records_observation() {
 
     let observations = repo.list_network_observations(10, false).await.unwrap();
     assert_eq!(observations.len(), 1);
-    assert_eq!(observations[0].job_id, job_id);
+    assert_eq!(observations[0].job_id, Some(job_id));
     assert_eq!(observations[0].client_id, "client-a");
-    assert_eq!(observations[0].seq, 0);
+    assert_eq!(observations[0].seq, Some(0));
     assert_eq!(observations[0].kind, "network_status");
     assert_eq!(observations[0].plan_name.as_deref(), Some("edge-a-edge-b"));
     assert_eq!(observations[0].healthy, Some(false));

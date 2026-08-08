@@ -1269,7 +1269,7 @@ async function navigateAndScreenshot(
     await page.getByRole("menuitem", { name: "Review VPS deletion" }).click();
     const prompt = page.locator(".fleetInstancesPanel > .confirmationPrompt");
     await expect(prompt).toBeVisible({ timeout: 5_000 });
-    await prompt.getByRole("button", { name: "Delete VPS" }).click();
+    await prompt.getByRole("button", { name: "Delete VPSs" }).click();
     await expect(
       page.getByText(
         "VPS deleted; tunnel cleanup queued for 1 surviving peer.",

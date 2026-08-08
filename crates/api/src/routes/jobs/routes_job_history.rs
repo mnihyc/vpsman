@@ -24,13 +24,14 @@ use crate::{
     error::ApiError,
     model::{
         AuditLogView, HistoryQuery, JobHistoryView, JobOutputListItemView, JobOutputListPageView,
-        JobOutputView, JobTargetView, ListQuery, NetworkObservationTrendView,
+        JobOutputView, JobTargetView, ListQuery, NetworkEvidenceQuery, NetworkObservationTrendView,
         NetworkObservationView, ProcessSupervisorInventoryView,
     },
     model_command_templates::{JobOutputComparisonQuery, JobOutputComparisonView},
     repository_job_outputs::{
         JobOutputCursor, JobOutputListFilter, PROCESS_SUPERVISOR_INVENTORY_SCAN_LIMIT_ERROR,
     },
+    repository_network_observations::NetworkObservationFilter,
     routes_file_transfers::{map_verified_object_error, streaming_artifact_file_body},
     security::{SCOPE_AUDIT_READ, SCOPE_FLEET_READ, SCOPE_JOBS_READ, SCOPE_NETWORK_READ},
     state::AppState,
@@ -1514,15 +1515,16 @@ pub(crate) async fn get_audit_log(
 pub(crate) async fn list_network_observations(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<NetworkEvidenceQuery>,
 ) -> Result<Json<Vec<NetworkObservationView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
+    let filter = network_observation_filter(&query, 100_000, true)?;
     Ok(Json(
         state
             .repo
-            .list_network_observations(limit_or_default(query.limit), true)
+            .list_network_observations_filtered(&filter)
             .await
             .map_err(ApiError::internal_mapper(
                 "network_observations_unavailable",
@@ -1534,21 +1536,145 @@ pub(crate) async fn list_network_observations(
 pub(crate) async fn list_network_observation_trends(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<NetworkEvidenceQuery>,
 ) -> Result<Json<Vec<NetworkObservationTrendView>>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    let filter = network_observation_filter(&query, 10_000, true)?;
     Ok(Json(
         state
             .repo
-            .list_network_observation_trends(limit_or_default(query.limit), true)
+            .list_network_observation_trends_filtered(&filter)
             .await
             .map_err(ApiError::internal_mapper(
                 "network_observation_trends_unavailable",
                 "Network observation trends could not be loaded.",
             ))?,
     ))
+}
+
+pub(crate) fn network_observation_filter(
+    query: &NetworkEvidenceQuery,
+    default_limit: i64,
+    visible_only: bool,
+) -> Result<NetworkObservationFilter, ApiError> {
+    let now = crate::unix_now() as i64;
+    let end_unix = query.end_unix.unwrap_or(now);
+    if end_unix > now.saturating_add(300) {
+        return Err(ApiError::bad_request("network_evidence_end_in_future"));
+    }
+    let window = query.window.as_deref().unwrap_or("1d");
+    let fixed_secs = match window {
+        "15m" => Some(15 * 60),
+        "1h" => Some(60 * 60),
+        "8h" => Some(8 * 60 * 60),
+        "1d" => Some(24 * 60 * 60),
+        "7d" => Some(7 * 24 * 60 * 60),
+        "30d" => Some(30 * 24 * 60 * 60),
+        "90d" => Some(90 * 24 * 60 * 60),
+        "180d" => Some(180 * 24 * 60 * 60),
+        "1y" => Some(365 * 24 * 60 * 60),
+        "all" | "custom" => None,
+        _ => return Err(ApiError::bad_request("network_evidence_window_invalid")),
+    };
+    let start_unix = match (window, fixed_secs) {
+        (_, Some(seconds)) => end_unix.saturating_sub(seconds),
+        ("all", None) => 0,
+        ("custom", None) => query
+            .start_unix
+            .ok_or_else(|| ApiError::bad_request("network_evidence_custom_start_required"))?,
+        _ => unreachable!(),
+    };
+    if start_unix < 0 || start_unix > end_unix {
+        return Err(ApiError::bad_request("network_evidence_range_invalid"));
+    }
+    let plan_ids = query
+        .plan_ids
+        .as_deref()
+        .map(|value| {
+            value
+                .split(',')
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| {
+                    Uuid::parse_str(value.trim())
+                        .map_err(|_| ApiError::bad_request("network_evidence_plan_id_invalid"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if plan_ids.len() > 500 {
+        return Err(ApiError::bad_request(
+            "network_evidence_plan_limit_exceeded",
+        ));
+    }
+    let source = normalized_choice(
+        query.source.as_deref(),
+        &["automatic", "manual"],
+        "network_evidence_source_invalid",
+    )?;
+    let kind = normalized_choice(
+        query.kind.as_deref(),
+        &[
+            "tunnel_reachability",
+            "network_speed_test",
+            "network_status",
+        ],
+        "network_evidence_kind_invalid",
+    )?;
+    let health = normalized_choice(
+        query.health.as_deref(),
+        &["healthy", "unhealthy", "unknown"],
+        "network_evidence_health_invalid",
+    )?;
+    let client_id = normalized_filter_text(
+        query.client_id.as_deref(),
+        128,
+        "network_evidence_client_invalid",
+    )?;
+    let search = normalized_filter_text(query.q.as_deref(), 256, "network_evidence_query_invalid")?;
+    Ok(NetworkObservationFilter {
+        start_unix,
+        end_unix,
+        plan_ids,
+        client_id,
+        source,
+        kind,
+        health,
+        search,
+        limit: query.limit.unwrap_or(default_limit).clamp(1, 250_000),
+        visible_only,
+    })
+}
+
+fn normalized_choice(
+    value: Option<&str>,
+    allowed: &[&str],
+    error_code: &'static str,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if allowed.contains(&value) {
+        Ok(Some(value.to_string()))
+    } else {
+        Err(ApiError::bad_request(error_code))
+    }
+}
+
+fn normalized_filter_text(
+    value: Option<&str>,
+    max_len: usize,
+    error_code: &'static str,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > max_len || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(error_code));
+    }
+    Ok(Some(value.to_string()))
 }
 
 #[cfg(test)]

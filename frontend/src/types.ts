@@ -62,7 +62,7 @@ export type TopologyRuntimeState = GeneratedTopologyRuntimeState;
 export type TunnelEndpointRuntimeState =
   "disabled" | "unknown" | "stale" | "healthy" | "degraded";
 export type TunnelEndpointReachabilityState =
-  "unknown" | "reachable" | "probe_failed" | "not_configured";
+  "unknown" | "reachable" | "probe_failed" | "stale" | "not_configured";
 export type TunnelConnectionAssessment =
   "automatic" | "connected" | "disconnected";
 export type WebhookRuleDeliveryHistoryStatus =
@@ -730,6 +730,17 @@ export type DeleteAgentResponse = {
   deleted_at: string;
   post_commit: LifecycleOutcomeRecord[];
   runtime_sync: RuntimeConfigDispatchRecord[];
+};
+
+export type DeleteAgentBatchTarget = {
+  client_id: string;
+  request: DeleteAgentRequest;
+};
+
+export type DeleteAgentBatchOutcome = {
+  client_id: string;
+  response: DeleteAgentResponse | null;
+  error: string | null;
 };
 
 export type AgentCapabilitySnapshot = {
@@ -2078,12 +2089,16 @@ export type TopologyGraphEdge = {
   right_reachability_state: TunnelEndpointReachabilityState;
   left_reachability_reason: string | null;
   right_reachability_reason: string | null;
+  left_reachability_source: "automatic" | "manual" | string | null;
+  right_reachability_source: "automatic" | "manual" | string | null;
+  left_reachability_observed_at: string | null;
+  right_reachability_observed_at: string | null;
   left_observed_at: string | null;
   right_observed_at: string | null;
   unavailable_client_ids: string[];
   availability_reasons: string[];
   neighbor_state: TopologyNeighborState;
-  probe_state: TopologyObservationState;
+  reachability_state: TopologyObservationState;
   runtime_state: TopologyRuntimeState;
   runtime_reasons: string[];
   adapter_state: TopologyRuntimeState;
@@ -2098,9 +2113,11 @@ export type TopologyGraphEdge = {
   recommended_ospf_cost: number | null;
   cost_delta: number | null;
   latency_avg_ms: number | null;
+  latest_latency_avg_ms: number | null;
   latency_series_ms: number[];
   packet_loss_avg_ratio: number | null;
   throughput_avg_mbps: number | null;
+  latest_speed_mbps: number | null;
   throughput_max_mbps: number | null;
   sample_count: number;
   degraded_count: number;
@@ -2116,6 +2133,8 @@ export type TopologyGraph = {
   nodes: TopologyGraphNode[];
   edges: TopologyGraphEdge[];
   generated_at: string;
+  start_unix: number;
+  end_unix: number;
 };
 
 export type JobTargetRecord = {
@@ -2394,10 +2413,11 @@ export type CreateAgentUpdateReleaseRequest = {
 
 export type NetworkObservationRecord = {
   id: string;
-  job_id: string;
+  job_id: string | null;
   client_id: string;
-  seq: number;
+  seq: number | null;
   kind: string;
+  source: "automatic" | "manual" | string;
   role: string | null;
   plan_id: string | null;
   topology_identity_hash: string | null;
@@ -2405,13 +2425,23 @@ export type NetworkObservationRecord = {
   interface_name: string | null;
   peer_client_id: string | null;
   target: string | null;
+  endpoint_side: "left" | "right" | string | null;
+  address_family: "ipv4" | "ipv6" | string | null;
+  stale_after_secs: number | null;
   healthy: boolean | null;
+  transmitted: number | null;
+  received: number | null;
+  latency_min_ms: number | null;
   latency_avg_ms: number | null;
+  latency_max_ms: number | null;
+  latency_mdev_ms: number | null;
   packet_loss_ratio: number | null;
+  reason: string | null;
   throughput_mbps: number | null;
   bytes: number | null;
   metadata: JsonValue;
   observed_at: string;
+  received_at: string;
 };
 
 export type NetworkObservationTrendRecord = {
@@ -2423,6 +2453,8 @@ export type NetworkObservationTrendRecord = {
   client_id: string;
   peer_client_id: string | null;
   sample_count: number;
+  automatic_count: number;
+  manual_count: number;
   healthy_count: number;
   degraded_count: number;
   latency_avg_ms: number | null;
@@ -2560,6 +2592,8 @@ export type JobOperation =
       activate?: boolean;
       restart_agent?: boolean;
     }
+  | { type: "agent_stop" }
+  | { type: "agent_restart" }
   | {
       type: "file_push";
       path: string;

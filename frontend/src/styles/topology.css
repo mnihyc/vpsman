@@ -2138,6 +2138,25 @@
   line-height: 1.4;
 }
 
+.tunnelPlanEvidenceDetails {
+  margin-top: 12px;
+}
+
+.tunnelPlanEvidenceDetails > .networkEvidenceRangeControls {
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+}
+
+.tunnelPlanEvidenceDetails > .localActionFeedback {
+  margin: 0;
+}
+
+.tunnelPlanEvidenceDetails .networkMetricStrip {
+  border: 0;
+  padding: 0;
+}
+
 .topologyNetworkTrendCharts {
   display: grid;
   gap: 10px;

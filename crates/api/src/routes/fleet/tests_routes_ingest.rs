@@ -23,6 +23,50 @@ fn agent_metric_validation_distinguishes_unknown_zero_and_invalid_swap() {
 }
 
 #[test]
+fn automatic_reachability_timestamp_uses_the_existing_ping_clock_window() {
+    let observed_unix = 10_000;
+    let mut metrics = vpsman_common::AgentMetrics {
+        observed_unix,
+        hostname: "vps".to_string(),
+        tunnel_reachability: vec![vpsman_common::TunnelReachabilityObservation {
+            id: uuid::Uuid::new_v4(),
+            source: vpsman_common::TunnelReachabilitySource::Automatic,
+            plan_id: uuid::Uuid::new_v4(),
+            topology_identity_hash: "a".repeat(64),
+            endpoint_side: vpsman_common::TunnelEndpointSide::Left,
+            peer_client_id: "v-2".to_string(),
+            interface_name: "tun0".to_string(),
+            address_family: vpsman_common::TunnelAddressFamily::Ipv4,
+            target: "10.0.0.2".to_string(),
+            measured_unix: observed_unix,
+            stale_after_secs: 180,
+            transmitted: 3,
+            received: 3,
+            latency_min_ms: Some(1.0),
+            latency_avg_ms: Some(2.0),
+            latency_max_ms: Some(3.0),
+            latency_mdev_ms: Some(0.1),
+            packet_loss_ratio: 0.0,
+            healthy: true,
+            reason: None,
+        }],
+        ..Default::default()
+    };
+
+    assert!(valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = observed_unix - 3_900;
+    assert!(valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = observed_unix - 3_901;
+    assert!(!valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = observed_unix + 300;
+    assert!(valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = observed_unix + 301;
+    assert!(!valid_agent_metrics(&metrics));
+    metrics.tunnel_reachability[0].measured_unix = 0;
+    assert!(!valid_agent_metrics(&metrics));
+}
+
+#[test]
 fn ingest_unsupported_command_output_maps_to_rejected_target_status() {
     let job_id = uuid::Uuid::new_v4();
     let output = CommandOutput {

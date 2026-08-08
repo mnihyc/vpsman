@@ -1491,7 +1491,7 @@ function buildVpsDetailContext({
     ...relatedNetworkObservations.map((observation) => ({
       detail: `${networkObservationLabel(observation.kind)} · ${observation.interface_name ?? "interface n/a"} · ${formatCompactTime(observation.observed_at)}`,
       id: observation.id,
-      jobId: observation.job_id,
+      jobId: observation.job_id ?? undefined,
       kind: "network" as const,
       title: observation.healthy === false ? "Network degradation" : "Network observation",
       when: observation.observed_at,

@@ -11,6 +11,7 @@ fn recognizes_read_only_network_evidence_commands() {
         "network-ospf-update-plans --limit=20"
     ));
     assert!(is_vty_network_evidence_command("topology-graph --limit=20"));
+    assert!(!is_vty_network_evidence_command("network-evidence-clear"));
     assert!(!is_vty_network_evidence_command("network-probe --limit=20"));
 }
 

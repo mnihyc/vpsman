@@ -161,6 +161,9 @@ WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
 Environment=VPSMAN_AGENT_STATE_DIR=$state_dir
+Environment=VPSMAN_AGENT_STOP_MODE=restart_prevent_exit_64
+SuccessExitStatus=64
+RestartPreventExitStatus=64
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -186,6 +189,9 @@ WorkingDirectory=$work_dir
 ExecStart=$install_dir/vpsman-agent --config $config_dir/agent.toml run
 Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
 Environment=VPSMAN_AGENT_STATE_DIR=$state_dir
+Environment=VPSMAN_AGENT_STOP_MODE=restart_prevent_exit_64
+SuccessExitStatus=64
+RestartPreventExitStatus=64
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

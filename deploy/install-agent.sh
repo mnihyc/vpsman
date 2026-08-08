@@ -1384,6 +1384,9 @@ UNIT
   cat <<UNIT
 ExecStart=$agent_bin --config $config_file run
 Environment=VPSMAN_AGENT_RESTART_MODE=signal_only
+Environment=VPSMAN_AGENT_STOP_MODE=restart_prevent_exit_64
+SuccessExitStatus=64
+RestartPreventExitStatus=64
 Restart=always
 RestartSec=5
 UMask=0077

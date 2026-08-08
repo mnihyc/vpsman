@@ -295,6 +295,7 @@ pub(crate) fn validate_job_command(command: &JobCommand) -> Result<(), ApiError>
             }
             Ok(())
         }
+        JobCommand::AgentStop | JobCommand::AgentRestart => Ok(()),
         JobCommand::Backup {
             paths,
             include_config,

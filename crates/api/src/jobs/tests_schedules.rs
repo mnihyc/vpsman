@@ -1144,6 +1144,18 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
 }
 
 #[test]
+fn schedule_validation_rejects_agent_lifecycle_commands() {
+    for operation in [JobCommand::AgentStop, JobCommand::AgentRestart] {
+        let mut request = shell_schedule_request("invalid-agent-lifecycle", true);
+        request.operation = operation;
+        assert_eq!(
+            validate_schedule_request(&request).unwrap_err().code,
+            "agent_lifecycle_not_schedulable"
+        );
+    }
+}
+
+#[test]
 fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
     let request = UpdateScheduleRequest {
         name: "legacy-cadence-repair".to_string(),

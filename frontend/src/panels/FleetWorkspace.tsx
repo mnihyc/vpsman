@@ -67,7 +67,10 @@ import {
 } from "../hooks/useReviewGenerationGuard";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
-import { FailureReasonGroups } from "../components/ExecutionResultPanel";
+import {
+  ExecutionResultPanel,
+  FailureReasonGroups,
+} from "../components/ExecutionResultPanel";
 import { Metric } from "../components/Metric";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import { VpsCombobox } from "../components/VpsCombobox";
@@ -162,8 +165,8 @@ import type {
   WebhookRuleProcessRequest,
   WebhookRuleRecord,
   WebhookRuleRequest,
-  DeleteAgentRequest,
-  DeleteAgentResponse,
+  DeleteAgentBatchOutcome,
+  DeleteAgentBatchTarget,
   JobOperation,
   JobOutputRecord,
   JobTargetRecord,
@@ -180,10 +183,27 @@ type FleetDetailTab =
 type FleetSelectionStatsMode =
   "telemetry" | "network" | "overview" | "capabilities";
 
-type DeleteAgentConfirmationSnapshot = {
+type FleetMutationTargetSnapshot = {
+  agent: AgentView;
   clientId: string;
   displayName: string;
   status: string;
+};
+
+type DeleteAgentConfirmationSnapshot = {
+  targets: Array<
+    FleetMutationTargetSnapshot & {
+      privilegeAssertion: PrivilegeAssertion;
+    }
+  >;
+};
+
+type AgentLifecycleAction = "stop" | "restart";
+
+type AgentLifecycleConfirmationSnapshot = {
+  action: AgentLifecycleAction;
+  targets: FleetMutationTargetSnapshot[];
+  selectorExpression: string;
   privilegeAssertion: PrivilegeAssertion;
 };
 
@@ -251,6 +271,7 @@ const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
 const FILE_BROWSER_STATE_STORAGE_KEY = "vpsman.fileBrowser.state";
+const AGENT_LIFECYCLE_MAX_TIMEOUT_SECS = 120;
 export function FleetWorkspace({
   activeSubpage,
   agents,
@@ -282,7 +303,7 @@ export function FleetWorkspace({
   onDispatchWebhookRules,
   onDryRunFleetAlertPolicy,
   onDryRunWebhookRule,
-  onDeleteAgent,
+  onDeleteAgents,
   onLoadJobOutputs,
   onLoadJobTargets,
   onOpenJobDetails,
@@ -359,10 +380,9 @@ export function FleetWorkspace({
   onDryRunWebhookRule: (
     request: WebhookRuleDryRunRequest,
   ) => Promise<WebhookRuleDryRunRecord>;
-  onDeleteAgent: (
-    clientId: string,
-    request: DeleteAgentRequest,
-  ) => Promise<DeleteAgentResponse>;
+  onDeleteAgents: (
+    targets: DeleteAgentBatchTarget[],
+  ) => Promise<DeleteAgentBatchOutcome[]>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
@@ -457,6 +477,19 @@ export function FleetWorkspace({
     null,
   );
   const deleteReviewPendingRef = useRef(false);
+  const [lifecycleSnapshot, setLifecycleSnapshot] =
+    useState<AgentLifecycleConfirmationSnapshot | null>(null);
+  const [lifecyclePending, setLifecyclePending] = useState(false);
+  const [lifecycleReviewPending, setLifecycleReviewPending] = useState(false);
+  const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleProgress, setLifecycleProgress] =
+    useState<BulkJobProgress | null>(null);
+  const [lifecycleResultAction, setLifecycleResultAction] =
+    useState<AgentLifecycleAction | null>(null);
+  const lifecycleReviewTargetRef = useRef<string | null>(null);
+  const lifecycleSnapshotRef =
+    useRef<AgentLifecycleConfirmationSnapshot | null>(null);
+  const lifecycleReviewPendingRef = useRef(false);
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -543,6 +576,21 @@ export function FleetWorkspace({
     setDeleteSnapshot(null);
     setDeleteReviewPending(false);
   }, [invalidateReviewGeneration]);
+  const clearLifecycleReview = useCallback(() => {
+    lifecycleReviewTargetRef.current = null;
+    invalidateReviewGeneration();
+    setLifecycleSnapshot(null);
+    setLifecycleReviewPending(false);
+  }, [invalidateReviewGeneration]);
+  const clearFleetMutationReviews = useCallback(() => {
+    deleteReviewTargetRef.current = null;
+    lifecycleReviewTargetRef.current = null;
+    invalidateReviewGeneration();
+    setDeleteSnapshot(null);
+    setDeleteReviewPending(false);
+    setLifecycleSnapshot(null);
+    setLifecycleReviewPending(false);
+  }, [invalidateReviewGeneration]);
   const ignoreRequestedFleetDetailTab = useCallback(() => {}, []);
 
   useEffect(() => {
@@ -554,21 +602,42 @@ export function FleetWorkspace({
   }, [deleteReviewPending]);
 
   useEffect(() => {
-    clearDeleteReview();
-  }, [activeSubpage, selectedAgent?.id, clearDeleteReview]);
+    lifecycleSnapshotRef.current = lifecycleSnapshot;
+  }, [lifecycleSnapshot]);
+
+  useEffect(() => {
+    lifecycleReviewPendingRef.current = lifecycleReviewPending;
+  }, [lifecycleReviewPending]);
+
+  useEffect(() => {
+    clearFleetMutationReviews();
+  }, [activeSubpage, selectedAgent?.id, clearFleetMutationReviews]);
 
   const handleFleetSelectionChange = useCallback(
     (rows: AgentView[]) => {
-      const reviewedClientId =
-        deleteSnapshotRef.current?.clientId ?? deleteReviewTargetRef.current;
-      if (!reviewedClientId && !deleteReviewPendingRef.current) {
-        return;
-      }
-      if (rows.length !== 1 || rows[0]?.id !== reviewedClientId) {
+      const currentSignature = fleetSelectionSignature(rows);
+      const reviewedDeleteSignature =
+        deleteSnapshotRef.current !== null
+          ? fleetTargetSignature(deleteSnapshotRef.current.targets)
+          : deleteReviewTargetRef.current;
+      if (
+        (reviewedDeleteSignature || deleteReviewPendingRef.current) &&
+        currentSignature !== reviewedDeleteSignature
+      ) {
         clearDeleteReview();
       }
+      const reviewedLifecycleSignature =
+        lifecycleSnapshotRef.current !== null
+          ? fleetTargetSignature(lifecycleSnapshotRef.current.targets)
+          : lifecycleReviewTargetRef.current;
+      if (
+        (reviewedLifecycleSignature || lifecycleReviewPendingRef.current) &&
+        currentSignature !== reviewedLifecycleSignature
+      ) {
+        clearLifecycleReview();
+      }
     },
-    [clearDeleteReview],
+    [clearDeleteReview, clearLifecycleReview],
   );
   const fleetColumns = useMemo<ConsoleDataGridColumn<AgentView>[]>(
     () => [
@@ -940,7 +1009,7 @@ export function FleetWorkspace({
     subpage: string,
     storageKey: string,
   ) {
-    clearDeleteReview();
+    clearFleetMutationReviews();
     const selectorExpression = selectorExpressionForClientIds(
       rows.map((agent) => agent.id),
     );
@@ -956,7 +1025,7 @@ export function FleetWorkspace({
   }
 
   function openFileBrowserWorkflow(rows: AgentView[]) {
-    clearDeleteReview();
+    clearFleetMutationReviews();
     if (rows.length !== 1) {
       return;
     }
@@ -969,7 +1038,7 @@ export function FleetWorkspace({
     view: ActiveView,
     subpage: string,
   ) {
-    clearDeleteReview();
+    clearFleetMutationReviews();
     if (rows.length !== 1) {
       return;
     }
@@ -978,7 +1047,7 @@ export function FleetWorkspace({
   }
 
   function openUpdateCheckWorkflow(rows: AgentView[]) {
-    clearDeleteReview();
+    clearFleetMutationReviews();
     onOpenJobDispatchPreset({
       mode: "agent_update_check",
       selectorExpression: selectorExpressionForClientIds(
@@ -990,10 +1059,11 @@ export function FleetWorkspace({
   }
 
   async function requestDeleteAgent(rows: AgentView[]) {
-    clearDeleteReview();
+    clearFleetMutationReviews();
+    setLifecycleError(null);
     setDeleteError(null);
     setDeleteFeedback(null);
-    if (rows.length !== 1) {
+    if (rows.length === 0) {
       return;
     }
     if (!privilegeMaterial) {
@@ -1001,39 +1071,146 @@ export function FleetWorkspace({
       setDeleteError("Privilege unlock is required");
       return;
     }
-    const target = rows[0];
-    deleteReviewTargetRef.current = target.id;
+    const targets = fleetMutationTargets(rows, vpsNameDisplayMode);
+    deleteReviewTargetRef.current = fleetTargetSignature(targets);
     const reviewGeneration = captureReviewGeneration();
     setDeleteReviewPending(true);
     try {
       await waitForReviewRender();
-      const privilegeAssertion = await buildPrivilegeAssertion({
-        intent: canonicalDbPrivilegeIntent({
-          action: "agent.delete",
-          confirmed: true,
-          resolvedTargets: [target.id],
-          target: target.id,
-        }),
-        privilegeMaterial,
-      });
+      const reviewedTargets = await Promise.all(
+        targets.map(async (target) => ({
+          ...target,
+          privilegeAssertion: await buildPrivilegeAssertion({
+            intent: canonicalDbPrivilegeIntent({
+              action: "agent.delete",
+              confirmed: true,
+              resolvedTargets: [target.clientId],
+              target: target.clientId,
+            }),
+            privilegeMaterial,
+          }),
+        })),
+      );
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
       setDeleteError(null);
-      setDeleteSnapshot({
-        clientId: target.id,
-        displayName: formatVpsName(target, vpsNameDisplayMode),
-        status: target.status,
-        privilegeAssertion,
-      });
+      setDeleteSnapshot({ targets: reviewedTargets });
     } catch (error) {
       if (!isReviewGenerationCurrent(reviewGeneration)) {
         return;
       }
       setDeleteError(error instanceof Error ? error.message : String(error));
     } finally {
-      setDeleteReviewPending(false);
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setDeleteReviewPending(false);
+      }
     }
+  }
+
+  async function requestAgentLifecycle(
+    rows: AgentView[],
+    action: AgentLifecycleAction,
+  ) {
+    clearFleetMutationReviews();
+    setDeleteError(null);
+    setDeleteFeedback(null);
+    setLifecycleError(null);
+    setLifecycleProgress(null);
+    setLifecycleResultAction(null);
+    if (rows.length === 0) {
+      return;
+    }
+    if (!privilegeMaterial) {
+      onOpenPrivilegeUnlock();
+      setLifecycleError("Privilege unlock is required");
+      return;
+    }
+    const targets = fleetMutationTargets(rows, vpsNameDisplayMode);
+    const targetIds = targets.map((target) => target.clientId);
+    const selectorExpression = selectorExpressionForClientIds(targetIds);
+    const operation: JobOperation = {
+      type: action === "stop" ? "agent_stop" : "agent_restart",
+    };
+    lifecycleReviewTargetRef.current = fleetTargetSignature(targets);
+    const reviewGeneration = captureReviewGeneration();
+    setLifecycleReviewPending(true);
+    try {
+      await waitForReviewRender();
+      const builtPrivilege = await buildPrivilegeForJobOperation({
+        clientIds: targetIds,
+        commandType: operation.type,
+        operation,
+        privilegeMaterial,
+        selectorExpression,
+        maxTimeoutSecs: AGENT_LIFECYCLE_MAX_TIMEOUT_SECS,
+      });
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setLifecycleSnapshot({
+        action,
+        targets,
+        selectorExpression,
+        privilegeAssertion: builtPrivilege.privilegeAssertion,
+      });
+    } catch (error) {
+      if (!isReviewGenerationCurrent(reviewGeneration)) {
+        return;
+      }
+      setLifecycleError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (isReviewGenerationCurrent(reviewGeneration)) {
+        setLifecycleReviewPending(false);
+      }
+    }
+  }
+
+  async function confirmAgentLifecycle() {
+    if (!lifecycleSnapshot) {
+      return;
+    }
+    const snapshot = lifecycleSnapshot;
+    await runPanelAction(setLifecyclePending, setLifecycleError, async () => {
+      const targetIds = snapshot.targets.map((target) => target.clientId);
+      const operation: JobOperation = {
+        type: snapshot.action === "stop" ? "agent_stop" : "agent_restart",
+      };
+      setLifecycleResultAction(snapshot.action);
+      const job = await onCreateJob({
+        argv: [],
+        selector_expression: snapshot.selectorExpression,
+        target_client_ids: targetIds,
+        command: operation.type,
+        confirmed: true,
+        destructive: true,
+        job_id: crypto.randomUUID(),
+        operation,
+        force_unprivileged: false,
+        privileged: true,
+        privilege_assertion: snapshot.privilegeAssertion,
+        max_timeout_secs: AGENT_LIFECYCLE_MAX_TIMEOUT_SECS,
+      });
+      const targets = rowsForFleetMutationTargets(snapshot.targets);
+      setLifecycleProgress(
+        buildBulkJobProgress({
+          jobId: job.job_id,
+          targetCount: createJobTargetCount(job),
+          targetRecords: [],
+          targets,
+          maxTimeoutSecs: AGENT_LIFECYCLE_MAX_TIMEOUT_SECS,
+        }),
+      );
+      clearLifecycleReview();
+      const result = await waitForBulkJobTargets(job.job_id, onLoadJobTargets, {
+        onProgress: setLifecycleProgress,
+        targetCount: createJobTargetCount(job),
+        targets,
+        maxTimeoutSecs: AGENT_LIFECYCLE_MAX_TIMEOUT_SECS,
+        onLoadOutputs: onLoadJobOutputs,
+      });
+      setLifecycleProgress(result.progress);
+    });
   }
 
   async function confirmDeleteAgent() {
@@ -1041,52 +1218,92 @@ export function FleetWorkspace({
       return;
     }
     await runPanelAction(setDeletePending, setDeleteError, async () => {
-      const response = await onDeleteAgent(deleteSnapshot.clientId, {
-        confirmed: true,
-        privilege_assertion: deleteSnapshot.privilegeAssertion,
-        reason: "Deleted from fleet inventory selection action",
-      });
-      const failedSyncs = response.runtime_sync.filter(
-        (outcome) => outcome.status !== "queued",
+      const outcomes = await onDeleteAgents(
+        deleteSnapshot.targets.map((target) => ({
+          client_id: target.clientId,
+          request: {
+            confirmed: true,
+            privilege_assertion: target.privilegeAssertion,
+            reason: "Deleted from fleet inventory selection action",
+          },
+        })),
       );
-      const queuedSyncs = response.runtime_sync.filter(
-        (outcome) => outcome.status === "queued",
+      const completed = outcomes.filter(
+        (outcome) => outcome.response?.deleted === true,
       );
-      const failedPostCommit = response.post_commit.filter(
-        (outcome) => outcome.status !== "completed",
+      const failedRequests = outcomes.filter(
+        (outcome) => outcome.response?.deleted !== true,
+      );
+      const queuedSyncs = completed.flatMap((outcome) =>
+        outcome.response!.runtime_sync.filter(
+          (runtimeOutcome) => runtimeOutcome.status === "queued",
+        ),
       );
       const failureReasons = [
-        ...failedSyncs.map(
+        ...failedRequests.map(
           (outcome) =>
-            `Tunnel cleanup for ${outcome.client_id}: ${dispatchFailureReason(
-              outcome.error,
-              outcome.status,
-              "Runtime apply job",
-            )}`,
+            `${fleetTargetLabel(deleteSnapshot.targets, outcome.client_id)}: ${outcome.error ?? "the API did not confirm deletion"}`,
         ),
-        ...failedPostCommit.map((outcome) =>
-          lifecycleOutcomeFailureReason(outcome, "VPS deletion"),
-        ),
+        ...completed.flatMap((outcome) => [
+          ...outcome.response!.runtime_sync
+            .filter((runtimeOutcome) => runtimeOutcome.status !== "queued")
+            .map(
+              (runtimeOutcome) =>
+                `Tunnel cleanup for ${runtimeOutcome.client_id}: ${dispatchFailureReason(
+                  runtimeOutcome.error,
+                  runtimeOutcome.status,
+                  "Runtime apply job",
+                )}`,
+            ),
+          ...outcome.response!.post_commit
+            .filter((postCommitOutcome) => postCommitOutcome.status !== "completed")
+            .map((postCommitOutcome) =>
+              lifecycleOutcomeFailureReason(postCommitOutcome, "VPS deletion"),
+            ),
+        ]),
       ];
-      setDeleteFeedback({
-        message:
-          failureReasons.length > 0
+      const total = deleteSnapshot.targets.length;
+      const deletionMessage =
+        total === 1 && completed.length === 1
+          ? failureReasons.length > 0
             ? `VPS deleted. ${failureReasons.join(" ")}`
             : queuedSyncs.length > 0
               ? `VPS deleted; tunnel cleanup queued for ${queuedSyncs.length} surviving ${queuedSyncs.length === 1 ? "peer" : "peers"}.`
-              : "VPS deleted; no surviving tunnel peer required cleanup.",
+              : "VPS deleted; no surviving tunnel peer required cleanup."
+          : [
+              `Deleted ${completed.length} of ${total} selected VPS${total === 1 ? "" : "s"}.`,
+              queuedSyncs.length > 0
+                ? `Tunnel cleanup queued for ${queuedSyncs.length} surviving ${queuedSyncs.length === 1 ? "peer" : "peers"}.`
+                : completed.length > 0
+                  ? "No surviving tunnel peer required cleanup."
+                  : "",
+              failureReasons.join(" "),
+            ]
+              .filter(Boolean)
+              .join(" ");
+      setDeleteFeedback({
+        message: deletionMessage,
         tone:
-          failureReasons.length > 0
+          completed.length === 0
+            ? "danger"
+            : failureReasons.length > 0
             ? "warning"
             : queuedSyncs.length > 0
               ? "progress"
               : "success",
       });
       clearDeleteReview();
-      onSelectAgent(null);
+      if (completed.length > 0) {
+        onSelectAgent(null);
+      }
     });
   }
 
+  const fleetMutationPending =
+    deletePending ||
+    deleteReviewPending ||
+    lifecyclePending ||
+    lifecycleReviewPending;
   const fleetInstanceActions: ConsoleDataGridAction<AgentView>[] = [
     {
       label: "Open detail",
@@ -1176,15 +1393,30 @@ export function FleetWorkspace({
         ),
     },
     {
+      label: "Stop agent",
+      description: (rows) =>
+        `Stop ${rows.length} selected agent${rows.length === 1 ? "" : "s"}. External service start is required afterward.`,
+      disabled: () => fleetMutationPending,
+      icon: <PowerOff size={15} />,
+      onSelect: (rows) => void requestAgentLifecycle(rows, "stop"),
+      separatorBefore: true,
+      tone: "danger",
+    },
+    {
+      label: "Restart agent",
+      description: (rows) =>
+        `Restart ${rows.length} selected agent${rows.length === 1 ? "" : "s"} through each agent's configured lifecycle mode.`,
+      disabled: () => fleetMutationPending,
+      icon: <RefreshCw size={15} />,
+      onSelect: (rows) => void requestAgentLifecycle(rows, "restart"),
+    },
+    {
       label: "Review VPS deletion",
       description: (rows) =>
-        rows.length === 1
-          ? `Delete ${formatVpsName(rows[0], vpsNameDisplayMode)}`
-          : "Select exactly one VPS to delete.",
-      disabled: (rows) => rows.length !== 1,
+        `Delete ${rows.length} selected VPS${rows.length === 1 ? "" : "s"} from panel inventory.`,
+      disabled: () => fleetMutationPending,
       icon: <Trash2 size={15} />,
       onSelect: requestDeleteAgent,
-      separatorBefore: true,
       tone: "danger",
     },
   ];
@@ -1217,11 +1449,27 @@ export function FleetWorkspace({
           deletePending={deletePending}
           deleteSnapshot={deleteSnapshot}
           fleetCoreEvidenceAvailable={fleetCoreEvidenceAvailable}
+          lifecycleError={lifecycleError}
+          lifecyclePending={lifecyclePending}
+          lifecycleProgress={lifecycleProgress}
+          lifecycleResultAction={lifecycleResultAction}
+          lifecycleSnapshot={lifecycleSnapshot}
           onCancelDelete={() => {
             setDeleteError(null);
             clearDeleteReview();
           }}
+          onCancelLifecycle={() => {
+            setLifecycleError(null);
+            clearLifecycleReview();
+          }}
+          onClearLifecycleResult={() => {
+            setLifecycleError(null);
+            setLifecycleProgress(null);
+            setLifecycleResultAction(null);
+          }}
           onConfirmDelete={() => void confirmDeleteAgent()}
+          onConfirmLifecycle={() => void confirmAgentLifecycle()}
+          onOpenJobDetails={onOpenJobDetails}
           onOpenMonitor={
             onNavigatePanel
               ? () => onNavigatePanel("Fleet", "monitor")
@@ -1379,6 +1627,90 @@ export function FleetWorkspace({
   );
 }
 
+function fleetMutationTargets(
+  rows: AgentView[],
+  vpsNameDisplayMode: VpsNameDisplayMode,
+): FleetMutationTargetSnapshot[] {
+  return [...rows]
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((agent) => ({
+      agent: {
+        ...agent,
+        capabilities: { ...agent.capabilities },
+        tags: [...agent.tags],
+      },
+      clientId: agent.id,
+      displayName: formatVpsName(agent, vpsNameDisplayMode),
+      status: agent.status,
+    }));
+}
+
+function fleetSelectionSignature(rows: AgentView[]): string {
+  return [...rows]
+    .map((row) => row.id)
+    .sort((left, right) => left.localeCompare(right))
+    .join("\u001f");
+}
+
+function fleetTargetSignature(targets: FleetMutationTargetSnapshot[]): string {
+  return targets.map((target) => target.clientId).join("\u001f");
+}
+
+function rowsForFleetMutationTargets(
+  targets: FleetMutationTargetSnapshot[],
+): AgentView[] {
+  return targets.map((target) => target.agent);
+}
+
+function fleetTargetLabel(
+  targets: FleetMutationTargetSnapshot[],
+  clientId: string,
+): string {
+  const target = targets.find((candidate) => candidate.clientId === clientId);
+  return target ? `${target.displayName} (${target.clientId})` : clientId;
+}
+
+function fleetMutationConfirmationItems(
+  targets: FleetMutationTargetSnapshot[],
+): Array<{ label: string; title?: string; value: ReactNode }> {
+  if (targets.length === 1) {
+    return [
+      { label: "VPS", value: targets[0].displayName },
+      { label: "Client ID", value: targets[0].clientId },
+      { label: "Status", value: targets[0].status },
+    ];
+  }
+  const fullTargetList = targets
+    .map((target) => `${target.displayName} (${target.clientId})`)
+    .join(", ");
+  const visibleTargetList = targets
+    .slice(0, 8)
+    .map((target) => `${target.displayName} (${target.clientId})`)
+    .join(", ");
+  const statusCounts = new Map<string, number>();
+  for (const target of targets) {
+    statusCounts.set(target.status, (statusCounts.get(target.status) ?? 0) + 1);
+  }
+  return [
+    { label: "VPS count", value: String(targets.length) },
+    {
+      label: "Selected VPSs",
+      title: fullTargetList,
+      value:
+        targets.length > 8
+          ? `${visibleTargetList} · +${targets.length - 8} more`
+          : visibleTargetList,
+    },
+    {
+      label: "Current states",
+      value: [...statusCounts.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([status, count]) => `${count} ${status}`)
+        .join(" · "),
+    },
+  ];
+}
+
 function FleetInstancesPanel({
   actions,
   agents,
@@ -1389,8 +1721,17 @@ function FleetInstancesPanel({
   deletePending,
   deleteSnapshot,
   fleetCoreEvidenceAvailable,
+  lifecycleError,
+  lifecyclePending,
+  lifecycleProgress,
+  lifecycleResultAction,
+  lifecycleSnapshot,
   onCancelDelete,
+  onCancelLifecycle,
+  onClearLifecycleResult,
   onConfirmDelete,
+  onConfirmLifecycle,
+  onOpenJobDetails,
   onOpenMonitor,
   onRegisterVps,
   onSelectionChange,
@@ -1410,8 +1751,17 @@ function FleetInstancesPanel({
   deletePending: boolean;
   deleteSnapshot: DeleteAgentConfirmationSnapshot | null;
   fleetCoreEvidenceAvailable: boolean;
+  lifecycleError: string | null;
+  lifecyclePending: boolean;
+  lifecycleProgress: BulkJobProgress | null;
+  lifecycleResultAction: AgentLifecycleAction | null;
+  lifecycleSnapshot: AgentLifecycleConfirmationSnapshot | null;
   onCancelDelete: () => void;
+  onCancelLifecycle: () => void;
+  onClearLifecycleResult: () => void;
   onConfirmDelete: () => void;
+  onConfirmLifecycle: () => void;
+  onOpenJobDetails?: (jobId: string) => void;
   onOpenMonitor?: () => void;
   onRegisterVps?: () => void;
   onSelectionChange: (rows: AgentView[]) => void;
@@ -1424,8 +1774,9 @@ function FleetInstancesPanel({
 }) {
   const deleteOutcomeRef = useRef<HTMLDivElement | null>(null);
   const previousDeleteOutcomeRef = useRef<string | null>(null);
-  const deleteOutcomeMessage = deleteError ?? deleteFeedback?.message ?? null;
-  const deleteOutcomeTone = deleteError
+  const mutationOutcomeMessage =
+    lifecycleError ?? deleteError ?? deleteFeedback?.message ?? null;
+  const mutationOutcomeTone = lifecycleError || deleteError
     ? "danger"
     : (deleteFeedback?.tone ?? "info");
   const stableAgents = useMemo(
@@ -1440,14 +1791,14 @@ function FleetInstancesPanel({
   );
 
   useEffect(() => {
-    if (!deleteOutcomeMessage) {
+    if (!mutationOutcomeMessage) {
       previousDeleteOutcomeRef.current = null;
       return;
     }
-    if (previousDeleteOutcomeRef.current === deleteOutcomeMessage) {
+    if (previousDeleteOutcomeRef.current === mutationOutcomeMessage) {
       return;
     }
-    previousDeleteOutcomeRef.current = deleteOutcomeMessage;
+    previousDeleteOutcomeRef.current = mutationOutcomeMessage;
     const frame = window.requestAnimationFrame(() => {
       if (deleteOutcomeRef.current) {
         scrollIntoViewWithMotion(deleteOutcomeRef.current, {
@@ -1456,7 +1807,7 @@ function FleetInstancesPanel({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [deleteOutcomeMessage]);
+  }, [mutationOutcomeMessage]);
 
   return (
     <div className="fleetPanel fleetInstancesPanel">
@@ -1475,9 +1826,9 @@ function FleetInstancesPanel({
       <ConsoleFreshnessBanner error={apiError} />
       <ActionFeedback
         className="localActionFeedback"
-        message={deleteOutcomeMessage}
+        message={mutationOutcomeMessage}
         ref={deleteOutcomeRef}
-        tone={deleteOutcomeTone}
+        tone={mutationOutcomeTone}
       />
 
       <ConsoleDataGrid
@@ -1552,27 +1903,75 @@ function FleetInstancesPanel({
           </>
         }
       />
+      {lifecycleProgress ? (
+        <ExecutionResultPanel
+          context={
+            lifecycleResultAction === "stop"
+              ? "Agent stop request"
+              : "Agent restart request"
+          }
+          label="Agent lifecycle result"
+          loading={lifecyclePending}
+          onClearResults={onClearLifecycleResult}
+          onOpenJobDetails={onOpenJobDetails}
+          progress={lifecycleProgress}
+        >
+          {lifecycleResultAction === "stop" ? (
+            <p>
+              Completed targets accepted the stop request. Start their agent
+              service externally before they can receive another panel action.
+            </p>
+          ) : (
+            <p>
+              Completed targets accepted the restart request through their
+              configured lifecycle mode; reconnect evidence updates
+              independently.
+            </p>
+          )}
+        </ExecutionResultPanel>
+      ) : null}
       <ConfirmationPrompt
-        confirmLabel="Delete VPS"
-        detail="This deactivates VPS access immediately and permanently removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Tunnel declarations using this VPS are retired and surviving peers receive cleanup sync jobs. Historical jobs and audit records remain."
+        confirmLabel={
+          lifecycleSnapshot?.action === "stop"
+            ? "Stop agents"
+            : "Restart agents"
+        }
+        detail={
+          lifecycleSnapshot?.action === "stop"
+            ? "Each selected agent first retains a terminal job result, then exits through its configured lifecycle mode. A stopped agent cannot receive Restart from this panel; start the vpsman-agent service externally."
+            : "Each selected agent first retains a terminal job result, then restarts through its configured lifecycle mode. Job completion confirms request acceptance; reconnect evidence is reported separately."
+        }
+        error={lifecycleError}
+        items={
+          lifecycleSnapshot
+            ? fleetMutationConfirmationItems(lifecycleSnapshot.targets)
+            : []
+        }
+        onCancel={onCancelLifecycle}
+        onConfirm={onConfirmLifecycle}
+        open={Boolean(lifecycleSnapshot)}
+        pending={lifecyclePending}
+        title={
+          lifecycleSnapshot?.action === "stop"
+            ? "Stop selected agents"
+            : "Restart selected agents"
+        }
+        tone={lifecycleSnapshot?.action === "stop" ? "warning" : "normal"}
+      />
+      <ConfirmationPrompt
+        confirmLabel="Delete VPSs"
+        detail="This deactivates every selected VPS immediately and removes it from inventory, selectors, dashboard, tags, topology, and future bulk targeting. Tunnel declarations using these VPSs are retired and surviving peers receive cleanup sync jobs. Historical jobs and audit records remain. Each VPS is committed separately, so partial results identify exactly what must be retried."
         error={deleteError}
         items={
           deleteSnapshot
-            ? [
-                {
-                  label: "VPS",
-                  value: deleteSnapshot.displayName,
-                },
-                { label: "Client ID", value: deleteSnapshot.clientId },
-                { label: "Status", value: deleteSnapshot.status },
-              ]
+            ? fleetMutationConfirmationItems(deleteSnapshot.targets)
             : []
         }
         onCancel={onCancelDelete}
         onConfirm={onConfirmDelete}
         open={Boolean(deleteSnapshot)}
         pending={deletePending}
-        title="Delete VPS from panel"
+        title="Delete selected VPSs from panel"
         tone="danger"
       />
     </div>

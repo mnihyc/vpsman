@@ -1,7 +1,4 @@
-use std::{
-    env, fs, io::Write, os::unix::fs::PermissionsExt, path::Path, process::Command, thread,
-    time::Duration,
-};
+use std::{fs, io::Write, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -14,6 +11,7 @@ use crate::{
     agent_binary_path::{
         activation_marker_path, current_agent_binary_path, rollback_path, staged_path,
     },
+    agent_lifecycle::request_agent_restart,
     command_worker::CommandCancelToken,
     telemetry::unix_now,
 };
@@ -131,7 +129,7 @@ fn activate_staged_update(
     replace_active_binary(current_exe, &staged)?;
     let _ = fs::remove_file(&staged_path);
     let restart = if input.restart_agent {
-        request_supervised_restart(current_exe)?;
+        request_agent_restart(current_exe)?;
         "self_restart_requested"
     } else {
         "manual_restart_required"
@@ -146,30 +144,6 @@ fn activate_staged_update(
         "restart": restart,
     });
     status_output(input.job_id, status)
-}
-
-fn request_supervised_restart(current_exe: &Path) -> Result<()> {
-    let pid = std::process::id();
-    let restart_mode = env::var("VPSMAN_AGENT_RESTART_MODE").unwrap_or_default();
-    let spawn_replacement = restart_mode.trim() != "signal_only";
-    let current_exe = current_exe.to_path_buf();
-    thread::Builder::new()
-        .name("vpsman-agent-restart-request".to_string())
-        .spawn(move || {
-            thread::sleep(Duration::from_secs(1));
-            if spawn_replacement {
-                let mut command = Command::new(&current_exe);
-                command.args(env::args_os().skip(1));
-                command.env("VPSMAN_AGENT_RESTARTED_FROM", pid.to_string());
-                let _ = command.spawn();
-                thread::sleep(Duration::from_millis(250));
-            }
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-            }
-        })
-        .context("failed to request supervised agent restart")?;
-    Ok(())
 }
 
 fn rollback_update(current_exe: &Path, input: AgentUpdateRollbackInput) -> Result<CommandOutput> {

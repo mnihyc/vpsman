@@ -1,4 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Context, Result};
 use tokio::{process::Command, time};
@@ -88,9 +91,26 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
     };
     let stdout = limit_bytes(output.stdout);
     let stderr = limit_bytes(output.stderr);
-    let parsed = parse_ping_output(std::str::from_utf8(&stdout).unwrap_or_default());
+    let parsed = parse_ping_measurement(std::str::from_utf8(&stdout).unwrap_or_default());
+    let healthy = output.exit_code == Some(0) && parsed.healthy;
+    let reason = if healthy {
+        None
+    } else if output.exit_code != Some(0) {
+        Some(format!("ping_exit:{:?}", output.exit_code))
+    } else if parsed.transmitted == 0 {
+        Some("ping_output_unparseable".to_string())
+    } else if parsed.received == 0 {
+        Some("no_reply".to_string())
+    } else {
+        Some("ping_measurement_incomplete".to_string())
+    };
+    let measured_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let status = serde_json::json!({
-        "type": "network_probe",
+        "type": "tunnel_reachability",
+        "source": "manual",
         "probe": "icmp_ping",
         "plan": input.plan.name,
         "interface": input.plan.interface_name,
@@ -98,17 +118,29 @@ async fn probe_network_plan(input: NetworkProbeInput<'_>) -> Result<Vec<CommandO
         "client_id": input.config.client_id,
         "peer_client_id": endpoint.peer_client_id,
         "target": target,
+        "address_family": if target.contains(':') { "ipv6" } else { "ipv4" },
+        "measured_unix": measured_unix,
+        "stale_after_secs": (input.config.network.latency_monitoring_interval_secs.clamp(15, 3600) * 3).max(180),
         "count": count,
         "interval_ms": interval_ms,
         "command_source": command_source,
         "command_sha256_hex": command_sha256_hex,
         "exit_code": output.exit_code,
-        "success": output.exit_code == Some(0),
+        "success": healthy,
+        "healthy": healthy,
+        "reason": reason,
+        "transmitted": parsed.transmitted,
+        "received": parsed.received,
+        "packet_loss_ratio": parsed.packet_loss_ratio,
+        "latency_min_ms": parsed.latency_min_ms,
+        "latency_avg_ms": parsed.latency_avg_ms,
+        "latency_max_ms": parsed.latency_max_ms,
+        "latency_mdev_ms": parsed.latency_mdev_ms,
         "stdout_sha256_hex": payload_hash(&stdout),
         "stderr_sha256_hex": payload_hash(&stderr),
         "stdout_bytes": stdout.len(),
         "stderr_bytes": stderr.len(),
-        "parsed": parsed,
+        "parsed": parsed.as_json(),
     });
     Ok(vec![CommandOutput {
         job_id: input.job_id,
@@ -155,30 +187,75 @@ fn limit_bytes(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
-fn parse_ping_output(stdout: &str) -> serde_json::Value {
-    let mut transmitted = None::<u64>;
-    let mut received = None::<u64>;
-    let mut packet_loss_ratio = None::<f64>;
-    let mut rtt_min_ms = None::<f64>;
-    let mut rtt_avg_ms = None::<f64>;
-    let mut rtt_max_ms = None::<f64>;
-    let mut rtt_mdev_ms = None::<f64>;
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedPingMeasurement {
+    pub(crate) transmitted: u32,
+    pub(crate) received: u32,
+    pub(crate) packet_loss_ratio: f64,
+    pub(crate) latency_min_ms: Option<f64>,
+    pub(crate) latency_avg_ms: Option<f64>,
+    pub(crate) latency_max_ms: Option<f64>,
+    pub(crate) latency_mdev_ms: Option<f64>,
+    pub(crate) healthy: bool,
+}
+
+impl Default for ParsedPingMeasurement {
+    fn default() -> Self {
+        Self {
+            transmitted: 0,
+            received: 0,
+            packet_loss_ratio: 1.0,
+            latency_min_ms: None,
+            latency_avg_ms: None,
+            latency_max_ms: None,
+            latency_mdev_ms: None,
+            healthy: false,
+        }
+    }
+}
+
+impl ParsedPingMeasurement {
+    pub(crate) fn as_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "transmitted": self.transmitted,
+            "received": self.received,
+            "packet_loss_ratio": self.packet_loss_ratio,
+            "latency_min_ms": self.latency_min_ms,
+            "latency_avg_ms": self.latency_avg_ms,
+            "latency_max_ms": self.latency_max_ms,
+            "latency_mdev_ms": self.latency_mdev_ms,
+            "healthy": self.healthy,
+        })
+    }
+}
+
+pub(crate) fn parse_ping_measurement(stdout: &str) -> ParsedPingMeasurement {
+    let mut parsed = ParsedPingMeasurement::default();
     for line in stdout.lines() {
         if line.contains("packets transmitted") && line.contains("packet loss") {
             let parts = line.split(',').map(str::trim).collect::<Vec<_>>();
-            transmitted = parts
+            parsed.transmitted = parts
                 .first()
                 .and_then(|part| part.split_whitespace().next())
-                .and_then(|value| value.parse().ok());
-            received = parts
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            parsed.received = parts
                 .get(1)
                 .and_then(|part| part.split_whitespace().next())
-                .and_then(|value| value.parse().ok());
-            packet_loss_ratio = parts
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            parsed.packet_loss_ratio = parts
                 .iter()
                 .find_map(|part| part.strip_suffix("% packet loss"))
                 .and_then(|value| value.trim().parse::<f64>().ok())
-                .map(|percent| percent / 100.0);
+                .map(|percent| percent / 100.0)
+                .unwrap_or_else(|| {
+                    if parsed.transmitted == 0 {
+                        1.0
+                    } else {
+                        1.0 - f64::from(parsed.received) / f64::from(parsed.transmitted)
+                    }
+                });
         }
         if let Some((_prefix, values)) = line.split_once(" = ") {
             let values = values.trim_end_matches(" ms");
@@ -186,24 +263,16 @@ fn parse_ping_output(stdout: &str) -> serde_json::Value {
                 .split('/')
                 .filter_map(|value| value.parse::<f64>().ok())
                 .collect::<Vec<_>>();
-            if samples.len() >= 4 {
-                rtt_min_ms = Some(samples[0]);
-                rtt_avg_ms = Some(samples[1]);
-                rtt_max_ms = Some(samples[2]);
-                rtt_mdev_ms = Some(samples[3]);
+            if samples.len() >= 2 {
+                parsed.latency_min_ms = Some(samples[0]);
+                parsed.latency_avg_ms = Some(samples[1]);
+                parsed.latency_max_ms = samples.get(2).copied();
+                parsed.latency_mdev_ms = samples.get(3).copied();
             }
         }
     }
-    serde_json::json!({
-        "transmitted": transmitted,
-        "received": received,
-        "packet_loss_ratio": packet_loss_ratio,
-        "latency_min_ms": rtt_min_ms,
-        "latency_avg_ms": rtt_avg_ms,
-        "latency_max_ms": rtt_max_ms,
-        "latency_mdev_ms": rtt_mdev_ms,
-        "healthy": received.unwrap_or(0) > 0,
-    })
+    parsed.healthy = parsed.received > 0 && parsed.latency_avg_ms.is_some();
+    parsed
 }
 
 #[cfg(test)]

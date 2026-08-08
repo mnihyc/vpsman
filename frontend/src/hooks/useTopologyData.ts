@@ -24,6 +24,10 @@ import type {
   UpdateTunnelPlanRequest,
 } from "../types";
 import { retainMutationSuccessAfterRefresh } from "../utils";
+import {
+  buildNetworkEvidenceSearch,
+  type NetworkEvidenceQuery,
+} from "../networkEvidence";
 
 const TOPOLOGY_SOURCE_ORDER = [
   "tunnelPlans",
@@ -65,11 +69,14 @@ export function useTopologyData(
   const [networkTrends, setNetworkTrends] = useState<NetworkObservationTrendRecord[]>([]);
   const [ospfRecommendations, setOspfRecommendations] = useState<NetworkOspfRecommendationRecord[]>([]);
   const [ospfUpdatePlans, setOspfUpdatePlans] = useState<NetworkOspfUpdatePlanRecord[]>([]);
-  const [topologyGraph, setTopologyGraph] = useState<TopologyGraph>({ nodes: [], edges: [], generated_at: "" });
+  const [topologyGraph, setTopologyGraph] = useState<TopologyGraph>(emptyTopologyGraph());
   const [topologyError, setTopologyError] = useState<string | null>(null);
   const [topologyLoading, setTopologyLoading] = useState(false);
   const topologyErrors = useRef<Partial<Record<TopologySource, string>>>({});
   const topologyPendingLoads = useRef(new Set<string>());
+  const networkObservationQuery = useRef<NetworkEvidenceQuery>({});
+  const networkTrendQuery = useRef<NetworkEvidenceQuery>({});
+  const topologyGraphQuery = useRef<NetworkEvidenceQuery>({});
   const topologyLoadGenerations = useRef<Record<TopologySource, number>>({
     tunnelPlans: 0,
     networkAdapterDefinitions: 0,
@@ -167,20 +174,27 @@ export function useTopologyData(
     [apiToken, loadTopologySource],
   );
 
+  const queryNetworkObservations = useCallback(
+    (query: NetworkEvidenceQuery = {}) =>
+      apiGet<NetworkObservationRecord[]>(
+        `/api/v1/network/observations?${buildNetworkEvidenceSearch(query)}`,
+        apiToken,
+      ),
+    [apiToken],
+  );
+
   const loadNetworkObservations = useCallback(
-    () =>
-      loadTopologySource(
+    (query: NetworkEvidenceQuery = {}) => {
+      networkObservationQuery.current = copyNetworkEvidenceQuery(query);
+      return loadTopologySource(
         "networkObservations",
-        () =>
-          apiGet<NetworkObservationRecord[]>(
-            `/api/v1/network/observations?limit=${TOPOLOGY_EVIDENCE_LIMIT}`,
-            apiToken,
-          ),
+        () => queryNetworkObservations(query),
         setNetworkObservations,
         () => setNetworkObservations([]),
         "Network observations unavailable",
-      ),
-    [apiToken, loadTopologySource],
+      );
+    },
+    [loadTopologySource, queryNetworkObservations],
   );
 
   const loadNetworkAdapterDefinitions = useCallback(
@@ -199,20 +213,27 @@ export function useTopologyData(
     [apiToken, loadTopologySource],
   );
 
+  const queryNetworkTrends = useCallback(
+    (query: NetworkEvidenceQuery = {}) =>
+      apiGet<NetworkObservationTrendRecord[]>(
+        `/api/v1/network/observation-trends?${buildNetworkEvidenceSearch(query)}`,
+        apiToken,
+      ),
+    [apiToken],
+  );
+
   const loadNetworkTrends = useCallback(
-    () =>
-      loadTopologySource(
+    (query: NetworkEvidenceQuery = {}) => {
+      networkTrendQuery.current = copyNetworkEvidenceQuery(query);
+      return loadTopologySource(
         "networkTrends",
-        () =>
-          apiGet<NetworkObservationTrendRecord[]>(
-            `/api/v1/network/observation-trends?limit=${TOPOLOGY_EVIDENCE_LIMIT}`,
-            apiToken,
-          ),
+        () => queryNetworkTrends(query),
         setNetworkTrends,
         () => setNetworkTrends([]),
         "Network trends unavailable",
-      ),
-    [apiToken, loadTopologySource],
+      );
+    },
+    [loadTopologySource, queryNetworkTrends],
   );
 
   const loadOspfRecommendations = useCallback(
@@ -248,19 +269,76 @@ export function useTopologyData(
   );
 
   const loadTopologyGraph = useCallback(
-    () =>
-      loadTopologySource(
+    (query: NetworkEvidenceQuery = {}) => {
+      topologyGraphQuery.current = copyNetworkEvidenceQuery(query);
+      return loadTopologySource(
         "topologyGraph",
         () =>
           apiGet<TopologyGraph>(
-            "/api/v1/network/topology-graph?limit=1000",
+            `/api/v1/network/topology-graph?${buildNetworkEvidenceSearch({
+              ...query,
+              limit: query.limit ?? 240,
+            })}`,
             apiToken,
           ),
         setTopologyGraph,
-        () => setTopologyGraph({ nodes: [], edges: [], generated_at: "" }),
+        () => setTopologyGraph(emptyTopologyGraph()),
         "Topology graph unavailable",
-      ),
+      );
+    },
     [apiToken, loadTopologySource],
+  );
+
+  const refreshRecentNetworkObservations = useCallback(
+    (query: NetworkEvidenceQuery) => {
+      if (query.window === "custom") {
+        return Promise.resolve();
+      }
+      const recentQuery: NetworkEvidenceQuery = {
+        ...query,
+        endAt: undefined,
+        limit: 10_000,
+        startAt: undefined,
+        window: "15m",
+      };
+      return loadTopologySource(
+        "networkObservations",
+        () => queryNetworkObservations(recentQuery),
+        (recent) =>
+          setNetworkObservations((current) =>
+            mergeRecentNetworkObservations(current, recent, query),
+          ),
+        () => setNetworkObservations([]),
+        "Network observations unavailable",
+      );
+    },
+    [loadTopologySource, queryNetworkObservations],
+  );
+
+  const refreshNetworkEvidence = useCallback(
+    async (includeTopologyGraph: boolean) => {
+      const observationQuery = networkObservationQuery.current;
+      const trendQuery = networkTrendQuery.current;
+      const refreshShortRangeTrends = matchesLiveEvidenceWindow(
+        trendQuery.window,
+      );
+      await Promise.all([
+        refreshRecentNetworkObservations(observationQuery),
+        ...(refreshShortRangeTrends ? [loadNetworkTrends(trendQuery)] : []),
+        loadOspfRecommendations(),
+        loadOspfUpdatePlans(),
+        ...(includeTopologyGraph && topologyGraphQuery.current.window !== "custom"
+          ? [loadTopologyGraph(topologyGraphQuery.current)]
+          : []),
+      ]);
+    },
+    [
+      loadNetworkTrends,
+      loadOspfRecommendations,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      refreshRecentNetworkObservations,
+    ],
   );
 
   const createTunnelPlan = useCallback(
@@ -509,7 +587,7 @@ export function useTopologyData(
     setNetworkTrends([]);
     setOspfRecommendations([]);
     setOspfUpdatePlans([]);
-    setTopologyGraph({ nodes: [], edges: [], generated_at: "" });
+    setTopologyGraph(emptyTopologyGraph());
     setTopologyError(null);
     setTopologyLoading(false);
   }, []);
@@ -531,6 +609,9 @@ export function useTopologyData(
     loadTunnelPlans,
     networkObservations,
     networkAdapterDefinitions,
+    queryNetworkObservations,
+    queryNetworkTrends,
+    refreshNetworkEvidence,
     networkTrends,
     ospfRecommendations,
     ospfUpdatePlans,
@@ -547,6 +628,88 @@ export function useTopologyData(
     tunnelPlans,
     tunnelPlanCorruptions,
   };
+}
+
+function copyNetworkEvidenceQuery(
+  query: NetworkEvidenceQuery,
+): NetworkEvidenceQuery {
+  return {
+    ...query,
+    planIds: query.planIds ? [...query.planIds] : undefined,
+  };
+}
+
+function emptyTopologyGraph(): TopologyGraph {
+  return {
+    edges: [],
+    end_unix: 0,
+    generated_at: "",
+    nodes: [],
+    start_unix: 0,
+  };
+}
+
+function matchesLiveEvidenceWindow(
+  window: NetworkEvidenceQuery["window"],
+): boolean {
+  return window === undefined || ["15m", "1h", "8h", "1d"].includes(window);
+}
+
+function mergeRecentNetworkObservations(
+  current: NetworkObservationRecord[],
+  recent: NetworkObservationRecord[],
+  query: NetworkEvidenceQuery,
+): NetworkObservationRecord[] {
+  const byId = new Map(current.map((observation) => [observation.id, observation]));
+  for (const observation of recent) {
+    byId.set(observation.id, observation);
+  }
+  const merged = Array.from(byId.values()).sort(
+    (left, right) =>
+      Date.parse(right.observed_at) - Date.parse(left.observed_at) ||
+      left.id.localeCompare(right.id),
+  );
+  const windowSecs = evidenceWindowSecs(query.window);
+  const newestMillis = merged.reduce(
+    (latest, observation) => Math.max(latest, Date.parse(observation.observed_at)),
+    Number.NEGATIVE_INFINITY,
+  );
+  const retained =
+    windowSecs === null || !Number.isFinite(newestMillis)
+      ? merged
+      : merged.filter(
+          (observation) =>
+            Date.parse(observation.observed_at) >= newestMillis - windowSecs * 1_000,
+        );
+  return retained.slice(0, query.limit ?? 100_000);
+}
+
+function evidenceWindowSecs(
+  window: NetworkEvidenceQuery["window"],
+): number | null {
+  switch (window ?? "1d") {
+    case "15m":
+      return 15 * 60;
+    case "1h":
+      return 60 * 60;
+    case "8h":
+      return 8 * 60 * 60;
+    case "1d":
+      return 24 * 60 * 60;
+    case "7d":
+      return 7 * 24 * 60 * 60;
+    case "30d":
+      return 30 * 24 * 60 * 60;
+    case "90d":
+      return 90 * 24 * 60 * 60;
+    case "180d":
+      return 180 * 24 * 60 * 60;
+    case "1y":
+      return 365 * 24 * 60 * 60;
+    case "all":
+    case "custom":
+      return null;
+  }
 }
 
 function isCorruptTunnelPlan(

@@ -174,9 +174,9 @@ the complete definition as JSON:
 ```sh
 cargo run -p vpsctl -- config-preset-create \
   --behavior process_inventory \
-  --name traffic-vnstat \
-  --description "Use the packaged vnStat binary" \
-  --definition-json '{"source":"vnstat","vnstat_argv":["/usr/bin/vnstat"]}'
+  --name host-mounted-processes \
+  --description "Read processes from a custom host procfs mount" \
+  --definition-json '{"source":"linux_procfs","proc_root":"/srv/host/proc"}'
 ```
 
 An OSPF updater preset uses the same bounded status/update contract as a

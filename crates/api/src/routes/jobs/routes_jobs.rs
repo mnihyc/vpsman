@@ -1173,6 +1173,7 @@ fn confirmation_error_code(command: &JobCommand) -> &'static str {
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. } => "config_update_confirmation_required",
+        JobCommand::AgentStop | JobCommand::AgentRestart => "agent_lifecycle_confirmation_required",
         JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }
         | JobCommand::FileTransferStart { .. }

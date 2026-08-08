@@ -232,7 +232,34 @@ latency is unavailable.
 General Ping is independent from declared-tunnel tests. A Ping target does not
 enable a tunnel, assess an OSPF plan, or become tunnel health evidence.
 
-## Declared-Tunnel Tests
+## Declared-Tunnel Monitoring and Tests
+
+Each enabled declared tunnel can run the existing bounded ICMP reachability
+check from both endpoints at its configured latency-monitoring cadence. Every
+completed run, including a failed run without latency, is retained in the same
+`network_observations` timeline used by a manual Network probe. This is not a
+second Ping-target system or a new telemetry store.
+
+Automatic observations carry their endpoint side, address family, source,
+topology identity, measured time, packet counts, latency distribution, loss,
+result, and freshness window. Network Metrics, Network Evidence, Tunnel plans,
+and the Topology graph distinguish automatic monitoring from manual tests and
+show expired evidence as stale. A failed run remains an explicit chart gap; it
+is never omitted or drawn as zero latency.
+
+The topology identity includes the saved plan name, kind, endpoints, interface,
+local and remote underlay bindings, tunnel addresses, and primary address
+family. Changing one of those fields starts a new evidence generation. MTU,
+bandwidth, OSPF policy, and runtime command changes do not detach otherwise
+valid reachability history.
+
+Automatic OSPF control requires the newest paired endpoint reachability window
+to be fresh and the configured number of preceding paired windows to be
+contiguously healthy. Endpoint probes may be independently phased within their
+declared cadence. Older windows in that contiguous streak remain evidence even
+after their individual current-state window expires; stale newest evidence
+never authorizes an update. Reviewed OSPF and manual probes continue to use the
+same retained evidence model.
 
 Only observations bound to a saved tunnel plan appear in Network Metrics.
 Status records that do not contain the selected measurement remain evidence but

@@ -41,7 +41,7 @@ fn preset_definitions_reject_missing_discriminators_and_unknown_fields() {
     assert!(validate_configuration_preset_definition(
         "latency_probe",
         &serde_json::json!({
-            "source": "interface_counters",
+            "source": "unsupported_source",
             "unexpected": true
         })
     )
@@ -123,7 +123,8 @@ async fn override_apply_rejects_a_changed_selection_origin() {
     memory.agents.write().await.push(test_agent("edge-a"));
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
-    let preset = create_test_latency_preset(&repo, "vnStat A", "/usr/bin/vnstat", &operator).await;
+    let preset =
+        create_test_latency_preset(&repo, "Custom latency A", "/usr/bin/ping", &operator).await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
@@ -164,7 +165,8 @@ async fn override_preview_and_audit_retain_the_trimmed_selector() {
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_latency_preset(&repo, "vnStat selector", "/usr/bin/vnstat", &operator).await;
+        create_test_latency_preset(&repo, "Custom latency selector", "/usr/bin/ping", &operator)
+            .await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
             action: ConfigurationOverrideAction::Set,
@@ -198,7 +200,7 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_latency_preset(&repo, "Retired edge traffic", "/usr/bin/vnstat", &operator)
+        create_test_latency_preset(&repo, "Retired latency probe", "/usr/bin/ping", &operator)
             .await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
@@ -242,7 +244,7 @@ async fn deleting_agent_hides_but_preserves_its_configuration_preset_override() 
                 description: Some("Updated after endpoint retirement".to_string()),
                 definition: serde_json::json!({
                     "source": "configured_ping_argv",
-                    "probe_ping_argv": ["/opt/vnstat"]
+                    "probe_ping_argv": ["/opt/operator/ping"]
                 }),
             },
         )
@@ -293,7 +295,7 @@ async fn revoking_agent_key_keeps_its_configuration_preset_override() {
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
     let preset =
-        create_test_latency_preset(&repo, "Revoked edge traffic", "/usr/bin/vnstat", &operator)
+        create_test_latency_preset(&repo, "Revoked latency probe", "/usr/bin/ping", &operator)
             .await;
     let preview = repo
         .preview_configuration_source_override(&PreviewConfigurationSourceOverrideRequest {
@@ -420,7 +422,8 @@ async fn preset_update_rejects_changed_affected_client_membership() {
         .extend([test_agent("edge-a"), test_agent("edge-b")]);
     let repo = Repository::Memory(memory);
     let operator = crate::tests::test_operator();
-    let preset = create_test_latency_preset(&repo, "vnStat B", "/usr/bin/vnstat", &operator).await;
+    let preset =
+        create_test_latency_preset(&repo, "Custom latency B", "/usr/bin/ping", &operator).await;
     let Repository::Memory(memory) = &repo else {
         unreachable!()
     };
@@ -441,7 +444,7 @@ async fn preset_update_rejects_changed_affected_client_membership() {
                 description: preset.description.clone(),
                 definition: serde_json::json!({
                     "source": "configured_ping_argv",
-                    "probe_ping_argv": ["/opt/vnstat"]
+                    "probe_ping_argv": ["/opt/operator/ping"]
                 }),
             },
         )

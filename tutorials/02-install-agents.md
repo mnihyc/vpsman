@@ -115,18 +115,37 @@ For emergency access lockout, revoke the current client key:
 cargo run -p vpsctl -- client-key-revoke --client-id v-1 --confirmed
 ```
 
-For inventory retirement, use **Fleet > Instances**, select exactly one VPS,
-then choose **Actions > Review VPS deletion**. Deletion requires local privilege
-unlock and confirmation, hides the VPS from normal fleet views, disconnects any
-active gateway session, retires tunnel declarations using that endpoint,
-immediately queues runtime-config cleanup for surviving peers, and marks pending
-or active work for that VPS as skipped or lost. If cleanup cannot be queued, the
-panel reports the affected peers so the operator can retry convergence before
-trusting those interfaces. A deleted client id is not reused; rebuild with a new
-id unless you are only rotating the current key. Deletion is a hidden tombstone,
-not a physical identity-row removal: lifecycle, frozen-scope, and audit evidence
-remain available to the owning historical workflows while normal fleet reads
-exclude the VPS.
+For agent process maintenance, use **Fleet > Instances**, select one or more
+VPSs, then choose **Actions > Stop agent** or **Actions > Restart agent**. Both
+actions freeze the selected VPS IDs into one reviewed, privileged bulk job.
+Restart uses each agent's configured lifecycle mode (systemd supervision or
+same-process exec for direct/SysV runs) and reports that the request was
+accepted; stop intentionally takes each reached agent offline and requires an
+external service start before it can reconnect. Inspect the resulting job
+targets for any VPS that was unavailable or did not accept the request.
+
+The in-agent updater replaces the binary but does not rewrite service assets. A
+systemd unit installed before command protocol v5 therefore rejects **Stop
+agent** explicitly instead of accidentally restarting it. Rerun the current
+`deploy/install-agent.sh` once to refresh that unit before using Stop; this does
+not replace the enrolled agent configuration.
+
+For inventory retirement, use **Fleet > Instances**, select one or more VPSs,
+then choose **Actions > Review VPS deletion**. One confirmation freezes and
+lists the selected VPS IDs before the panel submits a deletion for each target.
+Deletion requires local privilege unlock and confirmation, hides each successful
+target from normal fleet views, disconnects any active gateway session, retires
+tunnel declarations using that endpoint, immediately queues runtime-config
+cleanup for surviving peers, and marks pending or active work for that VPS as
+skipped or lost. The completion evidence distinguishes successful and failed
+targets; do not repeat deletions that already succeeded when recovering a
+partial batch. If cleanup cannot be queued, the panel reports the affected peers
+so the operator can retry convergence before trusting those interfaces. A
+deleted client id is not reused; rebuild with a new id unless you are only
+rotating the current key. Deletion is a hidden tombstone, not a physical
+identity-row removal: lifecycle, frozen-scope, and audit evidence remain
+available to the owning historical workflows while normal fleet reads exclude
+the VPS.
 
 ## 6. Rebuild or rotate safely
 

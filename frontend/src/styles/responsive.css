@@ -335,6 +335,14 @@
     grid-template-columns: 1fr;
   }
 
+  .dashboardControlBar.networkMetricsAdvancedFilterGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .networkMetricsAdvancedFilterGrid .dashboardScopeHint {
+    grid-column: auto;
+  }
+
   .dashboardTrafficRow {
     grid-template-columns: 1fr;
   }
@@ -550,6 +558,34 @@
   .observabilityMetricsControls > .timeRangeTabs button {
     flex: 0 0 auto;
     min-width: max-content;
+  }
+
+  .networkEvidenceRangeControls {
+    align-items: stretch;
+  }
+
+  .networkEvidenceRangeControls > .timeRangeTabs {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+    width: 100%;
+  }
+
+  .networkEvidenceRangeControls > .timeRangeTabs button {
+    flex: 0 0 auto;
+    min-width: max-content;
+  }
+
+  .networkEvidenceCustomRange,
+  .networkEvidenceCustomRange label {
+    width: 100%;
+  }
+
+  .observabilityMetricsRefreshState {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .publicMonitoringRangeControls.observabilityMetricsControls > .timeRangeTabs {

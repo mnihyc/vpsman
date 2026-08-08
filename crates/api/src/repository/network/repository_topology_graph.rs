@@ -51,15 +51,26 @@ impl fmt::Display for TopologyGraphStageError {
 impl std::error::Error for TopologyGraphStageError {}
 
 impl Repository {
-    pub(crate) async fn topology_graph(&self, limit: i64) -> Result<TopologyGraphView> {
+    pub(crate) async fn topology_graph(
+        &self,
+        sample_limit_per_plan_kind_endpoint: i64,
+        start_unix: i64,
+        end_unix: i64,
+        selected_plan_ids: &[Uuid],
+    ) -> Result<TopologyGraphView> {
+        ensure!(start_unix <= end_unix, "topology graph range is invalid");
         let agents = self
             .list_agents()
             .await
             .context(TopologyGraphStageError::Agents)?;
-        let plans = self
+        let mut plans = self
             .list_tunnel_plans()
             .await
             .context(TopologyGraphStageError::Plans)?;
+        if !selected_plan_ids.is_empty() {
+            let selected = selected_plan_ids.iter().copied().collect::<HashSet<_>>();
+            plans.retain(|plan| selected.contains(&plan.id));
+        }
         let plan_ids = plans.iter().map(|plan| plan.id).collect::<Vec<_>>();
         let plan_topologies = plans
             .iter()
@@ -81,7 +92,12 @@ impl Repository {
         endpoint_client_ids.sort();
         endpoint_client_ids.dedup();
         let observations = self
-            .list_network_observations_for_topology(&plan_topologies, limit.clamp(1, 24) as usize)
+            .list_network_observations_for_topology(
+                &plan_topologies,
+                start_unix,
+                end_unix,
+                sample_limit_per_plan_kind_endpoint.clamp(1, 1_000) as usize,
+            )
             .await
             .context(TopologyGraphStageError::Observations)?;
         let trends = summarize_network_observation_trends(&observations);
@@ -99,6 +115,7 @@ impl Repository {
             .await
             .context(TopologyGraphStageError::OspfRecommendations)?;
 
+        let now_unix = end_unix.min(Utc::now().timestamp());
         let agent_status = agents
             .iter()
             .map(|agent| (agent.id.clone(), agent.status.clone()))
@@ -148,19 +165,54 @@ impl Repository {
                 &telemetry,
                 &agent_status,
             );
-            let recommendation = recommendation_by_plan.get(&plan.id).copied();
-            let health = edge_health(
-                plan.enabled,
-                &left_runtime.state,
-                &right_runtime.state,
-                summary.degraded_count,
-                evidence.runtime_degraded,
+            let left_reachability = summarize_endpoint_reachability(
+                &plan,
+                TunnelEndpointSide::Left,
+                &topology_identity_hash,
+                &observations,
+                now_unix,
+            );
+            let right_reachability = summarize_endpoint_reachability(
+                &plan,
+                TunnelEndpointSide::Right,
+                &topology_identity_hash,
+                &observations,
+                now_unix,
             );
             let runtime_state = aggregate_endpoint_runtime_state(
                 &evidence.runtime_state,
                 &left_runtime.state,
                 &right_runtime.state,
                 plan.enabled,
+            );
+            let detailed_runtime_degraded =
+                topology_runtime_state_is_degraded(&evidence.runtime_state)
+                    || evidence.desired_missing_count > 0
+                    || evidence.stale_present_count > 0;
+            let recommendation = recommendation_by_plan.get(&plan.id).copied();
+            let health = edge_health(
+                plan.enabled,
+                &left_runtime.state,
+                &right_runtime.state,
+                detailed_runtime_degraded,
+                &left_reachability.state,
+                &right_reachability.state,
+            );
+            let reachability_state =
+                aggregate_current_reachability(&left_reachability.state, &right_reachability.state);
+            let latest_latency_avg_ms = latest_measurement_value(
+                plan.id,
+                &topology_identity_hash,
+                "tunnel_reachability",
+                &observations,
+                |observation| observation.latency_avg_ms,
+            );
+            let latest_speed_mbps = latest_measurement_value(
+                plan.id,
+                &topology_identity_hash,
+                "network_speed_test",
+                &observations,
+                |observation| observation.throughput_mbps,
             );
             let edge = TopologyGraphEdgeView {
                 plan_id: plan.id,
@@ -176,16 +228,20 @@ impl Repository {
                 right_runtime_state: right_runtime.state,
                 left_runtime_reason: left_runtime.reason,
                 right_runtime_reason: right_runtime.reason,
-                left_reachability_state: left_runtime.reachability_state,
-                right_reachability_state: right_runtime.reachability_state,
-                left_reachability_reason: left_runtime.reachability_reason,
-                right_reachability_reason: right_runtime.reachability_reason,
+                left_reachability_state: left_reachability.state,
+                right_reachability_state: right_reachability.state,
+                left_reachability_reason: left_reachability.reason,
+                right_reachability_reason: right_reachability.reason,
+                left_reachability_source: left_reachability.source,
+                right_reachability_source: right_reachability.source,
+                left_reachability_observed_at: left_reachability.observed_at.clone(),
+                right_reachability_observed_at: right_reachability.observed_at.clone(),
                 left_observed_at: left_runtime.observed_at.clone(),
                 right_observed_at: right_runtime.observed_at.clone(),
                 unavailable_client_ids: availability.unavailable_client_ids,
                 availability_reasons: availability.reasons,
                 neighbor_state: evidence.neighbor_state,
-                probe_state: evidence.probe_state,
+                reachability_state,
                 runtime_state,
                 runtime_reasons: evidence.runtime_reasons,
                 adapter_state: evidence.adapter_state,
@@ -202,9 +258,11 @@ impl Repository {
                     .or(plan.recommended_ospf_cost),
                 cost_delta: recommendation.map(|record| record.cost_delta),
                 latency_avg_ms: summary.latency_avg_ms,
+                latest_latency_avg_ms,
                 latency_series_ms: evidence.latency_series_ms,
                 packet_loss_avg_ratio: summary.packet_loss_avg_ratio,
                 throughput_avg_mbps: summary.throughput_avg_mbps,
+                latest_speed_mbps,
                 throughput_max_mbps: summary.throughput_max_mbps,
                 sample_count: summary.sample_count,
                 degraded_count: summary.degraded_count,
@@ -212,6 +270,8 @@ impl Repository {
                     summary.latest_observed_at.as_deref(),
                     left_runtime.observed_at.as_deref(),
                     right_runtime.observed_at.as_deref(),
+                    left_reachability.observed_at.as_deref(),
+                    right_reachability.observed_at.as_deref(),
                 ]),
                 left_tunnel_address: plan.plan.left_tunnel_address.clone(),
                 right_tunnel_address: plan.plan.right_tunnel_address.clone(),
@@ -244,6 +304,8 @@ impl Repository {
             nodes,
             edges,
             generated_at: Utc::now().to_rfc3339(),
+            start_unix,
+            end_unix,
         })
     }
 }
@@ -267,7 +329,7 @@ fn validate_topology_contract(
                 && is_endpoint_reachability_state(&edge.left_reachability_state)
                 && is_endpoint_reachability_state(&edge.right_reachability_state)
                 && is_topology_neighbor_state(&edge.neighbor_state)
-                && is_topology_observation_state(&edge.probe_state)
+                && is_topology_observation_state(&edge.reachability_state)
                 && is_topology_runtime_state(&edge.runtime_state)
                 && is_topology_runtime_state(&edge.adapter_state)
                 && is_topology_runtime_state(&edge.routing_state)
@@ -295,7 +357,6 @@ struct EdgeTrendSummary {
 #[derive(Default)]
 struct EdgeObservationSummary {
     latency_series_ms: Vec<f64>,
-    probe_state: String,
     neighbor_state: String,
     runtime_state: String,
     runtime_reasons: Vec<String>,
@@ -306,7 +367,6 @@ struct EdgeObservationSummary {
     kernel_namespace_covered: bool,
     desired_missing_count: i64,
     stale_present_count: i64,
-    runtime_degraded: bool,
 }
 
 #[derive(Default)]
@@ -318,8 +378,13 @@ struct EndpointAvailabilitySummary {
 struct EndpointRuntimeSummary {
     state: String,
     reason: Option<String>,
-    reachability_state: String,
-    reachability_reason: Option<String>,
+    observed_at: Option<String>,
+}
+
+struct EndpointReachabilitySummary {
+    state: String,
+    reason: Option<String>,
+    source: Option<String>,
     observed_at: Option<String>,
 }
 
@@ -404,7 +469,7 @@ fn summarize_edge_trends(
         .map(ToString::to_string);
     let probes = matching
         .iter()
-        .filter(|trend| trend.kind == "network_probe")
+        .filter(|trend| trend.kind == "tunnel_reachability")
         .copied()
         .collect::<Vec<_>>();
     let speeds = matching
@@ -437,7 +502,7 @@ fn summarize_edge_observations(
         .filter(|observation| {
             observation.plan_id == Some(plan_id)
                 && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
-                && observation.kind == "network_probe"
+                && observation.kind == "tunnel_reachability"
                 && observation.latency_avg_ms.is_some()
         })
         .collect::<Vec<_>>();
@@ -451,31 +516,6 @@ fn summarize_edge_observations(
         .rev()
         .filter_map(|observation| observation.latency_avg_ms)
         .collect::<Vec<_>>();
-
-    let matching_probe = observations
-        .iter()
-        .filter(|observation| {
-            observation.plan_id == Some(plan_id)
-                && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
-                && observation.kind == "network_probe"
-        })
-        .collect::<Vec<_>>();
-    let probe_state = if matching_probe.is_empty() {
-        "unknown"
-    } else if matching_probe
-        .iter()
-        .any(|observation| observation.healthy == Some(false))
-    {
-        "degraded"
-    } else if matching_probe
-        .iter()
-        .any(|observation| observation.healthy == Some(true))
-    {
-        "healthy"
-    } else {
-        "recorded"
-    }
-    .to_string();
 
     let mut neighbor_state = "unknown".to_string();
     let mut runtime_state = "unknown".to_string();
@@ -570,11 +610,7 @@ fn summarize_edge_observations(
 
     EdgeObservationSummary {
         latency_series_ms,
-        probe_state,
         neighbor_state,
-        runtime_degraded: runtime_state_is_degraded(&runtime_state)
-            || desired_missing_count > 0
-            || stale_present_count > 0,
         runtime_state,
         runtime_reasons,
         adapter_state,
@@ -589,10 +625,6 @@ fn summarize_edge_observations(
 
 fn aggregate_runtime_state(current: &str, next: &str) -> &'static str {
     aggregate_topology_runtime_state(current, next)
-}
-
-fn runtime_state_is_degraded(value: &str) -> bool {
-    topology_runtime_state_is_degraded(value)
 }
 
 fn aggregate_probe_state(current: &str, next: &str) -> &'static str {
@@ -627,8 +659,6 @@ fn summarize_endpoint_runtime(
         return EndpointRuntimeSummary {
             state: "disabled".to_string(),
             reason: Some("plan_disabled".to_string()),
-            reachability_state: "not_configured".to_string(),
-            reachability_reason: Some("plan_disabled".to_string()),
             observed_at: None,
         };
     }
@@ -641,8 +671,6 @@ fn summarize_endpoint_runtime(
             return EndpointRuntimeSummary {
                 state: "unknown".to_string(),
                 reason: Some("endpoint_not_registered".to_string()),
-                reachability_state: "unknown".to_string(),
-                reachability_reason: Some("endpoint_not_registered".to_string()),
                 observed_at: None,
             }
         }
@@ -650,8 +678,6 @@ fn summarize_endpoint_runtime(
             return EndpointRuntimeSummary {
                 state: "stale".to_string(),
                 reason: Some("endpoint_telemetry_stale".to_string()),
-                reachability_state: "unknown".to_string(),
-                reachability_reason: Some("endpoint_telemetry_stale".to_string()),
                 observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
             }
         }
@@ -659,8 +685,6 @@ fn summarize_endpoint_runtime(
             return EndpointRuntimeSummary {
                 state: "degraded".to_string(),
                 reason: Some("endpoint_offline".to_string()),
-                reachability_state: "unknown".to_string(),
-                reachability_reason: Some("endpoint_offline".to_string()),
                 observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
             }
         }
@@ -668,8 +692,6 @@ fn summarize_endpoint_runtime(
             return EndpointRuntimeSummary {
                 state: "unknown".to_string(),
                 reason: Some("endpoint_never_seen".to_string()),
-                reachability_state: "unknown".to_string(),
-                reachability_reason: Some("endpoint_never_seen".to_string()),
                 observed_at: None,
             }
         }
@@ -678,8 +700,6 @@ fn summarize_endpoint_runtime(
             return EndpointRuntimeSummary {
                 state: "degraded".to_string(),
                 reason: Some(format!("endpoint_not_online:{status}")),
-                reachability_state: "unknown".to_string(),
-                reachability_reason: Some(format!("endpoint_not_online:{status}")),
                 observed_at: latest_endpoint_observed_at(plan.id, client_id, side_name, telemetry),
             }
         }
@@ -689,13 +709,10 @@ fn summarize_endpoint_runtime(
         return EndpointRuntimeSummary {
             state: "unknown".to_string(),
             reason: Some("declared_endpoint_not_observed".to_string()),
-            reachability_state: "unknown".to_string(),
-            reachability_reason: Some("declared_endpoint_not_observed".to_string()),
             observed_at: None,
         };
     };
     let observed_at = Some(record.observed_at.clone());
-    let (reachability_state, reachability_reason) = endpoint_reachability(record);
     if let Some(status) = record
         .traffic_status
         .as_deref()
@@ -707,8 +724,6 @@ fn summarize_endpoint_runtime(
                 .traffic_reason
                 .clone()
                 .or_else(|| Some(format!("traffic_status:{status}"))),
-            reachability_state,
-            reachability_reason,
             observed_at,
         };
     }
@@ -723,8 +738,6 @@ fn summarize_endpoint_runtime(
                 .reason
                 .clone()
                 .or_else(|| Some(format!("runtime_adapter_status:{}", adapter.status))),
-            reachability_state,
-            reachability_reason,
             observed_at,
         };
     }
@@ -739,8 +752,6 @@ fn summarize_endpoint_runtime(
                 "interface_operstate:{}",
                 record.operstate.as_deref().unwrap_or("unknown")
             )),
-            reachability_state,
-            reachability_reason,
             observed_at,
         };
     }
@@ -761,27 +772,108 @@ fn summarize_endpoint_runtime(
         }
         .to_string(),
         reason: (!positive_evidence).then(|| "runtime_evidence_incomplete".to_string()),
-        reachability_state,
-        reachability_reason,
         observed_at,
     }
 }
 
-fn endpoint_reachability(record: &TelemetryTunnelView) -> (String, Option<String>) {
-    match record.latency_status.as_deref() {
-        Some("healthy") => ("reachable".to_string(), None),
-        Some("down" | "missed" | "failed") => (
-            "probe_failed".to_string(),
-            record
-                .latency_reason
-                .clone()
-                .or_else(|| Some("latency_probe_failed".to_string())),
-        ),
-        Some("disabled" | "unconfigured") => {
-            ("not_configured".to_string(), record.latency_reason.clone())
-        }
-        _ => ("unknown".to_string(), record.latency_reason.clone()),
+fn summarize_endpoint_reachability(
+    plan: &TunnelPlanView,
+    side: TunnelEndpointSide,
+    topology_identity_hash: &str,
+    observations: &[NetworkObservationView],
+    now_unix: i64,
+) -> EndpointReachabilitySummary {
+    if !plan.enabled {
+        return EndpointReachabilitySummary {
+            state: "not_configured".to_string(),
+            reason: Some("plan_disabled".to_string()),
+            source: None,
+            observed_at: None,
+        };
     }
+    let (client_id, side_name) = match side {
+        TunnelEndpointSide::Left => (&plan.left_client_id, "left"),
+        TunnelEndpointSide::Right => (&plan.right_client_id, "right"),
+    };
+    let latest = observations
+        .iter()
+        .filter(|observation| {
+            observation.plan_id == Some(plan.id)
+                && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
+                && observation.kind == "tunnel_reachability"
+                && observation.client_id == *client_id
+                && observation.endpoint_side.as_deref() == Some(side_name)
+        })
+        .max_by_key(|observation| timestamp_seconds(&observation.observed_at).unwrap_or(i64::MIN));
+    let Some(observation) = latest else {
+        return EndpointReachabilitySummary {
+            state: "unknown".to_string(),
+            reason: Some("no_reachability_observation".to_string()),
+            source: None,
+            observed_at: None,
+        };
+    };
+    let observed_unix = timestamp_seconds(&observation.observed_at).unwrap_or(i64::MIN);
+    let stale_after_secs = observation
+        .stale_after_secs
+        .unwrap_or(180)
+        .clamp(45, 86_400);
+    if now_unix.saturating_sub(observed_unix) > stale_after_secs {
+        return EndpointReachabilitySummary {
+            state: "stale".to_string(),
+            reason: Some(format!(
+                "reachability_observation_stale:{}s",
+                now_unix.saturating_sub(observed_unix)
+            )),
+            source: Some(observation.source.clone()),
+            observed_at: Some(observation.observed_at.clone()),
+        };
+    }
+    EndpointReachabilitySummary {
+        state: match observation.healthy {
+            Some(true) => "reachable",
+            Some(false) => "probe_failed",
+            None => "unknown",
+        }
+        .to_string(),
+        reason: observation.reason.clone(),
+        source: Some(observation.source.clone()),
+        observed_at: Some(observation.observed_at.clone()),
+    }
+}
+
+fn aggregate_current_reachability(left: &str, right: &str) -> String {
+    if left == "probe_failed" || right == "probe_failed" {
+        "degraded"
+    } else if left == "reachable" && right == "reachable" {
+        "healthy"
+    } else if left == "not_configured" && right == "not_configured" {
+        "unknown"
+    } else if matches!(left, "reachable" | "stale") || matches!(right, "reachable" | "stale") {
+        "recorded"
+    } else {
+        "unknown"
+    }
+    .to_string()
+}
+
+fn latest_measurement_value(
+    plan_id: Uuid,
+    topology_identity_hash: &str,
+    kind: &str,
+    observations: &[NetworkObservationView],
+    value: impl Fn(&NetworkObservationView) -> Option<f64>,
+) -> Option<f64> {
+    observations
+        .iter()
+        .filter(|observation| {
+            observation.plan_id == Some(plan_id)
+                && observation.topology_identity_hash.as_deref() == Some(topology_identity_hash)
+                && observation.kind == kind
+                && value(observation).is_some()
+        })
+        .max_by_key(|observation| timestamp_seconds(&observation.observed_at).unwrap_or(i64::MIN))
+        .and_then(value)
 }
 
 fn latest_endpoint_record<'a>(
@@ -847,7 +939,7 @@ fn is_endpoint_runtime_state(value: &str) -> bool {
 fn is_endpoint_reachability_state(value: &str) -> bool {
     matches!(
         value,
-        "unknown" | "reachable" | "probe_failed" | "not_configured"
+        "unknown" | "reachable" | "probe_failed" | "stale" | "not_configured"
     )
 }
 
@@ -902,18 +994,24 @@ fn edge_health(
     enabled: bool,
     left_runtime_state: &str,
     right_runtime_state: &str,
-    degraded_count: i64,
-    runtime_degraded: bool,
+    detailed_runtime_degraded: bool,
+    left_reachability_state: &str,
+    right_reachability_state: &str,
 ) -> String {
     if !enabled {
         "disabled".to_string()
-    } else if degraded_count > 0
-        || runtime_degraded
+    } else if detailed_runtime_degraded
         || matches!(left_runtime_state, "degraded" | "stale")
         || matches!(right_runtime_state, "degraded" | "stale")
+        || left_reachability_state == "probe_failed"
+        || right_reachability_state == "probe_failed"
     {
         "degraded".to_string()
-    } else if left_runtime_state == "healthy" && right_runtime_state == "healthy" {
+    } else if left_runtime_state == "healthy"
+        && right_runtime_state == "healthy"
+        && left_reachability_state == "reachable"
+        && right_reachability_state == "reachable"
+    {
         "healthy".to_string()
     } else {
         "unknown".to_string()

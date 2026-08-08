@@ -3949,6 +3949,13 @@
   background: var(--muted);
 }
 
+.latencyCurve span.gap {
+  align-self: end;
+  background: transparent;
+  border-bottom: 2px dashed var(--warning);
+  border-radius: 0;
+}
+
 .topologyEvidence > .latencyCurve {
   min-height: 38px;
   gap: 4px;

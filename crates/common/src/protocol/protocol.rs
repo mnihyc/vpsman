@@ -35,7 +35,7 @@ pub const MIN_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 10;
 pub const MAX_TERMINAL_IDLE_TIMEOUT_SECS: u32 = 86_400;
 pub const MIN_TERMINAL_FLOW_WINDOW_BYTES: u32 = 4 * 1024;
 pub const MAX_TERMINAL_FLOW_WINDOW_BYTES: u32 = 1024 * 1024;
-pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 4;
+pub const CURRENT_COMMAND_PROTOCOL_VERSION: u16 = 5;
 pub const MIN_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -43,6 +43,7 @@ pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 2;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
+pub const AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION: u16 = 5;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const PROCESS_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const HOST_SERVICE_COMMAND_PROTOCOL_VERSION: u16 = 2;
@@ -1382,6 +1383,8 @@ pub fn job_command_variant_names() -> &'static [&'static str] {
         "agent_update_activate",
         "agent_update_rollback",
         "agent_update_check",
+        "agent_stop",
+        "agent_restart",
         "file_pull",
         "file_push",
         "file_push_chunked",
@@ -1434,7 +1437,7 @@ pub const JOB_COMMAND_SAFETY_WRITE: &str = "write";
 pub const JOB_COMMAND_SAFETY_EXEC: &str = "exec";
 pub const JOB_COMMAND_SAFETY_EXCLUSIVE: &str = "exclusive";
 
-pub const JOB_COMMAND_TYPE_LABELS: [&str; 54] = [
+pub const JOB_COMMAND_TYPE_LABELS: [&str; 56] = [
     "shell_argv",
     "shell_pty",
     "shell_script",
@@ -1445,6 +1448,8 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 54] = [
     "agent_update_activate",
     "agent_update_rollback",
     "agent_update_check",
+    "agent_stop",
+    "agent_restart",
     "file_pull",
     "file_push",
     "file_push_chunked",
@@ -1491,7 +1496,7 @@ pub const JOB_COMMAND_TYPE_LABELS: [&str; 54] = [
     "network_routing_apply",
 ];
 
-pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 53] = [
+pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 55] = [
     ("shell", JOB_COMMAND_SAFETY_EXEC),
     ("shell_script", JOB_COMMAND_SAFETY_EXEC),
     ("terminal_open", JOB_COMMAND_SAFETY_EXEC),
@@ -1501,6 +1506,8 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("agent_update_activate", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_rollback", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("agent_update_check", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_stop", JOB_COMMAND_SAFETY_EXCLUSIVE),
+    ("agent_restart", JOB_COMMAND_SAFETY_EXCLUSIVE),
     ("file_pull", JOB_COMMAND_SAFETY_READ),
     ("file_push", JOB_COMMAND_SAFETY_WRITE),
     ("file_push_chunked", JOB_COMMAND_SAFETY_WRITE),
@@ -1547,7 +1554,7 @@ pub const JOB_COMMAND_SAFETY_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("network_routing_apply", JOB_COMMAND_SAFETY_EXEC),
 ];
 
-pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 53] = [
+pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 55] = [
     ("shell", true),
     ("shell_script", true),
     ("terminal_open", true),
@@ -1557,6 +1564,8 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 53
     ("agent_update_activate", true),
     ("agent_update_rollback", true),
     ("agent_update_check", true),
+    ("agent_stop", true),
+    ("agent_restart", true),
     ("file_pull", false),
     ("file_push", true),
     ("file_push_chunked", true),
@@ -1603,7 +1612,7 @@ pub const JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE: [(&str, bool); 53
     ("network_routing_apply", true),
 ];
 
-pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 53] = [
+pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 55] = [
     ("shell", "shell_argv"),
     ("shell_script", "shell_script"),
     ("terminal_open", "terminal_open"),
@@ -1613,6 +1622,8 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("agent_update_activate", "agent_update_activate"),
     ("agent_update_rollback", "agent_update_rollback"),
     ("agent_update_check", "agent_update_check"),
+    ("agent_stop", "agent_stop"),
+    ("agent_restart", "agent_restart"),
     ("file_pull", "file_pull"),
     ("file_push", "file_push"),
     ("file_push_chunked", "file_push_chunked"),
@@ -1668,7 +1679,7 @@ pub const JOB_COMMAND_TYPE_BY_OPERATION_TYPE: [(&str, &str); 53] = [
     ("network_routing_apply", "network_routing_apply"),
 ];
 
-pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 54] = [
+pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 56] = [
     ("shell_argv", "shell"),
     ("shell_pty", "shell"),
     ("shell_script", "shell"),
@@ -1679,6 +1690,8 @@ pub const JOB_COMMAND_DISPLAY_GROUP_BY_COMMAND_TYPE: [(&str, &str); 54] = [
     ("agent_update_activate", "agent_update"),
     ("agent_update_rollback", "agent_update"),
     ("agent_update_check", "agent_update"),
+    ("agent_stop", "agent_lifecycle"),
+    ("agent_restart", "agent_lifecycle"),
     ("file_pull", "file"),
     ("file_push", "file"),
     ("file_push_chunked", "file"),
@@ -2756,6 +2769,8 @@ pub enum JobCommand {
         #[serde(default = "default_agent_update_check_restart_agent")]
         restart_agent: bool,
     },
+    AgentStop,
+    AgentRestart,
     FilePull {
         path: String,
         follow_symlinks: bool,
@@ -3109,6 +3124,9 @@ pub fn job_command_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. } => AGENT_UPDATE_COMMAND_PROTOCOL_VERSION,
+        JobCommand::AgentStop | JobCommand::AgentRestart => {
+            AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::UserSessions => USER_SESSIONS_COMMAND_PROTOCOL_VERSION,
         JobCommand::ProcessList { .. }
         | JobCommand::ProcessStart { .. }
@@ -3198,6 +3216,9 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
         JobCommand::RuntimeConfigSync { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::AgentStop | JobCommand::AgentRestart => {
+            AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::NetworkStatus { .. }
         | JobCommand::NetworkProbe { .. }
         | JobCommand::NetworkSpeedTest { .. } => NETWORK_COMMAND_PROTOCOL_VERSION,
@@ -3229,6 +3250,8 @@ pub fn job_command_type_label(command: &JobCommand) -> &'static str {
         JobCommand::AgentUpdateActivate { .. } => "agent_update_activate",
         JobCommand::AgentUpdateRollback { .. } => "agent_update_rollback",
         JobCommand::AgentUpdateCheck { .. } => "agent_update_check",
+        JobCommand::AgentStop => "agent_stop",
+        JobCommand::AgentRestart => "agent_restart",
         JobCommand::FilePull { .. } => "file_pull",
         JobCommand::FilePush { .. } => "file_push",
         JobCommand::FilePushChunked { .. } => "file_push_chunked",
@@ -3302,6 +3325,8 @@ pub fn scheduled_command_type_label(command: &JobCommand, fallback: &str) -> Str
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::AgentStop
+        | JobCommand::AgentRestart
         | JobCommand::ServiceInventory { .. }
         | JobCommand::ServiceAction { .. }
         | JobCommand::ServiceLogs { .. } => job_command_type_label(command).to_string(),
@@ -3353,6 +3378,8 @@ pub fn job_command_safety(command: &JobCommand) -> JobCommandSafety {
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. }
+        | JobCommand::AgentStop
+        | JobCommand::AgentRestart
         | JobCommand::PackageUpdateApply { .. } => JobCommandSafety::Exclusive,
         JobCommand::FilePush { .. }
         | JobCommand::FilePushChunked { .. }

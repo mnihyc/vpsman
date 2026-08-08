@@ -23,13 +23,14 @@ use vpsman_common::{
     maybe_compress_payload, payload_hash, runtime_config_content_hash,
     runtime_config_reconcile_scope_from_reason, validate_agent_config_shape,
     AgentBuiltinTunnelDriverCapabilities, AgentBuiltinTunnelDriverCapability,
-    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentPrivilegeMode, AgentRuntimeConfig,
-    AgentRuntimeConfigReloadRequest, AgentSessionDisconnect, AgentUpdateVerificationResult,
-    CommandOutput, CommandResume, Frame, JobAck, JobCancelAck, JobCancelRequest, JobCommand,
-    JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream, OutputStream,
-    PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, RuntimeConfigReconcileResource,
-    RuntimeConfigReconcileScope, SequencedCommandOutput, ServerEndpoint, ServerHello,
-    TelemetryEnvelope, TerminalStreamOutput, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
+    AgentCapabilitySnapshot, AgentConfig, AgentHello, AgentNetworkConfig, AgentPrivilegeMode,
+    AgentRuntimeConfig, AgentRuntimeConfigReloadRequest, AgentSessionDisconnect,
+    AgentUpdateVerificationResult, CommandOutput, CommandResume, Frame, JobAck, JobCancelAck,
+    JobCancelRequest, JobCommand, JobCommandSafety, JobRequest, MessageKind, NoiseFrameStream,
+    OutputStream, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
+    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, SequencedCommandOutput,
+    ServerEndpoint, ServerHello, TelemetryEnvelope, TerminalStreamOutput,
+    MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 };
 
 use crate::{
@@ -202,13 +203,30 @@ fn endpoint_candidates(config: &AgentConfig) -> Vec<ServerEndpoint> {
     endpoints
 }
 
-fn effective_telemetry_interval_secs(configured_secs: u64, has_ping_targets: bool) -> u64 {
-    let configured_secs = configured_secs.max(5);
-    if has_ping_targets {
-        configured_secs.min(GENERAL_PING_INTERVAL_SECS)
-    } else {
-        configured_secs
+fn effective_telemetry_interval_secs(configured_secs: u64, network: &AgentNetworkConfig) -> u64 {
+    let mut interval_secs = configured_secs.max(5);
+    if !network.ping_targets.is_empty() {
+        interval_secs = interval_secs.min(GENERAL_PING_INTERVAL_SECS);
     }
+    if network.runtime_status_telemetry_enabled
+        && !network.runtime_status_telemetry_plans.is_empty()
+    {
+        interval_secs = interval_secs.min(
+            network
+                .runtime_status_telemetry_interval_secs
+                .clamp(15, 3_600),
+        );
+        if network.latency_monitoring_enabled
+            && network
+                .runtime_status_telemetry_plans
+                .iter()
+                .any(|plan| plan.latency_monitoring_enabled)
+        {
+            interval_secs =
+                interval_secs.min(network.latency_monitoring_interval_secs.clamp(15, 3_600));
+        }
+    }
+    interval_secs
 }
 
 async fn connect_and_stream(
@@ -293,7 +311,7 @@ async fn connect_and_stream(
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
     let mut ticker = time::interval(Duration::from_secs(effective_telemetry_interval_secs(
         server_hello.telemetry_interval_secs,
-        !config.network.ping_targets.is_empty(),
+        &config.network,
     )));
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
@@ -335,7 +353,7 @@ async fn connect_and_stream(
                             ticker = time::interval(Duration::from_secs(
                                 effective_telemetry_interval_secs(
                                     config.telemetry_interval_secs,
-                                    !config.network.ping_targets.is_empty(),
+                                    &config.network,
                                 ),
                             ));
                             unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
@@ -447,7 +465,7 @@ async fn connect_and_stream(
                                 ticker = time::interval(Duration::from_secs(
                                     effective_telemetry_interval_secs(
                                         config.telemetry_interval_secs,
-                                        !config.network.ping_targets.is_empty(),
+                                        &config.network,
                                     ),
                                 ));
                                 unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);

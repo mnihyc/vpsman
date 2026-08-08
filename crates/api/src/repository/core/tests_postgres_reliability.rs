@@ -14,7 +14,8 @@ use vpsman_common::{
     GatewayTelemetryIngest, JobCommand, LoadAverage, MemoryStat, NetworkStat, OspfControlMode,
     OspfCostPolicy, OutputStream, PortForwardProtocol, PortForwardRuntimeSnapshot,
     PortForwardRuntimeStatus, RuntimeTunnelControl, RuntimeTunnelManager, TelemetryEnvelope,
-    TunnelAddressPair, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
+    TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -807,6 +808,9 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
             client_id,
             seq,
             kind,
+            source,
+            endpoint_side,
+            stale_after_secs,
             plan_id,
             topology_identity_hash,
             plan_name,
@@ -822,7 +826,10 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
             $1,
             'topology-noisy-left',
             series::integer,
-            'network_probe',
+            'tunnel_reachability',
+            'manual',
+            'left',
+            180,
             $2,
             $3,
             'topology-noisy',
@@ -849,6 +856,9 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
             client_id,
             seq,
             kind,
+            source,
+            endpoint_side,
+            stale_after_secs,
             plan_id,
             topology_identity_hash,
             plan_name,
@@ -864,7 +874,10 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
             $2,
             'topology-quiet-left',
             1,
-            'network_probe',
+            'tunnel_reachability',
+            'manual',
+            'left',
+            180,
             $3,
             $4,
             'topology-quiet',
@@ -902,6 +915,8 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
                     quiet_plan.right_client_id.clone(),
                 ),
             ],
+            0,
+            crate::unix_now() as i64,
             24,
         )
         .await
@@ -916,15 +931,109 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
     assert!(observations
         .iter()
         .any(|observation| observation.plan_id == Some(quiet_plan.id)));
-    let graph = db.repo.topology_graph(24).await.unwrap();
+    let graph = db
+        .repo
+        .topology_graph(24, 0, crate::unix_now() as i64, &[])
+        .await
+        .unwrap();
     let quiet_edge = graph
         .edges
         .iter()
         .find(|edge| edge.plan_id == quiet_plan.id)
         .unwrap();
     assert_eq!(quiet_edge.sample_count, 1);
-    assert_eq!(quiet_edge.probe_state, "degraded");
+    assert_eq!(quiet_edge.reachability_state, "stale");
     assert_eq!(quiet_edge.latency_series_ms, vec![42.0]);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_operational_evidence_hides_deleted_plans_but_history_retains_it() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let left_client_id = "deleted-evidence-left";
+    let right_client_id = "deleted-evidence-right";
+    insert_client(&db.pool, left_client_id, None).await;
+    insert_client(&db.pool, right_client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "deleted-evidence-plan".to_string();
+    input.interface_name = "tun-del-ev".to_string();
+    input.runtime_control = Default::default();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.left_client_id = left_client_id.to_string();
+    input.right_client_id = right_client_id.to_string();
+    input.address_pool_cidr = "10.71.0.0/30".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.71.0.0".to_string(),
+        right: "10.71.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let observation_id = Uuid::new_v4();
+    db.repo
+        .record_automatic_tunnel_reachability(
+            left_client_id,
+            &[TunnelReachabilityObservation {
+                id: observation_id,
+                source: TunnelReachabilitySource::Automatic,
+                plan_id: saved.id,
+                topology_identity_hash:
+                    crate::repository_network_observations::topology_identity_hash_for_plan(&saved),
+                endpoint_side: TunnelEndpointSide::Left,
+                peer_client_id: right_client_id.to_string(),
+                interface_name: input.interface_name.clone(),
+                address_family: TunnelAddressFamily::Ipv4,
+                target: "10.71.0.1".to_string(),
+                measured_unix: crate::unix_now(),
+                stale_after_secs: 180,
+                transmitted: 3,
+                received: 3,
+                latency_min_ms: Some(1.0),
+                latency_avg_ms: Some(2.0),
+                latency_max_ms: Some(3.0),
+                latency_mdev_ms: Some(0.1),
+                packet_loss_ratio: 0.0,
+                healthy: true,
+                reason: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        db.repo
+            .list_network_observations(10, true)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    db.repo
+        .delete_tunnel_plan(saved.id, saved.revision, &operator)
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .list_network_observations(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .repo
+        .list_network_observation_trends(10, true)
+        .await
+        .unwrap()
+        .is_empty());
+    let history = db.repo.list_network_observations(10, false).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, observation_id);
     db.cleanup().await;
 }
 

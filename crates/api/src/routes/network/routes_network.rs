@@ -18,8 +18,9 @@ use crate::{
     error::ApiError,
     model::{
         AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
-        CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkOspfRecommendationView,
-        NetworkOspfUpdatePlanView, RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
+        CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkEvidenceQuery,
+        NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
+        RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
         TunnelPlanEndpointRuntimeConfigView, TunnelPlanListItem, TunnelPlanMutationResponse,
         TunnelPlanOspfDispatchView, TunnelPlanOspfJobsResponse, TunnelPlanView,
         UpdateTunnelConnectionAssessmentRequest, UpdateTunnelPlanOspfCostRequest,
@@ -29,6 +30,7 @@ use crate::{
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     repository_configuration_presets::validate_network_adapter_definition_view,
     repository_topology_graph::TopologyGraphStageError,
+    routes_job_history::network_observation_filter,
     routes_jobs::create_job_from_internal_operator_mutation,
     runtime_config::{dispatch_runtime_config_for_clients, operator_dispatch_error},
     security::{SCOPE_FLEET_READ, SCOPE_NETWORK_READ},
@@ -1341,15 +1343,21 @@ pub(crate) async fn list_network_ospf_update_plans(
 pub(crate) async fn get_topology_graph(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<NetworkEvidenceQuery>,
 ) -> Result<Json<TopologyGraphView>, ApiError> {
     let _operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    let filter = network_observation_filter(&query, 100, false)?;
     Ok(Json(
         state
             .repo
-            .topology_graph(limit_or_default(query.limit))
+            .topology_graph(
+                filter.limit,
+                filter.start_unix,
+                filter.end_unix,
+                &filter.plan_ids,
+            )
             .await
             .map_err(topology_graph_error)?,
     ))

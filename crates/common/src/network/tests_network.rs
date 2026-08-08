@@ -220,6 +220,82 @@ fn planned_ospf_cost_is_optional_and_computed_next_to_operator_inputs() {
 }
 
 #[test]
+fn topology_identity_ignores_policy_only_plan_edits() {
+    let plan_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let mut plan = plan_tunnel(&plan_input(
+        TunnelKind::Gre,
+        RuntimeTunnelManager::AgentBuiltin,
+    ))
+    .unwrap();
+    let identity = tunnel_topology_identity_hash(plan_id, &plan);
+
+    plan.bandwidth_mbps = 9_999;
+    plan.left_mtu = Some(1_400);
+    plan.right_mtu = Some(1_400);
+    plan.ospf = Some(ospf_config());
+    plan.recommended_ospf_cost = Some(42);
+
+    assert_eq!(tunnel_topology_identity_hash(plan_id, &plan), identity);
+}
+
+#[test]
+fn topology_identity_changes_with_endpoint_underlay_or_primary_family() {
+    let plan_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let plan = plan_tunnel(&plan_input(
+        TunnelKind::Gre,
+        RuntimeTunnelManager::AgentBuiltin,
+    ))
+    .unwrap();
+    let identity = tunnel_topology_identity_hash(plan_id, &plan);
+
+    let mut changed_endpoint = plan.clone();
+    changed_endpoint.right_tunnel_address = "10.255.0.3".to_string();
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_endpoint),
+        identity
+    );
+
+    let mut changed_underlay = plan.clone();
+    changed_underlay.left_remote_underlay = "198.51.100.11".to_string();
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_underlay),
+        identity,
+        "left remote underlay edit must detach prior path evidence"
+    );
+
+    let mut changed_underlay = plan.clone();
+    changed_underlay.left_local_underlay = Some("198.51.100.12".to_string());
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_underlay),
+        identity,
+        "left local underlay edit must detach prior path evidence"
+    );
+
+    let mut changed_underlay = plan.clone();
+    changed_underlay.right_remote_underlay = "203.0.113.21".to_string();
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_underlay),
+        identity,
+        "right remote underlay edit must detach prior path evidence"
+    );
+
+    let mut changed_underlay = plan.clone();
+    changed_underlay.right_local_underlay = Some("203.0.113.22".to_string());
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_underlay),
+        identity,
+        "right local underlay edit must detach prior path evidence"
+    );
+
+    let mut changed_family = plan;
+    changed_family.latency_primary_family = TunnelAddressFamily::Ipv6;
+    assert_ne!(
+        tunnel_topology_identity_hash(plan_id, &changed_family),
+        identity
+    );
+}
+
+#[test]
 fn tunnel_plan_rejects_ambiguous_identity_and_underlay() {
     let mut same_endpoint = plan_input(TunnelKind::Gre, RuntimeTunnelManager::AgentBuiltin);
     same_endpoint.right_client_id = same_endpoint.left_client_id.clone();

@@ -1217,7 +1217,7 @@ async fn fleet_read_only_cannot_read_sensitive_payload_surfaces() {
         routes_job_history::list_network_observations(
             axum::extract::State(state.clone()),
             viewer_headers.clone(),
-            axum::extract::Query(HistoryQuery { limit: None }),
+            axum::extract::Query(NetworkEvidenceQuery::default()),
         )
         .await,
     );
@@ -1898,7 +1898,7 @@ async fn matching_sensitive_read_scopes_cross_authorization_boundary() {
         routes_job_history::list_network_observations(
             axum::extract::State(state.clone()),
             network_headers.clone(),
-            axum::extract::Query(HistoryQuery { limit: None }),
+            axum::extract::Query(NetworkEvidenceQuery::default()),
         )
         .await,
     );

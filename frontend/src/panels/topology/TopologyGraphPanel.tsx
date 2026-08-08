@@ -9,6 +9,16 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { topologyEdgeHealthStatusBadgeClass } from "../../jobStatusPresentation";
+import { ActionFeedback } from "../../components/ActionFeedback";
+import { NetworkEvidenceRangeControls } from "../../components/NetworkEvidenceRangeControls";
+import type { MonitoringWindow } from "../../components/MonitoringRangeTabs";
+import {
+  DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  defaultNetworkEvidenceEndAt,
+  defaultNetworkEvidenceStartAt,
+  networkEvidenceWindowLabel,
+  type NetworkEvidenceQuery,
+} from "../../networkEvidence";
 import { consolePalette } from "../../colorPalette";
 import { usePanelDisplaySettings } from "../../panelDisplay";
 import { agentDisplayState } from "../../agentDisplayState";
@@ -83,6 +93,7 @@ const healthFilters: { label: string; value: HealthFilter }[] = [
 
 export function TopologyGraphPanel({
   agents,
+  error,
   graph,
   initialSelectedClientId,
   initialSelectionRequestId,
@@ -94,19 +105,28 @@ export function TopologyGraphPanel({
   runtimeConfigApplyStates,
 }: {
   agents: AgentView[];
+  error: string | null;
   graph: TopologyGraph;
   initialSelectedClientId?: string | null;
   initialSelectionRequestId?: string | null;
   loading: boolean;
   onInitialSelectionConsumed?: (requestId: string) => void;
   onOpenVpsDetail?: (clientId: string) => void;
-  onRefresh: () => Promise<void>;
+  onRefresh: (query?: NetworkEvidenceQuery) => Promise<void>;
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [query, setQuery] = useState("");
   const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
+  const [planFilter, setPlanFilter] = useState("");
+  const [evidenceWindow, setEvidenceWindow] = useState<MonitoringWindow>(
+    DEFAULT_NETWORK_EVIDENCE_WINDOW,
+  );
+  const [customStartAt, setCustomStartAt] = useState(
+    defaultNetworkEvidenceStartAt,
+  );
+  const [customEndAt, setCustomEndAt] = useState(defaultNetworkEvidenceEndAt);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const appliedInitialSelectionRequestRef = useRef<string | null>(null);
   const [graphZoom, setGraphZoom] = useState(1);
@@ -117,8 +137,8 @@ export function TopologyGraphPanel({
     [agents],
   );
   const filtered = useMemo(
-    () => filterGraph(graph, query, healthFilter),
-    [graph, healthFilter, query],
+    () => filterGraph(graph, query, healthFilter, planFilter),
+    [graph, healthFilter, planFilter, query],
   );
   const layout = useMemo(() => positionNodes(filtered.nodes), [filtered.nodes]);
   const nodes = layout.nodes;
@@ -185,10 +205,34 @@ export function TopologyGraphPanel({
     (edge) => edge.enabled && edge.recommended_ospf_cost !== null,
   );
   const showMinimap = filtered.edges.length > 10 || nodes.length > 8;
+  const planOptions = useMemo(
+    () =>
+      graph.edges
+        .map((edge) => ({ id: edge.plan_id, name: edge.plan_name }))
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    [graph.edges],
+  );
   const status =
     graph.edges.length === 0
       ? "No topology edges"
-      : `${filtered.nodes.length} of ${graph.nodes.length} plan endpoints shown; ${filtered.edges.length} of ${graph.edges.length} ${graph.edges.length === 1 ? "tunnel" : "tunnels"} shown`;
+      : `${filtered.nodes.length} of ${graph.nodes.length} plan endpoints shown; ${filtered.edges.length} of ${graph.edges.length} ${graph.edges.length === 1 ? "tunnel" : "tunnels"} shown in ${networkEvidenceWindowLabel(evidenceWindow)}`;
+
+  function evidenceQuery(
+    windowOverride: MonitoringWindow = evidenceWindow,
+  ): NetworkEvidenceQuery {
+    return {
+      endAt: customEndAt,
+      startAt: customStartAt,
+      window: windowOverride,
+    };
+  }
+
+  function selectEvidenceWindow(next: MonitoringWindow) {
+    setEvidenceWindow(next);
+    if (next !== "custom") {
+      void onRefresh(evidenceQuery(next));
+    }
+  }
 
   return (
     <section
@@ -214,13 +258,37 @@ export function TopologyGraphPanel({
         <button
           className="secondaryAction"
           disabled={loading || runtimeConfigEvidenceState === "loading"}
-          onClick={onRefresh}
+          onClick={() => void onRefresh(evidenceQuery())}
           type="button"
         >
           <RefreshCcw size={17} />
           Refresh graph
         </button>
       </div>
+      <ActionFeedback
+        className="localActionFeedback"
+        message={error}
+        tone="danger"
+      />
+      <NetworkEvidenceRangeControls
+        ariaLabel="Topology graph evidence range"
+        endAt={customEndAt}
+        onEndAtChange={setCustomEndAt}
+        onStartAtChange={setCustomStartAt}
+        onWindowChange={selectEvidenceWindow}
+        startAt={customStartAt}
+        window={evidenceWindow}
+      />
+      {evidenceWindow === "custom" ? (
+        <button
+          className="secondaryAction compactAction"
+          disabled={loading}
+          onClick={() => void onRefresh(evidenceQuery("custom"))}
+          type="button"
+        >
+          Apply custom range
+        </button>
+      ) : null}
       {graph.edges.length > 0 && (
         <div className="topologyGraphControls">
           <label className="searchControl compactSearch">
@@ -231,6 +299,21 @@ export function TopologyGraphPanel({
               placeholder="Search plans or endpoints"
               value={query}
             />
+          </label>
+          <label className="topologyFilterSelect">
+            <span>Plan</span>
+            <select
+              aria-label="Topology tunnel plan filter"
+              onChange={(event) => setPlanFilter(event.target.value)}
+              value={planFilter}
+            >
+              <option value="">All eligible plans</option>
+              {planOptions.map((plan) => (
+                <option key={plan.id} value={plan.id}>
+                  {plan.name}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="topologyFilterSelect">
             <span>View</span>
@@ -609,7 +692,9 @@ export function TopologyGraphPanel({
                 </span>
                 <span className="topologyMetric" data-label="Neighbor">
                   <strong>{humanStatus(edge.neighbor_state)}</strong>
-                  <small>{humanStatus(edge.probe_state)}</small>
+                  <small title={endpointReachabilityTitle(edge)}>
+                    {endpointReachabilitySummary(edge)}
+                  </small>
                 </span>
                 <span className="topologyMetric" data-label="Runtime">
                   <strong>{humanStatus(edge.runtime_state)}</strong>
@@ -807,12 +892,16 @@ function filterGraph(
   graph: TopologyGraph,
   query: string,
   healthFilter: HealthFilter,
+  planFilter: string,
 ) {
   const normalizedQuery = query.trim().toLowerCase();
   const graphNodeById = new Map(
     graph.nodes.map((node) => [node.client_id, node]),
   );
   const edges = graph.edges.filter((edge) => {
+    if (planFilter && edge.plan_id !== planFilter) {
+      return false;
+    }
     if (!edgeMatchesHealth(edge, healthFilter)) {
       return false;
     }
@@ -960,7 +1049,15 @@ function edgeSearchText(edge: TopologyGraphEdge): string {
     edge.health,
     edge.enabled ? "enabled" : "disabled",
     edge.neighbor_state ?? "",
-    edge.probe_state ?? "",
+    edge.reachability_state ?? "",
+    edge.left_reachability_state,
+    edge.right_reachability_state,
+    edge.left_reachability_reason ?? "",
+    edge.right_reachability_reason ?? "",
+    edge.left_reachability_source ?? "",
+    edge.right_reachability_source ?? "",
+    edge.left_reachability_observed_at ?? "",
+    edge.right_reachability_observed_at ?? "",
     edge.runtime_state ?? "",
     edge.adapter_state ?? "",
     edge.routing_state ?? "",
@@ -1253,6 +1350,48 @@ function endpointRuntimeDetail(edge: TopologyGraphEdge): string {
   }
   const observed = latestIso([edge.left_observed_at, edge.right_observed_at]);
   return observed ? `latest ${formatCompactTime(observed)}` : "no endpoint evidence";
+}
+
+function endpointReachabilitySummary(edge: TopologyGraphEdge): string {
+  const left = humanStatus(edge.left_reachability_state);
+  const right = humanStatus(edge.right_reachability_state);
+  return left === right ? `Both ${left.toLowerCase()}` : `L ${left} / R ${right}`;
+}
+
+function endpointReachabilityTitle(edge: TopologyGraphEdge): string {
+  return [
+    endpointReachabilityDetail(
+      "Left",
+      edge.left_reachability_state,
+      edge.left_reachability_source,
+      edge.left_reachability_observed_at,
+      edge.left_reachability_reason,
+    ),
+    endpointReachabilityDetail(
+      "Right",
+      edge.right_reachability_state,
+      edge.right_reachability_source,
+      edge.right_reachability_observed_at,
+      edge.right_reachability_reason,
+    ),
+  ].join("; ");
+}
+
+function endpointReachabilityDetail(
+  label: string,
+  state: string,
+  source: string | null,
+  observedAt: string | null,
+  reason: string | null,
+): string {
+  return [
+    `${label}: ${humanStatus(state)}`,
+    source ? `${humanStatus(source)} source` : null,
+    observedAt ? `observed ${formatFullTime(observedAt)}` : "not observed",
+    reason ? humanStatus(reason) : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function regionLabel(node: Pick<TopologyGraphNode, "tags">): string {
