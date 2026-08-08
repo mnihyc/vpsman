@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn vnstat_query_uses_the_supported_iface_flag() {
+    let command = vnstat_query_command("/usr/bin/vnstat", "eth0");
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args, ["--json", "--limit", "0", "--iface", "eth0"]);
+    assert!(!args.iter().any(|argument| argument == "--interface"));
+}
+
+#[test]
 fn parses_all_vnstat_resolutions_from_one_v2_snapshot() {
     let payload = serde_json::json!({
         "vnstatversion": "2.13",

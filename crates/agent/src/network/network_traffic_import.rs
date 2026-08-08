@@ -231,14 +231,7 @@ async fn run_vnstat_query(
     interface: &str,
     cancel_token: CommandCancelToken,
 ) -> Result<Value> {
-    let mut command = Command::new(executable);
-    command
-        .arg("--json")
-        .arg("--limit")
-        .arg("0")
-        .arg("--interface")
-        .arg(interface)
-        .stdin(Stdio::null());
+    let command = vnstat_query_command(executable, interface);
     let result = run_child_with_bounded_output_cancelable(
         command,
         VNSTAT_COMMAND_TIMEOUT_SECS,
@@ -268,6 +261,18 @@ async fn run_vnstat_query(
         }
     };
     serde_json::from_slice(&output).context("vnstat returned invalid JSON")
+}
+
+fn vnstat_query_command(executable: &str, interface: &str) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .arg("--json")
+        .arg("--limit")
+        .arg("0")
+        .arg("--iface")
+        .arg(interface)
+        .stdin(Stdio::null());
+    command
 }
 
 fn parse_vnstat_payload(
