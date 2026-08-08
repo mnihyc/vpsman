@@ -7043,6 +7043,13 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
   await expect(
     page.getByRole("heading", { level: 2, name: "Network tests" }),
   ).toBeVisible();
+  const endpointVisibility = page.getByLabel("Plan endpoint visibility");
+  await expect(
+    endpointVisibility.getByText("N/A", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    endpointVisibility.getByText("Unavailable", { exact: true }),
+  ).toHaveCount(0);
   await expect(page.getByLabel("Network test review contract")).toHaveCount(0);
   const trendCharts = page.getByLabel("Network test trend charts");
   await expect(trendCharts).toBeVisible();
@@ -7077,6 +7084,13 @@ test("network evidence stays read-mostly and links to network action pages", asy
   ).toBeVisible();
   await expect(
     page.getByRole("heading", { level: 2, name: "Network evidence" }),
+  ).toBeVisible();
+  const evidenceControls = page.getByLabel("Network evidence controls");
+  await expect(
+    evidenceControls.getByLabel("Network evidence time range"),
+  ).toBeVisible();
+  await expect(
+    evidenceControls.getByText("Advanced filters", { exact: true }),
   ).toBeVisible();
   await expect(page.getByLabel("Network evidence timeline")).toBeVisible();
   await expect(page.getByText(/outputs not loaded/)).toBeVisible();

@@ -35,12 +35,14 @@ export function TargetImpactPreview({
   mode,
   targets,
   title = "Target impact",
+  unavailableLabel = "Unavailable",
 }: {
   emptyText?: string;
   forceUnprivileged?: boolean;
   mode: TargetImpactMode;
   targets: AgentView[];
   title?: string;
+  unavailableLabel?: string;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const groups = buildTargetImpactGroups(targets, mode);
@@ -65,7 +67,11 @@ export function TargetImpactPreview({
               <div className="targetImpactGroupHeader">
                 {impactIcon(group.key)}
                 <strong>{group.agents.length}</strong>
-                <span>{group.label}</span>
+                <span>
+                  {group.key === "unavailable"
+                    ? unavailableLabel
+                    : group.label}
+                </span>
               </div>
               <TargetImpactChips agents={group.agents} mode={vpsNameDisplayMode} />
             </div>

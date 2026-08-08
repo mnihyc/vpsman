@@ -380,122 +380,127 @@ export function TopologyEvidencePanel({
           />
         </div>
       </div>
-      <NetworkEvidenceRangeControls
-        ariaLabel="Network evidence time range"
-        endAt={customEndAt}
-        onEndAtChange={setCustomEndAt}
-        onStartAtChange={setCustomStartAt}
-        onWindowChange={selectEvidenceWindow}
-        startAt={customStartAt}
-        window={evidenceWindow}
-      />
-      <details className="fleetMetricsAdvancedFilters topologyEvidenceFilters">
-        <summary>
-          <SlidersHorizontal size={14} />
-          <span>Advanced filters</span>
-          {activeEvidenceFilters > 0 ? <b>{activeEvidenceFilters}</b> : null}
-        </summary>
-        <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid">
-          <label>
-            <span>Tunnel plan</span>
-            <select
-              aria-label="Network evidence tunnel plan"
-              onChange={(event) => setPlanId(event.target.value)}
-              value={planId}
+      <div
+        className="observabilityMetricsControls"
+        aria-label="Network evidence controls"
+      >
+        <NetworkEvidenceRangeControls
+          ariaLabel="Network evidence time range"
+          endAt={customEndAt}
+          onEndAtChange={setCustomEndAt}
+          onStartAtChange={setCustomStartAt}
+          onWindowChange={selectEvidenceWindow}
+          startAt={customStartAt}
+          window={evidenceWindow}
+        />
+        <details className="fleetMetricsAdvancedFilters">
+          <summary>
+            <SlidersHorizontal size={14} />
+            <span>Advanced filters</span>
+            {activeEvidenceFilters > 0 ? <b>{activeEvidenceFilters}</b> : null}
+          </summary>
+          <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid">
+            <label>
+              <span>Tunnel plan</span>
+              <select
+                aria-label="Network evidence tunnel plan"
+                onChange={(event) => setPlanId(event.target.value)}
+                value={planId}
+              >
+                <option value="">All visible tunnel plans</option>
+                {tunnelPlans.map((plan) => (
+                  <option key={plan.id} value={plan.id}>
+                    {plan.name}{plan.enabled ? "" : " · disabled"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>VPS endpoint</span>
+              <VpsCombobox
+                agents={agents}
+                ariaLabel="Network evidence VPS endpoint"
+                onChange={setClientId}
+                placeholder="All VPS endpoints"
+                value={clientId}
+              />
+            </label>
+            <label>
+              <span>Source</span>
+              <select
+                aria-label="Network evidence source"
+                onChange={(event) =>
+                  setSource(event.target.value as NetworkEvidenceSource)
+                }
+                value={source}
+              >
+                <option value="">Automatic and manual</option>
+                <option value="automatic">Automatic monitor</option>
+                <option value="manual">Manual test</option>
+              </select>
+            </label>
+            <label>
+              <span>Measurement</span>
+              <select
+                aria-label="Network evidence measurement kind"
+                onChange={(event) =>
+                  setKind(event.target.value as NetworkEvidenceKind)
+                }
+                value={kind}
+              >
+                <option value="">All measurement kinds</option>
+                <option value="tunnel_reachability">Reachability</option>
+                <option value="network_speed_test">Speed test</option>
+                <option value="network_status">Runtime status</option>
+              </select>
+            </label>
+            <label>
+              <span>Health</span>
+              <select
+                aria-label="Network evidence health"
+                onChange={(event) =>
+                  setHealth(event.target.value as NetworkEvidenceHealth)
+                }
+                value={health}
+              >
+                <option value="">All states</option>
+                <option value="healthy">Healthy</option>
+                <option value="unhealthy">Unhealthy</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+            <label>
+              <span>Search</span>
+              <input
+                aria-label="Search network evidence"
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Plan, interface, target, reason"
+                type="search"
+                value={searchQuery}
+              />
+            </label>
+            <div className="dashboardScopeHint">
+              The selected range and filters are applied by the API. With no plan filter, every visible plan is eligible and represented independently.
+            </div>
+            <button
+              className="secondaryAction compactAction"
+              disabled={refreshing}
+              onClick={() => void refreshEvidence()}
+              type="button"
             >
-              <option value="">All visible tunnel plans</option>
-              {tunnelPlans.map((plan) => (
-                <option key={plan.id} value={plan.id}>
-                  {plan.name}{plan.enabled ? "" : " · disabled"}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>VPS endpoint</span>
-            <VpsCombobox
-              agents={agents}
-              ariaLabel="Network evidence VPS endpoint"
-              onChange={setClientId}
-              placeholder="All VPS endpoints"
-              value={clientId}
-            />
-          </label>
-          <label>
-            <span>Source</span>
-            <select
-              aria-label="Network evidence source"
-              onChange={(event) =>
-                setSource(event.target.value as NetworkEvidenceSource)
-              }
-              value={source}
+              Apply filters
+            </button>
+            <button
+              className="secondaryAction compactAction"
+              disabled={activeEvidenceFilters === 0}
+              onClick={() => void resetEvidenceFilters()}
+              type="button"
             >
-              <option value="">Automatic and manual</option>
-              <option value="automatic">Automatic monitor</option>
-              <option value="manual">Manual test</option>
-            </select>
-          </label>
-          <label>
-            <span>Measurement</span>
-            <select
-              aria-label="Network evidence measurement kind"
-              onChange={(event) =>
-                setKind(event.target.value as NetworkEvidenceKind)
-              }
-              value={kind}
-            >
-              <option value="">All measurement kinds</option>
-              <option value="tunnel_reachability">Reachability</option>
-              <option value="network_speed_test">Speed test</option>
-              <option value="network_status">Runtime status</option>
-            </select>
-          </label>
-          <label>
-            <span>Health</span>
-            <select
-              aria-label="Network evidence health"
-              onChange={(event) =>
-                setHealth(event.target.value as NetworkEvidenceHealth)
-              }
-              value={health}
-            >
-              <option value="">All states</option>
-              <option value="healthy">Healthy</option>
-              <option value="unhealthy">Unhealthy</option>
-              <option value="unknown">Unknown</option>
-            </select>
-          </label>
-          <label>
-            <span>Search</span>
-            <input
-              aria-label="Search network evidence"
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Plan, interface, target, reason"
-              type="search"
-              value={searchQuery}
-            />
-          </label>
-          <div className="dashboardScopeHint">
-            The selected range and filters are applied by the API. With no plan filter, every visible plan is eligible and represented independently.
+              Reset filters
+            </button>
           </div>
-          <button
-            className="secondaryAction compactAction"
-            disabled={refreshing}
-            onClick={() => void refreshEvidence()}
-            type="button"
-          >
-            Apply filters
-          </button>
-          <button
-            className="secondaryAction compactAction"
-            disabled={activeEvidenceFilters === 0}
-            onClick={() => void resetEvidenceFilters()}
-            type="button"
-          >
-            Reset filters
-          </button>
-        </div>
-      </details>
+        </details>
+      </div>
       {observations.length >= NETWORK_EVIDENCE_OBSERVATION_LIMIT ? (
         <ActionFeedback
           message="This range reached the 250,000-observation display limit. Narrow the range or filters to inspect every sample."
