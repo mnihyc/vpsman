@@ -643,20 +643,36 @@ function TrafficCycle({
         <>
           <div className="vpsMonitoringTrafficSummary">
             <span>
-              <small>Counted RX</small>
-              <strong>{formatBytes(traffic.rx_bytes)}</strong>
-              <em>{quotaDetail(traffic.rx_bytes, traffic.quota_rx_bytes)}</em>
-            </span>
-            <span>
-              <small>Counted TX</small>
-              <strong>{formatBytes(traffic.tx_bytes)}</strong>
-              <em>{quotaDetail(traffic.tx_bytes, traffic.quota_tx_bytes)}</em>
-            </span>
-            <span>
-              <small>Counted total</small>
-              <strong>{formatBytes(traffic.total_bytes)}</strong>
+              <small>Observed RX</small>
+              <strong>{formatBytes(traffic.diagnostic_rx_bytes)}</strong>
               <em>
-                {quotaDetail(traffic.total_bytes, traffic.quota_total_bytes)}
+                {accountedQuotaDetail(
+                  traffic.diagnostic_rx_bytes,
+                  traffic.rx_bytes,
+                  traffic.quota_rx_bytes,
+                )}
+              </em>
+            </span>
+            <span>
+              <small>Observed TX</small>
+              <strong>{formatBytes(traffic.diagnostic_tx_bytes)}</strong>
+              <em>
+                {accountedQuotaDetail(
+                  traffic.diagnostic_tx_bytes,
+                  traffic.tx_bytes,
+                  traffic.quota_tx_bytes,
+                )}
+              </em>
+            </span>
+            <span>
+              <small>Observed total</small>
+              <strong>{formatBytes(traffic.diagnostic_total_bytes)}</strong>
+              <em>
+                {accountedQuotaDetail(
+                  traffic.diagnostic_total_bytes,
+                  traffic.total_bytes,
+                  traffic.quota_total_bytes,
+                )}
               </em>
             </span>
             <span>
@@ -1193,6 +1209,17 @@ function quotaDetail(used: number, quota: number | null): string {
   return quota && quota > 0
     ? `${formatPercent((used / quota) * 100)} of ${formatBytes(quota)}`
     : "No directional quota";
+}
+
+function accountedQuotaDetail(
+  observed: number,
+  counted: number,
+  quota: number | null,
+): string {
+  const quotaEvidence = quotaDetail(counted, quota);
+  return observed === counted
+    ? quotaEvidence
+    : `${formatBytes(counted)} counted · ${quotaEvidence}`;
 }
 
 function formatDuration(seconds: number): string {

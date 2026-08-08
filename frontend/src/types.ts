@@ -986,6 +986,7 @@ export type MonitoringCardView = {
   resource_history: TelemetryRollupRecord[];
   network: TelemetryNetworkRateRecord[];
   network_history: TelemetryNetworkRateRecord[];
+  network_rate_expected: boolean;
   traffic: TrafficAccountingRecord;
   primary_ping: CurrentPingView | null;
   primary_ping_history: PingRollupView[];
@@ -1097,6 +1098,7 @@ export type PublicResourceMetricView = {
 };
 
 export type PublicNetworkMetricView = {
+  rate_expected: boolean;
   rx_bps: number | null;
   tx_bps: number | null;
   observed_at: string | null;
@@ -1116,6 +1118,9 @@ export type PublicTrafficMetricView = {
   rx_bytes?: number;
   tx_bytes?: number;
   total_bytes?: number;
+  diagnostic_rx_bytes?: number;
+  diagnostic_tx_bytes?: number;
+  diagnostic_total_bytes?: number;
   quota_rx_bytes?: number;
   quota_tx_bytes?: number;
   quota_total_bytes?: number;

@@ -1170,6 +1170,7 @@ async fn monitoring_cards_for_agents(
                 resource_history: resource_history.remove(&client_id).unwrap_or_default(),
                 network: network.remove(&client_id).unwrap_or_default(),
                 network_history: network_history.remove(&client_id).unwrap_or_default(),
+                network_rate_expected: network_rate_selection.expects_rates(&client_id),
                 traffic,
                 primary_ping: primary_ping.get(&client_id).cloned(),
                 primary_ping_history: primary_ping_history.remove(&client_id).unwrap_or_default(),
@@ -1604,7 +1605,7 @@ fn public_monitoring_card(
         }),
         network: visibility
             .network
-            .then(|| public_network_metric(&card.network)),
+            .then(|| public_network_metric(&card.network, card.network_rate_expected)),
         network_history: visibility
             .network
             .then(|| public_network_points(card.network_history)),
@@ -1772,8 +1773,12 @@ fn public_resource_metric(row: TelemetryRollupView) -> PublicResourceMetricView 
     }
 }
 
-fn public_network_metric(rows: &[TelemetryNetworkRateView]) -> PublicNetworkMetricView {
+fn public_network_metric(
+    rows: &[TelemetryNetworkRateView],
+    rate_expected: bool,
+) -> PublicNetworkMetricView {
     PublicNetworkMetricView {
+        rate_expected,
         rx_bps: (!rows.is_empty()).then(|| rows.iter().map(|row| row.rx_bps_avg).sum()),
         tx_bps: (!rows.is_empty()).then(|| rows.iter().map(|row| row.tx_bps_avg).sum()),
         observed_at: rows.iter().map(|row| row.updated_at.clone()).max(),
@@ -1813,7 +1818,7 @@ fn public_network_points(rows: Vec<TelemetryNetworkRateView>) -> Vec<PublicNetwo
         .collect()
 }
 
-fn public_traffic_metric(
+pub(super) fn public_traffic_metric(
     row: TrafficAccountingRecord,
     port_speed: Option<PortSpeedView>,
 ) -> PublicTrafficMetricView {
@@ -1825,6 +1830,9 @@ fn public_traffic_metric(
         rx_bytes: configured.then_some(row.rx_bytes),
         tx_bytes: configured.then_some(row.tx_bytes),
         total_bytes: configured.then_some(row.total_bytes),
+        diagnostic_rx_bytes: configured.then_some(row.diagnostic_rx_bytes),
+        diagnostic_tx_bytes: configured.then_some(row.diagnostic_tx_bytes),
+        diagnostic_total_bytes: configured.then_some(row.diagnostic_total_bytes),
         quota_rx_bytes: configured.then_some(row.quota_rx_bytes).flatten(),
         quota_tx_bytes: configured.then_some(row.quota_tx_bytes).flatten(),
         quota_total_bytes: configured.then_some(row.quota_total_bytes).flatten(),

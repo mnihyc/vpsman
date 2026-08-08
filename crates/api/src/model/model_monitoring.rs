@@ -266,6 +266,7 @@ pub(crate) struct MonitoringCardView {
     pub(crate) resource_history: Vec<TelemetryRollupView>,
     pub(crate) network: Vec<TelemetryNetworkRateView>,
     pub(crate) network_history: Vec<TelemetryNetworkRateView>,
+    pub(crate) network_rate_expected: bool,
     pub(crate) traffic: TrafficAccountingRecord,
     pub(crate) primary_ping: Option<CurrentPingView>,
     pub(crate) primary_ping_history: Vec<PingRollupView>,
@@ -479,6 +480,7 @@ pub(crate) struct PublicResourceMetricView {
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PublicNetworkMetricView {
+    pub(crate) rate_expected: bool,
     pub(crate) rx_bps: Option<f64>,
     pub(crate) tx_bps: Option<f64>,
     pub(crate) observed_at: Option<String>,
@@ -505,6 +507,12 @@ pub(crate) struct PublicTrafficMetricView {
     pub(crate) tx_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) total_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diagnostic_rx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diagnostic_tx_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diagnostic_total_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) quota_rx_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

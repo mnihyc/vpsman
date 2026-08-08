@@ -2541,6 +2541,25 @@ span.vpsMonitorSparkline.empty {
   white-space: nowrap;
 }
 
+.vpsMonitorTraffic .vpsMonitorRowHeading > strong,
+.vpsMonitorPing .vpsMonitorRowHeading > strong {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 700;
+}
+
+.vpsMonitorRowEvidence {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vpsMonitorRowEvidence > strong {
+  min-width: 0;
+}
+
 .vpsMonitorTraffic strong,
 .vpsMonitorPing strong {
   min-width: 0;
@@ -2637,6 +2656,37 @@ span.vpsMonitorSparkline.empty {
 .vpsMonitorCard.compact .vpsMonitorPing {
   gap: 3px;
   padding: 6px 0 0;
+}
+
+.vpsMonitorCard.compact
+  .vpsMonitorTraffic.contextual
+  > span:first-child {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px;
+}
+
+.vpsMonitorCard.compact
+  .vpsMonitorTraffic.contextual
+  .vpsMonitorRowEvidence {
+  display: contents;
+}
+
+.vpsMonitorCard.compact
+  .vpsMonitorTraffic.contextual
+  .vpsMonitorRowEvidence
+  > .publicMonitoringPortSpeed {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.vpsMonitorCard.compact
+  .vpsMonitorTraffic.contextual
+  .vpsMonitorRowEvidence
+  > strong {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  text-align: right;
 }
 
 .vpsMonitorCard.compact .vpsMonitorTraffic.warning,
@@ -2997,20 +3047,67 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringTrafficHeading {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  display: flex;
   align-items: baseline;
-  gap: 5px;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
 }
 
-.publicMonitoringTrafficHeading > strong {
-  font-size: 12px;
+.publicMonitoringTrafficHeading > .vpsMonitorRowHeading,
+.publicMonitoringPing > .vpsMonitorRowHeading {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
   line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.publicMonitoringTrafficHeading > span:last-child {
-  grid-column: 3;
+.publicMonitoringTrafficHeading > .vpsMonitorRowHeading > strong,
+.publicMonitoringPing > .vpsMonitorRowHeading > strong {
+  color: var(--text);
+  font-size: inherit;
+  font-weight: 700;
+}
+
+.publicMonitoringTrafficHeading > .vpsMonitorRowEvidence {
+  flex: 1 1 auto;
+}
+
+.publicMonitoringTrafficHeading > .vpsMonitorRowEvidence > strong {
+  font-size: 11px;
+}
+
+.publicMonitoringCard.compact
+  .publicMonitoringTraffic.contextual
+  .publicMonitoringTrafficHeading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px;
+}
+
+.publicMonitoringCard.compact
+  .publicMonitoringTraffic.contextual
+  .vpsMonitorRowEvidence {
+  display: contents;
+}
+
+.publicMonitoringCard.compact
+  .publicMonitoringTraffic.contextual
+  .vpsMonitorRowEvidence
+  > .publicMonitoringPortSpeed {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.publicMonitoringCard.compact
+  .publicMonitoringTraffic.contextual
+  .vpsMonitorRowEvidence
+  > strong {
+  grid-column: 1 / -1;
+  grid-row: 2;
   text-align: right;
 }
 
@@ -3076,15 +3173,6 @@ span.vpsMonitorSparkline.empty {
   padding-top: 6px;
 }
 
-.publicMonitoringPing > strong {
-  min-width: 0;
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .publicMonitoringCard.compact .publicMonitoringPing {
   grid-template-columns: auto minmax(0, 1fr);
 }
@@ -3099,7 +3187,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringPing > .vpsMonitorSparkline,
-.publicMonitoringPing > small {
+.publicMonitoringPing > small:not(.vpsMonitorRowHeading) {
   grid-column: 1 / -1;
 }
 
@@ -3128,12 +3216,16 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringCard.compact .publicMonitoringTraffic > small,
-.publicMonitoringCard.compact .publicMonitoringPing > small {
+.publicMonitoringCard.compact
+  .publicMonitoringPing
+  > small:not(.vpsMonitorRowHeading) {
   display: none;
 }
 
 .publicMonitoringCard.compact .publicMonitoringTraffic.warning > small,
-.publicMonitoringCard.compact .publicMonitoringPing.warning > small {
+.publicMonitoringCard.compact
+  .publicMonitoringPing.warning
+  > small:not(.vpsMonitorRowHeading) {
   display: block;
 }
 

@@ -167,16 +167,21 @@ fn live_rate_selector_defaults_to_reference_unless_all_or_exact_is_explicit() {
     let selected = resolve_network_rate_interface_selection(&client_ids, &rules).unwrap();
     assert!(selected.allows("v-1", "eth0"));
     assert!(selected.allows("v-1", "eth1"));
+    assert!(selected.expects_rates("v-1"));
     assert!(!selected.allows("v-1", "wg0"));
     assert!(selected.allows("v-2", "anything"));
+    assert!(selected.expects_rates("v-2"));
     assert!(!selected.allows("v-3", "eth0"));
     assert!(selected.allows("v-3", "eth9"));
     assert!(!selected.allows("v-4", "eth9"));
     assert!(selected.allows("v-4", "eth4"));
     assert!(!selected.allows("v-6", "wg0"));
+    assert!(!selected.expects_rates("v-6"));
     assert!(selected.allows("v-7", "eth7"));
+    assert!(selected.expects_rates("v-7"));
     assert!(!selected.allows("v-7", "anything"));
     assert!(!selected.allows("v-8", "anything"));
+    assert!(!selected.expects_rates("v-8"));
 
     let mut changed_rules = rules.clone();
     changed_rules
@@ -340,6 +345,34 @@ fn traffic_direction_accounting_is_defensively_idempotent() {
         claim_traffic_selector_directions(&mut counted, &tx),
         (false, false)
     );
+}
+
+#[test]
+fn directional_traffic_keeps_diagnostics_without_changing_billing_totals() {
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let usage = usage("eth0", now.timestamp());
+
+    let tx_only = traffic_accounting_for_client(
+        "edge-a",
+        &traffic_rules("eth0+tx"),
+        std::slice::from_ref(&usage),
+        now,
+    );
+    assert_eq!(tx_only.rx_bytes, 0);
+    assert_eq!(tx_only.tx_bytes, 200);
+    assert_eq!(tx_only.total_bytes, 200);
+    assert_eq!(tx_only.diagnostic_rx_bytes, 100);
+    assert_eq!(tx_only.diagnostic_tx_bytes, 200);
+    assert_eq!(tx_only.diagnostic_total_bytes, 300);
+
+    let split =
+        traffic_accounting_for_client("edge-a", &traffic_rules("eth0+rx,eth0+tx"), &[usage], now);
+    assert_eq!(split.rx_bytes, 100);
+    assert_eq!(split.tx_bytes, 200);
+    assert_eq!(split.total_bytes, 300);
+    assert_eq!(split.diagnostic_rx_bytes, 100);
+    assert_eq!(split.diagnostic_tx_bytes, 200);
+    assert_eq!(split.diagnostic_total_bytes, 300);
 }
 
 #[test]

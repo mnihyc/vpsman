@@ -28,6 +28,7 @@ import {
   MonitorFact,
   MonitorMetric,
   VpsMonitorCardSurface,
+  formatTrafficReset,
 } from "./panels/FleetMonitorPanel";
 import type {
   PublicMonitoringCardView as PublicMonitoringCard,
@@ -952,7 +953,9 @@ function PublicMonitoringCardView({
     ? publicFreshnessProblem(card.resources?.observed_at, "Resource telemetry")
     : null;
   const networkProblem = visibility?.network
-    ? publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
+    ? card.network?.rate_expected === false
+      ? null
+      : publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
     : null;
   const warnings = publicCardWarnings(card, visibility);
   const country = visibility?.identity_context
@@ -1117,7 +1120,9 @@ function PublicMonitoringCardView({
           />
           {density === "comfortable" ? (
             <small className="publicMonitoringFreshness">
-              {card.network?.observed_at
+              {card.network?.rate_expected === false
+                ? "Network rates not selected"
+                : card.network?.observed_at
                 ? `Updated ${formatCompactTime(card.network.observed_at)}`
                 : "Network data unavailable"}
             </small>
@@ -1237,7 +1242,9 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
         aria-label="Traffic unavailable"
       >
         <div className="publicMonitoringTrafficHeading">
-          <strong title="Traffic unavailable">Traffic unavailable</strong>
+          <small className="vpsMonitorRowHeading" title="Traffic unavailable">
+            <strong>Traffic unavailable</strong>
+          </small>
         </div>
       </div>
     );
@@ -1249,28 +1256,42 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
   const problem = publicTrafficProblem(traffic);
   const portSpeed = traffic.port_speed?.display;
   const cycleSummary = traffic.configured ? trafficCycleSummary(traffic) : "";
+  const resetContext =
+    traffic.configured && traffic.cycle_end
+      ? formatTrafficReset(traffic.cycle_end)
+      : null;
   const trafficDetail = traffic.configured
     ? (problem ??
-      `RX ${formatOptionalBytes(traffic.rx_bytes)} · TX ${formatOptionalBytes(traffic.tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`)
+      `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`)
     : "Authoritative traffic accounting is not configured for this VPS.";
   return (
     <div
       aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
-      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${problem ? " warning" : ""}${percent !== null && percent > 100 ? " overQuota" : ""}`}
+      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${resetContext ? " contextual" : ""}${problem ? " warning" : ""}${percent !== null && percent > 100 ? " overQuota" : ""}`}
     >
       <div className="publicMonitoringTrafficHeading">
-        <strong title={traffic.configured ? "Traffic" : "Traffic unconfigured"}>
-          {traffic.configured ? "Traffic" : "Traffic unconfigured"}
-        </strong>
-        {portSpeed ? (
-          <span
-            className="publicMonitoringPortSpeed"
-            title={`${portSpeed} port capacity; display value only—no shaping or enforcement is implied`}
-          >
-            {portSpeed}
-          </span>
-        ) : null}
-        {cycleSummary ? <span title={cycleSummary}>{cycleSummary}</span> : null}
+        <small
+          className="vpsMonitorRowHeading"
+          title={traffic.configured ? "Traffic" : "Traffic unconfigured"}
+        >
+          <strong>
+            {traffic.configured ? "Traffic" : "Traffic unconfigured"}
+          </strong>
+          {resetContext ? ` · ${resetContext}` : ""}
+        </small>
+        <span className="vpsMonitorRowEvidence">
+          {portSpeed ? (
+            <span
+              className="publicMonitoringPortSpeed"
+              title={`${portSpeed} port capacity; display value only—no shaping or enforcement is implied`}
+            >
+              {portSpeed}
+            </span>
+          ) : null}
+          {cycleSummary ? (
+            <strong title={cycleSummary}>{cycleSummary}</strong>
+          ) : null}
+        </span>
       </div>
       {percent !== null ? (
         <span
@@ -1304,7 +1325,9 @@ function PublicPingRow({
         aria-label="Primary Ping unconfigured"
       >
         <Radio aria-hidden="true" size={14} />
-        <strong>Primary Ping unconfigured</strong>
+        <small className="vpsMonitorRowHeading">
+          <strong>Ping</strong> · Unconfigured
+        </small>
         <span>No primary Ping target is available.</span>
       </div>
     );
@@ -1331,7 +1354,12 @@ function PublicPingRow({
       className={`publicMonitoringPing ${safeClassToken(ping.state)} ${safeClassToken(effectiveStatus)}${problem ? " warning" : ""}`}
     >
       <Radio aria-hidden="true" size={14} />
-      <strong title={ping.target_name}>{ping.target_name}</strong>
+      <small
+        className="vpsMonitorRowHeading"
+        title={`Ping · ${ping.target_name}`}
+      >
+        <strong>Ping</strong> · {ping.target_name}
+      </small>
       <span title={presentedDetail}>{presentedDetail}</span>
       <MiniSparkline
         label={`${ping.target_name} latency history`}
@@ -1848,7 +1876,7 @@ function PublicMonitoringDetailPanel({
                           ]}
                           summary={
                             currentTrafficConfigured
-                              ? `RX ${formatOptionalBytes(card.traffic?.rx_bytes)} · TX ${formatOptionalBytes(card.traffic?.tx_bytes)}`
+                              ? `RX ${formatOptionalBytes(card.traffic?.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(card.traffic?.diagnostic_tx_bytes)}`
                               : "Current accounting unconfigured"
                           }
                           times={trafficTimeline.times}
@@ -2068,7 +2096,7 @@ function PublicMonitoringKpiStrip({
     });
   }
   const traffic = card.traffic;
-  const trafficTotal = finiteNumber(traffic?.total_bytes);
+  const trafficTotal = finiteNumber(traffic?.diagnostic_total_bytes);
   if (
     visibility?.traffic &&
     traffic?.configured &&
@@ -2307,18 +2335,18 @@ function PublicTrafficCycle({
       </div>
       <div className="vpsMonitoringTrafficSummary">
         <PublicTrafficCycleFact
-          label="RX"
+          label="Observed RX"
           title={trafficQuotaTitle("RX", traffic.quota_rx_bytes)}
-          value={formatOptionalBytes(traffic.rx_bytes)}
+          value={formatOptionalBytes(traffic.diagnostic_rx_bytes)}
         />
         <PublicTrafficCycleFact
-          label="TX"
+          label="Observed TX"
           title={trafficQuotaTitle("TX", traffic.quota_tx_bytes)}
-          value={formatOptionalBytes(traffic.tx_bytes)}
+          value={formatOptionalBytes(traffic.diagnostic_tx_bytes)}
         />
         <PublicTrafficCycleFact
-          label="Total"
-          title={trafficQuotaTitle("Total", traffic.quota_total_bytes)}
+          label="Counted total"
+          title="Traffic included by the configured selector directions; this value drives quota progress"
           value={formatOptionalBytes(traffic.total_bytes)}
         />
         <PublicTrafficCycleFact
@@ -2652,7 +2680,10 @@ function summarizePublicFleet(
       network.freshCount += 1;
     }
     if (traffic && card.traffic?.configured) {
-      traffic.bytes += Math.max(0, finiteNumber(card.traffic.total_bytes) ?? 0);
+      traffic.bytes += Math.max(
+        0,
+        finiteNumber(card.traffic.diagnostic_total_bytes) ?? 0,
+      );
       traffic.count += 1;
     }
   }
@@ -2939,7 +2970,9 @@ function publicCardWarnings(
         )
       : null,
     visibility?.network
-      ? publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
+      ? card.network?.rate_expected === false
+        ? null
+        : publicFreshnessProblem(card.network?.observed_at, "Network telemetry")
       : null,
     visibility?.traffic ? publicTrafficProblem(card.traffic) : null,
     visibility?.ping ? publicPingProblem(card.primary_ping) : null,
@@ -3052,13 +3085,19 @@ function maximumCapacity(total: number | null | undefined): string | undefined {
 
 function trafficCycleSummary(traffic: PublicTrafficMetric): string {
   if (!traffic.configured) return "Unconfigured";
-  const total = finiteNumber(traffic.total_bytes);
-  if (total === null || total < 0) return "Current total unavailable";
+  const countedTotal = finiteNumber(traffic.total_bytes);
+  const diagnosticTotal = finiteNumber(traffic.diagnostic_total_bytes);
+  if (countedTotal === null || countedTotal < 0 || diagnosticTotal === null)
+    return "Current total unavailable";
   const limitingQuota = trafficLimitingQuota(traffic);
   if (limitingQuota) {
-    return limitingQuota.label === "Total"
-      ? `${formatBytes(total)} / ${formatBytes(limitingQuota.quota)} · ${formatPercent(limitingQuota.percent)}`
-      : `${formatBytes(total)} total · ${limitingQuota.label} limit ${formatPercent(limitingQuota.percent)}`;
+    const quotaLabel =
+      limitingQuota.label === "Total"
+        ? "quota"
+        : `${limitingQuota.label} quota`;
+    return diagnosticTotal === countedTotal && limitingQuota.label === "Total"
+      ? `${formatBytes(diagnosticTotal)} / ${formatBytes(limitingQuota.quota)} · ${formatPercent(limitingQuota.percent)}`
+      : `${formatBytes(diagnosticTotal)} observed · ${quotaLabel} ${formatPercent(limitingQuota.percent)}`;
   }
   const quotas = [
     traffic.quota_total_bytes,
@@ -3066,12 +3105,12 @@ function trafficCycleSummary(traffic: PublicTrafficMetric): string {
     traffic.quota_tx_bytes,
   ];
   if (quotas.some((quota) => quota === -1)) {
-    return `${formatBytes(total)} / Unlimited`;
+    return `${formatBytes(diagnosticTotal)} / Unlimited`;
   }
   if (quotas.some((quota) => quota !== undefined && quota > 0)) {
-    return `${formatBytes(total)} this cycle · quota evidence incomplete`;
+    return `${formatBytes(diagnosticTotal)} observed · quota evidence incomplete`;
   }
-  return `${formatBytes(total)} this cycle · quota unavailable`;
+  return `${formatBytes(diagnosticTotal)} observed · quota unavailable`;
 }
 
 function trafficLimitingQuota(traffic: PublicTrafficMetric): {

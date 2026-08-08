@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::{
     enrich_monitoring_share_target_evidence, monitoring_range, network_rate_is_current,
-    ClientMonitoringQuery,
+    public_network_metric, public_traffic_metric, ClientMonitoringQuery,
 };
 use axum::{
     body::Body,
@@ -23,6 +23,7 @@ use crate::{
         PublicResourceMetricView, PublicSystemInformationView, PublicTrafficHistoryPointView,
         PublicTrafficMetricView, TelemetryNetworkRateView,
     },
+    model_alert_policies::TrafficAccountingRecord,
     repository::{MemoryState, Repository},
     state::{AppState, DispatcherRuntimeConfig},
 };
@@ -280,6 +281,21 @@ fn current_card_rates_reject_stale_and_future_interface_rows() {
 }
 
 #[test]
+fn public_network_projection_preserves_whether_rates_are_expected() {
+    let intentionally_empty = public_network_metric(&[], false);
+    assert!(!intentionally_empty.rate_expected);
+    assert_eq!(intentionally_empty.rx_bps, None);
+    assert_eq!(intentionally_empty.tx_bps, None);
+    assert_eq!(intentionally_empty.observed_at, None);
+
+    let missing_expected = public_network_metric(&[], true);
+    assert!(missing_expected.rate_expected);
+    assert_eq!(missing_expected.rx_bps, None);
+    assert_eq!(missing_expected.tx_bps, None);
+    assert_eq!(missing_expected.observed_at, None);
+}
+
+#[test]
 fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
     let visibility = MonitoringShareVisibilityView {
         identity_context: true,
@@ -331,6 +347,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         observed_at: "1".to_string(),
     };
     let network = PublicNetworkMetricView {
+        rate_expected: true,
         rx_bps: Some(1.0),
         tx_bps: Some(2.0),
         observed_at: Some("1".to_string()),
@@ -367,6 +384,9 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         rx_bytes: Some(1),
         tx_bytes: Some(2),
         total_bytes: Some(3),
+        diagnostic_rx_bytes: Some(10),
+        diagnostic_tx_bytes: Some(20),
+        diagnostic_total_bytes: Some(30),
         quota_rx_bytes: Some(4),
         quota_tx_bytes: Some(5),
         quota_total_bytes: Some(9),
@@ -499,7 +519,11 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "udp_sockets",
         ],
     );
-    assert_serialized_keys("network", &network, &["observed_at", "rx_bps", "tx_bps"]);
+    assert_serialized_keys(
+        "network",
+        &network,
+        &["observed_at", "rate_expected", "rx_bps", "tx_bps"],
+    );
     assert_serialized_keys(
         "network point",
         &network_point,
@@ -529,6 +553,9 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "cycle_end",
             "cycle_percent",
             "cycle_start",
+            "diagnostic_rx_bytes",
+            "diagnostic_total_bytes",
+            "diagnostic_tx_bytes",
             "observed_at",
             "port_speed",
             "quota_rx_bytes",
@@ -639,6 +666,9 @@ fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
         rx_bytes: None,
         tx_bytes: None,
         total_bytes: None,
+        diagnostic_rx_bytes: None,
+        diagnostic_tx_bytes: None,
+        diagnostic_total_bytes: None,
         quota_rx_bytes: None,
         quota_tx_bytes: None,
         quota_total_bytes: None,
@@ -655,4 +685,46 @@ fn unconfigured_public_traffic_omits_retained_cycle_evidence() {
         &traffic,
         &["configured", "port_speed", "state"],
     );
+}
+
+#[test]
+fn public_traffic_keeps_diagnostics_separate_from_billing_totals() {
+    let projected = public_traffic_metric(
+        TrafficAccountingRecord {
+            client_id: "v-1".to_string(),
+            selectors: vec!["eth0+tx".to_string()],
+            selector_hash: "selector-hash".to_string(),
+            cycle_start: "1".to_string(),
+            cycle_end: "2".to_string(),
+            reset_day: Some(1),
+            rx_bytes: 0,
+            tx_bytes: 200,
+            total_bytes: 200,
+            diagnostic_rx_bytes: 100,
+            diagnostic_tx_bytes: 200,
+            diagnostic_total_bytes: 300,
+            latest_rx_bytes: 0,
+            latest_tx_bytes: 2_000,
+            latest_total_bytes: 2_000,
+            quota_rx_bytes: None,
+            quota_tx_bytes: None,
+            quota_total_bytes: Some(1_000),
+            cycle_percent: Some(20.0),
+            state: "ok".to_string(),
+            incomplete_reasons: Vec::new(),
+            last_sample_at: Some("2".to_string()),
+            counter_epochs_seen: 1,
+            updated_at: "2".to_string(),
+            selector_breakdown: Vec::new(),
+        },
+        None,
+    );
+
+    assert_eq!(projected.rx_bytes, Some(0));
+    assert_eq!(projected.tx_bytes, Some(200));
+    assert_eq!(projected.total_bytes, Some(200));
+    assert_eq!(projected.diagnostic_rx_bytes, Some(100));
+    assert_eq!(projected.diagnostic_tx_bytes, Some(200));
+    assert_eq!(projected.diagnostic_total_bytes, Some(300));
+    assert_eq!(projected.cycle_percent, Some(20.0));
 }

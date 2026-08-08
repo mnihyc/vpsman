@@ -126,6 +126,11 @@ and public monitoring views. It does not filter agent collection or retained
 per-interface evidence: raw interface diagnostics, APIs, and CSV remain
 complete.
 
+If the default reference has no configured `traffic.selectors`, aggregate RX
+and TX display as **n/a**. That is an intentional empty selection, not partial
+telemetry. An explicit all or non-empty interface selection with missing
+samples remains incomplete and is surfaced as such.
+
 Fleet chart points sum both direction rates for the selected interfaces in each
 logical interval, then average those fleet totals when several intervals share
 one displayed chart step. Monitoring-card current values accept only selected
@@ -152,10 +157,12 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   progress track may fill completely, but the numeric percentage and totals may
   exceed 100%.
 - Each selected source/interface counter stream is differenced independently.
-  Diagnostic RX and TX are visible by default, while the derived Total series
-  is selectable through the existing chart legend. A selector's billing
-  direction affects quota accounting only; it does not hide either diagnostic
-  direction from history.
+  Diagnostic RX and TX are visible on cards and detail and by default in
+  history, while the derived Total history series is selectable through the
+  existing chart legend. These diagnostic cycle totals deduplicate a stream
+  selected through separate `+rx` and `+tx` entries. A selector's billing
+  direction affects the counted RX/TX/total used by quota progress and alerts;
+  it does not hide either diagnostic direction.
 - Every configured date-based cycle boundary starts a new RX and TX accounting
   cycle together, regardless of which direction contributes to the quota.
   Billing direction changes the limited total, not the lifetime or reset point

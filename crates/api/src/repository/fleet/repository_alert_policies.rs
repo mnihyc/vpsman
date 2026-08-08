@@ -4361,10 +4361,13 @@ fn traffic_accounting_for_client_with_selector_override(
     let (cycle_start, cycle_end) = cycle_bounds(reset_day.unwrap_or(1), now);
     let mut rx_bytes = 0_i64;
     let mut tx_bytes = 0_i64;
+    let mut diagnostic_rx_bytes = 0_i64;
+    let mut diagnostic_tx_bytes = 0_i64;
     let mut latest_rx = 0_i64;
     let mut latest_tx = 0_i64;
     let mut last_sample_unix = None::<i64>;
     let mut counted_directions = HashMap::new();
+    let mut diagnostic_streams = HashSet::new();
     let mut stale_reasons = Vec::new();
     let mut breakdown = Vec::new();
     for selector in &selectors {
@@ -4406,6 +4409,10 @@ fn traffic_accounting_for_client_with_selector_override(
         let diagnostic_cycle_tx = usage.cycle_tx;
         let diagnostic_latest_rx = usage.latest_rx;
         let diagnostic_latest_tx = usage.latest_tx;
+        if diagnostic_streams.insert((selector.source.clone(), selector.interface.clone())) {
+            diagnostic_rx_bytes = diagnostic_rx_bytes.saturating_add(diagnostic_cycle_rx);
+            diagnostic_tx_bytes = diagnostic_tx_bytes.saturating_add(diagnostic_cycle_tx);
+        }
         match selector.direction.as_str() {
             "rx" => {
                 selected_cycle_tx = 0;
@@ -4469,8 +4476,9 @@ fn traffic_accounting_for_client_with_selector_override(
             incomplete_reasons: row_reasons,
         });
     }
-    let total_bytes = rx_bytes + tx_bytes;
-    let latest_total = latest_rx + latest_tx;
+    let total_bytes = rx_bytes.saturating_add(tx_bytes);
+    let diagnostic_total_bytes = diagnostic_rx_bytes.saturating_add(diagnostic_tx_bytes);
+    let latest_total = latest_rx.saturating_add(latest_tx);
     let cycle_percent = [
         quota_total
             .filter(|quota| *quota > 0)
@@ -4542,6 +4550,9 @@ fn traffic_accounting_for_client_with_selector_override(
         rx_bytes,
         tx_bytes,
         total_bytes,
+        diagnostic_rx_bytes,
+        diagnostic_tx_bytes,
+        diagnostic_total_bytes,
         latest_rx_bytes: latest_rx,
         latest_tx_bytes: latest_tx,
         latest_total_bytes: latest_total,

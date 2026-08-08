@@ -279,10 +279,17 @@ Every update must keep these boundaries explicit:
   Apply this scope consistently to
   cards, charts, the dashboard, and public monitoring views. Never use it to
   filter collection or raw per-interface diagnostics.
+  If that reference resolves to no configured traffic interfaces, show
+  aggregate RX/TX as unavailable without classifying the intentionally absent
+  rate stream as partial telemetry. Missing samples for an explicit all or
+  non-empty interface selection remain incomplete evidence.
   Keep traffic history diagnostic: RX and TX are initially visible, Total is
   legend-selectable, and selector direction affects quota accounting rather
   than diagnostic-series visibility. A configured date boundary restarts both
   RX and TX cycle usage together even when only one direction is quota-billed.
+  Current cards and detail summaries follow the same split: expose deduplicated
+  diagnostic cycle RX/TX for every selected stream, while the existing counted
+  RX/TX/total fields alone drive quota percentage, alerts, and billing progress.
 - Ping selectors resolve to frozen assignments. Probe-affecting edits advance a
   generation; current/history reads must not mix generations. Preserve the
   explicit primary selection and never silently replace a removed or disabled

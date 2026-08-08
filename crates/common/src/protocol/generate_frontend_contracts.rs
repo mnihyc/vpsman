@@ -640,6 +640,9 @@ export type TrafficAccountingRecord = {{
   rx_bytes: number;
   tx_bytes: number;
   total_bytes: number;
+  diagnostic_rx_bytes: number;
+  diagnostic_tx_bytes: number;
+  diagnostic_total_bytes: number;
   latest_rx_bytes: number;
   latest_tx_bytes: number;
   latest_total_bytes: number;

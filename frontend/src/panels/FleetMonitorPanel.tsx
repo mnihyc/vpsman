@@ -162,19 +162,22 @@ export function FleetMonitorPanel({
     [],
   );
   const [monitoringError, setMonitoringError] = useState<string | null>(null);
-  const [monitoringLoading, setMonitoringLoading] = useState(false);
+  const [monitoringSettledToken, setMonitoringSettledToken] = useState<
+    string | null
+  >(null);
+  const monitoringLoading =
+    Boolean(apiToken) && monitoringSettledToken !== apiToken;
   useEffect(() => {
     if (!apiToken) {
       setMonitoringCards([]);
       setMonitoringError(null);
-      setMonitoringLoading(false);
+      setMonitoringSettledToken(null);
       return;
     }
     let active = true;
     let inFlight = false;
     setMonitoringCards([]);
     setMonitoringError(null);
-    setMonitoringLoading(true);
     const loadCards = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -236,7 +239,7 @@ export function FleetMonitorPanel({
         }
       } finally {
         inFlight = false;
-        if (active) setMonitoringLoading(false);
+        if (active) setMonitoringSettledToken(apiToken);
       }
     };
     void loadCards();
@@ -317,6 +320,9 @@ export function FleetMonitorPanel({
   const trafficByClient = new Map(
     monitoringCards.map((card) => [card.client.id, card.traffic]),
   );
+  const networkRateExpectedByClient = new Map(
+    monitoringCards.map((card) => [card.client.id, card.network_rate_expected]),
+  );
   const billingByClient = new Map(
     monitoringCards.flatMap((card) =>
       card.billing ? [[card.client.id, card.billing] as const] : [],
@@ -365,6 +371,8 @@ export function FleetMonitorPanel({
         rates,
         trafficByClient,
         primaryPingByClient,
+        networkRateExpectedByClient,
+        monitoringLoading,
       ),
     [
       cardAgents,
@@ -373,6 +381,8 @@ export function FleetMonitorPanel({
       rates,
       rollups,
       trafficByClient,
+      networkRateExpectedByClient,
+      monitoringLoading,
     ],
   );
   const fleetSnapshot = monitorFleetSnapshot(
@@ -390,6 +400,8 @@ export function FleetMonitorPanel({
         rates,
         trafficByClient,
         primaryPingByClient,
+        networkRateExpectedByClient,
+        monitoringLoading,
       );
       if (statusFilter !== "all" && category !== statusFilter) return false;
       if (
@@ -419,6 +431,8 @@ export function FleetMonitorPanel({
     searchQuery,
     statusFilter,
     trafficByClient,
+    networkRateExpectedByClient,
+    monitoringLoading,
   ]);
   const sortedAgents = useMemo(
     () =>
@@ -430,6 +444,8 @@ export function FleetMonitorPanel({
           signals: cardSignals,
           traffic: trafficByClient,
           primaryPing: primaryPingByClient,
+          networkRateExpected: networkRateExpectedByClient,
+          evidenceLoading: monitoringLoading,
         }),
       ),
     [
@@ -440,6 +456,8 @@ export function FleetMonitorPanel({
       rollups,
       sortMode,
       trafficByClient,
+      networkRateExpectedByClient,
+      monitoringLoading,
     ],
   );
   const visibleAgents =
@@ -740,6 +758,9 @@ export function FleetMonitorPanel({
                   density={density}
                   key={agent.id}
                   monitoringState={monitoringState}
+                  networkRateExpected={
+                    monitoringCard?.network_rate_expected ?? true
+                  }
                   onOpenVpsDetail={openVpsDetail}
                   primaryPing={monitoringCard?.primary_ping ?? null}
                   primaryPingHistory={
@@ -761,6 +782,8 @@ export function FleetMonitorPanel({
                     rates,
                     trafficByClient,
                     primaryPingByClient,
+                    networkRateExpectedByClient,
+                    monitoringLoading,
                   )}
                   showCountryFlags={showCountryFlags}
                   traffic={monitoringCard?.traffic ?? null}
@@ -786,6 +809,7 @@ export type VpsMonitorCardProps = {
   billing: BillingPlanView | null;
   density: FleetMonitorDensity;
   monitoringState: MonitoringEvidenceState;
+  networkRateExpected: boolean;
   onOpenVpsDetail: (agent: AgentView) => void;
   primaryPing: CurrentPingView | null;
   primaryPingHistory: PingRollupView[];
@@ -845,6 +869,7 @@ export function VpsMonitorCard({
   billing,
   density,
   monitoringState,
+  networkRateExpected,
   onOpenVpsDetail,
   primaryPing,
   primaryPingHistory,
@@ -905,6 +930,7 @@ export function VpsMonitorCard({
     resourceTelemetryState,
     networkTelemetryState,
     latestTimestamp([resourceFreshness, networkFreshness]),
+    networkRateExpected,
   );
   const lastContact = agent.last_seen_at ?? agent.stale_since ?? null;
   const rxHistory = networkDirectionHistory(rateHistory, "rx");
@@ -938,12 +964,13 @@ export function VpsMonitorCard({
             : pingTelemetryState.label))
       : null;
   const noteworthyEvidence =
-    telemetryState.kind !== "fresh" ||
-    signals.alertTone === "critical" ||
-    signals.alertTone === "warning" ||
-    signals.backupTone === "critical" ||
-    signals.transferTone === "critical" ||
-    Boolean(agent.stale_reason);
+    monitoringState !== "loading" &&
+    (telemetryState.kind !== "fresh" ||
+      signals.alertTone === "critical" ||
+      signals.alertTone === "warning" ||
+      signals.backupTone === "critical" ||
+      signals.transferTone === "critical" ||
+      Boolean(agent.stale_reason));
   const effectiveStatusLabel =
     statusCategory === "warning" && displayState.label === "Online"
       ? "Online · Warning"
@@ -978,12 +1005,16 @@ export function VpsMonitorCard({
       : monitoringState === "unavailable"
         ? "Unavailable"
         : formatPrimaryPing(primaryPing);
-  const trafficHeading = `Traffic${portSpeed ? ` · ${portSpeed.display}` : ""}`;
+  const trafficReset =
+    trafficConfigured && traffic ? formatTrafficReset(traffic.cycle_end) : null;
+  const trafficHeadingContext = density === "compact" ? trafficReset : null;
+  const trafficHeading = `Traffic${trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}`;
   const trafficDetail =
     trafficConfigured && traffic
       ? (trafficProblem ?? formatTrafficReset(traffic.cycle_end))
       : null;
-  const pingHeading = `Ping${primaryPing ? ` · ${primaryPing.target_name}` : ""}`;
+  const pingHeadingContext = primaryPing?.target_name ?? null;
+  const pingHeading = `Ping${pingHeadingContext ? ` · ${pingHeadingContext}` : ""}`;
 
   const cardHeader = (
     <>
@@ -1100,6 +1131,7 @@ export function VpsMonitorCard({
             "received",
             currentRates.length,
             networkTelemetryState,
+            networkRateExpected,
           )}
           value={formatRateOrUnavailable(rxBps)}
         />
@@ -1113,6 +1145,7 @@ export function VpsMonitorCard({
             "sent",
             currentRates.length,
             networkTelemetryState,
+            networkRateExpected,
           )}
           value={formatRateOrUnavailable(txBps)}
         />
@@ -1140,19 +1173,31 @@ export function VpsMonitorCard({
         </span>
       </div>
       <div
-        className={`vpsMonitorTraffic${trafficWarning > 0 ? " warning" : ""}${trafficPercent !== null && trafficPercent > 100 ? " exceeded" : ""}`}
+        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficWarning > 0 ? " warning" : ""}${trafficPercent !== null && trafficPercent > 100 ? " exceeded" : ""}`}
       >
         <span>
           <small
+            className="vpsMonitorRowHeading"
             title={
               portSpeed
-                ? `${trafficHeading}; display value only—no shaping or enforcement is implied`
+                ? `${trafficHeading}; ${portSpeed.display} port capacity is a display value only—no shaping or enforcement is implied`
                 : trafficHeading
             }
           >
-            {trafficHeading}
+            <strong>Traffic</strong>
+            {trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}
           </small>
-          <strong title={trafficEvidenceLabel}>{trafficEvidenceLabel}</strong>
+          <span className="vpsMonitorRowEvidence">
+            {portSpeed ? (
+              <span
+                className="publicMonitoringPortSpeed"
+                title={`${portSpeed.display} port capacity; display value only—no shaping or enforcement is implied`}
+              >
+                {portSpeed.display}
+              </span>
+            ) : null}
+            <strong title={trafficEvidenceLabel}>{trafficEvidenceLabel}</strong>
+          </span>
         </span>
         <span
           aria-label={
@@ -1189,10 +1234,10 @@ export function VpsMonitorCard({
         {trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
-            title={`Current billing-cycle traffic: RX ${formatBytes(traffic.rx_bytes)}; TX ${formatBytes(traffic.tx_bytes)}.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
+            title={`Observed current-cycle traffic: RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
           >
-            ↓ {formatBytes(traffic.rx_bytes)} · ↑{" "}
-            {formatBytes(traffic.tx_bytes)}
+            ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
+            {formatBytes(traffic.diagnostic_tx_bytes)}
             {density === "comfortable" || trafficWarning > 0
               ? ` · ${trafficDetail}`
               : ""}
@@ -1203,7 +1248,10 @@ export function VpsMonitorCard({
         className={`vpsMonitorPing ${pingWarning >= 2 ? "failed" : pingWarning > 0 ? "stale" : (primaryPing?.state ?? "unconfigured")}`}
       >
         <span>
-          <small title={pingHeading}>{pingHeading}</small>
+          <small className="vpsMonitorRowHeading" title={pingHeading}>
+            <strong>Ping</strong>
+            {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
+          </small>
           <strong title={pingEvidenceLabel}>{pingEvidenceLabel}</strong>
         </span>
         <span className="vpsMonitorPingVisual" aria-hidden="true">
@@ -1480,7 +1528,14 @@ function monitorTelemetrySummary(
   resource: MonitorTelemetryState,
   network: MonitorTelemetryState,
   latestAt: string | null,
+  networkRateExpected: boolean,
 ): MonitorTelemetryState {
+  if (!networkRateExpected) {
+    return {
+      ...resource,
+      title: `${resource.title}. Network rates are intentionally unavailable because no live-rate interfaces are selected`,
+    };
+  }
   if (resource.kind === "missing" && network.kind === "missing") {
     return {
       kind: "missing",
@@ -1874,14 +1929,18 @@ function recentPingValues(records: PingRollupView[]) {
 }
 
 function compareMonitorAgents({
+  evidenceLoading,
   mode,
+  networkRateExpected,
   primaryPing,
   rates,
   rollups,
   signals,
   traffic,
 }: {
+  evidenceLoading: boolean;
   mode: FleetMonitorSort;
+  networkRateExpected: Map<string, boolean>;
   primaryPing: Map<string, CurrentPingView>;
   rates: Map<string, TelemetryNetworkRateRecord[]>;
   rollups: Map<string, TelemetryRollupRecord>;
@@ -1915,6 +1974,8 @@ function compareMonitorAgents({
         rates,
         traffic.get(right.id),
         primaryPing.get(right.id),
+        networkRateExpected,
+        evidenceLoading,
       ) -
       monitorWarningRank(
         left,
@@ -1923,6 +1984,8 @@ function compareMonitorAgents({
         rates,
         traffic.get(left.id),
         primaryPing.get(left.id),
+        networkRateExpected,
+        evidenceLoading,
       );
     if (mode === "warning" && warningDelta !== 0) return warningDelta;
     const leftTraffic = trafficSortValue(traffic.get(left.id));
@@ -2000,13 +2063,23 @@ function monitorWarningRank(
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: TrafficAccountingRecord | undefined,
   primaryPing: CurrentPingView | undefined,
+  networkRateExpected: Map<string, boolean>,
+  evidenceLoading = false,
 ) {
   const localSignals =
     signals.records.get(agent.id) ?? defaultCardSignal(signals.global);
   return (
     monitorStatusRank(agent) * 10 +
-    monitorEvidenceWarningRank(agent, rollups, rates, traffic, primaryPing) *
-      5 +
+    (evidenceLoading
+      ? 0
+      : monitorEvidenceWarningRank(
+          agent,
+          rollups,
+          rates,
+          traffic,
+          primaryPing,
+          networkRateExpected,
+        ) * 5) +
     signalToneRank(localSignals.alertTone) +
     signalToneRank(localSignals.backupTone) +
     signalToneRank(localSignals.transferTone)
@@ -2058,6 +2131,8 @@ function monitorFleetCategory(
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: Map<string, TrafficAccountingRecord>,
   primaryPing: Map<string, CurrentPingView>,
+  networkRateExpected: Map<string, boolean>,
+  evidenceLoading = false,
 ): Exclude<FleetMonitorStatusFilter, "all"> {
   const status = monitorStatusTone(agent);
   if (status === "offline") return "offline";
@@ -2066,13 +2141,15 @@ function monitorFleetCategory(
   if (
     status === "stale" ||
     status === "warning" ||
-    monitorEvidenceWarningRank(
-      agent,
-      rollups,
-      rates,
-      traffic.get(agent.id),
-      primaryPing.get(agent.id),
-    ) > 0 ||
+    (!evidenceLoading &&
+      monitorEvidenceWarningRank(
+        agent,
+        rollups,
+        rates,
+        traffic.get(agent.id),
+        primaryPing.get(agent.id),
+        networkRateExpected,
+      ) > 0) ||
     local.alertTone === "critical" ||
     local.alertTone === "warning" ||
     local.backupTone === "critical" ||
@@ -2090,11 +2167,22 @@ function monitorFleetCounts(
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: Map<string, TrafficAccountingRecord>,
   primaryPing: Map<string, CurrentPingView>,
+  networkRateExpected: Map<string, boolean>,
+  evidenceLoading = false,
 ) {
   const counts = { offline: 0, online: 0, total: agents.length, warning: 0 };
   for (const agent of agents) {
     counts[
-      monitorFleetCategory(agent, signals, rollups, rates, traffic, primaryPing)
+      monitorFleetCategory(
+        agent,
+        signals,
+        rollups,
+        rates,
+        traffic,
+        primaryPing,
+        networkRateExpected,
+        evidenceLoading,
+      )
     ] += 1;
   }
   return counts;
@@ -2135,7 +2223,7 @@ function monitorFleetSnapshot(
       accounting.selectors.length > 0 &&
       accounting.reset_day !== null
     ) {
-      trafficBytes += Math.max(0, accounting.total_bytes);
+      trafficBytes += Math.max(0, accounting.diagnostic_total_bytes);
       trafficCount += 1;
     }
   }
@@ -2168,12 +2256,14 @@ function monitorEvidenceWarningRank(
   rates: Map<string, TelemetryNetworkRateRecord[]>,
   traffic: TrafficAccountingRecord | undefined,
   primaryPing: CurrentPingView | undefined,
+  networkRateExpected: Map<string, boolean>,
 ) {
   return Math.max(
     monitorTelemetryWarningRank(
       agent,
       rollups.get(agent.id),
       rates.get(agent.id) ?? [],
+      networkRateExpected.get(agent.id) ?? true,
     ),
     trafficWarningRank(traffic),
     pingWarningRank(primaryPing),
@@ -2207,6 +2297,7 @@ function monitorTelemetryWarningRank(
   agent: AgentView,
   rollup: TelemetryRollupRecord | undefined,
   rates: TelemetryNetworkRateRecord[],
+  networkRateExpected: boolean,
 ) {
   const displayState = agentDisplayState(agent);
   const resource = monitorTelemetryState(
@@ -2226,6 +2317,7 @@ function monitorTelemetryWarningRank(
       rollup?.latest_observed_at,
       ...coherentNetworkRates(rates).map((rate) => rate.bucket_start),
     ]),
+    networkRateExpected,
   );
   if (summary.kind === "missing" || summary.kind === "stale") return 2;
   return summary.kind === "partial" ? 1 : 0;
@@ -2359,10 +2451,10 @@ function formatTrafficTitle(traffic: TrafficAccountingRecord) {
     traffic.cycle_percent !== null && traffic.cycle_percent > 100
       ? ` Quota exceeded by ${(traffic.cycle_percent - 100).toFixed(1)}%.`
       : "";
-  return `${state} authoritative traffic-accounting cycle. RX ${formatBytes(traffic.rx_bytes)}; TX ${formatBytes(traffic.tx_bytes)}.${overage}`;
+  return `${state} authoritative traffic-accounting cycle. Observed RX ${formatBytes(traffic.diagnostic_rx_bytes)}; observed TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
 }
 
-function formatTrafficReset(cycleEnd: string) {
+export function formatTrafficReset(cycleEnd: string) {
   const end = timestampMillis(cycleEnd);
   if (!Number.isFinite(end)) return "Reset time unavailable";
   const remaining = end - Date.now();
@@ -2399,7 +2491,11 @@ function networkMetricTitle(
   direction: "received" | "sent",
   interfaceCount: number,
   telemetryState: MonitorTelemetryState,
+  networkRateExpected: boolean,
 ) {
+  if (!networkRateExpected) {
+    return `${INTERFACE_RATE_DEFINITION} No live-rate interfaces are selected, so the ${direction} rate is intentionally unavailable.`;
+  }
   return `${INTERFACE_RATE_DEFINITION} Latest ${direction} interval-average rates are summed across ${interfaceCount} concurrently reported interface${interfaceCount === 1 ? "" : "s"}; virtual paths can overlap. ${telemetryState.title}`;
 }
 

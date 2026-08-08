@@ -373,6 +373,28 @@ test("public cards remain static when detail history is not shared", async ({
   );
 });
 
+test("public cards keep an intentionally empty network-rate selection neutral", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { networkRateExpected: false });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  await expect(card).toBeVisible();
+  await expect(card.getByText("Online", { exact: true })).toBeVisible();
+  await expect(card.getByText("Online · Warning", { exact: true })).toHaveCount(
+    0,
+  );
+  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(card.getByText("Network rates not selected")).toBeVisible();
+  await expect(card.getByText("Needs attention")).toHaveCount(0);
+  await expect(
+    card.getByLabel("Current network rate for Shared edge").getByText("n/a"),
+  ).toHaveCount(2);
+});
+
 test("public monitoring reuses the Unicode country flag renderer", async ({
   page,
 }) => {
@@ -415,30 +437,39 @@ test("public monitoring keeps grid and detail history state without exposing hid
   await expect(page.getByText("Visible telemetry unavailable")).toHaveCount(0);
   await expect(card.getByText("Traffic", { exact: true })).toBeVisible();
   const publicTraffic = card.locator(".publicMonitoringTraffic");
-  await expect(publicTraffic.locator("div > strong")).toHaveAttribute(
+  await expect(publicTraffic.locator(".vpsMonitorRowHeading")).toContainText(
+    /Traffic · Resets/,
+  );
+  await expect(publicTraffic.locator(".vpsMonitorRowHeading")).toHaveAttribute(
     "title",
     /Traffic/,
   );
-  await expect(publicTraffic.locator("div > span")).toHaveAttribute(
-    "title",
-    /\S/,
-  );
+  await expect(
+    publicTraffic.locator(".vpsMonitorRowEvidence > strong"),
+  ).toHaveAttribute("title", /\S/);
   await expect(publicTraffic.locator(":scope > small")).toHaveAttribute(
     "title",
     /\S/,
   );
   const publicPing = card.locator(".publicMonitoringPing");
+  await expect(publicPing.locator(".vpsMonitorRowHeading")).toContainText(
+    "Ping · Panel API",
+  );
   await expect(publicPing.locator(":scope > span")).toHaveAttribute(
     "title",
     /\S/,
   );
-  await expect(publicPing.locator(":scope > small")).toHaveAttribute(
+  await expect(
+    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+  ).toHaveAttribute(
     "title",
     /\S/,
   );
-  await expect(card.locator(".publicMonitoringPing > small")).toContainText(
-    "Reachable",
-  );
+  await expect(
+    card.locator(
+      ".publicMonitoringPing > small:not(.vpsMonitorRowHeading)",
+    ),
+  ).toContainText("Reachable");
   await expect(card.getByText("Ok", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Billing", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Uptime", { exact: true })).toHaveCount(0);
@@ -1224,6 +1255,7 @@ async function installPublicMonitoringApiMock(
     edgeCases = false,
     identityContext = false,
     mixedTrafficQuotas = false,
+    networkRateExpected = true,
     retainTrafficHistory = false,
     supplementalVisibility = edgeCases,
     trafficConfigured = true,
@@ -1233,6 +1265,7 @@ async function installPublicMonitoringApiMock(
     edgeCases?: boolean;
     identityContext?: boolean;
     mixedTrafficQuotas?: boolean;
+    networkRateExpected?: boolean;
     retainTrafficHistory?: boolean;
     supplementalVisibility?: boolean;
     trafficConfigured?: boolean;
@@ -1263,24 +1296,27 @@ async function installPublicMonitoringApiMock(
     client_key: publicClientKey,
     display_name: "Shared edge",
     network: {
-      observed_at: observedAt,
-      rx_bps: 1_024_000,
-      tx_bps: 512_000,
+      observed_at: networkRateExpected ? observedAt : null,
+      rate_expected: networkRateExpected,
+      rx_bps: networkRateExpected ? 1_024_000 : null,
+      tx_bps: networkRateExpected ? 512_000 : null,
     },
-    network_history: [
-      {
-        bucket_secs: 60,
-        bucket_start: new Date(rangeStart * 1_000).toISOString(),
-        rx_bps: 900_000,
-        tx_bps: 450_000,
-      },
-      {
-        bucket_secs: 60,
-        bucket_start: new Date(rangeEnd * 1_000).toISOString(),
-        rx_bps: 1_024_000,
-        tx_bps: 512_000,
-      },
-    ],
+    network_history: networkRateExpected
+      ? [
+          {
+            bucket_secs: 60,
+            bucket_start: new Date(rangeStart * 1_000).toISOString(),
+            rx_bps: 900_000,
+            tx_bps: 450_000,
+          },
+          {
+            bucket_secs: 60,
+            bucket_start: new Date(rangeEnd * 1_000).toISOString(),
+            rx_bps: 1_024_000,
+            tx_bps: 512_000,
+          },
+        ]
+      : [],
     primary_ping: {
       checked_at: observedAt,
       latency_avg_ms: 18.5,
@@ -1325,6 +1361,9 @@ async function installPublicMonitoringApiMock(
       cycle_end: new Date(now + 20 * 24 * 60 * 60 * 1_000).toISOString(),
       cycle_percent: 25,
       cycle_start: new Date(now - 10 * 24 * 60 * 60 * 1_000).toISOString(),
+      diagnostic_rx_bytes: 2_000,
+      diagnostic_total_bytes: 3_000,
+      diagnostic_tx_bytes: 1_000,
       observed_at: observedAt,
       quota_total_bytes: 12_000,
       rx_bytes: 2_000,

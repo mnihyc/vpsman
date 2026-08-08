@@ -48,6 +48,8 @@ const customMockTests = new Set([
   "failed audit event lookup stays scoped to its detail page",
   "observability dashboards use safe labels when summary counts are missing",
   "home shows a useful empty state when no VPS agents are loaded",
+  "fleet monitor keeps unsettled evidence neutral while cards load",
+  "fleet monitor keeps an intentionally empty rate selection out of partial telemetry",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
   "fleet monitor cards remain readable for 1 generated VPS fixtures",
   "fleet monitor cards remain readable for 8 generated VPS fixtures",
@@ -1970,6 +1972,70 @@ test("home overview text fits desktop tablet and mobile widths", async ({
   }
 });
 
+test("fleet monitor keeps unsettled evidence neutral while cards load", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the loading lifecycle is density-independent and is covered once on desktop",
+  );
+  await installConsoleApiMock(page, {
+    agentListOverride: makeMonitorAgentFixtures(2).slice(1),
+    monitoringCardsDelayMs: 1_500,
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  await expect(page.getByText("Loading monitoring evidence…")).toBeVisible();
+  const monitor = page.getByLabel("VPS monitor cards");
+  const onlineCard = monitor
+    .locator(".vpsMonitorCard", { hasText: "fleet-002-de" })
+    .first();
+  await expect(onlineCard).toHaveClass(/\bonline\b/);
+  await expect(onlineCard).not.toHaveClass(/\bwarning\b/);
+  await expect(onlineCard.getByText("Online", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByLabel("VPS cards fleet summary")
+      .getByRole("button", { name: /Warning/ }),
+  ).toContainText("0");
+
+  await expect(page.getByText("1 matched")).toBeVisible();
+});
+
+test("fleet monitor keeps an intentionally empty rate selection out of partial telemetry", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the telemetry-state contract is viewport independent",
+  );
+  await installConsoleApiMock(page, {
+    monitoringNetworkRateExpectedOverride: false,
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+  await expect(page.getByText(/matched$/)).toBeVisible();
+
+  const card = page
+    .getByLabel("VPS monitor cards")
+    .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
+    .first();
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Comfortable" })
+    .click();
+  await expect(card.locator(".vpsMonitorFlowFacts strong")).toHaveText([
+    "n/a",
+    "n/a",
+  ]);
+  await expect(card.locator(".telemetryEvidence")).not.toHaveClass(/partial/);
+  await expect(card.locator(".telemetryEvidence")).toHaveAttribute(
+    "title",
+    /no live-rate interfaces are selected/i,
+  );
+});
+
 test("fleet monitor cards are density-distinct and open canonical detail", async ({
   page,
 }, testInfo) => {
@@ -2003,18 +2069,27 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   );
   const snapshot = page.getByLabel("VPS cards current totals");
   await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
-  await expect(edgeCard.locator(".vpsMonitorTraffic strong")).toHaveAttribute(
-    "title",
-    /\S/,
-  );
+  await expect(
+    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
+  ).toHaveAttribute("title", /\S/);
   await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveAttribute(
     "title",
     /\S/,
   );
-  await expect(edgeCard.locator(".vpsMonitorPing strong")).toHaveAttribute(
-    "title",
-    /\S/,
+  const trafficHeading = edgeCard.locator(
+    ".vpsMonitorTraffic .vpsMonitorRowHeading",
   );
+  await expect(trafficHeading.locator("strong")).toHaveText("Traffic");
+  await expect(trafficHeading).toContainText(/Resets|Cycle reset/);
+  await expect(
+    edgeCard.locator(".vpsMonitorTraffic .publicMonitoringPortSpeed"),
+  ).toContainText("1.5 Gbps");
+  await expect(
+    edgeCard.locator(".vpsMonitorPing > span:first-child > strong:last-child"),
+  ).toHaveAttribute("title", /\S/);
+  await expect(
+    edgeCard.locator(".vpsMonitorPing .vpsMonitorRowHeading strong"),
+  ).toHaveText("Ping");
   await expect(
     edgeCard.locator(".vpsMonitorPing > span small"),
   ).toHaveAttribute("title", /\S/);

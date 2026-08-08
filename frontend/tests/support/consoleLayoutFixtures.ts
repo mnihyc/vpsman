@@ -1387,6 +1387,9 @@ const trafficAccounting = [
     cycle_percent: 80.33,
     cycle_start: "2026-06-14T00:00:00Z",
     counter_epochs_seen: 2,
+    diagnostic_rx_bytes: 1310000000000,
+    diagnostic_total_bytes: 3210000000000,
+    diagnostic_tx_bytes: 1900000000000,
     incomplete_reasons: [],
     last_sample_at: "2026-06-23T07:31:00Z",
     latest_rx_bytes: 510000000000,
@@ -1399,8 +1402,8 @@ const trafficAccounting = [
     rx_bytes: 510000000000,
     selector_breakdown: [
       {
-        cycle_rx_bytes: 0,
-        cycle_total_bytes: 1900000000000,
+        cycle_rx_bytes: 800000000000,
+        cycle_total_bytes: 2700000000000,
         cycle_tx_bytes: 1900000000000,
         direction: "tx",
         incomplete_reasons: [],
@@ -1412,9 +1415,9 @@ const trafficAccounting = [
         state: "ok",
       },
       {
-        cycle_rx_bytes: 300000000000,
-        cycle_total_bytes: 420000000000,
-        cycle_tx_bytes: 120000000000,
+        cycle_rx_bytes: 510000000000,
+        cycle_total_bytes: 510000000000,
+        cycle_tx_bytes: 0,
         direction: "total",
         incomplete_reasons: [],
         interface: "ens3",
@@ -3531,6 +3534,8 @@ export async function installConsoleApiMock(
     hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
     jobRolloutsOverride?: JobRolloutRecord[];
     jobTargetDelayMs?: number;
+    monitoringCardsDelayMs?: number;
+    monitoringNetworkRateExpectedOverride?: boolean;
     networkSpeedSecondDispatchFailure?: boolean;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
@@ -3608,6 +3613,8 @@ export async function installConsoleApiMock(
       jobApprovalsFixture,
       jobRolloutsFixture,
       jobTargetDelayMsFixture,
+      monitoringCardsDelayMsFixture,
+      monitoringNetworkRateExpectedOverrideFixture,
       networkSpeedSecondDispatchFailureFixture,
       jobOutputsFixture,
       jobsFixture,
@@ -5422,6 +5429,11 @@ export async function installConsoleApiMock(
           return jsonResponse(trafficAccountingFixture);
         }
         if (pathname === "/api/v1/monitoring/cards" && method === "GET") {
+          if (monitoringCardsDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, monitoringCardsDelayMsFixture),
+            );
+          }
           const params = new URL(url, window.location.href).searchParams;
           const offset = Math.max(0, Number(params.get("offset") ?? "0"));
           const limit = Math.max(1, Number(params.get("limit") ?? "1000"));
@@ -5448,8 +5460,11 @@ export async function installConsoleApiMock(
                   }
                 : null,
             client,
+            network_rate_expected:
+              monitoringNetworkRateExpectedOverrideFixture ?? true,
             network:
-              client.id === "agent-sfo-01"
+              client.id === "agent-sfo-01" &&
+              monitoringNetworkRateExpectedOverrideFixture !== false
                 ? [
                     {
                       bucket_secs: 60,
@@ -5468,7 +5483,8 @@ export async function installConsoleApiMock(
                   ]
                 : [],
             network_history:
-              client.id === "agent-sfo-01"
+              client.id === "agent-sfo-01" &&
+              monitoringNetworkRateExpectedOverrideFixture !== false
                 ? [
                     [9_600_000, 9_200_000],
                     [14_400_000, 13_800_000],
@@ -9725,6 +9741,9 @@ export async function installConsoleApiMock(
       jobApprovalsFixture: jobApprovals,
       jobRolloutsFixture: options.jobRolloutsOverride ?? jobRollouts,
       jobTargetDelayMsFixture: options.jobTargetDelayMs ?? 0,
+      monitoringCardsDelayMsFixture: options.monitoringCardsDelayMs ?? 0,
+      monitoringNetworkRateExpectedOverrideFixture:
+        options.monitoringNetworkRateExpectedOverride,
       networkSpeedSecondDispatchFailureFixture:
         options.networkSpeedSecondDispatchFailure ?? false,
       jobOutputsFixture: networkJobOutputs,

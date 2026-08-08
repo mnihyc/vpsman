@@ -48,6 +48,14 @@ impl NetworkRateInterfaceSelection {
             .is_some_and(|interfaces| interfaces.contains(interface))
     }
 
+    pub(crate) fn expects_rates(&self, client_id: &str) -> bool {
+        self.all_clients.contains(client_id)
+            || self
+                .exact_by_client
+                .get(client_id)
+                .is_some_and(|interfaces| !interfaces.is_empty())
+    }
+
     pub(crate) fn client_ids(&self) -> Vec<String> {
         self.all_clients
             .iter()
@@ -179,6 +187,9 @@ pub(crate) struct TrafficAccountingRecord {
     pub(crate) rx_bytes: i64,
     pub(crate) tx_bytes: i64,
     pub(crate) total_bytes: i64,
+    pub(crate) diagnostic_rx_bytes: i64,
+    pub(crate) diagnostic_tx_bytes: i64,
+    pub(crate) diagnostic_total_bytes: i64,
     pub(crate) latest_rx_bytes: i64,
     pub(crate) latest_tx_bytes: i64,
     pub(crate) latest_total_bytes: i64,
