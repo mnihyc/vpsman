@@ -942,7 +942,9 @@ async fn postgres_topology_evidence_is_bounded_per_plan_beyond_global_caps() {
         .find(|edge| edge.plan_id == quiet_plan.id)
         .unwrap();
     assert_eq!(quiet_edge.sample_count, 1);
-    assert_eq!(quiet_edge.reachability_state, "stale");
+    assert_eq!(quiet_edge.left_reachability_state, "stale");
+    assert_eq!(quiet_edge.right_reachability_state, "unknown");
+    assert_eq!(quiet_edge.reachability_state, "recorded");
     assert_eq!(quiet_edge.latency_series_ms, vec![42.0]);
     db.cleanup().await;
 }

@@ -517,6 +517,20 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         )
         .await;
     }
+    let mut tunnel_input = crate::tests_network::test_plan_input(
+        vpsman_common::RuntimeTunnelManager::AgentBuiltin,
+        false,
+    );
+    tunnel_input.name = "lifecycle-regression".to_string();
+    tunnel_input.left_client_id = deleted_client_id.to_string();
+    tunnel_input.right_client_id = visible_peer_id.to_string();
+    let tunnel_plan = vpsman_common::plan_tunnel(&tunnel_input).unwrap();
+    let saved_tunnel_plan = repo
+        .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
+        .await
+        .unwrap();
+    let topology_identity_hash =
+        vpsman_common::tunnel_topology_identity_hash(saved_tunnel_plan.id, &saved_tunnel_plan.plan);
     memory
         .telemetry_samples
         .write()
@@ -620,13 +634,20 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         kind: "tunnel_reachability".to_string(),
         source: "manual".to_string(),
         role: None,
-        plan_id: None,
-        topology_identity_hash: None,
+        plan_id: Some(saved_tunnel_plan.id),
+        topology_identity_hash: Some(topology_identity_hash.clone()),
         plan_name: Some("lifecycle-regression".to_string()),
         interface_name: Some("test0".to_string()),
         peer_client_id: Some(peer_client_id.to_string()),
         target: Some("192.0.2.1".to_string()),
-        endpoint_side: None,
+        endpoint_side: Some(
+            if client_id == deleted_client_id {
+                "left"
+            } else {
+                "right"
+            }
+            .to_string(),
+        ),
         address_family: Some("ipv4".to_string()),
         stale_after_secs: Some(180),
         healthy: Some(true),
