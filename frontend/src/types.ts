@@ -3148,6 +3148,29 @@ export type TunnelPlanRevisionTarget = {
   expected_revision: number;
 };
 
+export type ClearTunnelPlanEvidenceRequest = {
+  targets: TunnelPlanRevisionTarget[];
+  confirmed: boolean;
+};
+
+export type ClearTunnelPlanEvidenceResult = {
+  plan_id: string;
+  name: string;
+  reviewed_revision: number;
+  cleared_observation_count: number;
+};
+
+export type ClearTunnelPlanEvidenceResponse = {
+  results: ClearTunnelPlanEvidenceResult[];
+  plan_count: number;
+  cleared_observation_count: number;
+};
+
+export type ClearTunnelPlanEvidenceOutcome =
+  ClearTunnelPlanEvidenceResponse & {
+    refresh_warnings: string[];
+  };
+
 export type UpdateTunnelPlanOspfCostRequest = {
   plan_revision: number;
   recommendation_id: string;

@@ -33,7 +33,11 @@ edit opens below it. Each plan shows:
 - current left/right runtime evidence derived from that declaration only;
 - optional OSPF mode and updater status;
 - edit, export, credential rotation where supported, enable, disable, and
-  retire actions.
+  retire actions;
+- a reviewed, bulk-capable **Clear evidence** action for discarding retained
+  observations from earlier topology identities without changing the plan or
+  runtime state. Automatic monitoring resumes, and later manual tests add new
+  evidence normally.
 
 Choose **Create plan**, select the runtime owner, enter endpoints and addresses,
 and optionally enable OSPF. The cost preview updates beside latency, loss,

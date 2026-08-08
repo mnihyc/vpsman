@@ -253,6 +253,13 @@ family. Changing one of those fields starts a new evidence generation. MTU,
 bandwidth, OSPF policy, and runtime command changes do not detach otherwise
 valid reachability history.
 
+From **Network > Tunnel plans**, a reviewed **Clear evidence** action can remove
+all retained automatic and manual observations for the selected plans when an
+operator wants to discard evidence from earlier topology identities. The
+action is audited and leaves declarations, runtime state, jobs, assessments,
+and OSPF state unchanged. Monitoring remains enabled and records new evidence
+normally.
+
 Automatic OSPF control requires the newest paired endpoint reachability window
 to be fresh and the configured number of preceding paired windows to be
 contiguously healthy. Endpoint probes may be independently phased within their

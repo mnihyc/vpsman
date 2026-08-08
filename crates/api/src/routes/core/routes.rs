@@ -102,10 +102,10 @@ use crate::{
         update_ping_target,
     },
     routes_network::{
-        allocate_tunnel_endpoints, create_tunnel_plan, delete_tunnel_plan, disable_tunnel_plan,
-        enable_tunnel_plan, export_tunnel_plan, get_topology_graph,
-        list_network_ospf_recommendations, list_network_ospf_update_plans, list_tunnel_plans,
-        refresh_tunnel_plan_ospf_status, rotate_tunnel_plan_credentials,
+        allocate_tunnel_endpoints, clear_tunnel_plan_evidence, create_tunnel_plan,
+        delete_tunnel_plan, disable_tunnel_plan, enable_tunnel_plan, export_tunnel_plan,
+        get_topology_graph, list_network_ospf_recommendations, list_network_ospf_update_plans,
+        list_tunnel_plans, refresh_tunnel_plan_ospf_status, rotate_tunnel_plan_credentials,
         update_tunnel_connection_assessment, update_tunnel_plan, update_tunnel_plan_ospf_cost,
     },
     routes_port_forwarding::{
@@ -657,6 +657,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/tunnel-plans/allocate",
             post(allocate_tunnel_endpoints),
+        )
+        .route(
+            "/api/v1/tunnel-plans/evidence/clear",
+            post(clear_tunnel_plan_evidence),
         )
         .route(
             "/api/v1/tunnel-plans/{plan_id}/plan",

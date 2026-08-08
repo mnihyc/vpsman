@@ -4,6 +4,9 @@ import { TOPOLOGY_EVIDENCE_LIMIT } from "../constants";
 import type {
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
+  ClearTunnelPlanEvidenceOutcome,
+  ClearTunnelPlanEvidenceRequest,
+  ClearTunnelPlanEvidenceResponse,
   CreateTunnelPlanRequest,
   NetworkAdapterDefinitionRecord,
   NetworkObservationRecord,
@@ -117,6 +120,7 @@ export function useTopologyData(
       apply: (value: T) => void,
       reset: () => void,
       fallback: string,
+      rethrow = false,
     ) => {
       if (apiTokenRef.current !== apiToken) {
         return;
@@ -149,6 +153,9 @@ export function useTopologyData(
             error instanceof Error ? error.message : fallback;
         }
         setTopologyError(summarizeTopologyErrors(topologyErrors.current));
+        if (rethrow) {
+          throw error;
+        }
       } finally {
         finishTopologyLoad(source, generation);
       }
@@ -184,7 +191,7 @@ export function useTopologyData(
   );
 
   const loadNetworkObservations = useCallback(
-    (query: NetworkEvidenceQuery = {}) => {
+    (query: NetworkEvidenceQuery = {}, rethrow = false) => {
       networkObservationQuery.current = copyNetworkEvidenceQuery(query);
       return loadTopologySource(
         "networkObservations",
@@ -192,6 +199,7 @@ export function useTopologyData(
         setNetworkObservations,
         () => setNetworkObservations([]),
         "Network observations unavailable",
+        rethrow,
       );
     },
     [loadTopologySource, queryNetworkObservations],
@@ -223,7 +231,7 @@ export function useTopologyData(
   );
 
   const loadNetworkTrends = useCallback(
-    (query: NetworkEvidenceQuery = {}) => {
+    (query: NetworkEvidenceQuery = {}, rethrow = false) => {
       networkTrendQuery.current = copyNetworkEvidenceQuery(query);
       return loadTopologySource(
         "networkTrends",
@@ -231,13 +239,14 @@ export function useTopologyData(
         setNetworkTrends,
         () => setNetworkTrends([]),
         "Network trends unavailable",
+        rethrow,
       );
     },
     [loadTopologySource, queryNetworkTrends],
   );
 
   const loadOspfRecommendations = useCallback(
-    () =>
+    (rethrow = false) =>
       loadTopologySource(
         "ospfRecommendations",
         () =>
@@ -248,12 +257,13 @@ export function useTopologyData(
         setOspfRecommendations,
         () => setOspfRecommendations([]),
         "OSPF recommendations unavailable",
+        rethrow,
       ),
     [apiToken, loadTopologySource],
   );
 
   const loadOspfUpdatePlans = useCallback(
-    () =>
+    (rethrow = false) =>
       loadTopologySource(
         "ospfUpdatePlans",
         () =>
@@ -264,12 +274,13 @@ export function useTopologyData(
         setOspfUpdatePlans,
         () => setOspfUpdatePlans([]),
         "OSPF update plans unavailable",
+        rethrow,
       ),
     [apiToken, loadTopologySource],
   );
 
   const loadTopologyGraph = useCallback(
-    (query: NetworkEvidenceQuery = {}) => {
+    (query: NetworkEvidenceQuery = {}, rethrow = false) => {
       topologyGraphQuery.current = copyNetworkEvidenceQuery(query);
       return loadTopologySource(
         "topologyGraph",
@@ -284,6 +295,7 @@ export function useTopologyData(
         setTopologyGraph,
         () => setTopologyGraph(emptyTopologyGraph()),
         "Topology graph unavailable",
+        rethrow,
       );
     },
     [apiToken, loadTopologySource],
@@ -535,6 +547,61 @@ export function useTopologyData(
     [apiToken, loadOspfUpdatePlans, loadTopologyGraph, loadTunnelPlans, onAuditChanged, onRuntimeConfigChanged],
   );
 
+  const clearTunnelPlanEvidence = useCallback(
+    async (
+      targets: TunnelPlanRevisionTarget[],
+    ): Promise<ClearTunnelPlanEvidenceOutcome> => {
+      const request: ClearTunnelPlanEvidenceRequest = {
+        confirmed: true,
+        targets,
+      };
+      const response = await apiPost<ClearTunnelPlanEvidenceResponse>(
+        "/api/v1/tunnel-plans/evidence/clear",
+        apiToken,
+        request,
+      );
+      const refreshes = await Promise.allSettled([
+        loadNetworkObservations(networkObservationQuery.current, true),
+        loadNetworkTrends(networkTrendQuery.current, true),
+        loadOspfRecommendations(true),
+        loadOspfUpdatePlans(true),
+        loadTopologyGraph(topologyGraphQuery.current, true),
+        onAuditChanged(),
+      ]);
+      const labels = [
+        "network observations",
+        "network trends",
+        "OSPF recommendations",
+        "OSPF update plans",
+        "topology graph",
+        "audit log",
+      ];
+      return {
+        ...response,
+        refresh_warnings: refreshes.flatMap((result, index) =>
+          result.status === "rejected"
+            ? [
+                `${labels[index]}: ${
+                  result.reason instanceof Error
+                    ? result.reason.message
+                    : "refresh failed"
+                }`,
+              ]
+            : [],
+        ),
+      };
+    },
+    [
+      apiToken,
+      loadNetworkObservations,
+      loadNetworkTrends,
+      loadOspfRecommendations,
+      loadOspfUpdatePlans,
+      loadTopologyGraph,
+      onAuditChanged,
+    ],
+  );
+
   const updateTunnelConnectionAssessment = useCallback(
     async (planId: string, request: UpdateTunnelConnectionAssessmentRequest) => {
       await apiPut<TunnelPlanRecord>(
@@ -594,6 +661,7 @@ export function useTopologyData(
 
   return {
     allocateTunnelEndpoints,
+    clearTunnelPlanEvidence,
     clearTopology,
     createTunnelPlan,
     createNetworkAdapterDefinition,

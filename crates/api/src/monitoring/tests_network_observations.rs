@@ -1348,6 +1348,283 @@ async fn operational_evidence_hides_deleted_plans_but_history_retains_it() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn confirmed_bulk_clear_removes_only_selected_plan_evidence_and_audits_counts() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
+    let operator = topology_test_operator();
+    let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let first = repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let second = TunnelPlanView {
+        id: Uuid::new_v4(),
+        name: "selected-without-evidence".to_string(),
+        revision: 7,
+        ..first.clone()
+    };
+    let retained = TunnelPlanView {
+        id: Uuid::new_v4(),
+        name: "retained-plan".to_string(),
+        revision: 3,
+        ..first.clone()
+    };
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory
+        .tunnel_plans
+        .write()
+        .await
+        .extend([second.clone(), retained.clone()]);
+    memory.network_observations.write().await.extend([
+        clear_test_observation(first.id, "network_status", "manual"),
+        clear_test_observation(first.id, "tunnel_reachability", "automatic"),
+        clear_test_observation(first.id, "tunnel_reachability", "manual"),
+        clear_test_observation(first.id, "network_speed_test", "manual"),
+        clear_test_observation(retained.id, "network_status", "automatic"),
+    ]);
+
+    let state = test_state(repo.clone());
+    let headers = crate::test_auth_headers(&state).await;
+    let Json(response) = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state),
+        headers,
+        Json(ClearTunnelPlanEvidenceRequest {
+            targets: vec![
+                TunnelPlanEvidenceClearTargetRequest {
+                    plan_id: first.id.to_string(),
+                    expected_revision: first.revision,
+                },
+                TunnelPlanEvidenceClearTargetRequest {
+                    plan_id: second.id.to_string(),
+                    expected_revision: second.revision,
+                },
+            ],
+            confirmed: true,
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.plan_count, 2);
+    assert_eq!(response.cleared_observation_count, 4);
+    assert_eq!(response.results.len(), 2);
+    let first_result = response
+        .results
+        .iter()
+        .find(|result| result.plan_id == first.id)
+        .unwrap();
+    assert_eq!(first_result.name, first.name);
+    assert_eq!(first_result.reviewed_revision, first.revision);
+    assert_eq!(first_result.cleared_observation_count, 4);
+    assert_eq!(
+        response
+            .results
+            .iter()
+            .find(|result| result.plan_id == second.id)
+            .unwrap()
+            .cleared_observation_count,
+        0
+    );
+    let remaining = memory.network_observations.read().await;
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].plan_id, Some(retained.id));
+    drop(remaining);
+    assert_eq!(
+        memory
+            .tunnel_plans
+            .read()
+            .await
+            .iter()
+            .find(|plan| plan.id == first.id)
+            .unwrap()
+            .revision,
+        first.revision
+    );
+    let audit = memory
+        .audits
+        .read()
+        .await
+        .iter()
+        .find(|audit| audit.action == "network.tunnel_plan_evidence_cleared")
+        .cloned()
+        .unwrap();
+    assert_eq!(audit.target, "tunnel_plans:bulk");
+    assert_eq!(audit.metadata["plan_count"], 2);
+    assert_eq!(audit.metadata["cleared_observation_count"], 4);
+    assert_eq!(audit.metadata["plans"].as_array().unwrap().len(), 2);
+    assert!(audit.metadata.to_string().contains(&second.name));
+    assert!(!audit.metadata.to_string().contains("network_status"));
+}
+
+#[tokio::test]
+async fn bulk_clear_rejects_missing_or_stale_plan_snapshots_before_deleting_any_evidence() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests_network::seed_online_agent(&repo, "left-a").await;
+    crate::tests_network::seed_online_agent(&repo, "right-b").await;
+    let operator = topology_test_operator();
+    let input = test_plan_input("right-b");
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let plan = repo
+        .record_tunnel_plan(&input, &plan_tunnel(&input).unwrap(), true, &operator)
+        .await
+        .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory
+        .network_observations
+        .write()
+        .await
+        .push(clear_test_observation(
+            plan.id,
+            "tunnel_reachability",
+            "automatic",
+        ));
+
+    let missing = repo
+        .clear_tunnel_plan_evidence(&[(plan.id, plan.revision), (Uuid::new_v4(), 1)], &operator)
+        .await
+        .unwrap_err();
+    assert_eq!(missing.to_string(), "tunnel_plan_not_found");
+    assert_eq!(memory.network_observations.read().await.len(), 1);
+
+    let stale = repo
+        .clear_tunnel_plan_evidence(&[(plan.id, plan.revision + 1)], &operator)
+        .await
+        .unwrap_err();
+    assert_eq!(stale.to_string(), "tunnel_plan_snapshot_stale");
+    assert_eq!(memory.network_observations.read().await.len(), 1);
+    assert!(!memory
+        .audits
+        .read()
+        .await
+        .iter()
+        .any(|audit| audit.action == "network.tunnel_plan_evidence_cleared"));
+}
+
+#[tokio::test]
+async fn tunnel_plan_evidence_clear_route_reports_confirmation_and_target_errors() {
+    let state = test_state(Repository::Memory(MemoryState::default()));
+    let headers = crate::test_auth_headers(&state).await;
+    let request = |targets, confirmed| ClearTunnelPlanEvidenceRequest { targets, confirmed };
+
+    let unconfirmed = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state.clone()),
+        headers.clone(),
+        Json(request(Vec::new(), false)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        unconfirmed.code,
+        "tunnel_plan_evidence_clear_requires_confirmation"
+    );
+
+    let empty = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state.clone()),
+        headers.clone(),
+        Json(request(Vec::new(), true)),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(empty.code, "tunnel_plan_evidence_clear_targets_invalid");
+
+    let invalid = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state.clone()),
+        headers.clone(),
+        Json(request(
+            vec![TunnelPlanEvidenceClearTargetRequest {
+                plan_id: "not-a-plan-id".to_string(),
+                expected_revision: 1,
+            }],
+            true,
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.code, "tunnel_plan_evidence_plan_id_invalid");
+
+    let duplicate_id = Uuid::new_v4().to_string();
+    let duplicate = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state.clone()),
+        headers.clone(),
+        Json(request(
+            vec![
+                TunnelPlanEvidenceClearTargetRequest {
+                    plan_id: duplicate_id.clone(),
+                    expected_revision: 1,
+                },
+                TunnelPlanEvidenceClearTargetRequest {
+                    plan_id: duplicate_id,
+                    expected_revision: 1,
+                },
+            ],
+            true,
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        duplicate.code,
+        "tunnel_plan_evidence_clear_target_duplicate"
+    );
+
+    let missing = crate::routes_network::clear_tunnel_plan_evidence(
+        State(state),
+        headers,
+        Json(request(
+            vec![TunnelPlanEvidenceClearTargetRequest {
+                plan_id: Uuid::new_v4().to_string(),
+                expected_revision: 1,
+            }],
+            true,
+        )),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.code, "tunnel_plan_not_found");
+}
+
+fn clear_test_observation(plan_id: Uuid, kind: &str, source: &str) -> NetworkObservationView {
+    NetworkObservationView {
+        id: Uuid::new_v4(),
+        job_id: None,
+        client_id: "left-a".to_string(),
+        seq: None,
+        kind: kind.to_string(),
+        source: source.to_string(),
+        role: None,
+        plan_id: Some(plan_id),
+        topology_identity_hash: Some(format!("identity-{plan_id}")),
+        plan_name: Some(format!("plan-{plan_id}")),
+        interface_name: Some("tun-clear".to_string()),
+        peer_client_id: Some("right-b".to_string()),
+        target: Some("10.255.0.1".to_string()),
+        endpoint_side: Some("left".to_string()),
+        address_family: Some("ipv4".to_string()),
+        stale_after_secs: Some(180),
+        healthy: Some(true),
+        transmitted: Some(3),
+        received: Some(3),
+        latency_min_ms: Some(1.0),
+        latency_avg_ms: Some(1.5),
+        latency_max_ms: Some(2.0),
+        latency_mdev_ms: Some(0.25),
+        packet_loss_ratio: Some(0.0),
+        reason: None,
+        throughput_mbps: Some(100.0),
+        bytes: Some(1_000),
+        metadata: serde_json::json!({"fixture": true}),
+        observed_at: crate::unix_now().to_string(),
+        received_at: crate::unix_now().to_string(),
+    }
+}
+
 fn test_plan() -> TunnelPlan {
     plan_tunnel(&test_plan_input("right-b")).unwrap()
 }

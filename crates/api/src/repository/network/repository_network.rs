@@ -2297,7 +2297,7 @@ fn ospf_jobs_metadata(
     )
 }
 
-fn network_audit_metadata(
+pub(crate) fn network_audit_metadata(
     mut metadata: serde_json::Value,
     operator: &AuthContext,
     result: &str,

@@ -66,6 +66,10 @@ for listing management records and target evidence.
 Config > Rules writes require `config:write`. Alert policy group and notification
 channel writes require `integrations:write`.
 
+Tunnel-plan mutations and the reviewed, plan-scoped **Clear evidence** action
+require `network:write`. Clearing evidence does not grant access to job or audit
+payloads and does not change tunnel runtime state.
+
 Port-forward create, update, enable, disable, reapply, bulk, and delete actions
 require `network:write`. Forgetting an unconfirmed removal tombstone additionally
 requires the `admin` role because it discards host-cleanup evidence.

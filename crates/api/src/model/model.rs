@@ -691,6 +691,36 @@ pub(crate) struct TunnelPlanMutationResponse {
     pub(crate) sync: Vec<RuntimeConfigDispatchView>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TunnelPlanEvidenceClearTargetRequest {
+    pub(crate) plan_id: String,
+    pub(crate) expected_revision: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClearTunnelPlanEvidenceRequest {
+    pub(crate) targets: Vec<TunnelPlanEvidenceClearTargetRequest>,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TunnelPlanEvidenceClearResult {
+    pub(crate) plan_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) reviewed_revision: i64,
+    pub(crate) cleared_observation_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ClearTunnelPlanEvidenceResponse {
+    pub(crate) results: Vec<TunnelPlanEvidenceClearResult>,
+    pub(crate) plan_count: usize,
+    pub(crate) cleared_observation_count: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct AgentIdentityView {
     pub(crate) client_id: String,

@@ -238,6 +238,10 @@ Every update must keep these boundaries explicit:
   path: plan identity/name/kind, endpoint VPSs, interface, local/remote underlay
   bindings, tunnel addresses, and primary family. MTU, bandwidth, OSPF policy,
   and runtime-command edits must not invalidate reachability or speed history.
+- **Clear evidence** is an explicit, audited reset for selected tunnel-plan
+  observations across all prior topology identities. It must not mutate the
+  plan, runtime or OSPF state, jobs, assessments, retention policy, or future
+  collection; new automatic and manual evidence resumes normally.
 - Automatic OSPF requires a fresh newest bilateral reachability window followed
   by the configured contiguous healthy paired windows. Fetch enough bounded
   history for the maximum supported cadence/streak; do not require every older

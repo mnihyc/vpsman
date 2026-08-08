@@ -3,6 +3,7 @@ import {
   Activity,
   CirclePlus,
   Download,
+  Eraser,
   ExternalLink,
   Gauge,
   GitGraph,
@@ -47,6 +48,7 @@ import {
 import { scrollIntoViewWithMotion } from "../motion";
 import { tunnelEndpointRuntimeStateBadgeClass } from "../jobStatusPresentation";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import { waitForReviewRender } from "../hooks/useReviewGenerationGuard";
 import {
   buildRuntimeControl,
   buildRuntimeTopology,
@@ -71,6 +73,7 @@ import type {
   AgentView,
   AllocateTunnelEndpointsRequest,
   AllocateTunnelEndpointsResponse,
+  ClearTunnelPlanEvidenceOutcome,
   ConfigurationSourceView,
   CreateJobRequest,
   CreateJobResponse,
@@ -172,6 +175,7 @@ export function TopologyPanel({
   onCreateJob,
   onCreateTunnelPlan,
   onCreateNetworkAdapterDefinition,
+  onClearTunnelPlanEvidence,
   onDeleteNetworkAdapterDefinition,
   onDeleteTunnelPlan,
   onExportTunnelPlan,
@@ -438,6 +442,7 @@ export function TopologyPanel({
       onAllocateTunnelEndpoints={onAllocateTunnelEndpoints}
       onCreateTunnelPlan={onCreateTunnelPlan}
       onCreateNetworkAdapterDefinition={onCreateNetworkAdapterDefinition}
+      onClearTunnelPlanEvidence={onClearTunnelPlanEvidence}
       onDeleteNetworkAdapterDefinition={onDeleteNetworkAdapterDefinition}
       onDeleteTunnelPlan={onDeleteTunnelPlan}
       onExportTunnelPlan={onExportTunnelPlan}
@@ -626,6 +631,7 @@ function TunnelPlansWorkspace({
   onAllocateTunnelEndpoints,
   onCreateTunnelPlan,
   onCreateNetworkAdapterDefinition,
+  onClearTunnelPlanEvidence,
   onDeleteNetworkAdapterDefinition,
   onDeleteTunnelPlan,
   onExportTunnelPlan,
@@ -662,6 +668,9 @@ function TunnelPlansWorkspace({
   onCreateNetworkAdapterDefinition: (
     request: UpsertNetworkAdapterDefinitionRequest,
   ) => Promise<NetworkAdapterDefinitionRecord>;
+  onClearTunnelPlanEvidence: (
+    targets: TunnelPlanRevisionTarget[],
+  ) => Promise<ClearTunnelPlanEvidenceOutcome>;
   onDeleteNetworkAdapterDefinition: (definitionId: string) => Promise<void>;
   onDeleteTunnelPlan: (
     target: TunnelPlanRevisionTarget,
@@ -712,6 +721,10 @@ function TunnelPlansWorkspace({
   );
   const [credentialRotationSnapshot, setCredentialRotationSnapshot] =
     useState<TunnelPlanRecord | null>(null);
+  const [clearEvidenceSnapshot, setClearEvidenceSnapshot] =
+    useState<ClearEvidenceSnapshot | null>(null);
+  const [clearEvidenceReviewPending, setClearEvidenceReviewPending] =
+    useState(false);
   const [pending, setPending] = useState(false);
   const createRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLElement | null>(null);
@@ -742,7 +755,8 @@ function TunnelPlansWorkspace({
     if (
       lifecycleSnapshot ||
       deleteSnapshot ||
-      credentialRotationSnapshot
+      credentialRotationSnapshot ||
+      clearEvidenceSnapshot
     )
       return;
     const frame = window.requestAnimationFrame(() => {
@@ -755,6 +769,7 @@ function TunnelPlansWorkspace({
     return () => window.cancelAnimationFrame(frame);
   }, [
     credentialRotationSnapshot,
+    clearEvidenceSnapshot,
     deleteSnapshot,
     error,
     feedback,
@@ -869,6 +884,59 @@ function TunnelPlansWorkspace({
     } catch (actionError) {
       setFeedback({
         message: tunnelCredentialRotationError(actionError),
+        tone: "danger",
+      });
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function requestClearEvidence(rows: TunnelPlanRecord[]) {
+    if (rows.length === 0) return;
+    setFeedback(null);
+    setClearEvidenceReviewPending(true);
+    try {
+      await waitForReviewRender();
+      setClearEvidenceSnapshot({
+        plans: [...rows]
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .map((plan) => ({
+            id: plan.id,
+            name: plan.name,
+            revision: plan.revision,
+          })),
+      });
+    } finally {
+      setClearEvidenceReviewPending(false);
+    }
+  }
+
+  async function applyClearEvidence(snapshot: ClearEvidenceSnapshot) {
+    setPending(true);
+    setFeedback(null);
+    try {
+      const outcome = await onClearTunnelPlanEvidence(
+        snapshot.plans.map((plan) => ({
+          expected_revision: plan.revision,
+          plan_id: plan.id,
+        })),
+      );
+      setClearEvidenceSnapshot(null);
+      const message = `Cleared ${outcome.cleared_observation_count} retained evidence record${outcome.cleared_observation_count === 1 ? "" : "s"} for ${outcome.plan_count} tunnel plan${outcome.plan_count === 1 ? "" : "s"}`;
+      setFeedback(
+        outcome.refresh_warnings.length === 0
+          ? { message, tone: "success" }
+          : {
+              message: `${message}; refresh incomplete: ${outcome.refresh_warnings.join("; ")}`,
+              tone: "warning",
+            },
+      );
+    } catch (actionError) {
+      setFeedback({
+        message:
+          actionError instanceof Error
+            ? actionError.message
+            : "Tunnel evidence clear failed",
         tone: "danger",
       });
     } finally {
@@ -1317,6 +1385,19 @@ function TunnelPlansWorkspace({
     },
     {
       description: (rows) =>
+        rows.length > 0
+          ? `Review clearing retained network evidence for ${rows.length} selected tunnel plan${rows.length === 1 ? "" : "s"}.`
+          : "Select one or more tunnel plans to clear retained evidence.",
+      disabled: (rows) =>
+        pending || clearEvidenceReviewPending || rows.length === 0,
+      icon: <Eraser size={14} />,
+      label: "Clear evidence",
+      onSelect: (rows) => void requestClearEvidence(rows),
+      separatorBefore: true,
+      tone: "danger",
+    },
+    {
+      description: (rows) =>
         rows.length === 1
           ? `Delete ${rows[0].name} and queue runtime removal on both endpoints.`
           : "Select one tunnel plan to delete.",
@@ -1435,6 +1516,52 @@ function TunnelPlansWorkspace({
           }
         />
       </section>
+      <ConfirmationPrompt
+        confirmLabel="Clear evidence"
+        detail="Permanently remove all retained automatic and manual observations for these reviewed tunnel plans, across prior topology identities. Plan and endpoint runtime state do not change; future monitoring repopulates evidence."
+        error={
+          clearEvidenceSnapshot && feedback?.tone === "danger"
+            ? feedback.message
+            : null
+        }
+        items={
+          clearEvidenceSnapshot
+            ? [
+                {
+                  label: "Plans",
+                  value: clearEvidenceSnapshot.plans
+                    .map(
+                      (plan) =>
+                        `${plan.name} · ${plan.id} · revision ${plan.revision}`,
+                    )
+                    .join("; "),
+                },
+                {
+                  label: "Evidence removed",
+                  value:
+                    "Retained reachability, runtime-status, and speed-test observations",
+                },
+                {
+                  label: "Plan and runtime state",
+                  value: "Unchanged",
+                },
+                {
+                  label: "After clearing",
+                  value: "Future monitoring creates fresh evidence",
+                },
+              ]
+            : []
+        }
+        onCancel={() => setClearEvidenceSnapshot(null)}
+        onConfirm={() =>
+          clearEvidenceSnapshot &&
+          void applyClearEvidence(clearEvidenceSnapshot)
+        }
+        open={clearEvidenceSnapshot !== null}
+        pending={pending}
+        title="Confirm tunnel evidence clear"
+        tone="danger"
+      />
       {createOpen && (
         <div ref={createRef}>
           <TunnelPlanComposer
@@ -5982,6 +6109,14 @@ type DeleteSnapshot = {
   target: TunnelPlanRevisionTarget;
 };
 
+type ClearEvidenceSnapshot = {
+  plans: Array<{
+    id: string;
+    name: string;
+    revision: number;
+  }>;
+};
+
 type TopologyPanelProps = {
   activeSubpage: string;
   agents: AgentView[];
@@ -6009,6 +6144,9 @@ type TopologyPanelProps = {
   onCreateNetworkAdapterDefinition: (
     request: UpsertNetworkAdapterDefinitionRequest,
   ) => Promise<NetworkAdapterDefinitionRecord>;
+  onClearTunnelPlanEvidence: (
+    targets: TunnelPlanRevisionTarget[],
+  ) => Promise<ClearTunnelPlanEvidenceOutcome>;
   onDeleteNetworkAdapterDefinition: (definitionId: string) => Promise<void>;
   onDeleteTunnelPlan: (
     target: TunnelPlanRevisionTarget,

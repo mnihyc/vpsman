@@ -3889,6 +3889,7 @@ export async function installConsoleApiMock(
         tunnelPlanEnabledMutations: [] as unknown[],
         tunnelPlanConnectionAssessments: [] as unknown[],
         tunnelPlanDeletes: [] as unknown[],
+        tunnelPlanEvidenceClears: [] as unknown[],
         tunnelPlanOspfCostUpdates: [] as unknown[],
         tunnelPlanOspfStatusChecks: [] as unknown[],
         tunnelPlans: [] as unknown[],
@@ -8368,6 +8369,39 @@ export async function installConsoleApiMock(
         }
         if (pathname === "/api/v1/tunnel-plans" && method === "GET") {
           return jsonResponse(visibleTunnelPlans());
+        }
+        if (
+          pathname === "/api/v1/tunnel-plans/evidence/clear" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            confirmed?: boolean;
+            targets?: Array<{
+              expected_revision?: number;
+              plan_id?: string;
+            }>;
+          };
+          requests.tunnelPlanEvidenceClears.push(body);
+          const targets = body.targets ?? [];
+          const results = targets.map((target, index) => {
+            const plan = tunnelPlansFixture.find(
+              (record) => record.id === target.plan_id,
+            );
+            return {
+              cleared_observation_count: index + 2,
+              name: plan?.name ?? "Unknown plan",
+              plan_id: target.plan_id,
+              reviewed_revision: target.expected_revision,
+            };
+          });
+          return jsonResponse({
+            cleared_observation_count: results.reduce(
+              (count, result) => count + result.cleared_observation_count,
+              0,
+            ),
+            plan_count: targets.length,
+            results,
+          });
         }
         const tunnelPlanUpdateMatch = pathname.match(
           /^\/api\/v1\/tunnel-plans\/([^/]+)$/,

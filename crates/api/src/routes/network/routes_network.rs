@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
@@ -17,7 +19,8 @@ use vpsman_common::{
 use crate::{
     error::ApiError,
     model::{
-        AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse, CreateJobRequest,
+        AllocateTunnelEndpointsRequest, AllocateTunnelEndpointsResponse,
+        ClearTunnelPlanEvidenceRequest, ClearTunnelPlanEvidenceResponse, CreateJobRequest,
         CreateJobResponse, CreateTunnelPlanRequest, HistoryQuery, NetworkEvidenceQuery,
         NetworkOspfRecommendationView, NetworkOspfUpdatePlanView,
         RefreshTunnelPlanOspfStatusRequest, RuntimeConfigDispatchView,
@@ -59,6 +62,87 @@ pub(crate) async fn list_tunnel_plans(
             "Tunnel plans could not be loaded.",
         ),
     )?))
+}
+
+pub(crate) async fn clear_tunnel_plan_evidence(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ClearTunnelPlanEvidenceRequest>,
+) -> Result<Json<ClearTunnelPlanEvidenceResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "network:write")
+        .await?;
+    if !request.confirmed {
+        return Err(ApiError::conflict(
+            "tunnel_plan_evidence_clear_requires_confirmation",
+        ));
+    }
+    let targets = normalize_tunnel_plan_evidence_clear_targets(&request)?;
+    let results = state
+        .repo
+        .clear_tunnel_plan_evidence(&targets, &operator)
+        .await
+        .map_err(tunnel_plan_evidence_clear_error)?;
+    let cleared_observation_count = results
+        .iter()
+        .map(|result| result.cleared_observation_count)
+        .sum();
+    Ok(Json(ClearTunnelPlanEvidenceResponse {
+        plan_count: results.len(),
+        cleared_observation_count,
+        results,
+    }))
+}
+
+fn normalize_tunnel_plan_evidence_clear_targets(
+    request: &ClearTunnelPlanEvidenceRequest,
+) -> Result<Vec<(Uuid, i64)>, ApiError> {
+    if request.targets.is_empty() || request.targets.len() > 1_000 {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_evidence_clear_targets_invalid",
+        ));
+    }
+    let mut targets = request
+        .targets
+        .iter()
+        .map(|target| {
+            let plan_id = target
+                .plan_id
+                .trim()
+                .parse::<Uuid>()
+                .map_err(|_| ApiError::bad_request("tunnel_plan_evidence_plan_id_invalid"))?;
+            Ok((plan_id, target.expected_revision))
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let unique = targets
+        .iter()
+        .map(|(plan_id, _)| *plan_id)
+        .collect::<BTreeSet<_>>();
+    if unique.len() != targets.len() {
+        return Err(ApiError::bad_request(
+            "tunnel_plan_evidence_clear_target_duplicate",
+        ));
+    }
+    targets.sort_unstable_by_key(|(plan_id, _)| *plan_id);
+    Ok(targets)
+}
+
+fn tunnel_plan_evidence_clear_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    match message.as_str() {
+        "tunnel_plan_not_found" => ApiError::not_found("tunnel_plan_not_found"),
+        "tunnel_plan_snapshot_stale" => ApiError::conflict("tunnel_plan_snapshot_stale"),
+        "tunnel_plan_evidence_targets_required"
+        | "tunnel_plan_evidence_target_limit_exceeded"
+        | "tunnel_plan_evidence_target_duplicate" => {
+            ApiError::bad_request("tunnel_plan_evidence_clear_targets_invalid")
+        }
+        _ => ApiError::internal(
+            "tunnel_plan_evidence_clear_failed",
+            "The selected tunnel evidence could not be cleared.",
+            error,
+        ),
+    }
 }
 
 pub(crate) async fn create_tunnel_plan(

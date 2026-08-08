@@ -6507,6 +6507,74 @@ test("shows topology network evidence, speed metrics, and probe latency history"
 });
 
 test(
+  "clears selected tunnel evidence against frozen plan revisions",
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "bulk row actions and retained editor state are covered on desktop",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Network", "Tunnel plans");
+    await selectGridRow(page, "Tunnel plans", tunnelPlans[0].id);
+    await selectGridRow(page, "Tunnel plans", tunnelPlans[1].id);
+    await activate(page.getByRole("button", { name: "Create plan" }));
+    const editor = page.locator(".tunnelPlanComposer");
+    await expect(editor).toBeVisible();
+
+    await runGridAction(page, "Tunnel plans", "Clear evidence");
+    const prompt = page.locator(".confirmationPrompt", {
+      hasText: "Confirm tunnel evidence clear",
+    });
+    await expect(
+      page.locator(".tunnelPlanRegistry + .confirmationPrompt", {
+        hasText: "Confirm tunnel evidence clear",
+      }),
+    ).toBeVisible();
+    await expect(prompt).toContainText(
+      `${tunnelPlans[0].name} · ${tunnelPlans[0].id} · revision ${tunnelPlans[0].revision}`,
+    );
+    await expect(prompt).toContainText(
+      `${tunnelPlans[1].name} · ${tunnelPlans[1].id} · revision ${tunnelPlans[1].revision}`,
+    );
+    await expect(prompt).toContainText(
+      "Retained reachability, runtime-status, and speed-test observations",
+    );
+    await expect(prompt).toContainText("Plan and runtime state");
+    await expect(prompt).toContainText("Unchanged");
+    await expect(editor).toBeVisible();
+
+    await confirmVisiblePrompt(page, "Clear evidence");
+    await expect(editor).toBeVisible();
+    await expect(
+      page.locator(".topologyPlanActionFeedback"),
+    ).toContainText("Cleared 5 retained evidence records for 2 tunnel plans");
+
+    const request = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { tunnelPlanEvidenceClears: unknown[] };
+        }
+      ).__vpsmanTestRequests;
+      return requests.tunnelPlanEvidenceClears.at(-1);
+    });
+    expect(request).toEqual({
+      confirmed: true,
+      targets: [
+        {
+          expected_revision: tunnelPlans[0].revision,
+          plan_id: tunnelPlans[0].id,
+        },
+        {
+          expected_revision: tunnelPlans[1].revision,
+          plan_id: tunnelPlans[1].id,
+        },
+      ],
+    });
+  },
+);
+
+test(
   "authors explicit tunnel plans with endpoint-scoped adapters",
   {
     tag: "@tunnel-prefill",

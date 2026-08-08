@@ -712,6 +712,7 @@ export function useDashboardData(activeView: ActiveView) {
     backupsEvidenceAvailable: backups.backupsEvidenceAvailable,
     backupsLoading: backups.backupsLoading,
     clearSession,
+    clearTunnelPlanEvidence: topology.clearTunnelPlanEvidence,
     clientKeyRevocations: access.clientKeyRevocations,
     clearOperatorTotp: access.clearOperatorTotp,
     cloneConfigurationPreset: inventory.cloneConfigurationPreset,

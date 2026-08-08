@@ -10,8 +10,14 @@ use vpsman_common::{
 };
 
 use crate::{
-    model::{NetworkObservationTrendView, NetworkObservationView, TunnelPlanView},
+    internal_operator::persisted_actor_id,
+    model::{
+        AuditLogView, AuthContext, NetworkObservationTrendView, NetworkObservationView,
+        TunnelPlanEvidenceClearResult, TunnelPlanView,
+    },
     repository::Repository,
+    repository_network::network_audit_metadata,
+    unix_now,
     util::compare_timestamps_desc,
 };
 
@@ -108,6 +114,171 @@ impl NetworkObservationFilter {
 }
 
 impl Repository {
+    pub(crate) async fn clear_tunnel_plan_evidence(
+        &self,
+        targets: &[(Uuid, i64)],
+        operator: &AuthContext,
+    ) -> Result<Vec<TunnelPlanEvidenceClearResult>> {
+        anyhow::ensure!(!targets.is_empty(), "tunnel_plan_evidence_targets_required");
+        anyhow::ensure!(
+            targets.len() <= 1_000,
+            "tunnel_plan_evidence_target_limit_exceeded"
+        );
+        let selected_ids = targets
+            .iter()
+            .map(|(plan_id, _)| *plan_id)
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            selected_ids.len() == targets.len(),
+            "tunnel_plan_evidence_target_duplicate"
+        );
+
+        match self {
+            Self::Memory(memory) => {
+                let plans = memory.tunnel_plans.read().await;
+                let mut reviewed_plans = HashMap::new();
+                for (plan_id, expected_revision) in targets {
+                    let plan = plans
+                        .iter()
+                        .find(|plan| plan.id == *plan_id && plan.deleted_at.is_none())
+                        .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+                    anyhow::ensure!(
+                        plan.revision == *expected_revision,
+                        "tunnel_plan_snapshot_stale"
+                    );
+                    reviewed_plans.insert(*plan_id, (plan.name.clone(), plan.revision));
+                }
+
+                let mut cleared_by_plan = targets
+                    .iter()
+                    .map(|(plan_id, _)| (*plan_id, 0_u64))
+                    .collect::<HashMap<_, _>>();
+                let mut observations = memory.network_observations.write().await;
+                observations.retain(|observation| {
+                    let Some(plan_id) = observation
+                        .plan_id
+                        .filter(|plan_id| selected_ids.contains(plan_id))
+                    else {
+                        return true;
+                    };
+                    *cleared_by_plan
+                        .get_mut(&plan_id)
+                        .expect("selected observation plan has a clear counter") += 1;
+                    false
+                });
+                drop(observations);
+
+                let results = targets
+                    .iter()
+                    .map(|(plan_id, _)| {
+                        let (name, reviewed_revision) = &reviewed_plans[plan_id];
+                        TunnelPlanEvidenceClearResult {
+                            plan_id: *plan_id,
+                            name: name.clone(),
+                            reviewed_revision: *reviewed_revision,
+                            cleared_observation_count: cleared_by_plan[plan_id],
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                memory
+                    .audits
+                    .write()
+                    .await
+                    .push(tunnel_plan_evidence_clear_audit(&results, operator));
+                Ok(results)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let plan_ids = targets
+                    .iter()
+                    .map(|(plan_id, _)| *plan_id)
+                    .collect::<Vec<_>>();
+                let locked = sqlx::query(
+                    r#"
+                    SELECT id, name, revision
+                    FROM tunnel_plans
+                    WHERE id = ANY($1::uuid[])
+                      AND deleted_at IS NULL
+                    ORDER BY id
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(&plan_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(locked.len() == targets.len(), "tunnel_plan_not_found");
+                let revisions = locked
+                    .iter()
+                    .map(|row| {
+                        Ok((
+                            row.try_get("id")?,
+                            (row.try_get("name")?, row.try_get("revision")?),
+                        ))
+                    })
+                    .collect::<Result<HashMap<Uuid, (String, i64)>>>()?;
+                for (plan_id, expected_revision) in targets {
+                    anyhow::ensure!(
+                        revisions
+                            .get(plan_id)
+                            .is_some_and(|(_, revision)| revision == expected_revision),
+                        "tunnel_plan_snapshot_stale"
+                    );
+                }
+
+                let rows = sqlx::query(
+                    r#"
+                    WITH deleted AS (
+                        DELETE FROM network_observations
+                        WHERE plan_id = ANY($1::uuid[])
+                        RETURNING plan_id
+                    )
+                    SELECT plan_id, COUNT(*)::bigint AS cleared_count
+                    FROM deleted
+                    GROUP BY plan_id
+                    "#,
+                )
+                .bind(&plan_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+                let cleared_by_plan = rows
+                    .iter()
+                    .map(|row| {
+                        let count = row.try_get::<i64, _>("cleared_count")?;
+                        Ok((row.try_get("plan_id")?, u64::try_from(count)?))
+                    })
+                    .collect::<Result<HashMap<Uuid, u64>>>()?;
+                let results = targets
+                    .iter()
+                    .map(|(plan_id, _)| {
+                        let (name, reviewed_revision) = &revisions[plan_id];
+                        TunnelPlanEvidenceClearResult {
+                            plan_id: *plan_id,
+                            name: name.clone(),
+                            reviewed_revision: *reviewed_revision,
+                            cleared_observation_count: *cleared_by_plan.get(plan_id).unwrap_or(&0),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let audit = tunnel_plan_evidence_clear_audit(&results, operator);
+                sqlx::query(
+                    r#"
+                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    "#,
+                )
+                .bind(audit.id)
+                .bind(audit.actor_id)
+                .bind(&audit.action)
+                .bind(&audit.target)
+                .bind(&audit.metadata)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(results)
+            }
+        }
+    }
+
     pub(crate) async fn list_network_observations(
         &self,
         limit: i64,
@@ -1165,6 +1336,43 @@ fn compare_network_observations_desc(
 ) -> std::cmp::Ordering {
     compare_timestamps_desc(&left.observed_at, &right.observed_at)
         .then_with(|| right.id.cmp(&left.id))
+}
+
+fn tunnel_plan_evidence_clear_audit(
+    results: &[TunnelPlanEvidenceClearResult],
+    operator: &AuthContext,
+) -> AuditLogView {
+    let plan_ids = results
+        .iter()
+        .map(|result| result.plan_id)
+        .collect::<Vec<_>>();
+    let cleared_observation_count = results
+        .iter()
+        .map(|result| result.cleared_observation_count)
+        .sum::<u64>();
+    let target = if let [plan_id] = plan_ids.as_slice() {
+        format!("tunnel_plan:{plan_id}")
+    } else {
+        "tunnel_plans:bulk".to_string()
+    };
+    AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: persisted_actor_id(operator),
+        action: "network.tunnel_plan_evidence_cleared".to_string(),
+        target,
+        command_hash: None,
+        metadata: network_audit_metadata(
+            serde_json::json!({
+                "plan_ids": plan_ids,
+                "plan_count": results.len(),
+                "cleared_observation_count": cleared_observation_count,
+                "plans": results,
+            }),
+            operator,
+            "succeeded",
+        ),
+        created_at: unix_now().to_string(),
+    }
 }
 
 #[cfg(test)]

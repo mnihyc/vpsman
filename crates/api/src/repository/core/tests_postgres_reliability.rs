@@ -244,6 +244,137 @@ async fn postgres_audit_schema_rejects_non_object_metadata() {
 }
 
 #[tokio::test]
+async fn postgres_tunnel_evidence_clear_is_scoped_counted_and_audited_atomically() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["evidence-clear-left", "evidence-clear-right"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut selected_input = postgres_alert_test_tunnel_input();
+    selected_input.name = "evidence-clear-selected".to_string();
+    selected_input.interface_name = "tunclr0".to_string();
+    selected_input.runtime_control = Default::default();
+    selected_input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    selected_input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    selected_input.left_client_id = "evidence-clear-left".to_string();
+    selected_input.right_client_id = "evidence-clear-right".to_string();
+    selected_input.address_pool_cidr = "10.73.0.0/30".to_string();
+    selected_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.73.0.0".to_string(),
+        right: "10.73.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let selected = db
+        .repo
+        .record_tunnel_plan(
+            &selected_input,
+            &plan_tunnel(&selected_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let mut retained_input = selected_input.clone();
+    retained_input.name = "evidence-clear-retained".to_string();
+    retained_input.interface_name = "tunclr1".to_string();
+    retained_input.address_pool_cidr = "10.73.0.4/30".to_string();
+    retained_input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.73.0.4".to_string(),
+        right: "10.73.0.5".to_string(),
+        prefix_len: 31,
+    });
+    let retained = db
+        .repo
+        .record_tunnel_plan(
+            &retained_input,
+            &plan_tunnel(&retained_input).unwrap(),
+            true,
+            &operator,
+        )
+        .await
+        .unwrap();
+    for (plan, kind, source) in [
+        (&selected, "network_status", "manual"),
+        (&selected, "tunnel_reachability", "automatic"),
+        (&selected, "tunnel_reachability", "manual"),
+        (&selected, "network_speed_test", "manual"),
+        (&retained, "network_status", "automatic"),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO network_observations (
+                id, client_id, kind, source, plan_id, topology_identity_hash,
+                plan_name, interface_name, peer_client_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(&plan.left_client_id)
+        .bind(kind)
+        .bind(source)
+        .bind(plan.id)
+        .bind(crate::repository_network_observations::topology_identity_hash_for_plan(plan))
+        .bind(&plan.name)
+        .bind(&plan.plan.interface_name)
+        .bind(&plan.right_client_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let results = db
+        .repo
+        .clear_tunnel_plan_evidence(&[(selected.id, selected.revision)], &operator)
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].plan_id, selected.id);
+    assert_eq!(results[0].name, selected.name);
+    assert_eq!(results[0].reviewed_revision, selected.revision);
+    assert_eq!(results[0].cleared_observation_count, 4);
+    let counts = sqlx::query_as::<_, (Uuid, i64)>(
+        r#"
+        SELECT plan_id, count(*)::bigint
+        FROM network_observations
+        GROUP BY plan_id
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, vec![(retained.id, 1)]);
+    let audit = sqlx::query(
+        r#"
+        SELECT target, metadata
+        FROM audit_logs
+        WHERE action = 'network.tunnel_plan_evidence_cleared'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit.try_get::<String, _>("target").unwrap(),
+        format!("tunnel_plan:{}", selected.id)
+    );
+    let metadata = audit.try_get::<serde_json::Value, _>("metadata").unwrap();
+    assert_eq!(metadata["cleared_observation_count"], 4);
+    assert_eq!(metadata["plans"][0]["reviewed_revision"], selected.revision);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM tunnel_plans WHERE id = $1")
+            .bind(selected.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        selected.revision
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_rollout_reconciler_isolates_missing_current_batch_assignment() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
