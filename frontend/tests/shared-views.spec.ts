@@ -715,10 +715,16 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   await expect(detail.getByText("None", { exact: true })).toBeVisible();
   await expect(
     detail.getByText("RAM", { exact: true }).locator(".."),
-  ).toHaveAttribute("title", /RAM: 25\.0% \(3\.7 GiB\).*used-memory/);
+  ).toHaveAttribute(
+    "title",
+    "Average used-memory percentage and maximum reported RAM capacity",
+  );
   await expect(
     detail.getByText("Reported filesystems", { exact: true }).locator(".."),
-  ).toHaveAttribute("title", /40\.0% \(47 GiB\).*filesystem capacity/);
+  ).toHaveAttribute(
+    "title",
+    "Average used-disk percentage and maximum aggregate filesystem capacity",
+  );
   await expect(detail.locator(".publicMonitoringDetailHeader")).toContainText(
     "Online · Warning · Updated just now · Read-only history",
   );

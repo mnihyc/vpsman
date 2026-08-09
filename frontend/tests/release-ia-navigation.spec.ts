@@ -2186,9 +2186,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(
     edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
   ).toContainText("· Total · 80.3%");
-  await expect(
-    edgeCard.locator(".vpsMonitorTraffic > small"),
-  ).not.toHaveAttribute("title", /\S/);
+  await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveCount(0);
   const trafficHeading = edgeCard.locator(
     ".vpsMonitorTraffic .vpsMonitorRowHeading",
   );
@@ -2270,6 +2268,12 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(edgeCard).toContainText("1m load");
   await expect(edgeCard).not.toContainText(/No (recent|continuous) history/);
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
+  await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toContainText(
+    /↓ .+ · ↑ /,
+  );
+  await expect(
+    edgeCard.locator(".vpsMonitorTraffic > small"),
+  ).not.toHaveAttribute("title", /\S/);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
   for (const index of [0, 1, 2]) {
     await expect(

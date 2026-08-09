@@ -89,9 +89,43 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       { exact: true },
     ),
   ).toHaveCount(0);
-  await expectEqualCompactPingHeight(
+  for (const name of [
+    "Traffic quota exceeded",
+    "RX quota · Annual",
+    "Accumulated archive",
+  ]) {
+    await expect(
+      cardNamed(privateGrid, name).locator(".vpsMonitorTraffic > small"),
+    ).toHaveCount(0);
+  }
+  await expect(
+    cardNamed(privateGrid, "Accumulated archive").locator(
+      ".vpsMonitorTrafficTrack",
+    ),
+  ).toBeVisible();
+  await expect(
+    cardNamed(privateGrid, "Accumulated archive").locator(
+      ".vpsMonitorTraffic.contextual",
+    ),
+  ).toBeVisible();
+  await expectEqualRowHeight(
+    cardNamed(privateGrid, "Accumulated archive").locator(".vpsMonitorTraffic"),
+    cardNamed(privateGrid, "TX quota · Unlimited").locator(
+      ".vpsMonitorTraffic",
+    ),
+  );
+  await expectHeadingSidePortSpeed(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(
+      ".vpsMonitorTraffic",
+    ),
+  );
+  await expectEqualRowHeight(
     cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
     cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+  );
+  await expectEqualRowHeight(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "RX quota · Annual").locator(".vpsMonitorPing"),
   );
   await capture(page, "private-monitor-compact.png");
 
@@ -119,6 +153,15 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       { exact: true },
     ),
   ).toBeVisible();
+  await expectEqualRowHeight(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+  );
+  await expectHeadingSidePortSpeed(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(
+      ".vpsMonitorTraffic",
+    ),
+  );
   await capture(page, "private-monitor-comfortable.png");
 
   await page.setViewportSize({ width: 1440, height: 1200 });
@@ -172,11 +215,53 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     "RX quota · Annual",
   ).locator(".publicMonitoringPing > small:not(.vpsMonitorRowHeading)");
   await expect(sharedRxPingDiagnostic).toHaveCount(0);
-  await expectEqualCompactPingHeight(
+  for (const name of [
+    "Traffic quota exceeded",
+    "RX quota · Annual",
+    "Accumulated archive",
+  ]) {
+    await expect(
+      publicCardNamed(sharedGrid, name).locator(
+        ".publicMonitoringTraffic > small",
+      ),
+    ).toHaveCount(0);
+  }
+  await expect(
+    publicCardNamed(sharedGrid, "Accumulated archive").locator(
+      ".publicMonitoringTraffic .vpsMonitorMetricTrack",
+    ),
+  ).toBeVisible();
+  await expect(
+    publicCardNamed(sharedGrid, "Accumulated archive").locator(
+      ".publicMonitoringTraffic.contextual",
+    ),
+  ).toBeVisible();
+  await expectEqualRowHeight(
+    publicCardNamed(sharedGrid, "Accumulated archive").locator(
+      ".publicMonitoringTraffic",
+    ),
+    publicCardNamed(sharedGrid, "TX quota · Unlimited").locator(
+      ".publicMonitoringTraffic",
+    ),
+  );
+  await expectHeadingSidePortSpeed(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringTraffic",
+    ),
+  );
+  await expectEqualRowHeight(
     publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
       ".publicMonitoringPing",
     ),
     publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+  );
+  await expectEqualRowHeight(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "RX quota · Annual").locator(
       ".publicMonitoringPing",
     ),
   );
@@ -196,6 +281,11 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   ).toHaveCount(0);
   await expect(sharedRxPingDiagnostic).toHaveText("Primary Ping degraded");
   await expect(sharedRxPingDiagnostic).toBeVisible();
+  await expectHeadingSidePortSpeed(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringTraffic",
+    ),
+  );
   await capture(page, "shared-monitor-billing-visible-comfortable.png");
 
   const detailCard = page.getByRole("link", {
@@ -395,7 +485,7 @@ async function capture(page: Page, filename: string) {
   });
 }
 
-async function expectEqualCompactPingHeight(
+async function expectEqualRowHeight(
   configured: ReturnType<Page["locator"]>,
   unconfigured: ReturnType<Page["locator"]>,
 ) {
@@ -407,6 +497,35 @@ async function expectEqualCompactPingHeight(
       return Math.abs(configuredBox.height - unconfiguredBox.height);
     })
     .toBeLessThanOrEqual(1);
+}
+
+async function expectHeadingSidePortSpeed(row: ReturnType<Page["locator"]>) {
+  await expect
+    .poll(async () =>
+      row.evaluate((element) => {
+        const heading = element.querySelector<HTMLElement>(
+          ".vpsMonitorRowHeading",
+        );
+        const speed = element.querySelector<HTMLElement>(
+          ".publicMonitoringPortSpeed",
+        );
+        const value = element.querySelector<HTMLElement>(
+          ".vpsMonitorRowEvidence > strong",
+        );
+        if (!heading || !speed || !value) return false;
+        const headingBox = heading.getBoundingClientRect();
+        const speedBox = speed.getBoundingClientRect();
+        const valueBox = value.getBoundingClientRect();
+        return (
+          Math.abs(
+            speedBox.top +
+              speedBox.height / 2 -
+              (headingBox.top + headingBox.height / 2),
+          ) <= 2 && valueBox.top >= headingBox.bottom
+        );
+      }),
+    )
+    .toBe(true);
 }
 
 async function expectExceededTraffic(traffic: ReturnType<Page["locator"]>) {

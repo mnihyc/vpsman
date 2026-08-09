@@ -1036,6 +1036,10 @@ export function VpsMonitorCard({
         : formatTrafficReset(traffic.cycle_end)
       : null;
   const trafficHeadingContext = density === "compact" ? trafficReset : null;
+  const trafficUsesSeparatedRows =
+    trafficConfigured &&
+    traffic !== undefined &&
+    (density === "compact" || portSpeed !== undefined);
   const trafficHeading = `Traffic${trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}`;
   const trafficDetail =
     trafficConfigured && traffic
@@ -1251,7 +1255,7 @@ export function VpsMonitorCard({
         </span>
       </div>
       <div
-        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficUnconfigured ? " unconfigured" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
+        className={`vpsMonitorTraffic${trafficUsesSeparatedRows ? " contextual" : ""}${trafficUnconfigured ? " unconfigured" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
         title={trafficRowTitle}
       >
         <span>
@@ -1303,15 +1307,13 @@ export function VpsMonitorCard({
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
         </span>
-        {trafficConfigured && traffic ? (
+        {density === "comfortable" && trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
           >
             ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
             {formatBytes(traffic.diagnostic_tx_bytes)}
-            {trafficDetail && (density === "comfortable" || trafficWarning > 0)
-              ? ` · ${trafficDetail}`
-              : ""}
+            {trafficDetail ? ` · ${trafficDetail}` : ""}
           </small>
         ) : null}
       </div>

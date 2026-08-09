@@ -2614,7 +2614,7 @@ span.vpsMonitorSparkline.empty {
 
 .unlimitedTrafficTrack {
   border: 1px solid var(--primary-border);
-  background: var(--primary-soft);
+  background: var(--surface);
   box-shadow: inset 0 1px 2px var(--primary-border);
   box-sizing: border-box;
 }
@@ -2624,7 +2624,7 @@ span.vpsMonitorSparkline.empty {
   width: 100% !important;
   background: repeating-linear-gradient(
     90deg,
-    var(--primary-selected) 0 11px,
+    color-mix(in srgb, var(--primary) 30%, var(--surface)) 0 11px,
     transparent 11px 15px
   ) !important;
 }
@@ -2667,7 +2667,7 @@ span.vpsMonitorSparkline.empty {
   height: 10px;
 }
 
-.vpsMonitorCard.compact .vpsMonitorPingVisual > span.vpsMonitorSparkline.empty {
+.vpsMonitorPingVisual > span.vpsMonitorSparkline.empty {
   height: 10px;
 }
 
@@ -2703,28 +2703,24 @@ span.vpsMonitorSparkline.empty {
   padding: 6px 0 0;
 }
 
-.vpsMonitorCard.compact .vpsMonitorTraffic.contextual > span:first-child {
+.vpsMonitorTraffic.contextual > span:first-child {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px;
 }
 
-.vpsMonitorCard.compact .vpsMonitorTraffic.contextual .vpsMonitorRowEvidence {
+.vpsMonitorTraffic.contextual .vpsMonitorRowEvidence {
   display: contents;
 }
 
-.vpsMonitorCard.compact
-  .vpsMonitorTraffic.contextual
+.vpsMonitorTraffic.contextual
   .vpsMonitorRowEvidence
   > .publicMonitoringPortSpeed {
   grid-column: 2;
   grid-row: 1;
 }
 
-.vpsMonitorCard.compact
-  .vpsMonitorTraffic.contextual
-  .vpsMonitorRowEvidence
-  > strong {
+.vpsMonitorTraffic.contextual .vpsMonitorRowEvidence > strong {
   grid-column: 1 / -1;
   grid-row: 2;
   text-align: right;
@@ -2746,13 +2742,15 @@ span.vpsMonitorSparkline.empty {
   padding: 6px;
 }
 
+.vpsMonitorCard.compact .vpsMonitorPing.failed,
+.vpsMonitorCard.compact .vpsMonitorPing.down,
+.vpsMonitorCard.compact .vpsMonitorPing.error {
+  padding: 2px 6px 3px;
+}
+
 .vpsMonitorCard.compact .vpsMonitorTraffic > small,
 .vpsMonitorCard.compact .vpsMonitorPing > small {
   display: none;
-}
-
-.vpsMonitorCard.compact .vpsMonitorTraffic > small.exceptionEvidence {
-  display: block;
 }
 
 .vpsMonitoringDetailPanel {
@@ -3122,32 +3120,24 @@ span.vpsMonitorSparkline.empty {
   font-size: 11px;
 }
 
-.publicMonitoringCard.compact
-  .publicMonitoringTraffic.contextual
-  .publicMonitoringTrafficHeading {
+.publicMonitoringTraffic.contextual .publicMonitoringTrafficHeading {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px;
 }
 
-.publicMonitoringCard.compact
-  .publicMonitoringTraffic.contextual
-  .vpsMonitorRowEvidence {
+.publicMonitoringTraffic.contextual .vpsMonitorRowEvidence {
   display: contents;
 }
 
-.publicMonitoringCard.compact
-  .publicMonitoringTraffic.contextual
+.publicMonitoringTraffic.contextual
   .vpsMonitorRowEvidence
   > .publicMonitoringPortSpeed {
   grid-column: 2;
   grid-row: 1;
 }
 
-.publicMonitoringCard.compact
-  .publicMonitoringTraffic.contextual
-  .vpsMonitorRowEvidence
-  > strong {
+.publicMonitoringTraffic.contextual .vpsMonitorRowEvidence > strong {
   grid-column: 1 / -1;
   grid-row: 2;
   text-align: right;
@@ -3202,7 +3192,7 @@ span.vpsMonitorSparkline.empty {
 
 .publicMonitoringTraffic.warning:not(.overQuota),
 .publicMonitoringTraffic.unconfigured,
-.publicMonitoringPing.warning:not(.failed):not(.down):not(.error) {
+.publicMonitoringPing.warning {
   border: 1px solid var(--warning-border);
   border-radius: 8px;
   background: var(--warning-soft);
@@ -3255,15 +3245,18 @@ span.vpsMonitorSparkline.empty {
   color: var(--danger);
 }
 
+.publicMonitoringCard.compact .publicMonitoringPing.warning,
+.publicMonitoringCard.compact .publicMonitoringPing.failed,
+.publicMonitoringCard.compact .publicMonitoringPing.down,
+.publicMonitoringCard.compact .publicMonitoringPing.error {
+  padding: 2px 6px 3px;
+}
+
 .publicMonitoringCard.compact .publicMonitoringTraffic > small,
 .publicMonitoringCard.compact
   .publicMonitoringPing
   > small:not(.vpsMonitorRowHeading) {
   display: none;
-}
-
-.publicMonitoringCard.compact .publicMonitoringTraffic.warning > small {
-  display: block;
 }
 
 .publicMonitoringWarnings {

@@ -1168,7 +1168,9 @@ function PublicMonitoringCardView({
         </div>
       ) : null}
 
-      {visibility?.traffic ? <PublicTrafficRow traffic={card.traffic} /> : null}
+      {visibility?.traffic ? (
+        <PublicTrafficRow density={density} traffic={card.traffic} />
+      ) : null}
 
       {visibility?.ping ? (
         <PublicPingRow
@@ -1259,7 +1261,13 @@ function PublicFact({
   );
 }
 
-function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
+function PublicTrafficRow({
+  density,
+  traffic,
+}: {
+  density: Density;
+  traffic?: PublicTrafficMetric;
+}) {
   if (!traffic) {
     return (
       <div
@@ -1302,6 +1310,8 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
         ? formatTrafficReset(traffic.cycle_end)
         : null
     : null;
+  const trafficUsesSeparatedRows =
+    traffic.configured && (density === "compact" || portSpeed !== undefined);
   const trafficDetail = traffic.configured
     ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
     : "Authoritative traffic accounting is not configured for this VPS.";
@@ -1312,7 +1322,7 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
   return (
     <div
       aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
-      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${resetContext ? " contextual" : ""}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
+      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${trafficUsesSeparatedRows ? " contextual" : ""}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
       title={trafficRowTitle}
     >
       <div className="publicMonitoringTrafficHeading">
@@ -1379,7 +1389,7 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
           <span />
         </span>
       )}
-      <small>{trafficDetail}</small>
+      {density === "comfortable" ? <small>{trafficDetail}</small> : null}
     </div>
   );
 }
