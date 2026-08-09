@@ -213,7 +213,7 @@ test("keeps action feedback in dedicated local containers", () => {
     /const status\s*=\s*visibleDispatchProgress/,
   );
   expect(jobDispatchPanel).toMatch(
-    /\{!dispatchPromptOpen\s*&&\s*visibleDispatchProgress\s*&&/,
+    /\{!dispatchPromptOpen\s*&&[\s\S]{0,80}visibleDispatchProgress\s*&&/,
   );
 
   const topologyNetworkTests = source(

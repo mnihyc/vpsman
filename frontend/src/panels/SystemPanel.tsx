@@ -1995,12 +1995,17 @@ export function SystemUsersPanel({
                 <input
                   aria-label="Operator username"
                   autoComplete="username"
+                  data-tooltip-disabled-reason="Username is immutable after an operator account is created."
                   disabled={Boolean(selectedOperator)}
                   onChange={(event) => {
                     invalidateUserReview();
                     setDraftUsername(event.target.value);
                   }}
-                  title={operatorHelpText.username}
+                  title={
+                    selectedOperator
+                      ? "Username is immutable after an operator account is created."
+                      : operatorHelpText.username
+                  }
                   ref={operatorUsernameRef}
                   value={draftUsername}
                 />
@@ -2017,6 +2022,11 @@ export function SystemUsersPanel({
                 <input
                   aria-label="Operator password"
                   autoComplete="new-password"
+                  data-tooltip-disabled-reason={operatorFieldDisabledReason(
+                    canManageUsers,
+                    editingDeleted,
+                  )}
+                  data-tooltip-sensitive="true"
                   disabled={!canManageUsers || editingDeleted}
                   minLength={12}
                   onChange={(event) => {
@@ -2039,6 +2049,10 @@ export function SystemUsersPanel({
                 <FieldLabel help={operatorHelpText.role} label="Role" />
                 <select
                   aria-label="Operator role"
+                  data-tooltip-disabled-reason={operatorFieldDisabledReason(
+                    canManageUsers,
+                    editingDeleted,
+                  )}
                   disabled={!canManageUsers || editingDeleted}
                   onChange={(event) => {
                     invalidateUserReview();
@@ -2067,6 +2081,10 @@ export function SystemUsersPanel({
                 />
                 <input
                   aria-label="Session refresh TTL days"
+                  data-tooltip-disabled-reason={operatorFieldDisabledReason(
+                    canManageUsers,
+                    editingDeleted,
+                  )}
                   disabled={!canManageUsers || editingDeleted}
                   max={3650}
                   min={1}
@@ -2096,6 +2114,10 @@ export function SystemUsersPanel({
                 <FieldLabel help={operatorHelpText.scopes} label="Scopes" />
                 <textarea
                   aria-label="Operator scopes"
+                  data-tooltip-disabled-reason={operatorFieldDisabledReason(
+                    canManageUsers,
+                    editingDeleted,
+                  )}
                   disabled={!canManageUsers || editingDeleted}
                   onChange={(event) => {
                     invalidateUserReview();
@@ -2115,6 +2137,10 @@ export function SystemUsersPanel({
                 {commonScopeOptions.map((scope) => (
                   <button
                     className="tagChip"
+                    data-tooltip-disabled-reason={operatorFieldDisabledReason(
+                      canManageUsers,
+                      editingDeleted,
+                    )}
                     disabled={!canManageUsers || editingDeleted}
                     key={scope}
                     onClick={() => {
@@ -3475,7 +3501,12 @@ function AuthEventDetailGrid({ event }: { event: OperatorAuthEventRecord }) {
       </span>
       <span>
         <strong>Operator ID</strong>
-        <span className="monoValue">{event.operator_id ?? "-"}</span>
+        <span
+          className="monoValue"
+          data-tooltip-empty-reason="This authentication event is not linked to an operator record."
+        >
+          {event.operator_id ?? "-"}
+        </span>
       </span>
       <span>
         <strong>Result</strong>
@@ -3483,11 +3514,15 @@ function AuthEventDetailGrid({ event }: { event: OperatorAuthEventRecord }) {
       </span>
       <span>
         <strong>Reason</strong>
-        <span>{event.reason ?? "-"}</span>
+        <span data-tooltip-empty-reason="No authentication reason was recorded for this event.">
+          {event.reason ?? "-"}
+        </span>
       </span>
       <span>
         <strong>Remote IP</strong>
-        <span>{event.remote_ip ?? "-"}</span>
+        <span data-tooltip-empty-reason="No remote IP address was recorded for this authentication event.">
+          {event.remote_ip ?? "-"}
+        </span>
       </span>
       <span>
         <strong>Risk</strong>
@@ -3503,11 +3538,18 @@ function AuthEventDetailGrid({ event }: { event: OperatorAuthEventRecord }) {
       </span>
       <span>
         <strong>Session</strong>
-        <span className="monoValue">{event.session_id ?? "-"}</span>
+        <span
+          className="monoValue"
+          data-tooltip-empty-reason="This authentication event is not linked to a bearer session."
+        >
+          {event.session_id ?? "-"}
+        </span>
       </span>
       <span>
         <strong>User agent</strong>
-        <span>{event.user_agent ?? "-"}</span>
+        <span data-tooltip-empty-reason="No browser or client user agent was recorded for this authentication event.">
+          {event.user_agent ?? "-"}
+        </span>
       </span>
     </div>
   );
@@ -4383,6 +4425,7 @@ function SystemDashboardPanel({
             </div>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason="System overview data is already refreshing."
               disabled={loading}
               onClick={onRefresh}
               type="button"
@@ -5064,6 +5107,7 @@ function SystemCapacityPanel({
             </div>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason="System capacity data is already refreshing."
               disabled={loading}
               onClick={onRefresh}
               type="button"
@@ -6033,6 +6077,7 @@ function SystemConfigPanel({
                   <textarea
                     aria-label="Suite config TOML"
                     className="systemConfigToml"
+                    data-tooltip-sensitive="true"
                     onChange={(event) => {
                       validationRequestId.current += 1;
                       setConfigError(null);
@@ -6230,7 +6275,10 @@ function SystemConfigPanel({
                   <div className="systemDiffPreview">
                     <div>
                       <h3>Current redacted</h3>
-                      <pre className="jsonPreview compactJsonPreview">
+                      <pre
+                        className="jsonPreview compactJsonPreview"
+                        data-value-tooltip-skip="true"
+                      >
                         {formatJson(
                           config?.redacted ?? validation?.old_redacted ?? null,
                         )}
@@ -6238,7 +6286,10 @@ function SystemConfigPanel({
                     </div>
                     <div>
                       <h3>Draft redacted</h3>
-                      <pre className="jsonPreview compactJsonPreview">
+                      <pre
+                        className="jsonPreview compactJsonPreview"
+                        data-value-tooltip-skip="true"
+                      >
                         {formatJson(validation?.redacted ?? null)}
                       </pre>
                     </div>
@@ -6283,7 +6334,8 @@ function SystemConfigPanel({
 }
 
 type ParsedTomlDraft =
-  { ok: true; table: TomlTable } | { ok: false; error: string };
+  | { ok: true; table: TomlTable }
+  | { ok: false; error: string };
 
 function SystemConfigStatusItem({
   icon,
@@ -6396,6 +6448,11 @@ function ConfigFieldControl({
   const defaultLabel = formatConfigValue(defaultValue);
   const changed = !configValuesEqual(draftValue, currentValue);
   const impact = configFieldImpact(field.path, activeValidation);
+  const urlValueProtected = configFieldValueIsUrl(field, [
+    currentValue,
+    defaultValue,
+    draftValue,
+  ]);
   const controlId = `suite-config-field-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
     <div className={`systemConfigFieldRow ${changed ? "changed" : ""}`}>
@@ -6407,7 +6464,15 @@ function ConfigFieldControl({
         </label>
         <p>{field.help}</p>
         <details className="systemConfigFieldMeta" open={changed}>
-          <summary>
+          <summary
+            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
+            data-value-tooltip-skip={urlValueProtected ? "true" : undefined}
+            title={
+              urlValueProtected
+                ? "Loaded and inherited endpoint values are shown here; exact URL content is excluded from tooltips."
+                : undefined
+            }
+          >
             <strong>{changed ? "Changed metadata" : "Field metadata"}</strong>
             <span>
               Current {currentLabel} · Default {defaultLabel} ·{" "}
@@ -6417,11 +6482,39 @@ function ConfigFieldControl({
           <dl>
             <div>
               <dt>Current</dt>
-              <dd title={currentLabel}>{currentLabel}</dd>
+              <dd
+                data-tooltip-sensitive={
+                  urlValueProtected ? "true" : undefined
+                }
+                data-value-tooltip-skip={
+                  urlValueProtected ? "true" : undefined
+                }
+                title={
+                  urlValueProtected
+                    ? "Loaded endpoint value; exact URL content is excluded from tooltips."
+                    : currentLabel
+                }
+              >
+                {currentLabel}
+              </dd>
             </div>
             <div>
               <dt>Default</dt>
-              <dd title={defaultLabel}>{defaultLabel}</dd>
+              <dd
+                data-tooltip-sensitive={
+                  urlValueProtected ? "true" : undefined
+                }
+                data-value-tooltip-skip={
+                  urlValueProtected ? "true" : undefined
+                }
+                title={
+                  urlValueProtected
+                    ? "Inherited endpoint default; exact URL content is excluded from tooltips."
+                    : defaultLabel
+                }
+              >
+                {defaultLabel}
+              </dd>
             </div>
             <div>
               <dt>Validation</dt>
@@ -6442,6 +6535,15 @@ function ConfigFieldControl({
             <input
               aria-label={field.label}
               checked={draftValue === true}
+              data-tooltip-disabled-reason="Form fields are unavailable until the Suite Config TOML parses successfully."
+              data-tooltip-sensitive={
+                configFieldValueIsSensitive(field) || urlValueProtected
+                  ? "true"
+                  : undefined
+              }
+              data-value-tooltip-skip={
+                urlValueProtected ? "true" : undefined
+              }
               disabled={!parsedDraft.ok}
               id={controlId}
               onChange={(event) => onChange(field.path, event.target.checked)}
@@ -6453,6 +6555,15 @@ function ConfigFieldControl({
           <input
             aria-label={field.label}
             aria-describedby={`${controlId}-meta`}
+            data-tooltip-disabled-reason="Form fields are unavailable until the Suite Config TOML parses successfully."
+            data-tooltip-sensitive={
+              configFieldValueIsSensitive(field) || urlValueProtected
+                ? "true"
+                : undefined
+            }
+            data-value-tooltip-skip={
+              urlValueProtected ? "true" : undefined
+            }
             disabled={!parsedDraft.ok}
             id={controlId}
             min={field.kind === "number" ? 0 : undefined}
@@ -6467,7 +6578,15 @@ function ConfigFieldControl({
                   : undefined,
               );
             }}
-            title={draftLabel}
+            title={
+              urlValueProtected
+                ? `${field.label} endpoint field. Exact URL content is excluded from tooltips.`
+                : configFieldValueIsSensitive(field)
+                ? undefined
+                : draftValue === undefined
+                  ? `${field.label} has no explicit value; inherited default is ${defaultLabel}.`
+                  : `${field.label}: ${draftLabel}.`
+            }
             type={field.kind === "number" ? "number" : "text"}
             value={
               field.kind === "number"
@@ -6486,11 +6605,28 @@ function ConfigFieldControl({
         <div className="systemConfigFieldActions">
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              !parsedDraft.ok
+                ? "Reset is unavailable until the Suite Config TOML parses successfully."
+                : "This field already matches the loaded value."
+            }
+            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
+            data-value-tooltip-skip={
+              urlValueProtected ? "true" : undefined
+            }
             disabled={
               !parsedDraft.ok || configValuesEqual(draftValue, currentValue)
             }
             onClick={() => onChange(field.path, currentValue)}
-            title={`Reset ${field.label} to loaded value: ${currentLabel}`}
+            title={
+              urlValueProtected
+                ? `Restore the loaded ${field.label} endpoint value. Exact URL content is excluded from tooltips.`
+                : !parsedDraft.ok
+                ? "Reset is unavailable until the Suite Config TOML parses successfully."
+                : configValuesEqual(draftValue, currentValue)
+                  ? "This field already matches the loaded value."
+                  : `Reset ${field.label} to the loaded value${currentValue === undefined ? " (no explicit value)" : `: ${currentLabel}`}.`
+            }
             type="button"
           >
             <TimerReset size={14} />
@@ -6498,9 +6634,26 @@ function ConfigFieldControl({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              !parsedDraft.ok
+                ? "Default inheritance is unavailable until the Suite Config TOML parses successfully."
+                : "This field already inherits its default value."
+            }
+            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
+            data-value-tooltip-skip={
+              urlValueProtected ? "true" : undefined
+            }
             disabled={!parsedDraft.ok || draftValue === undefined}
             onClick={() => onChange(field.path, undefined)}
-            title={`Use inherited default for ${field.label}: ${defaultLabel}. Removes the explicit value.`}
+            title={
+              urlValueProtected
+                ? `Remove the explicit ${field.label} endpoint value and inherit its configured default. Exact URL content is excluded from tooltips.`
+                : !parsedDraft.ok
+                ? "Default inheritance is unavailable until the Suite Config TOML parses successfully."
+                : draftValue === undefined
+                  ? "This field already inherits its default value."
+                  : `Use inherited default for ${field.label}: ${defaultLabel}. Removes the explicit value.`
+            }
             type="button"
           >
             <SlidersHorizontal size={14} />
@@ -6509,6 +6662,41 @@ function ConfigFieldControl({
         </div>
       </div>
     </div>
+  );
+}
+
+function operatorFieldDisabledReason(
+  canManageUsers: boolean,
+  editingDeleted: boolean,
+) {
+  if (!canManageUsers) {
+    return "Operator fields can be changed only by an admin operator.";
+  }
+  if (editingDeleted) {
+    return "Deleted operator records are read-only.";
+  }
+  return "This operator field is available.";
+}
+
+function configFieldValueIsSensitive(field: ConfigFieldSpec) {
+  return (
+    !field.path.endsWith("_file") &&
+    /password|passphrase|secret|token|private|verifier|salt|api[_-]?key/i.test(
+      `${field.path} ${field.label}`,
+    )
+  );
+}
+
+function configFieldValueIsUrl(field: ConfigFieldSpec, values: unknown[]) {
+  if (
+    field.path === "api.gateway_control_url" ||
+    field.path === "gateway.api_url"
+  ) {
+    return true;
+  }
+  return values.some(
+    (value) =>
+      typeof value === "string" && /\b(?:https?|wss?):\/\//i.test(value),
   );
 }
 

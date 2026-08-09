@@ -4,9 +4,11 @@ import "@xterm/xterm/css/xterm.css";
 import { App } from "./App";
 import { PublicMonitoringSharePage } from "./PublicMonitoringSharePage";
 import { parsePublicShareRouteHash } from "./publicShareRoute";
+import { useValueTooltips } from "./useValueTooltips";
 import "./styles.css";
 
 function RootRouter() {
+  useValueTooltips();
   const [shareRoute, setShareRoute] = useState(() =>
     parsePublicShareRouteHash(window.location.hash),
   );

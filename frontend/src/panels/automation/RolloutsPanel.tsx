@@ -471,6 +471,13 @@ export function RolloutsPanel({
           <div className="headerActionStack">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading
+                  ? "Rollout records are already loading"
+                  : pendingJobId
+                    ? "A rollout control action is already in progress"
+                    : undefined
+              }
               disabled={loading || Boolean(pendingJobId)}
               onClick={() => void reload()}
               title="Reload durable rollout state"
@@ -730,7 +737,7 @@ function RolloutDetail({
         cell: (target) => (
           <span
             className={`status ${jobTargetStatusBadgeClass(target.status)}`}
-            title={target.message ?? undefined}
+            title={`Rollout target status: ${readableToken(target.status)}`}
           >
             {readableToken(target.status)}
           </span>
@@ -744,7 +751,18 @@ function RolloutDetail({
       },
       {
         cell: (target) => (
-          <span className="truncateValue" title={target.message ?? undefined}>
+          <span
+            className="truncateValue"
+            data-tooltip-empty-reason={
+              target.message ? undefined : "This rollout target has no result message yet"
+            }
+            data-value-tooltip-skip="true"
+            title={
+              target.message
+                ? "Latest rollout result; exact agent content is excluded from tooltips"
+                : "This rollout target has no result message yet"
+            }
+          >
             {target.message ?? "-"}
           </span>
         ),
@@ -774,6 +792,9 @@ function RolloutDetail({
           {rollout.status === "running" && (
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending ? "A rollout control action is already in progress" : undefined
+              }
               disabled={pending}
               onClick={onPause}
               type="button"
@@ -785,6 +806,9 @@ function RolloutDetail({
           {rollout.status === "paused" && (
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending ? "A rollout control action is already in progress" : undefined
+              }
               disabled={pending}
               onClick={onResume}
               type="button"
@@ -796,6 +820,9 @@ function RolloutDetail({
           {!isTerminalRollout(rollout.status) && (
             <button
               className="dangerAction compactAction"
+              data-tooltip-disabled-reason={
+                pending ? "A rollout control action is already in progress" : undefined
+              }
               disabled={pending}
               onClick={onAbort}
               type="button"

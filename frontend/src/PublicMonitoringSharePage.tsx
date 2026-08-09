@@ -791,15 +791,13 @@ export function PublicMonitoringSharePage({
                   <strong
                     title={`Receive rate ${formatOptionalRate(fleetSnapshot.network.rxBps)}`}
                   >
-                    ↓{" "}
-                    {formatOptionalRate(fleetSnapshot.network.rxBps)}
+                    ↓ {formatOptionalRate(fleetSnapshot.network.rxBps)}
                   </strong>
                   <em
                     title={`Transmit rate ${formatOptionalRate(fleetSnapshot.network.txBps)}; ${fleetSnapshot.network.freshCount} VPSs have fresh evidence`}
                   >
-                    ↑{" "}
-                    {formatOptionalRate(fleetSnapshot.network.txBps)}{" "}
-                    · {fleetSnapshot.network.freshCount} fresh
+                    ↑ {formatOptionalRate(fleetSnapshot.network.txBps)} ·{" "}
+                    {fleetSnapshot.network.freshCount} fresh
                     {cardsComplete ? "" : " · partial"}
                   </em>
                 </span>
@@ -1659,6 +1657,7 @@ function PublicMonitoringDetailPanel({
               aria-pressed={section === "resources"}
               className={section === "resources" ? "active" : ""}
               onClick={() => setSection("resources")}
+              title={`Show retained resource and network history for ${card.display_name || "this shared VPS"}`}
               type="button"
             >
               <strong>Resources</strong>
@@ -1668,6 +1667,7 @@ function PublicMonitoringDetailPanel({
               aria-pressed={section === "ping"}
               className={section === "ping" ? "active" : ""}
               onClick={() => setSection("ping")}
+              title={`Show shared Ping target latency and loss history for ${card.display_name || "this shared VPS"}`}
               type="button"
             >
               <strong>Ping</strong>
@@ -2023,6 +2023,7 @@ function PublicMonitoringDetailPanel({
                       aria-pressed={pingMetric === "latency"}
                       className={pingMetric === "latency" ? "selected" : ""}
                       onClick={() => setPingMetric("latency")}
+                      title="Plot retained latency measurements for the selected shared Ping targets"
                       type="button"
                     >
                       Latency
@@ -2031,6 +2032,7 @@ function PublicMonitoringDetailPanel({
                       aria-pressed={pingMetric === "loss"}
                       className={pingMetric === "loss" ? "selected" : ""}
                       onClick={() => setPingMetric("loss")}
+                      title="Plot retained packet-loss measurements for the selected shared Ping targets"
                       type="button"
                     >
                       Loss
@@ -2042,6 +2044,11 @@ function PublicMonitoringDetailPanel({
                       selectedPingTargetNames.length === pingTargetNames.length
                     }
                     onClick={() => setHiddenPingTargets([])}
+                    title={
+                      selectedPingTargetNames.length === pingTargetNames.length
+                        ? "Every shared Ping target is already selected"
+                        : "Select every shared Ping target series"
+                    }
                     type="button"
                   >
                     Select all
@@ -2050,6 +2057,11 @@ function PublicMonitoringDetailPanel({
                     className="secondaryAction compactAction"
                     disabled={selectedPingTargetNames.length === 0}
                     onClick={() => setHiddenPingTargets(pingTargetNames)}
+                    title={
+                      selectedPingTargetNames.length === 0
+                        ? "No shared Ping target series is currently selected"
+                        : "Hide every shared Ping target series"
+                    }
                     type="button"
                   >
                     Select none
@@ -2610,10 +2622,21 @@ function PublicChart({
     <section
       aria-label={`${label} chart`}
       className={`dashboardWidgetChart publicMonitoringChart${wide ? " wideWidget" : ""}`}
+      title={`${label}: ${summary && summary !== "-" ? summary : emptyLabel}`}
     >
       <div className="dashboardWidgetHeader">
-        <h3>{label}</h3>
-        {summary ? <small title={summary}>{summary}</small> : null}
+        <h3 title={`${label} retained shared monitoring chart`}>{label}</h3>
+        {summary ? (
+          <small
+            title={
+              summary === "-"
+                ? emptyLabel
+                : `${label} current summary: ${summary}`
+            }
+          >
+            {summary}
+          </small>
+        ) : null}
       </div>
       <TimeSeriesChart
         allowNoVisibleSeries={allowNoVisibleSeries}
@@ -2635,9 +2658,10 @@ function SummaryFact({ label, value }: { label: string; value: number }) {
   return (
     <span
       className={`publicMonitoringSummaryFact ${label.toLocaleLowerCase()}`}
+      title={`${label}: ${value}`}
     >
-      <strong>{value}</strong>
-      <small>{label}</small>
+      <strong title={`${value} ${label.toLocaleLowerCase()}`}>{value}</strong>
+      <small title={label}>{label}</small>
     </span>
   );
 }

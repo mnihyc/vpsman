@@ -34,15 +34,26 @@ type ConfirmationFocusTarget = {
   type: string | null;
 };
 
+export type ConfirmationPromptItem =
+  | {
+      label: string;
+      sensitive: true;
+      title?: never;
+      value: ReactNode;
+    }
+  | {
+      label: string;
+      sensitive?: false;
+      title?: string;
+      value: ReactNode;
+    };
+
 const RAPID_CONFIRM_POINTER_WINDOW_MS = 600;
 let rapidConfirmPointerUntil = 0;
 let rapidConfirmPointerTimer: number | null = null;
 
 function blockRapidConfirmClickThrough(event: MouseEvent) {
-  if (
-    event.detail <= 1 ||
-    performance.now() >= rapidConfirmPointerUntil
-  ) {
+  if (event.detail <= 1 || performance.now() >= rapidConfirmPointerUntil) {
     return;
   }
   event.preventDefault();
@@ -141,7 +152,7 @@ export function ConfirmationPrompt({
   detail: ReactNode;
   error?: ReactNode;
   expiresAtUnix?: number | null;
-  items?: Array<{ label: string; title?: string; value: ReactNode }>;
+  items?: ConfirmationPromptItem[];
   onCancel: () => void;
   onConfirm: () => void;
   open: boolean;
@@ -166,11 +177,26 @@ export function ConfirmationPrompt({
   const errorId = useId();
   const typedConfirmationRequired = Boolean(typedConfirmationText);
   const typedConfirmationMatches =
-    !typedConfirmationText || typedConfirmation.trim() === typedConfirmationText;
+    !typedConfirmationText ||
+    typedConfirmation.trim() === typedConfirmationText;
   const displayMode =
     preferences.review_prompt_mode === "overlay" ? "overlay" : "inline";
   const confirmBlocked =
     pending || confirmLatched || confirmDisabled || !typedConfirmationMatches;
+  const cancelDisabledReason = pending
+    ? "The confirmation is being submitted; wait for it to finish before cancelling."
+    : confirmLatched
+      ? "The confirmation was already accepted and is waiting for the request to start."
+      : undefined;
+  const confirmDisabledReason = pending
+    ? "The confirmation is being submitted."
+    : confirmLatched
+      ? "This confirmation was already accepted."
+      : !typedConfirmationMatches
+        ? `Type ${typedConfirmationText} exactly to enable ${confirmLabel}.`
+        : confirmDisabled
+          ? `${confirmLabel} is unavailable until the reviewed requirements are satisfied.`
+          : undefined;
 
   if (open && !previouslyOpenRef.current) {
     overlaySubmissionRef.current = false;
@@ -185,7 +211,7 @@ export function ConfirmationPrompt({
       activeElement !== document.documentElement &&
       !activeElement.closest(".confirmationPrompt")
         ? activeElement
-        : state?.lastExternalFocus ?? null;
+        : (state?.lastExternalFocus ?? null);
     previousFocusRef.current = captureConfirmationFocusTargets([
       primary,
       ...(state?.focusHistory ?? []),
@@ -393,11 +419,7 @@ export function ConfirmationPrompt({
   }, [expiresAtUnix, onCancel, open, pending]);
 
   if (!open) {
-    if (
-      displayMode === "overlay" &&
-      overlaySubmissionRef.current &&
-      error
-    ) {
+    if (displayMode === "overlay" && overlaySubmissionRef.current && error) {
       return createPortal(
         <div
           aria-atomic="true"
@@ -445,6 +467,7 @@ export function ConfirmationPrompt({
       aria-modal={displayMode === "overlay" ? true : undefined}
       role={displayMode === "overlay" ? "dialog" : "region"}
       tabIndex={-1}
+      title={`${title}. Review the exact scope and effect before confirming.`}
     >
       <div className="confirmationPromptIcon">
         <AlertTriangle size={18} />
@@ -455,11 +478,22 @@ export function ConfirmationPrompt({
         {items.length > 0 && (
           <dl>
             {items.map((item) => {
-              const valueTitle = item.title ?? confirmationItemTitle(item.value);
+              const valueTitle = item.sensitive
+                ? confirmationItemTitle(item.label, item.value, true)
+                : (item.title ??
+                  confirmationItemTitle(item.label, item.value, false));
               return (
                 <div key={item.label}>
-                  <dt>{item.label}</dt>
-                  <dd title={valueTitle}>{item.value}</dd>
+                  <dt title={`${item.label} review field.`}>{item.label}</dt>
+                  <dd
+                    data-tooltip-sensitive={item.sensitive ? "true" : undefined}
+                    data-value-tooltip-skip={
+                      item.sensitive ? "true" : undefined
+                    }
+                    title={valueTitle}
+                  >
+                    {item.value}
+                  </dd>
                 </div>
               );
             })}
@@ -467,9 +501,15 @@ export function ConfirmationPrompt({
         )}
         {typedConfirmationRequired && (
           <label className="confirmationTypedInput">
-            <span>{typedConfirmationLabel ?? `Type ${typedConfirmationText} to confirm`}</span>
+            <span>
+              {typedConfirmationLabel ??
+                `Type ${typedConfirmationText} to confirm`}
+            </span>
             <input
-              aria-label={typedConfirmationLabel ?? `Type ${typedConfirmationText} to confirm`}
+              aria-label={
+                typedConfirmationLabel ??
+                `Type ${typedConfirmationText} to confirm`
+              }
               autoComplete="off"
               onChange={(event) => setTypedConfirmation(event.target.value)}
               value={typedConfirmation}
@@ -492,8 +532,12 @@ export function ConfirmationPrompt({
         aria-label="Close confirmation"
         className="iconButton confirmationPromptClose"
         disabled={pending || confirmLatched}
+        data-tooltip-disabled-reason={cancelDisabledReason}
         onClick={onCancel}
-        title="Close confirmation"
+        title={
+          cancelDisabledReason ??
+          "Close confirmation without applying the reviewed action."
+        }
         type="button"
       >
         <X size={16} />
@@ -502,7 +546,12 @@ export function ConfirmationPrompt({
         <button
           className="secondaryAction compactAction"
           disabled={pending || confirmLatched}
+          data-tooltip-disabled-reason={cancelDisabledReason}
           onClick={onCancel}
+          title={
+            cancelDisabledReason ??
+            `${cancelLabel} and leave the reviewed state unchanged.`
+          }
           type="button"
         >
           {cancelLabel}
@@ -514,7 +563,11 @@ export function ConfirmationPrompt({
               : "primaryAction compactAction"
           }
           disabled={confirmBlocked}
+          data-tooltip-disabled-reason={confirmDisabledReason}
           onClick={handleConfirm}
+          title={
+            confirmDisabledReason ?? `${confirmLabel} using the reviewed scope.`
+          }
           type="button"
         >
           {confirmLabel}
@@ -578,7 +631,11 @@ function scrollTargetWithinContainer(
   const containerBox = container.getBoundingClientRect();
   const visibleTop = Math.max(containerBox.top, occludedTop) + 12;
   const visibleBottom = Math.min(containerBox.bottom, window.innerHeight) - 12;
-  const delta = scrollDelta(target.getBoundingClientRect(), visibleTop, visibleBottom);
+  const delta = scrollDelta(
+    target.getBoundingClientRect(),
+    visibleTop,
+    visibleBottom,
+  );
   if (Math.abs(delta) >= 1) {
     container.scrollBy({ behavior, top: delta });
   }
@@ -591,7 +648,11 @@ function scrollTargetWithinViewport(
 ) {
   const visibleTop = Math.max(0, occludedTop) + 12;
   const visibleBottom = window.innerHeight - 12;
-  const delta = scrollDelta(target.getBoundingClientRect(), visibleTop, visibleBottom);
+  const delta = scrollDelta(
+    target.getBoundingClientRect(),
+    visibleTop,
+    visibleBottom,
+  );
   if (Math.abs(delta) >= 1) {
     window.scrollBy({ behavior, top: delta });
   }
@@ -674,7 +735,13 @@ function captureConfirmationFocusTargets(
         ),
         tagName: element.tagName.toLocaleLowerCase(),
         text: normalizeFocusText(element.textContent ?? ""),
-        title: element.getAttribute("title"),
+        // Generated value tooltips are presentation, not stable control
+        // identity. A synchronously mounted prompt can replace its trigger
+        // before the tooltip observer decorates the replacement.
+        title:
+          element.dataset.valueTooltip === "true"
+            ? null
+            : element.getAttribute("title"),
         type: element.getAttribute("type"),
       },
     ];
@@ -739,9 +806,19 @@ function normalizeFocusText(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function confirmationItemTitle(value: ReactNode): string | undefined {
-  if (typeof value === "string" || typeof value === "number") {
-    return String(value);
+function confirmationItemTitle(
+  label: string,
+  value: ReactNode,
+  sensitive: boolean,
+): string {
+  if (sensitive) {
+    return `${label} is shown in this confirmation; its exact value is excluded from tooltips.`;
   }
-  return undefined;
+  if (typeof value === "string" || typeof value === "number") {
+    const text = String(value);
+    return text === "-"
+      ? `${label} has no available value.`
+      : `${label}: ${text}.`;
+  }
+  return `${label} review value.`;
 }

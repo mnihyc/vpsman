@@ -667,6 +667,7 @@ export function ConsoleShell({
         className="skipLink"
         href="#console-main-content"
         onClick={skipToPageContent}
+        title="Skip the console navigation and move focus to the current page content."
       >
         Skip to page content
       </a>

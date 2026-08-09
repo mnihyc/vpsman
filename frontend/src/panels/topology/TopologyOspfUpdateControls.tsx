@@ -417,7 +417,11 @@ export function TopologyOspfUpdateControls({
             className="secondaryAction compactAction"
             disabled={refreshing}
             onClick={() => void refreshData()}
-            title="Refresh saved plans, endpoint cost status, and recommendations"
+            title={
+              refreshing
+                ? "OSPF plans, endpoint status, and recommendations are already refreshing"
+                : "Refresh saved plans, endpoint cost status, and recommendations"
+            }
             type="button"
           >
             <RefreshCw

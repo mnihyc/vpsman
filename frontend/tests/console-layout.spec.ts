@@ -7,6 +7,7 @@ import {
 } from "./support/consoleLayoutFixtures";
 import { DEFAULT_UPDATE_VERSION_URL } from "../src/jobDispatchPreset";
 import {
+  expectPrivilegeVerifiedForViewport,
   lockPrivilegeFromVault,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
@@ -414,12 +415,20 @@ async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   ).toBeVisible();
 }
 
-test("exposes hover titles for truncated grid text and editable values", async ({
+test("exposes safe semantic hover titles without leaking sensitive values", async ({
   page,
 }, testInfo) => {
   await page.goto("/");
   await waitForConsoleShell(page);
   await openConsoleSubpage(page, "Fleet", "Instances");
+
+  const skipLink = page.getByRole("link", { name: "Skip to page content" });
+  await skipLink.focus();
+  await expect(skipLink).toBeVisible();
+  await expect(skipLink).toHaveAttribute(
+    "title",
+    "Skip the console navigation and move focus to the current page content.",
+  );
 
   const fleetGrid = page.getByLabel("VPS instance records data grid");
   await page.evaluate(() => {
@@ -429,10 +438,330 @@ test("exposes hover titles for truncated grid text and editable values", async (
     input.value = "a".repeat(64);
     document.body.append(input);
     input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", "Review density");
+    select.dataset.testTooltipSelect = "true";
+    select.append(new Option("Comfortable", "comfortable", true, true));
+    document.body.append(select);
+
+    const action = document.createElement("button");
+    action.dataset.testTooltipAction = "true";
+    action.textContent = "Retry evidence";
+    document.body.append(action);
+
+    const disabled = document.createElement("button");
+    disabled.dataset.testTooltipDisabled = "true";
+    disabled.dataset.tooltipDisabledReason = "Select one VPS to retry evidence.";
+    disabled.disabled = true;
+    disabled.textContent = "Retry";
+    document.body.append(disabled);
+
+    const empty = document.createElement("span");
+    empty.className = "status";
+    empty.dataset.testTooltipEmpty = "true";
+    empty.dataset.tooltipEmptyReason = "Latency has not been reported.";
+    empty.textContent = "-";
+    document.body.append(empty);
+
+    const authored = document.createElement("button");
+    authored.dataset.testTooltipAuthored = "true";
+    authored.title = "Existing operator guidance.";
+    authored.textContent = "Preserve title";
+    document.body.append(authored);
+
+    const totp = document.createElement("input");
+    totp.autocomplete = "one-time-code";
+    totp.dataset.testTooltipTotp = "true";
+    totp.value = "123456";
+    document.body.append(totp);
+    totp.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const protectedOuter = document.createElement("div");
+    protectedOuter.className = "metricCard";
+    protectedOuter.dataset.testTooltipProtectedOuter = "true";
+    const protectedParent = document.createElement("div");
+    protectedParent.className = "vpsFactRow";
+    protectedParent.dataset.testTooltipProtectedParent = "true";
+    protectedParent.setAttribute("aria-label", "Protected share reference");
+    const protectedValue = document.createElement("span");
+    protectedValue.className = "status";
+    protectedValue.dataset.testTooltipProtectedValue = "true";
+    protectedValue.dataset.valueTooltipSkip = "true";
+    protectedValue.textContent =
+      "https://operator.invalid/share?access_token=skipped-descendant-sentinel";
+    protectedParent.append(protectedValue);
+    protectedOuter.append(protectedParent);
+    document.body.append(protectedOuter);
+
+    const dynamicAction = document.createElement("button");
+    dynamicAction.dataset.testTooltipDynamic = "true";
+    dynamicAction.textContent = "First dynamic action";
+    document.body.append(dynamicAction);
+
+    const numericInput = document.createElement("input");
+    numericInput.type = "number";
+    numericInput.setAttribute("aria-label", "Retention days");
+    numericInput.dataset.testTooltipNumeric = "true";
+    numericInput.value = "14";
+    document.body.append(numericInput);
+
+    const placeholderInput = document.createElement("input");
+    placeholderInput.setAttribute("aria-label", "Selector expression");
+    placeholderInput.dataset.testTooltipPlaceholder = "true";
+    placeholderInput.placeholder = "tag:edge or id:vps-id";
+    document.body.append(placeholderInput);
+
+    const dashInput = document.createElement("input");
+    dashInput.setAttribute("aria-label", "Billing renewal");
+    dashInput.dataset.testTooltipDash = "true";
+    dashInput.value = "-";
+    document.body.append(dashInput);
+
+    const freeform = document.createElement("textarea");
+    freeform.setAttribute("aria-label", "Operator notes");
+    freeform.dataset.testTooltipFreeform = "true";
+    freeform.value = "freeform-tooltip-secret-sentinel";
+    document.body.append(freeform);
+
+    const unsafeEmpty = document.createElement("span");
+    unsafeEmpty.className = "status";
+    unsafeEmpty.dataset.testTooltipUnsafeEmpty = "true";
+    unsafeEmpty.setAttribute(
+      "aria-label",
+      "https://credential-user:empty-label-sentinel@example.invalid/",
+    );
+    unsafeEmpty.textContent = "-";
+    document.body.append(unsafeEmpty);
+
+    const protectedText = document.createElement("div");
+    protectedText.className = "metricCard";
+    protectedText.dataset.testTooltipHiddenDescendants = "true";
+    protectedText.append("Visible total 42");
+    const hiddenKinds = [
+      ["srOnly", "sr-only-secret-sentinel"],
+      ["visuallyHidden", "visually-hidden-secret-sentinel"],
+      ["", "aria-hidden-secret-sentinel"],
+    ] as const;
+    hiddenKinds.forEach(([className, value], index) => {
+      const hidden = document.createElement("span");
+      hidden.className = `${className} status`.trim();
+      hidden.dataset.testTooltipHiddenKind = String(index);
+      if (index === 2) hidden.setAttribute("aria-hidden", "true");
+      hidden.textContent = value;
+      protectedText.append(hidden);
+    });
+    document.body.append(protectedText);
+
+    const iconAction = document.createElement("button");
+    iconAction.dataset.testTooltipIconAction = "true";
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("aria-hidden", "true");
+    const hiddenIconText = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "text",
+    );
+    hiddenIconText.textContent = "icon-secret-sentinel";
+    icon.append(hiddenIconText);
+    iconAction.append(icon, "Visible icon action");
+    document.body.append(iconAction);
+
+    const authoredLifecycle = document.createElement("button");
+    authoredLifecycle.dataset.testTooltipAuthoredLifecycle = "true";
+    authoredLifecycle.textContent = "Lifecycle action";
+    document.body.append(authoredLifecycle);
   });
   await expect(
     page.locator('input[data-test-tooltip-probe="true"]'),
   ).not.toHaveAttribute("title", /.+/);
+  await expect(page.locator('[data-test-tooltip-select="true"]')).toHaveAttribute(
+    "title",
+    "Review density: Comfortable.",
+  );
+  await expect(page.locator('[data-test-tooltip-action="true"]')).toHaveAttribute(
+    "title",
+    "Activate Retry evidence.",
+  );
+  await expect(page.locator('[data-test-tooltip-disabled="true"]')).toHaveAttribute(
+    "title",
+    "Select one VPS to retry evidence.",
+  );
+  await expect(page.locator('[data-test-tooltip-empty="true"]')).toHaveAttribute(
+    "title",
+    "Latency has not been reported.",
+  );
+  await expect(page.locator('[data-test-tooltip-authored="true"]')).toHaveAttribute(
+    "title",
+    "Existing operator guidance.",
+  );
+  await expect(page.locator('[data-test-tooltip-totp="true"]')).not.toHaveAttribute(
+    "title",
+    /123456/,
+  );
+  const protectedValue = page.locator(
+    '[data-test-tooltip-protected-value="true"]',
+  );
+  await expect(protectedValue).not.toHaveAttribute("title", /.+/);
+  await expect(
+    page.locator('[data-test-tooltip-protected-parent="true"]'),
+  ).toHaveAttribute("title", "Current value: Protected share reference.");
+  await expect(
+    page.locator('[data-test-tooltip-protected-outer="true"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect
+    .poll(() =>
+      protectedValue.evaluate((element) => {
+        const protectedText = element.textContent ?? "";
+        const leakingAncestorTitles: string[] = [];
+        let ancestor = element.parentElement;
+        while (ancestor) {
+          if (ancestor.title.includes(protectedText)) {
+            leakingAncestorTitles.push(ancestor.title);
+          }
+          ancestor = ancestor.parentElement;
+        }
+        return leakingAncestorTitles;
+      }),
+    )
+    .toEqual([]);
+
+  const dynamicAction = page.locator('[data-test-tooltip-dynamic="true"]');
+  await expect(dynamicAction).toHaveAttribute(
+    "title",
+    "Activate First dynamic action.",
+  );
+  await dynamicAction.evaluate((element) => {
+    element.textContent = "Second dynamic action";
+  });
+  await expect(dynamicAction).toHaveAttribute(
+    "title",
+    "Activate Second dynamic action.",
+  );
+  await expect(page.locator('[data-test-tooltip-numeric="true"]')).toHaveAttribute(
+    "title",
+    "Retention days: 14.",
+  );
+  await expect(
+    page.locator('[data-test-tooltip-placeholder="true"]'),
+  ).toHaveAttribute(
+    "title",
+    "Selector expression accepted format: tag:edge or id:vps-id.",
+  );
+  await expect(page.locator('[data-test-tooltip-dash="true"]')).toHaveAttribute(
+    "title",
+    "Billing renewal has no available value.",
+  );
+  await expect(
+    page.locator('[data-test-tooltip-freeform="true"]'),
+  ).toHaveAttribute(
+    "title",
+    "Operator notes; current multiline content is excluded from tooltips.",
+  );
+  await expect(
+    page.locator('[data-test-tooltip-unsafe-empty="true"]'),
+  ).toHaveAttribute("title", "This value has no available value.");
+
+  const hiddenDescendants = page.locator(
+    '[data-test-tooltip-hidden-descendants="true"]',
+  );
+  await expect(hiddenDescendants).toHaveAttribute(
+    "title",
+    "Current value: Visible total 42.",
+  );
+  await expect(
+    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="0"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect(
+    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="1"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect(
+    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="2"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect(page.locator('[data-test-tooltip-icon-action="true"]')).toHaveAttribute(
+    "title",
+    "Activate Visible icon action.",
+  );
+  expect(
+    await page.locator("[title]").evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
+    ),
+  ).not.toMatch(
+    /sr-only-secret-sentinel|visually-hidden-secret-sentinel|aria-hidden-secret-sentinel|icon-secret-sentinel|freeform-tooltip-secret-sentinel|empty-label-sentinel/,
+  );
+
+  await dynamicAction.evaluate((element) => {
+    element.dataset.valueTooltipSkip = "true";
+  });
+  await expect(dynamicAction).not.toHaveAttribute("title", /.+/);
+  await dynamicAction.evaluate((element) => {
+    delete element.dataset.valueTooltipSkip;
+  });
+  await expect(dynamicAction).toHaveAttribute(
+    "title",
+    "Activate Second dynamic action.",
+  );
+  await dynamicAction.evaluate((element) => {
+    element.dataset.tooltipSensitive = "true";
+  });
+  await expect(dynamicAction).not.toHaveAttribute("title", /.+/);
+  await dynamicAction.evaluate((element) => {
+    delete element.dataset.tooltipSensitive;
+  });
+  await expect(dynamicAction).toHaveAttribute(
+    "title",
+    "Activate Second dynamic action.",
+  );
+
+  const authoredLifecycle = page.locator(
+    '[data-test-tooltip-authored-lifecycle="true"]',
+  );
+  await expect(authoredLifecycle).toHaveAttribute(
+    "title",
+    "Activate Lifecycle action.",
+  );
+  await authoredLifecycle.evaluate((element) => {
+    element.title = "Activate Lifecycle action.";
+  });
+  await expect(authoredLifecycle).not.toHaveAttribute(
+    "data-value-tooltip",
+    "true",
+  );
+  await authoredLifecycle.evaluate((element) => {
+    element.textContent = "Changed lifecycle action";
+  });
+  await expect(authoredLifecycle).toHaveAttribute(
+    "title",
+    "Activate Lifecycle action.",
+  );
+  await authoredLifecycle.evaluate((element) => {
+    element.title = "First authored lifecycle title.";
+  });
+  await expect(authoredLifecycle).toHaveAttribute(
+    "title",
+    "First authored lifecycle title.",
+  );
+  await expect(authoredLifecycle).not.toHaveAttribute(
+    "data-value-tooltip",
+    "true",
+  );
+  await authoredLifecycle.evaluate((element) => {
+    element.title = "Second authored lifecycle title.";
+  });
+  await expect(authoredLifecycle).toHaveAttribute(
+    "title",
+    "Second authored lifecycle title.",
+  );
+  await authoredLifecycle.evaluate((element) => {
+    element.removeAttribute("title");
+  });
+  await expect(authoredLifecycle).toHaveAttribute(
+    "title",
+    "Activate Changed lifecycle action.",
+  );
+  await expect(authoredLifecycle).toHaveAttribute(
+    "data-value-tooltip",
+    "true",
+  );
   if (testInfo.project.name.includes("mobile")) {
     const mobilePageSelector = page.getByRole("combobox", {
       name: "Console page",
@@ -472,7 +801,10 @@ test("exposes hover titles for truncated grid text and editable values", async (
   ).toHaveAttribute("title", /edge-sfo-01/);
   const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
   await fleetSearch.fill("edge-sfo-01");
-  await expect(fleetSearch).toHaveAttribute("title", "edge-sfo-01");
+  await expect(fleetSearch).toHaveAttribute(
+    "title",
+    "Search fleet: edge-sfo-01.",
+  );
 });
 
 test("keeps VPS combobox menus above clipped workflow panels", async ({
@@ -1129,7 +1461,9 @@ test(
       ".fleetInstancesPanel > .actionFeedbackWarning",
     );
     await expect(partial).toContainText("Deleted 1 of 2 selected VPSs");
-    await expect(partial).toContainText("core-fra-02 (agent-fra-02)");
+    await expect(partial).toContainText(
+      "core-fra-02 (ra02) (agent-fra-02)",
+    );
     await expect(partial).toContainText("Fixture refused the VPS deletion");
 
     const deleteRequests = await page.evaluate(() => {
@@ -1425,7 +1759,7 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await activate(reviewCleanup);
   const cleanupPrompt = page.getByLabel("Delete webhook delivery history");
   await expect(cleanupPrompt).toBeVisible();
-  await expect(cleanupPrompt.getByTitle("9".repeat(64))).toBeVisible();
+  await expect(cleanupPrompt.getByTitle(new RegExp("9".repeat(64)))).toBeVisible();
   await activate(
     cleanupPrompt.getByRole("button", {
       name: "Delete retained history",
@@ -2531,7 +2865,7 @@ test(
     });
     await finalAction.getByRole("button", { name: "Apply 1 change" }).click();
     await expect(unsetPrompt).toBeVisible();
-    await expect(unsetPrompt.getByTitle("unset")).toBeVisible();
+    await expect(unsetPrompt.getByTitle(/unset/)).toBeVisible();
     await page.getByRole("button", { name: "Cancel" }).click();
   },
 );
@@ -3423,9 +3757,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
       .getByRole("button", { name: "Unlock", exact: true }),
   );
   await expect(privilegeDialog).toBeHidden();
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await expect(page.getByLabel("API DB pool")).toHaveValue("40");
   await expect(
     page
@@ -5836,6 +6168,12 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(inspector.getByLabel("Agent identity private key")).toHaveValue(
     /^[0-9a-f]{64}$/,
   );
+  await expect(
+    inspector.getByRole("button", { name: "Copy", exact: true }),
+  ).toHaveAttribute(
+    "title",
+    "Copy the one-time private key to the clipboard; key content is excluded from tooltips.",
+  );
   await inspector
     .getByLabel("Agent identity display name")
     .fill("edge-tokyo-04");
@@ -6686,7 +7024,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
   ).toBeVisible();
   const evidence = page.locator(".topologyEvidence");
   await expect(evidence.getByLabel("Network evidence freshness")).toContainText(
-    /Evidence set was observed .* ago\./,
+    /Reachability evidence was observed .* ago\./,
   );
   const timeline = evidence.getByLabel("Network evidence timeline");
   await expect(timeline.getByText("Evidence timeline")).toBeVisible();
@@ -6725,7 +7063,7 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     evidence.getByRole("button", { name: "Open OSPF" }),
   ).toBeVisible();
   await expect(evidence.getByText("Tunnel reachability").first()).toBeVisible();
-  await expect(evidence.getByText("1 OSPF update plans")).toBeVisible();
+  await expect(evidence.getByLabel("OSPF update plan evidence")).toBeVisible();
   await expect(evidence.getByText("approval required")).toBeVisible();
   await expect(
     evidence
@@ -6769,10 +7107,10 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     observationTable.getByText("10.255.0.1", { exact: true }),
   ).toBeVisible();
   await expect(
-    observationTable.getByText("Runtime adapter unhealthy"),
+    observationTable.getByText("Runtime observed", { exact: true }),
   ).toBeVisible();
   await expect(
-    observationTable.getByText("Adapter status failed"),
+    observationTable.getByText("external_observed; ovpn42", { exact: true }),
   ).toBeVisible();
   await expect(evidence.getByLabel("Related command jobs")).toContainText(
     "Stale sample · degraded throughput",
@@ -6782,7 +7120,9 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     .locator(".status");
   for (let index = 0; index < (await commandSignals.count()); index += 1) {
     const signal = commandSignals.nth(index);
-    await expect(signal).toHaveAttribute("title", await signal.innerText());
+    expect(await signal.getAttribute("title")).toContain(
+      await signal.innerText(),
+    );
   }
   await expect(evidence).toContainText(
     "Runtime status evidence is available in observations or retained command output.",
@@ -7028,7 +7368,7 @@ test(
     await expect(
       composer.getByRole("button", { name: "Agent builtin" }),
     ).toHaveAttribute("aria-pressed", "true");
-    await expect(composer.getByLabel("Left tunnel MTU")).toHaveValue("1500");
+    await expect(composer.getByLabel("Left tunnel MTU")).toHaveValue("1400");
     await expect(composer.getByLabel("OpenVPN transport")).toHaveValue("udp");
     await expect(composer.getByLabel("OpenVPN listener VPS")).toHaveValue(
       "left",
@@ -7467,18 +7807,20 @@ test("keeps each expanded VPS network evidence scoped to that VPS", async ({
 
   await expect(edgeRate).toContainText("RX 2.4 MB/s / TX 2.3 MB/s");
   await expect(coreRate).toContainText("Awaiting selected rate");
-  await expect(edgeDetail.locator(".networkInterfaceList")).toContainText(
-    "eth0",
-  );
-  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
-    "eth0",
-  );
-  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
-    "tunab",
-  );
-  await expect(coreDetail.locator(".networkInterfaceList")).toContainText(
-    "ovpn42",
-  );
+  await activate(edgeDetail.getByRole("tab", { name: "Network" }));
+  await activate(coreDetail.getByRole("tab", { name: "Network" }));
+  await expect(
+    edgeDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
+  ).toHaveCount(1);
+  await expect(
+    coreDetail.locator(".telemetryInterfaceRow", { hasText: "eth0" }),
+  ).toHaveCount(1);
+  await expect(
+    coreDetail.locator(".telemetryTunnelRow", { hasText: "tunab" }),
+  ).toHaveCount(1);
+  await expect(
+    coreDetail.locator(".telemetryTunnelRow", { hasText: "ovpn42" }),
+  ).toHaveCount(1);
 });
 
 test("shows grouped execution summaries for job output details", async ({
@@ -7579,9 +7921,7 @@ test("generates local privilege assertions before dispatching a privileged job",
   ).toBeVisible();
   await unlockPrivilegeFor(page, "Jobs", "Dispatch");
   const topbar = page.locator(".topbar");
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await lockPrivilegeFromVault(page);
   await expect(
     page.locator(".commandComposer").getByLabel("Super password"),
@@ -8096,9 +8436,7 @@ test("dispatches executable restores with agent-local archive metadata only", as
 
   await openConsoleSubpage(page, "Backups", "Restore");
   await unlockPrivilegeFor(page, "Backups", "Restore");
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await activate(page.getByRole("button", { name: "Choose restore artifact" }));
   const restoreWorkflow = page.getByLabel("Choose restore artifact");
 
@@ -8444,11 +8782,16 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   await expect(trendCharts).toContainText("Latency");
   await expect(trendCharts).toContainText("Packet loss");
   await expect(trendCharts).toContainText("Throughput");
-  await expect(trendCharts).toContainText("Single evidence bucket");
+  await expect(trendCharts).toContainText(
+    "No trend line yet; capture another run to compare movement.",
+  );
   await expect(trendCharts).toContainText(
     "10.1 Mbps avg - 10% of expected 100 Mbps",
   );
-  await expect(trendCharts.getByRole("button")).toHaveCount(0);
+  await expect(trendCharts.getByRole("button")).toHaveCount(4);
+  await expect(
+    trendCharts.getByRole("button", { name: "Hide Average latency series" }),
+  ).toBeVisible();
 
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);
   await page.getByLabel("Network test endpoint side").selectOption("left");
@@ -8491,9 +8834,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
   });
 
   await unlockPrivilegeFor(page, "Network", "Tests");
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await expect(networkTestsPanel).toContainText("Dispatch ready");
 
   await page.getByLabel("Network test plan").selectOption(tunnelPlans[0].id);

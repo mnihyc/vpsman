@@ -47,6 +47,7 @@ export function ExecutionResultPanel({
       className="executionResultPanel"
       ref={panelRef}
       tabIndex={-1}
+      title={`${label}: ${bulkOutcomeSummary(progress)}`}
     >
       <div className="executionResultHeader">
         <div>
@@ -94,38 +95,38 @@ export function ExecutionResultPanel({
           </div>
         )}
       </div>
-      <div className="executionResultStats">
-        <span>
+      <div className="executionResultStats" title="Execution outcome counts for the reviewed operation.">
+        <span title={hasMultipleJobs ? `${jobCount} target-specific jobs.` : `Job ${progress.jobId}.`}>
           <strong>
             {hasMultipleJobs ? jobCount : shortId(progress.jobId)}
           </strong>
           {hasMultipleJobs ? "jobs" : "job"}
         </span>
-        <span>
+        <span title={`${progress.terminal} of ${progress.total} target actions reached a terminal state.`}>
           <strong>{progress.terminal}/{progress.total}</strong>
           {hasMultipleJobs ? "target actions" : "targets"}
         </span>
-        <span>
+        <span title={`${progress.in_progress} target actions remain in progress.`}>
           <strong>{progress.in_progress}</strong>
           in progress
         </span>
-        <span>
+        <span title={`${progress.retrieved} target actions have reported retained evidence.`}>
           <strong>{progress.retrieved}</strong>
           reported
         </span>
-        <span>
+        <span title={`${progress.completed} target actions completed successfully.`}>
           <strong>{progress.completed}</strong>
           completed
         </span>
-        <span>
+        <span title={`${progress.skipped} target actions were skipped.`}>
           <strong>{progress.skipped}</strong>
           skipped
         </span>
-        <span>
+        <span title={`${progress.unavailable} targets were unavailable before execution.`}>
           <strong>{progress.unavailable}</strong>
           pre-run unavailable
         </span>
-        <span>
+        <span title={`${progress.unsuccessful} target actions were unsuccessful.`}>
           <strong>{progress.unsuccessful}</strong>
           unsuccessful
         </span>
@@ -150,7 +151,13 @@ export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] 
         return (
           <div className="executionFailureReason" key={group.reason}>
             <strong>{group.targets.length} unsuccessful</strong>
-            <span title={group.reason}>{group.reason}</span>
+            <span
+              data-tooltip-sensitive="true"
+              data-value-tooltip-skip="true"
+              title="The failure reason is shown here; exact external error content is excluded from tooltips."
+            >
+              {group.reason}
+            </span>
             <small title={group.targets.join("\n")}>
               {visibleTargets.join(", ")}
               {more > 0 ? `, +${more} more` : ""}

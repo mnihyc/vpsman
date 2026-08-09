@@ -272,6 +272,10 @@ export function PreferencesPanel({
             <div className="buttonCluster">
               <button
                 className="secondaryAction compactAction"
+                data-tooltip-disabled-reason={preferenceResetDisabledReason(
+                  dirty,
+                  saveInFlight,
+                )}
                 disabled={!dirty || saveInFlight}
                 onClick={resetPreferences}
                 type="button"
@@ -284,6 +288,11 @@ export function PreferencesPanel({
                   draftValidationError ? DRAFT_VALIDATION_ERROR_ID : undefined
                 }
                 className="primaryAction compactAction"
+                data-tooltip-disabled-reason={preferenceSaveDisabledReason(
+                  dirty,
+                  saveInFlight,
+                  draftValidationError,
+                )}
                 disabled={saveDisabled}
                 type="submit"
               >
@@ -387,6 +396,7 @@ export function PreferencesPanel({
                 />
                 <button
                   className="secondaryAction compactAction"
+                  data-tooltip-disabled-reason="Fleet tag visibility already uses its default settings."
                   disabled={
                     Object.keys(draft.fleet_tag_visibility_overrides).length === 0
                   }
@@ -830,6 +840,10 @@ export function PreferencesPanel({
           <div className="preferencesActions">
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={preferenceResetDisabledReason(
+                dirty,
+                saveInFlight,
+              )}
               disabled={!dirty || saveInFlight}
               onClick={resetPreferences}
               type="button"
@@ -842,6 +856,11 @@ export function PreferencesPanel({
                 draftValidationError ? DRAFT_VALIDATION_ERROR_ID : undefined
               }
               className="primaryAction"
+              data-tooltip-disabled-reason={preferenceSaveDisabledReason(
+                dirty,
+                saveInFlight,
+                draftValidationError,
+              )}
               disabled={saveDisabled}
               type="submit"
             >
@@ -849,7 +868,10 @@ export function PreferencesPanel({
               <span>{saveInFlight ? "Saving" : "Save preferences"}</span>
             </button>
           </div>
-          <p className="preferenceBuildNote">
+          <p
+            className="preferenceBuildNote"
+            title={`Frontend build number: ${FRONTEND_BUILD_NUMBER}.`}
+          >
             Console build {FRONTEND_BUILD_NUMBER}
           </p>
         </form>
@@ -892,9 +914,14 @@ function PreferenceGroup({
           <button
             aria-label={`Reset ${title} to default`}
             className="secondaryAction compactAction preferenceCardReset"
+            data-tooltip-disabled-reason={`${title} already uses its default setting.`}
             disabled={resetDisabled}
             onClick={onReset}
-            title={`Reset ${title} to default`}
+            title={
+              resetDisabled
+                ? `${title} already uses its default setting.`
+                : `Reset ${title} to default.`
+            }
             type="button"
           >
             <RotateCcw size={15} />
@@ -945,6 +972,7 @@ function PreferenceScopeTile({
       aria-pressed={active}
       className={`preferenceScopeTile ${active ? "active" : ""}`}
       onClick={onSelect}
+      title={`${label}: ${value}. ${detail}`}
       type="button"
     >
       <small>{label}</small>
@@ -952,6 +980,30 @@ function PreferenceScopeTile({
       <p>{detail}</p>
     </button>
   );
+}
+
+function preferenceResetDisabledReason(dirty: boolean, saveInFlight: boolean) {
+  return saveInFlight
+    ? "The preference draft cannot be reset while it is being saved."
+    : dirty
+      ? "The preference draft can be reset."
+      : "The preference draft has no unsaved changes to reset.";
+}
+
+function preferenceSaveDisabledReason(
+  dirty: boolean,
+  saveInFlight: boolean,
+  validationError: string | null,
+) {
+  if (saveInFlight) {
+    return "Preferences are already being saved.";
+  }
+  if (validationError) {
+    return `Preferences cannot be saved until the draft is valid: ${validationError}`;
+  }
+  return dirty
+    ? "Preference changes are ready to save."
+    : "There are no preference changes to save.";
 }
 
 function SystemLinkedPreferenceRow({

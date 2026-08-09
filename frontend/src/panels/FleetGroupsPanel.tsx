@@ -195,6 +195,13 @@ export function FleetGroupsPanel({
           <div className="headerActionStack">
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                loading
+                  ? "Fleet groups are still loading"
+                  : pending
+                    ? "Another fleet group change is in progress"
+                    : undefined
+              }
               disabled={loading || pending}
               onClick={onRefresh}
               type="button"
@@ -835,6 +842,9 @@ function TagRegistry({
         toolbarActions={
           <button
             className="primaryAction compactAction"
+            data-tooltip-disabled-reason={
+              pending ? "Wait for the current group change to finish" : undefined
+            }
             disabled={pending}
             onClick={() => {
               onClearActionFeedback();
@@ -889,6 +899,9 @@ function TagRegistry({
           <div className="consoleFormActions fieldFull">
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                pending ? "Wait for the current group change to finish" : undefined
+              }
               disabled={pending}
               onClick={() => {
                 onClearActionFeedback();
@@ -901,6 +914,13 @@ function TagRegistry({
             </button>
             <button
               className="primaryAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "Wait for the current group change to finish"
+                  : !trimmedGroupName
+                    ? "Enter a group name before creating it"
+                    : groupNameError ?? undefined
+              }
               disabled={pending || !trimmedGroupName || groupNameError !== null}
               type="submit"
             >
@@ -1058,6 +1078,13 @@ function TagOrderManager({
               {orderedTags.map((tag, index) => (
                 <SortableTagOrderRow
                   disabled={disabled || saving}
+                  disabledReason={
+                    saving
+                      ? "The updated group order is being saved"
+                      : disabled
+                        ? "Group order is locked while another group change is in progress"
+                        : undefined
+                  }
                   index={index}
                   key={tag.name}
                   tag={tag}
@@ -1073,10 +1100,12 @@ function TagOrderManager({
 
 function SortableTagOrderRow({
   disabled,
+  disabledReason,
   index,
   tag,
 }: {
   disabled: boolean;
+  disabledReason?: string;
   index: number;
   tag: TagView;
 }) {
@@ -1101,6 +1130,7 @@ function SortableTagOrderRow({
       <button
         aria-label={`Reorder ${tag.name}`}
         className="tagOrderHandle"
+        data-tooltip-disabled-reason={disabledReason}
         disabled={disabled}
         type="button"
         {...attributes}
@@ -1473,6 +1503,9 @@ function TagAssignments({
                       <button
                         aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
                         className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
+                        data-tooltip-disabled-reason={
+                          pending ? "Wait for the current group assignment change to finish" : undefined
+                        }
                         disabled={pending}
                         key={tag}
                         onClick={() => void removeTag(editingAgent, tag)}
@@ -1517,6 +1550,13 @@ function TagAssignments({
                 <button
                   aria-label={`Add group to ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
                   className="primaryAction"
+                  data-tooltip-disabled-reason={
+                    pending
+                      ? "Wait for the current group assignment change to finish"
+                      : !editingGroupInput.trim()
+                        ? "Enter a group name before adding it"
+                        : editingGroupError ?? undefined
+                  }
                   disabled={
                     pending ||
                     !editingGroupInput.trim() ||
@@ -1548,6 +1588,9 @@ function TagAssignments({
                   )}
                   <button
                     className="secondaryAction compactAction"
+                    data-tooltip-disabled-reason={
+                      pending ? "Wait for the current group assignment change to finish" : undefined
+                    }
                     disabled={pending}
                     onClick={undoRemoveTag}
                     type="button"
@@ -1991,6 +2034,13 @@ function BulkTagPanel({
         </div>
         <button
           className="primaryAction"
+          data-tooltip-disabled-reason={
+            pending
+              ? "A bulk group operation is already in progress"
+              : !canReviewMutation
+                ? reviewButtonLabel
+                : undefined
+          }
           disabled={pending || !canReviewMutation}
           onClick={() => void reviewMutation()}
           title={
@@ -2211,7 +2261,14 @@ function ScheduleImpactTable({
 
 function VpsChipList({ agents }: { agents: AgentView[] }) {
   if (agents.length === 0) {
-    return <span className="mutedText">-</span>;
+    return (
+      <span
+        className="mutedText"
+        data-tooltip-empty-reason="No VPS is present in this impact set"
+      >
+        -
+      </span>
+    );
   }
   return (
     <span className="targetChipList impactTargetChips">

@@ -163,6 +163,7 @@ export function JobArtifactsPanel({
         <span className="historyPrimary">
           <span
             className={`status ${artifactVerificationClass(row.verification)}`}
+            title={row.verificationDetail}
           >
             {row.verification}
           </span>
@@ -200,7 +201,7 @@ export function JobArtifactsPanel({
           className="jobArtifactsSummary"
           aria-label="Job artifact inventory summary"
         >
-          <div>
+          <div title={`${formatLowerBoundCount(artifactTypes.length, rowsTruncated)} artifact types are represented${rowsTruncated ? " in loaded source pages" : ""}.`}>
             <span>Artifact types</span>
             <strong>
               {formatLowerBoundCount(artifactTypes.length, rowsTruncated)}
@@ -211,21 +212,21 @@ export function JobArtifactsPanel({
                 : "backup, transfer, and update artifact types"}
             </small>
           </div>
-          <div>
+          <div title={`${formatLowerBoundCount(rows.length, rowsTruncated)} artifact records are linked to source workflows${rowsTruncated ? " in loaded pages" : ""}.`}>
             <span>Records</span>
             <strong>{formatLowerBoundCount(rows.length, rowsTruncated)}</strong>
             <small>
               linked to source workflows{rowsTruncated ? " in loaded pages" : ""}
             </small>
           </div>
-          <div>
+          <div title={`${rowsTruncated ? "At least " : ""}${formatBytes(totalBytes)} is recorded across artifacts with known sizes.`}>
             <span>Stored bytes</span>
             <strong>{rowsTruncated ? "≥" : ""}{formatBytes(totalBytes)}</strong>
             <small>
               known artifact sizes only{rowsTruncated ? " in loaded pages" : ""}
             </small>
           </div>
-          <div>
+          <div title="Artifact deletion is intentionally separated into System / Maintenance; this inventory is read-only.">
             <span>Cleanup boundary</span>
             <strong>System / Maintenance</strong>
             <small>no destructive controls on this inventory page</small>

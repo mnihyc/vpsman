@@ -189,7 +189,7 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
 
   const grid = page.getByLabel("Active shared views data grid");
   const activeRow = grid
-    .getByRole("row")
+    .locator(".gridBody [role=row], .gridMobileCard")
     .filter({ hasText: "Customer status" })
     .first();
   await activeRow.click({ button: "right" });
@@ -209,9 +209,8 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await targetUpdatePrompt
     .getByRole("button", { name: "Update targets", exact: true })
     .click();
-  await grid
-    .getByLabel(`Expand Active shared views row ${activeShareId}`)
-    .click();
+  await activeRow.click();
+  await expect(activeRow).toHaveAttribute("aria-expanded", "true");
   const frozenTargetCount = grid
     .locator(".gridExpandedRow .consoleInlineDetailGrid > span")
     .filter({ hasText: "Frozen VPS count" });
@@ -347,6 +346,15 @@ test("unauthenticated public shares call only public monitoring APIs", async ({
         path.startsWith("/api/v1/monitoring-shares/"),
     ),
   ).toEqual([]);
+  await expect(
+    page.getByRole("combobox", { name: "Filter shared VPSs by status" }),
+  ).toHaveAttribute("title", /Filter shared VPSs by status: All statuses/);
+  const generatedTitles = await page.locator("[title]").evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("title") ?? ""),
+  );
+  expect(generatedTitles.some((title) => title.includes(publicShareSecret))).toBe(
+    false,
+  );
 });
 
 test("public cards remain static when detail history is not shared", async ({

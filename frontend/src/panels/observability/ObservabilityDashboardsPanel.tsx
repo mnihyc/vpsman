@@ -271,6 +271,11 @@ export function ObservabilityDashboardsPanel({
               className="secondaryAction compactAction"
               disabled={loading}
               onClick={onRefresh}
+              title={
+                loading
+                  ? "Dashboard overview data is already refreshing"
+                  : "Refresh the read-only dashboard overview"
+              }
               type="button"
             >
               <RefreshCw size={14} />
@@ -279,6 +284,7 @@ export function ObservabilityDashboardsPanel({
             <button
               className="secondaryAction compactAction"
               onClick={() => void copyPresetLink()}
+              title={`Copy a link to the ${selectedPreset.label} dashboard preset and current scope`}
               type="button"
             >
               <Copy size={14} />
@@ -287,6 +293,7 @@ export function ObservabilityDashboardsPanel({
             <button
               className="secondaryAction compactAction"
               onClick={exportDashboard}
+              title={`Export the ${selectedPreset.label} preset, preferences, source counts, and overview data as JSON`}
               type="button"
             >
               <Download size={14} />
@@ -353,9 +360,7 @@ export function ObservabilityDashboardsPanel({
             <select
               aria-label="Dashboard preset"
               onChange={(event) => {
-                selectDashboardPreset(
-                  event.target.value as DashboardPresetId,
-                );
+                selectDashboardPreset(event.target.value as DashboardPresetId);
               }}
               value={selectedId}
             >
@@ -380,6 +385,7 @@ export function ObservabilityDashboardsPanel({
                 }
                 key={preset.id}
                 onClick={() => selectDashboardPreset(preset.id)}
+                title={`${preset.label}: ${preset.description}; ${preset.widgets.length} widgets`}
                 type="button"
               >
                 <span className="dashboardPresetIcon">
@@ -405,6 +411,7 @@ export function ObservabilityDashboardsPanel({
               className={selectedSection === section.id ? "active" : ""}
               key={section.id}
               onClick={() => setSelectedSection(section.id)}
+              title={`${section.label}: ${section.description}`}
               type="button"
             >
               <strong>{section.label}</strong>
@@ -432,6 +439,7 @@ export function ObservabilityDashboardsPanel({
                 <button
                   className="secondaryAction compactAction"
                   onClick={onOpenFleetMetrics}
+                  title="Open retained per-VPS CPU, memory, disk, and load metrics"
                   type="button"
                 >
                   <Gauge size={14} />
@@ -440,6 +448,7 @@ export function ObservabilityDashboardsPanel({
                 <button
                   className="secondaryAction compactAction"
                   onClick={onOpenNetworkMetrics}
+                  title="Open retained tunnel latency, loss, throughput, and endpoint metrics"
                   type="button"
                 >
                   <GitBranch size={14} />
@@ -508,21 +517,26 @@ function DashboardSourceStrip({
       className="dashboardSourceStrip"
       aria-label="Dashboard source coverage"
     >
-      <span>
-        <strong>Fleet source</strong>
-        <small>{source.fleetDetail}</small>
+      <span title={`Fleet source: ${source.fleetDetail}`}>
+        <strong title="Fleet dashboard source coverage">Fleet source</strong>
+        <small title={source.fleetDetail}>{source.fleetDetail}</small>
       </span>
-      <span>
-        <strong>Alert source</strong>
-        <small>{source.alertDetail}</small>
+      <span title={`Alert source: ${source.alertDetail}`}>
+        <strong title="Alert dashboard source coverage">Alert source</strong>
+        <small title={source.alertDetail}>{source.alertDetail}</small>
       </span>
-      <span>
-        <strong>Job source</strong>
-        <small>{source.jobDetail}</small>
+      <span title={`Job source: ${source.jobDetail}`}>
+        <strong title="Job dashboard source coverage">Job source</strong>
+        <small title={source.jobDetail}>{source.jobDetail}</small>
       </span>
-      <span className={coverage.tone === "warning" ? "warning" : ""}>
-        <strong>Range coverage</strong>
-        <small>{coverage.detail}</small>
+      <span
+        className={coverage.tone === "warning" ? "warning" : ""}
+        title={`Range coverage: ${coverage.detail}`}
+      >
+        <strong title="Retained telemetry coverage within the selected range">
+          Range coverage
+        </strong>
+        <small title={coverage.detail}>{coverage.detail}</small>
       </span>
     </div>
   );
@@ -591,7 +605,10 @@ function FleetOperationsDashboard({
       <MetricTile
         detail={`${countPhrase(operations.critical_alerts, "critical")} · ${countPhrase(operations.warning_alerts, "warning")} from ${operations.alerts_truncated ? "loaded operations page" : "operations"}`}
         label="Active alerts"
-        value={countValue(operations.active_alerts, operations.alerts_truncated)}
+        value={countValue(
+          operations.active_alerts,
+          operations.alerts_truncated,
+        )}
       />
       <MetricTile
         detail={source.jobDetail}
@@ -615,7 +632,11 @@ function FleetOperationsDashboard({
           detail={countPhrase(recentAlerts.length, "retained row")}
         />
         {recentAlerts.slice(0, 8).map((alert) => (
-          <div className="dashboardWidgetRow" key={alert.id}>
+          <div
+            className="dashboardWidgetRow"
+            key={alert.id}
+            title={`${alert.severity || "warning"} alert: ${alert.title || "Untitled alert"}; ${alert.client_label ?? "fleet"}; observed ${formatCompactTime(alert.observed_at)}`}
+          >
             <ConsoleStatusBadge
               tone={
                 alert.severity === "critical"
@@ -627,9 +648,17 @@ function FleetOperationsDashboard({
             >
               {alert.severity || "warning"}
             </ConsoleStatusBadge>
-            <strong>{alert.title || "Untitled alert"}</strong>
-            <span>{alert.client_label ?? "fleet"}</span>
-            <small>{formatCompactTime(alert.observed_at)}</small>
+            <strong title={alert.title || "This retained alert has no title"}>
+              {alert.title || "Untitled alert"}
+            </strong>
+            <span title={`Alert scope: ${alert.client_label ?? "fleet"}`}>
+              {alert.client_label ?? "fleet"}
+            </span>
+            <small
+              title={`Alert observed ${formatCompactTime(alert.observed_at)}`}
+            >
+              {formatCompactTime(alert.observed_at)}
+            </small>
           </div>
         ))}
         {!recentAlerts.length ? (
@@ -645,12 +674,28 @@ function FleetOperationsDashboard({
           detail={countPhrase(degradedAgents.length, "record")}
         />
         {degradedAgents.slice(0, 8).map((agent) => (
-          <div className="dashboardWidgetRow" key={agent.client_id}>
-            <ConsoleStatusBadge tone={agentStatusPresentation(agent.status).tone}>
+          <div
+            className="dashboardWidgetRow"
+            key={agent.client_id}
+            title={`${agent.label || agent.client_id || "Unnamed VPS"}: ${agentStatusPresentation(agent.status).label}; ${(agent.tags ?? []).slice(0, 3).join(", ") || "no labels"}`}
+          >
+            <ConsoleStatusBadge
+              tone={agentStatusPresentation(agent.status).tone}
+            >
               {agentStatusPresentation(agent.status).label}
             </ConsoleStatusBadge>
-            <strong>{agent.label || agent.client_id || "Unnamed VPS"}</strong>
-            <span>
+            <strong
+              title={`VPS: ${agent.label || agent.client_id || "Unnamed VPS"}`}
+            >
+              {agent.label || agent.client_id || "Unnamed VPS"}
+            </strong>
+            <span
+              title={
+                (agent.tags ?? []).length
+                  ? `VPS labels: ${(agent.tags ?? []).slice(0, 3).join(", ")}`
+                  : "No VPS labels are reported"
+              }
+            >
               {(agent.tags ?? []).slice(0, 3).join(", ") || "no labels"}
             </span>
           </div>
@@ -738,15 +783,27 @@ function ResourceDashboard({
           detail={`${countValue(overview.resource_curve.top_limit)} row limit`}
         />
         {overview.resource_curve.series.slice(0, 8).map((series) => (
-          <div className="dashboardWidgetRow" key={series.client_id}>
+          <div
+            className="dashboardWidgetRow"
+            key={series.client_id}
+            title={`${series.label || series.client_id || "Unnamed VPS"}: current ${formatResourceValue(preferences.resourceMetric, series.current)}; peak ${formatResourceValue(preferences.resourceMetric, series.peak)}`}
+          >
             <ConsoleStatusBadge tone={thresholdTone(series)}>
               {thresholdLabel(series)}
             </ConsoleStatusBadge>
-            <strong>{series.label || series.client_id || "Unnamed VPS"}</strong>
-            <span>
+            <strong
+              title={`VPS: ${series.label || series.client_id || "Unnamed VPS"}`}
+            >
+              {series.label || series.client_id || "Unnamed VPS"}
+            </strong>
+            <span
+              title={`Current ${resourceMetricTitle(preferences.resourceMetric)}: ${formatResourceValue(preferences.resourceMetric, series.current)}`}
+            >
               {formatResourceValue(preferences.resourceMetric, series.current)}
             </span>
-            <small>
+            <small
+              title={`Peak ${resourceMetricTitle(preferences.resourceMetric)}: ${formatResourceValue(preferences.resourceMetric, series.peak)}`}
+            >
               Peak{" "}
               {formatResourceValue(preferences.resourceMetric, series.peak)}
             </small>
@@ -879,13 +936,29 @@ function NetworkDashboard({
           detail={countPhrase(network.top_clients.length, "rate row")}
         />
         {network.top_clients.slice(0, 8).map((client) => (
-          <div className="dashboardWidgetRow" key={client.client_id}>
+          <div
+            className="dashboardWidgetRow"
+            key={client.client_id}
+            title={`${client.label || client.client_id || "Unnamed VPS"}: ${formatByteRateFromBitsPerSecond(client.rx_bps)} inbound; ${formatByteRateFromBitsPerSecond(client.tx_bps)} outbound across ${client.interfaces.length} interfaces`}
+          >
             <ConsoleStatusBadge tone="info">
               {countPhrase(client.interfaces.length, "interface")}
             </ConsoleStatusBadge>
-            <strong>{client.label || client.client_id || "Unnamed VPS"}</strong>
-            <span>{formatByteRateFromBitsPerSecond(client.rx_bps)} in</span>
-            <small>{formatByteRateFromBitsPerSecond(client.tx_bps)} out</small>
+            <strong
+              title={`VPS: ${client.label || client.client_id || "Unnamed VPS"}`}
+            >
+              {client.label || client.client_id || "Unnamed VPS"}
+            </strong>
+            <span
+              title={`Average inbound interval rate: ${formatByteRateFromBitsPerSecond(client.rx_bps)}`}
+            >
+              {formatByteRateFromBitsPerSecond(client.rx_bps)} in
+            </span>
+            <small
+              title={`Average outbound interval rate: ${formatByteRateFromBitsPerSecond(client.tx_bps)}`}
+            >
+              {formatByteRateFromBitsPerSecond(client.tx_bps)} out
+            </small>
           </div>
         ))}
         {!network.top_clients.length ? (
@@ -910,10 +983,17 @@ function GroupDashboard({
         <div
           className="groupDashboardTile"
           key={`${cluster.kind}:${cluster.label}`}
+          title={`${cluster.kind || "group"} ${cluster.label || "Unnamed group"}: ${cluster.total} retained records`}
         >
-          <span>{cluster.kind || "group"}</span>
-          <strong>{cluster.label || "Unnamed group"}</strong>
-          <small>
+          <span title={`Grouping dimension: ${cluster.kind || "group"}`}>
+            {cluster.kind || "group"}
+          </span>
+          <strong title={`Group value: ${cluster.label || "Unnamed group"}`}>
+            {cluster.label || "Unnamed group"}
+          </strong>
+          <small
+            title={`${cluster.total} retained records; ${cluster.online} online or completed; ${cluster.stale} stale or other backup records`}
+          >
             {cluster.kind === "date" ? (
               <>
                 {countPhrase(cluster.total, "network sample")} ·{" "}
@@ -943,25 +1023,39 @@ function GroupDashboard({
             )}
           </small>
           <dl>
-            <div>
-              <dt>Alerts</dt>
-              <dd>
+            <div
+              title={`${countValue(cluster.warnings, cluster.counts_truncated)} alerts in this group`}
+            >
+              <dt title="Retained alerts associated with this group">Alerts</dt>
+              <dd
+                title={`${countValue(cluster.warnings, cluster.counts_truncated)} alerts`}
+              >
                 {countValue(cluster.warnings, cluster.counts_truncated)}
               </dd>
             </div>
-            <div>
-              <dt>
+            <div
+              title={`${countValue(cluster.running_jobs, cluster.counts_truncated)} running job records in this group`}
+            >
+              <dt title="Running jobs or active job assignments associated with this group">
                 {cluster.kind === "date"
                   ? "Running jobs"
                   : "Active job assignments"}
               </dt>
-              <dd>
+              <dd
+                title={`${countValue(cluster.running_jobs, cluster.counts_truncated)} running job records`}
+              >
                 {countValue(cluster.running_jobs, cluster.counts_truncated)}
               </dd>
             </div>
-            <div>
-              <dt>Network rate</dt>
-              <dd>
+            <div
+              title={`Aggregate interval-average network rate ${formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps)}`}
+            >
+              <dt title="Aggregate receive plus transmit interval-average rate">
+                Network rate
+              </dt>
+              <dd
+                title={`Aggregate interval-average network rate ${formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps)}`}
+              >
                 {formatByteRateFromBitsPerSecond(
                   cluster.rx_bps + cluster.tx_bps,
                 )}
@@ -1104,7 +1198,9 @@ function dashboardSourceCounts(overview: DashboardOverviewRecord | null): {
 
 function WidgetCoverageNote({ note }: { note: DashboardWidgetCoverageNote }) {
   return (
-    <div className={`dashboardWidgetNote ${note.tone}`}>{note.detail}</div>
+    <div className={`dashboardWidgetNote ${note.tone}`} title={note.detail}>
+      {note.detail}
+    </div>
   );
 }
 
@@ -1251,12 +1347,7 @@ function summaryOfflineCount(summary: DashboardSummaryRecord): number | null {
   const online = finiteCount(summary.online);
   const stale = finiteCount(summary.stale);
   const revoked = finiteCount(summary.revoked);
-  if (
-    total === null ||
-    online === null ||
-    stale === null ||
-    revoked === null
-  ) {
+  if (total === null || online === null || stale === null || revoked === null) {
     return null;
   }
   return Math.max(0, total - online - stale - revoked);
@@ -1327,25 +1418,29 @@ function MetricTile({
   value: string;
 }) {
   return (
-    <div className="metricCard">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
+    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
+      <span title={label}>{label}</span>
+      <strong title={`${label}: ${value}`}>{value}</strong>
+      <small title={detail}>{detail}</small>
     </div>
   );
 }
 
 function WidgetHeader({ detail, title }: { detail: string; title: string }) {
   return (
-    <div className="dashboardWidgetHeader">
-      <strong>{title}</strong>
-      <small>{detail}</small>
+    <div className="dashboardWidgetHeader" title={`${title}: ${detail}`}>
+      <strong title={title}>{title}</strong>
+      <small title={detail}>{detail}</small>
     </div>
   );
 }
 
 function WidgetEmpty({ label }: { label: string }) {
-  return <div className="dashboardWidgetEmpty">{label}</div>;
+  return (
+    <div className="dashboardWidgetEmpty" title={label}>
+      {label}
+    </div>
+  );
 }
 
 function presetIcon(id: DashboardPresetId) {

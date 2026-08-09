@@ -718,6 +718,11 @@ function StaleSelectorMaintenancePanel({
           <div className="previewMeta">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "Stale selector records cannot refresh while an update review is in progress."
+                  : "Stale selector records are already refreshing."
+              }
               disabled={loading || pending}
               onClick={() => void refreshResources()}
               type="button"
@@ -727,12 +732,21 @@ function StaleSelectorMaintenancePanel({
             </button>
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "A stale selector update review is already in progress."
+                  : "No resolvable stale target snapshots are available to update."
+              }
               disabled={pending || updateableRows.length === 0}
               onClick={() => void reviewRows(updateableRows)}
               title={
-                blockedRows > 0
-                  ? `Update every resolvable stale snapshot; ${blockedRows} invalid definition${blockedRows === 1 ? " remains" : "s remain"} for repair.`
-                  : "Resolve and review every stale mutable target snapshot."
+                pending
+                  ? "A stale selector update review is already in progress."
+                  : updateableRows.length === 0
+                    ? "No resolvable stale target snapshots are available to update."
+                    : blockedRows > 0
+                      ? `Update every resolvable stale snapshot; ${blockedRows} invalid definition${blockedRows === 1 ? " remains" : "s remain"} for repair.`
+                      : "Resolve and review every stale mutable target snapshot."
               }
               type="button"
             >
@@ -1001,9 +1015,7 @@ function pingChangeHasDelta(change: PingTargetAssignmentChangeView): boolean {
   );
 }
 
-function shareChangeHasDelta(
-  change: MonitoringShareTargetChangeView,
-): boolean {
+function shareChangeHasDelta(change: MonitoringShareTargetChangeView): boolean {
   return (
     change.added_client_ids.length > 0 || change.removed_client_ids.length > 0
   );

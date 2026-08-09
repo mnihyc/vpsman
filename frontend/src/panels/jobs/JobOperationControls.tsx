@@ -364,10 +364,14 @@ export function JobOperationEditor({
   if (mode === "shell") {
     return (
       <div className="compactOperation shellOperation">
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Command arguments are intentionally omitted from tooltips because they may contain sensitive values."
+        >
           <span>Command argv</span>
           <textarea
             aria-label="Command argv"
+            data-value-tooltip-skip="true"
             onChange={(event) => setCommandText(event.target.value)}
             placeholder={COMMAND_ARGV_PLACEHOLDER}
             rows={3}
@@ -388,10 +392,11 @@ export function JobOperationEditor({
 
   if (mode === "shell_script") {
     return (
-      <label>
+      <label title="Shell script contents are intentionally omitted from tooltips because scripts may contain sensitive values.">
         <span>Shell script</span>
         <textarea
           aria-label="Shell script"
+          data-value-tooltip-skip="true"
           onChange={(event) => setShellScript(event.target.value)}
           placeholder="set -eu&#10;hostname&#10;uptime"
           rows={5}
@@ -635,6 +640,7 @@ export function JobOperationEditor({
           <span>Resume token</span>
           <input
             aria-label="Resumable upload resume token"
+            data-value-tooltip-skip="true"
             onChange={(event) => setFileTransferResumeToken(event.target.value)}
             placeholder="auto"
             value={fileTransferResumeToken}
@@ -737,6 +743,7 @@ export function JobOperationEditor({
           <span>Resume token</span>
           <input
             aria-label="Resumable download resume token"
+            data-value-tooltip-skip="true"
             onChange={(event) => setFileTransferResumeToken(event.target.value)}
             placeholder="auto"
             value={fileTransferResumeToken}
@@ -886,13 +893,16 @@ export function JobOperationEditor({
           <strong>Agent binary</strong>
           <span>HTTPS artifact staged side-by-side after SHA-256 verification</span>
         </div>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Agent update artifact URL; the value is intentionally omitted from tooltips because URLs may contain signed credentials."
+        >
           <span>Artifact URL</span>
           <input
             aria-label="Agent update artifact URL"
+            data-value-tooltip-skip="true"
             onChange={(event) => setUpdateArtifactUrl(event.target.value)}
             placeholder="https://updates.example/vpsman-agent"
-            title={updateArtifactUrl || undefined}
             value={updateArtifactUrl}
           />
         </label>
@@ -918,13 +928,16 @@ export function JobOperationEditor({
           <strong>Version manifest</strong>
           <span>Checks version.json and stages its newer architecture-specific artifact without activating or restarting it</span>
         </div>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Agent update manifest URL; the value is intentionally omitted from tooltips because URLs may contain signed credentials."
+        >
           <span>Manifest URL</span>
           <input
             aria-label="Agent update version manifest URL"
+            data-value-tooltip-skip="true"
             onChange={(event) => setUpdateCheckVersionUrl(event.target.value)}
             placeholder="https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
-            title={updateCheckVersionUrl || undefined}
             value={updateCheckVersionUrl}
           />
         </label>
@@ -1068,10 +1081,14 @@ function SupervisorEditor({
       </label>
       {supervisorAction === "start" && (
         <>
-          <label className="wideField">
+          <label
+            className="wideField"
+            title="Supervisor command arguments are intentionally omitted from tooltips because they may contain sensitive values."
+          >
             <span>Command argv</span>
             <textarea
               aria-label="Supervisor command argv"
+              data-value-tooltip-skip="true"
               onChange={(event) => setSupervisorArgv(event.target.value)}
               placeholder={SUPERVISOR_COMMAND_PLACEHOLDER}
               rows={2}
@@ -1087,10 +1104,14 @@ function SupervisorEditor({
               value={supervisorCwd}
             />
           </label>
-          <label className="wideField">
+          <label
+            className="wideField"
+            title="Supervisor environment values are intentionally omitted from tooltips because they may contain credentials."
+          >
             <span>Env</span>
             <textarea
               aria-label="Supervisor environment"
+              data-value-tooltip-skip="true"
               onChange={(event) => setSupervisorEnv(event.target.value)}
               placeholder="KEY=value"
               rows={2}

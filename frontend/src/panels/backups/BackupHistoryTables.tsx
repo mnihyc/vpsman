@@ -252,7 +252,11 @@ function BackupPoliciesTable({
       cell: (policy) => {
         const result = policyLastResult(policy);
         return (
-          <span className="historyPrimary">
+          <span
+            className="historyPrimary"
+            data-tooltip-sensitive={policy.last_error ? "true" : undefined}
+            data-value-tooltip-skip={policy.last_error ? "true" : undefined}
+          >
             <strong className={`status ${result.tone}`} title={result.title}>
               {result.label}
             </strong>
@@ -1660,7 +1664,8 @@ function policyLastResult(policy: BackupPolicyRecord): {
     return {
       detail: policy.last_error,
       label: "Failed",
-      title: policy.last_error,
+      title:
+        "The retained backup failure is shown here; its exact content is excluded from tooltips.",
       tone: "warn",
     };
   }

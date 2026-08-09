@@ -146,8 +146,8 @@ export function TopologyGraphPanel({
   const nodeStatsById = buildNodeTunnelStats(filtered.edges);
   const selectedNode =
     selectedClientId === null
-      ? nodes[0] ?? null
-      : nodes.find((node) => node.client_id === selectedClientId) ?? null;
+      ? (nodes[0] ?? null)
+      : (nodes.find((node) => node.client_id === selectedClientId) ?? null);
   const selectedEdges = selectedNode
     ? filtered.edges.filter(
         (edge) =>
@@ -259,6 +259,11 @@ export function TopologyGraphPanel({
           className="secondaryAction"
           disabled={loading || runtimeConfigEvidenceState === "loading"}
           onClick={() => void onRefresh(evidenceQuery())}
+          title={
+            loading || runtimeConfigEvidenceState === "loading"
+              ? "Topology or runtime configuration evidence is already loading"
+              : "Refresh topology edges and retained endpoint evidence for the selected range"
+          }
           type="button"
         >
           <RefreshCcw size={17} />
@@ -284,6 +289,11 @@ export function TopologyGraphPanel({
           className="secondaryAction compactAction"
           disabled={loading}
           onClick={() => void onRefresh(evidenceQuery("custom"))}
+          title={
+            loading
+              ? "Topology evidence is already loading"
+              : "Apply the custom topology evidence range"
+          }
           type="button"
         >
           Apply custom range
@@ -343,7 +353,11 @@ export function TopologyGraphPanel({
                   Math.max(0.8, roundZoom(current - 0.2)),
                 )
               }
-              title="Zoom out topology graph"
+              title={
+                graphZoom <= 0.8
+                  ? "Topology graph is already at the minimum 80% zoom"
+                  : "Zoom out topology graph"
+              }
               type="button"
             >
               <ZoomOut size={15} />
@@ -369,13 +383,19 @@ export function TopologyGraphPanel({
                   Math.min(1.6, roundZoom(current + 0.2)),
                 )
               }
-              title="Zoom in topology graph"
+              title={
+                graphZoom >= 1.6
+                  ? "Topology graph is already at the maximum 160% zoom"
+                  : "Zoom in topology graph"
+              }
               type="button"
             >
               <ZoomIn size={15} />
               <span>Zoom in</span>
             </button>
-            <span>{Math.round(graphZoom * 100)}%</span>
+            <span title={`Topology graph zoom ${Math.round(graphZoom * 100)}%`}>
+              {Math.round(graphZoom * 100)}%
+            </span>
           </div>
         </div>
       )}
@@ -407,10 +427,13 @@ export function TopologyGraphPanel({
               <div
                 className={item.tone ? item.tone : undefined}
                 key={item.label}
+                title={`${item.label}: ${item.value}. ${item.detail}`}
               >
-                <span>{item.label}</span>
-                <strong>{item.value}</strong>
-                <p>{item.detail}</p>
+                <span title={item.label}>{item.label}</span>
+                <strong title={`${item.label}: ${item.value}`}>
+                  {item.value}
+                </strong>
+                <p title={item.detail}>{item.detail}</p>
               </div>
             ))}
           </div>
@@ -515,41 +538,49 @@ export function TopologyGraphPanel({
                 })}
                 {nodes.map((node) => {
                   const stats =
-                    nodeStatsById.get(node.client_id) ?? EMPTY_NODE_TUNNEL_STATS;
+                    nodeStatsById.get(node.client_id) ??
+                    EMPTY_NODE_TUNNEL_STATS;
                   return (
-                  <g
-                    aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
-                    className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
-                    key={node.client_id}
-                    onClick={() => setSelectedClientId(node.client_id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        setSelectedClientId(node.client_id);
-                      }
-                    }}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <title>{nodeHoverDetail(node, vpsNameDisplayMode, agentById, stats)}</title>
-                    <circle cx={node.x} cy={node.y} r="42" />
-                    <text x={node.x} y={node.y - 8}>
-                      {graphNodeLabel(node, vpsNameDisplayMode)}
-                    </text>
-                    <text
-                      className="topologyGraphMetric"
-                      x={node.x}
-                      y={node.y + 10}
+                    <g
+                      aria-label={`Select ${nodeLabel(node, vpsNameDisplayMode)}`}
+                      className={`topologyGraphNode ${selectedNode?.client_id === node.client_id ? "selected" : ""} ${stats.attention > 0 ? "degraded" : nodeStatusClass(node, agentById)}`}
+                      key={node.client_id}
+                      onClick={() => setSelectedClientId(node.client_id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          setSelectedClientId(node.client_id);
+                        }
+                      }}
+                      role="button"
+                      tabIndex={0}
                     >
-                      {regionLabel(node)}
-                    </text>
-                    <text
-                      className="topologyGraphMetric"
-                      x={node.x}
-                      y={node.y + 26}
-                    >
-                      {stats.healthy}/{stats.enabled} active
-                    </text>
-                  </g>
+                      <title>
+                        {nodeHoverDetail(
+                          node,
+                          vpsNameDisplayMode,
+                          agentById,
+                          stats,
+                        )}
+                      </title>
+                      <circle cx={node.x} cy={node.y} r="42" />
+                      <text x={node.x} y={node.y - 8}>
+                        {graphNodeLabel(node, vpsNameDisplayMode)}
+                      </text>
+                      <text
+                        className="topologyGraphMetric"
+                        x={node.x}
+                        y={node.y + 10}
+                      >
+                        {regionLabel(node)}
+                      </text>
+                      <text
+                        className="topologyGraphMetric"
+                        x={node.x}
+                        y={node.y + 26}
+                      >
+                        {stats.healthy}/{stats.enabled} active
+                      </text>
+                    </g>
                   );
                 })}
               </g>
@@ -590,7 +621,10 @@ export function TopologyGraphPanel({
             ) : null}
           </div>
           {selectedClientId && !selectedNode ? (
-            <div className="emptyState compactEmpty topologySelectionEmpty" role="status">
+            <div
+              className="emptyState compactEmpty topologySelectionEmpty"
+              role="status"
+            >
               <Server size={20} />
               <strong>VPS not in the managed graph</strong>
               <span>
@@ -598,9 +632,9 @@ export function TopologyGraphPanel({
                   selectedClientId,
                   agentById,
                   vpsNameDisplayMode,
-                )} has no
-                visible managed tunnel declaration in the current graph or
-                filter. No different VPS was selected.
+                )}{" "}
+                has no visible managed tunnel declaration in the current graph
+                or filter. No different VPS was selected.
               </span>
             </div>
           ) : null}
@@ -684,11 +718,53 @@ export function TopologyGraphPanel({
                 </span>
                 <span className="topologyMetric" data-label="Metric">
                   <strong>{edgeMetric(edge)}</strong>
-                  <small>{edgeStatusDetail(edge)}</small>
+                  <small
+                    data-tooltip-sensitive={
+                      edgeAvailabilityReasons(edge).length > 0 ||
+                      edgeRuntimeReasons(edge).length > 0
+                        ? "true"
+                        : undefined
+                    }
+                    data-value-tooltip-skip={
+                      edgeAvailabilityReasons(edge).length > 0 ||
+                      edgeRuntimeReasons(edge).length > 0
+                        ? "true"
+                        : undefined
+                    }
+                    title={
+                      edgeAvailabilityReasons(edge).length > 0 ||
+                      edgeRuntimeReasons(edge).length > 0
+                        ? "Tunnel health detail is displayed here; exact runtime diagnostic content is excluded from tooltips."
+                        : undefined
+                    }
+                  >
+                    {edgeStatusDetail(edge)}
+                  </small>
                 </span>
                 <span className="topologyMetric" data-label="Endpoints">
-                  <strong>{humanStatus(edge.left_runtime_state)} / {humanStatus(edge.right_runtime_state)}</strong>
-                  <small>{endpointRuntimeDetail(edge)}</small>
+                  <strong>
+                    {humanStatus(edge.left_runtime_state)} /{" "}
+                    {humanStatus(edge.right_runtime_state)}
+                  </strong>
+                  <small
+                    data-tooltip-sensitive={
+                      edge.left_runtime_reason || edge.right_runtime_reason
+                        ? "true"
+                        : undefined
+                    }
+                    data-value-tooltip-skip={
+                      edge.left_runtime_reason || edge.right_runtime_reason
+                        ? "true"
+                        : undefined
+                    }
+                    title={
+                      edge.left_runtime_reason || edge.right_runtime_reason
+                        ? "Endpoint runtime detail is displayed here; exact provider diagnostic content is excluded from tooltips."
+                        : undefined
+                    }
+                  >
+                    {endpointRuntimeDetail(edge)}
+                  </small>
                 </span>
                 <span className="topologyMetric" data-label="Neighbor">
                   <strong>{humanStatus(edge.neighbor_state)}</strong>
@@ -936,7 +1012,9 @@ function filterGraph(
   for (const clientId of queryMatchedNodeIds) {
     visibleNodeIds.add(clientId);
   }
-  const nodes = graph.nodes.filter((node) => visibleNodeIds.has(node.client_id));
+  const nodes = graph.nodes.filter((node) =>
+    visibleNodeIds.has(node.client_id),
+  );
   return { edges, nodes };
 }
 
@@ -1349,13 +1427,17 @@ function endpointRuntimeDetail(edge: TopologyGraphEdge): string {
     return reasons.join("; ");
   }
   const observed = latestIso([edge.left_observed_at, edge.right_observed_at]);
-  return observed ? `latest ${formatCompactTime(observed)}` : "no endpoint evidence";
+  return observed
+    ? `latest ${formatCompactTime(observed)}`
+    : "no endpoint evidence";
 }
 
 function endpointReachabilitySummary(edge: TopologyGraphEdge): string {
   const left = humanStatus(edge.left_reachability_state);
   const right = humanStatus(edge.right_reachability_state);
-  return left === right ? `Both ${left.toLowerCase()}` : `L ${left} / R ${right}`;
+  return left === right
+    ? `Both ${left.toLowerCase()}`
+    : `L ${left} / R ${right}`;
 }
 
 function endpointReachabilityTitle(edge: TopologyGraphEdge): string {
@@ -1365,14 +1447,12 @@ function endpointReachabilityTitle(edge: TopologyGraphEdge): string {
       edge.left_reachability_state,
       edge.left_reachability_source,
       edge.left_reachability_observed_at,
-      edge.left_reachability_reason,
     ),
     endpointReachabilityDetail(
       "Right",
       edge.right_reachability_state,
       edge.right_reachability_source,
       edge.right_reachability_observed_at,
-      edge.right_reachability_reason,
     ),
   ].join("; ");
 }
@@ -1382,13 +1462,12 @@ function endpointReachabilityDetail(
   state: string,
   source: string | null,
   observedAt: string | null,
-  reason: string | null,
 ): string {
   return [
     `${label}: ${humanStatus(state)}`,
     source ? `${humanStatus(source)} source` : null,
     observedAt ? `observed ${formatFullTime(observedAt)}` : "not observed",
-    reason ? humanStatus(reason) : null,
+    "exact probe diagnostic content excluded from tooltips",
   ]
     .filter(Boolean)
     .join(", ");

@@ -485,10 +485,15 @@ export function HostServicesPanel({
       {
         cell: (service) => (
           <span className="historyPrimary">
-            <span className={`status ${serviceTone(service.active_state)}`}>
+            <span
+              className={`status ${serviceTone(service.active_state)}`}
+              title={`Service runtime state: ${readableState(service.active_state)}; sub-state: ${readableState(service.sub_state)}.${service.state_reason ? " Exact provider diagnostic content is excluded from tooltips." : ""}`}
+            >
               {readableState(service.active_state)}
             </span>
-            <small title={service.state_reason ?? service.sub_state}>
+            <small
+              title={`Service runtime sub-state: ${readableState(service.sub_state)}.${service.state_reason ? " Exact provider diagnostic content is excluded from tooltips." : ""}`}
+            >
               {readableState(service.sub_state)}
             </small>
           </span>
@@ -586,7 +591,16 @@ export function HostServicesPanel({
           </div>
           <div className="headerActionStack">
             <div className="processHeaderActions">
-              <label className="processTargetPicker">
+              <label
+                className="processTargetPicker"
+                title={
+                  agents.length === 0
+                    ? "No VPS is available in the current fleet scope."
+                    : pending
+                      ? "The VPS cannot change while a service inventory operation is running."
+                      : "Choose the VPS whose services should be inspected."
+                }
+              >
                 <span>VPS</span>
                 <VpsCombobox
                   agents={agents}
@@ -599,6 +613,9 @@ export function HostServicesPanel({
               </label>
               <button
                 className="secondaryAction compactAction"
+                data-tooltip-disabled-reason={
+                  pending ? "A service inventory operation is already running." : refreshUnavailable ?? undefined
+                }
                 disabled={Boolean(refreshUnavailable) || pending}
                 onClick={() => void refreshInventory()}
                 title={refreshUnavailable ?? "Detect the active init provider and refresh services"}
@@ -632,27 +649,36 @@ export function HostServicesPanel({
           aria-label="Service capability summary"
           className="processSupervisorSummaryStrip"
         >
-          <span className={capability?.status !== "supported" ? "attention" : undefined}>
+          <span
+            className={capability?.status !== "supported" ? "attention" : undefined}
+            title={capability ? `${providerLabel(capability.provider)} provider capability is ${readableState(capability.status)}.` : "The service provider has not been detected."}
+          >
             <strong>{providerLabel(capability?.provider ?? null)}</strong>
             <small>Provider</small>
           </span>
-          <span>
+          <span title={`${activeCount} of ${services.length} retained services are active.`}>
             <strong>{activeCount} / {services.length}</strong>
             <small>Active</small>
           </span>
-          <span className={failedCount > 0 ? "attention" : undefined}>
+          <span
+            className={failedCount > 0 ? "attention" : undefined}
+            title={`${failedCount} retained services report a failed runtime state.`}
+          >
             <strong>{failedCount}</strong>
             <small>Failed</small>
           </span>
-          <span>
+          <span title={`${enabledCount} retained services are enabled at boot.`}>
             <strong>{enabledCount}</strong>
             <small>Enabled at boot</small>
           </span>
-          <span className={capability && !capability.can_read_logs ? "attention" : undefined}>
+          <span
+            className={capability && !capability.can_read_logs ? "attention" : undefined}
+            title={capability?.can_read_logs ? "The detected provider supports service log reads." : "Service log reads are not supported by the detected provider."}
+          >
             <strong>{capability?.can_read_logs ? "Available" : "Unsupported"}</strong>
             <small>Service logs</small>
           </span>
-          <span>
+          <span title={inventory?.observed_at ? `Service inventory observed ${formatFullTime(inventory.observed_at)}.` : "No service inventory observation time has been reported."}>
             <strong title={inventory?.observed_at ? formatFullTime(inventory.observed_at) : undefined}>
               {inventory?.observed_at ? formatCompactTime(inventory.observed_at) : "Never"}
             </strong>
@@ -721,7 +747,15 @@ export function HostServicesPanel({
               <span>Boot state</span>
               <strong>{readableState(service.enabled_state)}</strong>
               <span>Provider evidence</span>
-              <strong title={service.state_reason ?? undefined}>
+              <strong
+                data-tooltip-sensitive={service.state_reason ? "true" : undefined}
+                data-value-tooltip-skip={service.state_reason ? "true" : undefined}
+                title={
+                  service.state_reason
+                    ? "Provider diagnostic evidence is displayed here; exact command output is excluded from tooltips."
+                    : "The provider reported no additional service diagnostic."
+                }
+              >
                 {service.state_reason ?? "No additional diagnostic"}
               </strong>
               <span>Observed</span>
@@ -788,7 +822,11 @@ export function HostServicesPanel({
             onClose={() => setLogs(null)}
             title={`${logs.service} logs`}
           >
-            <pre className="serviceLogOutput" title={logs.lines.join("\n")}>
+            <pre
+              className="serviceLogOutput"
+              data-value-tooltip-skip="true"
+              title={`${logs.lines.length} retained journal line${logs.lines.length === 1 ? "" : "s"}; log contents are intentionally omitted from the tooltip.`}
+            >
               {logs.lines.length > 0 ? logs.lines.join("\n") : "No journal entries returned."}
             </pre>
           </ConsoleDetailPanel>

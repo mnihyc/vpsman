@@ -383,7 +383,15 @@ export function FileTransferSessionsPanel({
               ? formatBytes(transfer.size_bytes)
               : "Not reported"}
           </strong>
-          <small>{formatChunkInfo(transfer)}</small>
+          <small
+            title={
+              transfer.last_chunk_size_bytes
+                ? formatChunkInfo(transfer)
+                : `Configured chunk ${transfer.chunk_size_bytes ? formatBytes(transfer.chunk_size_bytes) : "automatic"}; last chunk size was not reported.`
+            }
+          >
+            {formatChunkInfo(transfer)}
+          </small>
         </span>
       ),
       header: "Size",
@@ -425,6 +433,7 @@ export function FileTransferSessionsPanel({
         <span className="historyPrimary">
           <span
             className={`status ${fileTransferSessionStatusBadgeClass(transfer.status)}`}
+            title={transferStateDetail(transfer)}
           >
             {transferStateLabel(transfer)}
           </span>
@@ -678,6 +687,9 @@ export function FileTransferSessionsPanel({
         <div className="headerActionStack">
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              loading ? "File transfer sessions are already refreshing." : undefined
+            }
             disabled={loading}
             onClick={onRefresh}
             type="button"
@@ -691,13 +703,19 @@ export function FileTransferSessionsPanel({
         className="transferLifecycleSummary"
         aria-label="File transfer lifecycle summary"
       >
-        <span>
+        <span title="Start a reviewed browser upload or download against one selected VPS.">
           <strong>New transfer</strong>
           <small title="Upload or download with local review">
             Upload or download with local review
           </small>
         </span>
-        <span>
+        <span
+          title={
+            transfersTruncated
+              ? `${formatLowerBoundCount(handoffCandidates.length, true)} completed downloads are ready and ${unavailableCompletedDownloads} are unavailable in loaded sessions.`
+              : `${handoffCandidates.length} completed downloads are ready and ${unavailableCompletedDownloads} are unavailable.`
+          }
+        >
           <strong>Ready downloads</strong>
           <small
             title={
@@ -711,7 +729,13 @@ export function FileTransferSessionsPanel({
               : `${handoffCandidates.length} ready, ${unavailableCompletedDownloads} unavailable`}
           </small>
         </span>
-        <span>
+        <span
+          title={
+            transfersTruncated
+              ? `${formatLowerBoundCount(downloadTransfers.length, true)} downloads and ${formatLowerBoundCount(uploadTransfers.length, true)} uploads are present in loaded sessions.`
+              : `${downloadTransfers.length} downloads and ${uploadTransfers.length} uploads are tracked.`
+          }
+        >
           <strong>Transfers</strong>
           <small
             title={
@@ -725,7 +749,14 @@ export function FileTransferSessionsPanel({
               : `${downloadTransfers.length} downloads, ${uploadTransfers.length} uploads`}
           </small>
         </span>
-        <span className={failedTransfers.length > 0 ? "attention" : undefined}>
+        <span
+          className={failedTransfers.length > 0 ? "attention" : undefined}
+          title={
+            transfersTruncated
+              ? `${formatLowerBoundCount(failedTransfers.length, true)} failed sessions in the loaded page can be reviewed for retry.`
+              : `${failedTransfers.length} failed sessions can be reviewed for retry.`
+          }
+        >
           <strong>Retries</strong>
           <small
             title={
@@ -829,7 +860,13 @@ export function FileTransferSessionsPanel({
               </div>
             </div>
           ) : null}
-          <label>
+          <label
+            title={
+              agents.length === 0
+                ? "No VPS is available in the current fleet scope."
+                : "Choose the VPS for this reviewed file transfer."
+            }
+          >
             <span>VPS</span>
             <VpsCombobox
               agents={agents}
@@ -869,6 +906,17 @@ export function FileTransferSessionsPanel({
           </label>
           <button
             className="primaryAction compactAction"
+            data-tooltip-disabled-reason={
+              loading
+                ? "Transfer data is still loading."
+                : !onOpenDispatchPreset
+                  ? "Transfer dispatch is unavailable on this surface."
+                  : !quickTransferReady
+                    ? quickTransferMode === "upload"
+                      ? "Choose a local file, VPS, and absolute destination path."
+                      : "Choose a VPS and absolute remote source path."
+                    : undefined
+            }
             disabled={loading || !onOpenDispatchPreset || !quickTransferReady}
             onClick={startQuickUpload}
             title={
@@ -925,12 +973,17 @@ export function FileTransferSessionsPanel({
         detail="Saves the reviewed completed download sessions using the selected method."
         error={handoffError}
         items={[
-          { label: "Save method", value: handoffSnapshot?.mode ?? "-" },
+          {
+            label: "Save method",
+            value: handoffSnapshot?.mode ?? (
+              <span data-tooltip-empty-reason="No ready-download review is active.">-</span>
+            ),
+          },
           {
             label: "Transfers",
             value: handoffSnapshot
               ? String(handoffSnapshot.transfers.length)
-              : "-",
+              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
           },
           {
             label: "Sessions",
@@ -939,7 +992,7 @@ export function FileTransferSessionsPanel({
               : undefined,
             value: handoffSnapshot
               ? handoffSessionSummary(handoffSnapshot.transfers)
-              : "-",
+              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
           },
           {
             label: "Expected hashes",
@@ -948,7 +1001,7 @@ export function FileTransferSessionsPanel({
               : undefined,
             value: handoffSnapshot
               ? handoffHashSummary(handoffSnapshot.transfers)
-              : "-",
+              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
           },
           {
             label: "Evidence",
@@ -957,7 +1010,7 @@ export function FileTransferSessionsPanel({
               : undefined,
             value: handoffSnapshot
               ? handoffEvidenceSummary(handoffSnapshot.transfers)
-              : "-",
+              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
           },
         ]}
         onCancel={() => setHandoffSnapshot(null)}
@@ -1046,6 +1099,9 @@ export function FileTransferSessionsPanel({
             <span>{retrySnapshot.retryGuidance}</span>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                onOpenDispatchPreset ? undefined : "Retry dispatch is unavailable on this surface."
+              }
               disabled={!onOpenDispatchPreset}
               onClick={() => {
                 onOpenDispatchPreset?.(
@@ -1065,6 +1121,9 @@ export function FileTransferSessionsPanel({
             </button>
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                onOpenDispatchPreset ? undefined : "Retry dispatch is unavailable on this surface."
+              }
               disabled={!onOpenDispatchPreset}
               onClick={() => {
                 onOpenDispatchPreset?.(
@@ -1166,6 +1225,9 @@ export function FileTransferSessionsPanel({
             <span>Save method</span>
             <select
               aria-label="Ready download save method"
+              data-tooltip-disabled-reason={
+                handoffBusy ? "The save method cannot change while downloads are being prepared." : undefined
+              }
               disabled={handoffBusy}
               onChange={(event) =>
                 setHandoffDownloadMode(
@@ -1227,6 +1289,15 @@ export function FileTransferSessionsPanel({
             </label>
             <button
               className="primaryAction"
+              data-tooltip-disabled-reason={
+                sourcePending
+                  ? "A source artifact review or download is already running."
+                  : loading
+                    ? "Source artifacts are still loading."
+                    : !sourceFile
+                      ? "Choose a source file before review."
+                      : undefined
+              }
               disabled={sourcePending || !sourceFile || loading}
               onClick={() => void reviewSourceArtifact()}
               type="button"
@@ -1252,20 +1323,20 @@ export function FileTransferSessionsPanel({
                 value:
                   sourceSnapshot?.request.name ??
                   sourceSnapshot?.fileName ??
-                  "-",
+                  <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
               },
               {
                 label: "SHA-256",
                 title: sourceSnapshot?.request.sha256_hex,
                 value: sourceSnapshot
                   ? shortHash(sourceSnapshot.request.sha256_hex)
-                  : "-",
+                  : <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
               },
               {
                 label: "Size",
                 value: sourceSnapshot
                   ? formatBytes(sourceSnapshot.request.size_bytes)
-                  : "-",
+                  : <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
               },
             ]}
             onCancel={() => setSourceSnapshot(null)}

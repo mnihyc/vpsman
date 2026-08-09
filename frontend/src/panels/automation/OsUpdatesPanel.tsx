@@ -622,6 +622,13 @@ export function OsUpdatesPanel({
           <div className="headerActionStack">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading
+                  ? "OS package evidence is already loading"
+                  : pendingClientId
+                    ? "A package operation is already in progress for a VPS"
+                    : undefined
+              }
               disabled={loading || Boolean(pendingClientId)}
               onClick={() => void reloadEvidence()}
               title="Reload stored package-plan evidence without contacting agents"
@@ -909,6 +916,13 @@ function PackagePlanDetail({
         <>
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A package operation is already in progress for this VPS"
+                : row.agent.status !== "online"
+                  ? "The VPS must be online to check its cached package metadata"
+                  : undefined
+            }
             disabled={pending || row.agent.status !== "online"}
             onClick={onCheckCached}
             title="Build a reviewed candidate snapshot from the host's current package metadata cache"
@@ -919,6 +933,13 @@ function PackagePlanDetail({
           </button>
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A package operation is already in progress for this VPS"
+                : row.agent.status !== "online"
+                  ? "The VPS must be online to refresh package metadata"
+                  : refreshUnavailable ?? undefined
+            }
             disabled={
               pending ||
               row.agent.status !== "online" ||
@@ -947,6 +968,11 @@ function PackagePlanDetail({
           ) : null}
           <button
             className="primaryAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A package operation is already in progress for this VPS"
+                : applyUnavailable ?? undefined
+            }
             disabled={Boolean(applyUnavailable) || pending}
             onClick={onApply}
             title={

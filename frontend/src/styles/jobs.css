@@ -3486,6 +3486,10 @@
   border-top: 1px solid var(--border-subtle);
 }
 
+.osUpdatesWorkspace:has(> .consoleDetailPanel) {
+  padding-bottom: 40px;
+}
+
 .osUpdatePlanSummary {
   margin-bottom: 12px;
 }

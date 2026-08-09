@@ -417,6 +417,7 @@ export function TimeSeriesChart({
       aria-labelledby={captionId}
       data-gap-policy="preserve"
       data-render-mode={pointsOnly ? "points" : "line"}
+      title={`${ariaLabel}. Missing samples remain visible as gaps.`}
     >
       <figcaption className="srOnly" id={captionId}>
         {ariaLabel}
@@ -449,6 +450,7 @@ export function TimeSeriesChart({
             role="group"
             style={{ minHeight: height }}
             tabIndex={0}
+            title={`${ariaLabel}. Focus and use the arrow keys to inspect exact samples.`}
           />
           <div className="timeSeriesLegendToolbar">
             <div
@@ -487,7 +489,7 @@ export function TimeSeriesChart({
             </div>
             {(effectiveHiddenSeries.size > 0 || exportFileName) && (
               <div className="timeSeriesLegendActions">
-                <span>
+                <span title={`${visibleLineCount} of ${sanitizedLines.length} chart series are visible.`}>
                   {visibleLineCount}/{sanitizedLines.length} series
                 </span>
                 {effectiveHiddenSeries.size > 0 && (
@@ -519,16 +521,23 @@ export function TimeSeriesChart({
             <p
               className="timeSeriesCoverage"
               aria-label={`${ariaLabel} data coverage`}
+              title={`${ariaLabel}. ${coverageLabel}`}
             >
               {coverageLabel}
             </p>
           )}
           {hover && (
-            <div className={`timeSeriesHover ${hover.side}`}>
+            <div
+              className={`timeSeriesHover ${hover.side}`}
+              title={`${ariaLabel} sample at ${hover.fullTimeLabel}.`}
+            >
               <strong title={hover.fullTimeLabel}>{hover.timeLabel}</strong>
               <small>{hover.fullTimeLabel}</small>
               {hover.values.map((entry) => (
-                <span key={`${hover.index}-${entry.label}`}>
+                <span
+                  key={`${hover.index}-${entry.label}`}
+                  title={`${entry.label}: ${valueFormatter(entry.value)} at ${hover.fullTimeLabel}.`}
+                >
                   <i style={{ background: entry.color }} />
                   {entry.label}
                   <b>{valueFormatter(entry.value)}</b>
@@ -570,7 +579,9 @@ export function TimeSeriesChart({
           </table>
         </>
       ) : (
-        <div className="dashboardEmptyChart">{emptyLabel}</div>
+        <div className="dashboardEmptyChart" title={`${ariaLabel}: ${emptyLabel}`}>
+          {emptyLabel}
+        </div>
       )}
     </figure>
   );

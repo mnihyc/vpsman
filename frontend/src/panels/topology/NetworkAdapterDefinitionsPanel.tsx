@@ -252,8 +252,8 @@ export function NetworkAdapterDefinitionsPanel({
           <div className="emptyState">
             <strong>No adapter definitions</strong>
             <span>
-              Agent builtin tunnels need no runtime adapter. Create one only
-              for custom tunnel or routing commands.
+              Agent builtin tunnels need no runtime adapter. Create one only for
+              custom tunnel or routing commands.
             </span>
           </div>
         }
@@ -282,6 +282,7 @@ export function NetworkAdapterDefinitionsPanel({
             <button
               className="secondaryAction compactAction"
               onClick={() => openCreate("routing_cost")}
+              title="Create an adapter contract for reading and updating routing cost"
               type="button"
             >
               <Plus size={14} />
@@ -290,6 +291,7 @@ export function NetworkAdapterDefinitionsPanel({
             <button
               className="primaryAction compactAction"
               onClick={() => openCreate("runtime_tunnel")}
+              title="Create an adapter contract for custom tunnel runtime commands"
               type="button"
             >
               <Plus size={14} />
@@ -357,6 +359,11 @@ export function NetworkAdapterDefinitionsPanel({
                     setDefinition(defaultAdapterDefinition(nextKind));
                   });
                 }}
+                title={
+                  editor?.mode === "edit"
+                    ? "Adapter purpose is immutable after creation; create another definition for a different purpose"
+                    : "Choose whether this adapter manages a tunnel runtime or routing cost"
+                }
                 value={kind}
               >
                 <option value="runtime_tunnel">Tunnel runtime</option>
@@ -398,6 +405,15 @@ export function NetworkAdapterDefinitionsPanel({
           <button
             className="primaryAction"
             disabled={pending || !name.trim()}
+            title={
+              pending
+                ? "Wait for the current adapter definition operation to finish"
+                : !name.trim()
+                  ? "Enter an adapter definition name before saving"
+                  : editor?.mode === "edit"
+                    ? "Save the reviewed adapter contract changes"
+                    : "Create this adapter definition"
+            }
             type="submit"
           >
             {editor?.mode === "edit"
@@ -493,13 +509,16 @@ function AdapterCommandFields({
         const command = asObject(definition[field]);
         return (
           <div className="compactForm" key={field}>
-            <label>
+            <label
+              title={`${label} adapter command editor; arguments are excluded from tooltips`}
+            >
               <span>
                 {label}
                 {` (${hint})`}
               </span>
               <textarea
                 aria-label={`${label} adapter command`}
+                data-tooltip-sensitive="true"
                 onChange={(event) => {
                   const argv = lines(event.target.value);
                   const next = { ...definition };

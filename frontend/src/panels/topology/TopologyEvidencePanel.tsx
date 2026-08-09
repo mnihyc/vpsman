@@ -118,7 +118,9 @@ export function TopologyEvidencePanel({
   const [evidenceWindow, setEvidenceWindow] = useState<MonitoringWindow>(
     DEFAULT_NETWORK_EVIDENCE_WINDOW,
   );
-  const [customStartAt, setCustomStartAt] = useState(defaultNetworkEvidenceStartAt);
+  const [customStartAt, setCustomStartAt] = useState(
+    defaultNetworkEvidenceStartAt,
+  );
   const [customEndAt, setCustomEndAt] = useState(defaultNetworkEvidenceEndAt);
   const [planId, setPlanId] = useState("");
   const [clientId, setClientId] = useState("");
@@ -147,17 +149,21 @@ export function TopologyEvidencePanel({
     .filter((plan) => !selectedPlanIds || selectedPlanIds.has(plan.plan_id))
     .map(buildOspfUpdatePlanRow);
   const ospfRows = ospfRecommendations
-    .filter((recommendation) =>
-      !selectedPlanIds || selectedPlanIds.has(recommendation.plan_id),
+    .filter(
+      (recommendation) =>
+        !selectedPlanIds || selectedPlanIds.has(recommendation.plan_id),
     )
     .map(buildOspfRecommendationRow);
-  const observationRows = latestObservationRows(observations).map((observation) =>
-    buildObservationRow(observation, clientLabel, throughputBaselines),
+  const observationRows = latestObservationRows(observations).map(
+    (observation) =>
+      buildObservationRow(observation, clientLabel, throughputBaselines),
   );
   const trendRows = trends.map((trend) =>
     buildTrendRow(trend, clientLabel, throughputBaselines),
   );
-  const hasUnloadedOutput = rows.some((row) => row.metric === "Output not loaded");
+  const hasUnloadedOutput = rows.some(
+    (row) => row.metric === "Output not loaded",
+  );
   const hasTrendComparison = trendRows.length > 0;
   const freshness = buildNetworkEvidenceFreshness(observations);
   const timelineStages = buildTimelineStages({
@@ -177,8 +183,7 @@ export function TopologyEvidencePanel({
     ...rows
       .filter(
         (row) =>
-          row.kind === "network_probe" &&
-          typeof row.latencyAvgMs === "number",
+          row.kind === "network_probe" && typeof row.latencyAvgMs === "number",
       )
       .map((row) => ({
         jobId: row.job.id,
@@ -186,9 +191,7 @@ export function TopologyEvidencePanel({
         lossRatio: row.lossRatio ?? null,
       })),
     ...observations
-      .filter(
-        (observation) => observation.kind === "tunnel_reachability",
-      )
+      .filter((observation) => observation.kind === "tunnel_reachability")
       .map((observation) => ({
         healthy: observation.healthy,
         jobId: observation.id,
@@ -221,9 +224,12 @@ export function TopologyEvidencePanel({
   const selectedRangeLabel = networkEvidenceWindowLabel(evidenceWindow);
   const status = `${observations.length} observations / ${trends.length} trend groups in ${selectedRangeLabel}`;
   const evidenceFeedbackMessage =
-    refreshError ?? error ?? (refreshing ? "Refreshing network evidence" : null);
+    refreshError ??
+    error ??
+    (refreshing ? "Refreshing network evidence" : null);
   const outputFeedbackMessage =
-    outputError ?? (outputLoading ? "Loading retained command output" : outputNotice);
+    outputError ??
+    (outputLoading ? "Loading retained command output" : outputNotice);
 
   function currentEvidenceQuery(
     windowOverride: MonitoringWindow = evidenceWindow,
@@ -332,7 +338,9 @@ export function TopologyEvidencePanel({
         ),
       );
       setOutputsByJob(Object.fromEntries(outputEntries));
-      setOutputNotice(`Loaded retained output for ${outputEntries.length} network job${outputEntries.length === 1 ? "" : "s"}`);
+      setOutputNotice(
+        `Loaded retained output for ${outputEntries.length} network job${outputEntries.length === 1 ? "" : "s"}`,
+      );
     } catch (loadError) {
       setOutputError(
         loadError instanceof Error
@@ -363,6 +371,11 @@ export function TopologyEvidencePanel({
             className="secondaryAction"
             disabled={refreshing}
             onClick={() => void refreshEvidence()}
+            title={
+              refreshing
+                ? "Network evidence is already refreshing"
+                : "Refresh retained topology measurements and command evidence for the selected range"
+            }
             type="button"
           >
             <RefreshCcw size={17} />
@@ -393,8 +406,13 @@ export function TopologyEvidencePanel({
           startAt={customStartAt}
           window={evidenceWindow}
         />
-        <details className="fleetMetricsAdvancedFilters">
-          <summary>
+        <details
+          className="fleetMetricsAdvancedFilters"
+          title="Restrict retained network evidence by plan, endpoint, source, measurement, health, or text"
+        >
+          <summary
+            title={`${activeEvidenceFilters} advanced network evidence filter${activeEvidenceFilters === 1 ? "" : "s"} active`}
+          >
             <SlidersHorizontal size={14} />
             <span>Advanced filters</span>
             {activeEvidenceFilters > 0 ? <b>{activeEvidenceFilters}</b> : null}
@@ -410,7 +428,8 @@ export function TopologyEvidencePanel({
                 <option value="">All visible tunnel plans</option>
                 {tunnelPlans.map((plan) => (
                   <option key={plan.id} value={plan.id}>
-                    {plan.name}{plan.enabled ? "" : " · disabled"}
+                    {plan.name}
+                    {plan.enabled ? "" : " · disabled"}
                   </option>
                 ))}
               </select>
@@ -480,12 +499,19 @@ export function TopologyEvidencePanel({
               />
             </label>
             <div className="dashboardScopeHint">
-              The selected range and filters are applied by the API. With no plan filter, every visible plan is eligible and represented independently.
+              The selected range and filters are applied by the API. With no
+              plan filter, every visible plan is eligible and represented
+              independently.
             </div>
             <button
               className="secondaryAction compactAction"
               disabled={refreshing}
               onClick={() => void refreshEvidence()}
+              title={
+                refreshing
+                  ? "Network evidence is already refreshing"
+                  : "Apply the selected range and advanced evidence filters"
+              }
               type="button"
             >
               Apply filters
@@ -494,6 +520,11 @@ export function TopologyEvidencePanel({
               className="secondaryAction compactAction"
               disabled={activeEvidenceFilters === 0}
               onClick={() => void resetEvidenceFilters()}
+              title={
+                activeEvidenceFilters === 0
+                  ? "No advanced network evidence filters are active"
+                  : `Reset ${activeEvidenceFilters} active advanced evidence filter${activeEvidenceFilters === 1 ? "" : "s"}`
+              }
               type="button"
             >
               Reset filters
@@ -511,9 +542,15 @@ export function TopologyEvidencePanel({
         <div
           className="topologyEvidenceFreshness warning"
           aria-label="Network evidence freshness"
-          title={freshness.latestTimestamp ? `Latest evidence: ${formatFullTime(freshness.latestTimestamp)}` : undefined}
+          title={
+            freshness.latestTimestamp
+              ? `Latest evidence: ${formatFullTime(freshness.latestTimestamp)}`
+              : undefined
+          }
         >
-          <strong>Reachability evidence was observed {freshness.observedLabel}.</strong>
+          <strong>
+            Reachability evidence was observed {freshness.observedLabel}.
+          </strong>
           <span>{freshness.detail}</span>
         </div>
       )}
@@ -577,7 +614,11 @@ export function TopologyEvidencePanel({
           className="secondaryAction compactAction"
           disabled={outputLoading || networkJobs.length === 0}
           onClick={loadCommandOutputs}
-          title={networkJobs.length === 0 ? "No network jobs have retained output" : "Load retained command output for the recent network jobs"}
+          title={
+            networkJobs.length === 0
+              ? "No network jobs have retained output"
+              : "Load retained command output for the recent network jobs"
+          }
           type="button"
         >
           <RefreshCcw size={16} />
@@ -587,7 +628,11 @@ export function TopologyEvidencePanel({
           className="secondaryAction compactAction"
           disabled={!hasTrendComparison}
           onClick={scrollToTrendComparison}
-          title={hasTrendComparison ? "Jump to trend ranges that compare recent observations" : "No comparable trend ranges are available"}
+          title={
+            hasTrendComparison
+              ? "Jump to trend ranges that compare recent observations"
+              : "No comparable trend ranges are available"
+          }
           type="button"
         >
           <GitCompareArrows size={16} />
@@ -597,7 +642,11 @@ export function TopologyEvidencePanel({
           className="secondaryAction compactAction"
           disabled={!onOpenOspfApprovals}
           onClick={onOpenOspfApprovals}
-          title="Open optional OSPF routing-cost control"
+          title={
+            onOpenOspfApprovals
+              ? "Open optional OSPF routing-cost control"
+              : "OSPF routing-cost control is unavailable in this context"
+          }
           type="button"
         >
           <ShieldCheck size={16} />
@@ -620,7 +669,10 @@ export function TopologyEvidencePanel({
               className="table historyTable trendTable"
               role="table"
             >
-              <div className="historyRow heading topologyEvidenceGrid" role="row">
+              <div
+                className="historyRow heading topologyEvidenceGrid"
+                role="row"
+              >
                 <span role="columnheader">OSPF update plan</span>
                 <span role="columnheader">Health</span>
                 <span role="columnheader">Cost</span>
@@ -628,8 +680,17 @@ export function TopologyEvidencePanel({
                 <span role="columnheader">Latest</span>
               </div>
               {ospfUpdateRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
-                  <span className="historyPrimary" role="cell">
+                <div
+                  className="historyRow topologyEvidenceGrid"
+                  key={row.id}
+                  role="row"
+                  title={`${row.planName}: ${row.signalLabel}; cost ${row.metric}; approval ${row.target}; latest ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}`}
+                >
+                  <span
+                    className="historyPrimary"
+                    role="cell"
+                    title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}`}
+                  >
                     <EvidenceMobileLabel>OSPF update plan</EvidenceMobileLabel>
                     <strong>{row.planName}</strong>
                     <small>{row.interfaceName}</small>
@@ -644,12 +705,20 @@ export function TopologyEvidencePanel({
                       {row.signalLabel}
                     </span>
                   </span>
-                  <span className="topologyMetric" role="cell">
+                  <span
+                    className="topologyMetric"
+                    role="cell"
+                    title={`Cost ${row.metric}; ${row.metricDetail}`}
+                  >
                     <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span className="topologyMetric" role="cell">
+                  <span
+                    className="topologyMetric"
+                    role="cell"
+                    title={`Approval ${row.target}; ${row.targetDetail}`}
+                  >
                     <EvidenceMobileLabel>Approval</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
@@ -665,7 +734,10 @@ export function TopologyEvidencePanel({
               className="table historyTable trendTable"
               role="table"
             >
-              <div className="historyRow heading topologyEvidenceGrid" role="row">
+              <div
+                className="historyRow heading topologyEvidenceGrid"
+                role="row"
+              >
                 <span role="columnheader">OSPF recommendation</span>
                 <span role="columnheader">Health</span>
                 <span role="columnheader">Cost</span>
@@ -673,9 +745,20 @@ export function TopologyEvidencePanel({
                 <span role="columnheader">Latest</span>
               </div>
               {ospfRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
-                  <span className="historyPrimary" role="cell">
-                    <EvidenceMobileLabel>OSPF recommendation</EvidenceMobileLabel>
+                <div
+                  className="historyRow topologyEvidenceGrid"
+                  key={row.id}
+                  role="row"
+                  title={`${row.planName}: ${row.signalLabel}; cost ${row.metric}; evidence ${row.target}; latest ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}`}
+                >
+                  <span
+                    className="historyPrimary"
+                    role="cell"
+                    title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}`}
+                  >
+                    <EvidenceMobileLabel>
+                      OSPF recommendation
+                    </EvidenceMobileLabel>
                     <strong>{row.planName}</strong>
                     <small>{row.interfaceName}</small>
                     <small>{row.confidence}</small>
@@ -689,12 +772,20 @@ export function TopologyEvidencePanel({
                       {row.signalLabel}
                     </span>
                   </span>
-                  <span className="topologyMetric" role="cell">
+                  <span
+                    className="topologyMetric"
+                    role="cell"
+                    title={`Cost ${row.metric}; ${row.metricDetail}`}
+                  >
                     <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span className="topologyMetric" role="cell">
+                  <span
+                    className="topologyMetric"
+                    role="cell"
+                    title={`Evidence ${row.target}; ${row.targetDetail}`}
+                  >
                     <EvidenceMobileLabel>Evidence</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
@@ -722,10 +813,10 @@ export function TopologyEvidencePanel({
                     point.latencyAvgMs === null
                       ? "gap"
                       : point.lossRatio === null
-                      ? "unknown"
-                      : point.lossRatio > 0
-                        ? "warn"
-                        : "ok"
+                        ? "unknown"
+                        : point.lossRatio > 0
+                          ? "warn"
+                          : "ok"
                   }
                   key={point.jobId}
                   style={{
@@ -753,10 +844,17 @@ export function TopologyEvidencePanel({
               aria-label="Per tunnel latency curves"
             >
               {latencyGroups.map((group) => (
-                <div className="latencyCurveCard" key={group.key}>
-                  <span className="latencyCurveTitle">
-                    <strong>{group.label}</strong>
-                    <small>{group.detail}</small>
+                <div
+                  className="latencyCurveCard"
+                  key={group.key}
+                  title={`${group.label}: ${group.detail}`}
+                >
+                  <span
+                    className="latencyCurveTitle"
+                    title={`${group.label}: ${group.detail}`}
+                  >
+                    <strong title={group.label}>{group.label}</strong>
+                    <small title={group.detail}>{group.detail}</small>
                   </span>
                   <div
                     className="latencyCurve compact"
@@ -768,10 +866,10 @@ export function TopologyEvidencePanel({
                           point.latencyAvgMs === null
                             ? "gap"
                             : point.lossRatio === null
-                            ? "unknown"
-                            : point.lossRatio > 0
-                              ? "warn"
-                              : "ok"
+                              ? "unknown"
+                              : point.lossRatio > 0
+                                ? "warn"
+                                : "ok"
                         }
                         key={`${group.key}-${index}`}
                         style={{
@@ -803,7 +901,10 @@ export function TopologyEvidencePanel({
               id="topology-evidence-trends"
               role="table"
             >
-              <div className="historyRow heading topologyEvidenceGrid" role="row">
+              <div
+                className="historyRow heading topologyEvidenceGrid"
+                role="row"
+              >
                 <span role="columnheader">Trend</span>
                 <span role="columnheader">Health</span>
                 <span role="columnheader">Metric</span>
@@ -811,7 +912,11 @@ export function TopologyEvidencePanel({
                 <span role="columnheader">Latest</span>
               </div>
               {trendRows.map((row) => (
-                <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+                <div
+                  className="historyRow topologyEvidenceGrid"
+                  key={row.id}
+                  role="row"
+                >
                   <span className="historyPrimary" role="cell">
                     <EvidenceMobileLabel>Trend</EvidenceMobileLabel>
                     <strong>{humanStatus(row.kind)}</strong>
@@ -860,7 +965,11 @@ export function TopologyEvidencePanel({
               <span role="columnheader">Observed</span>
             </div>
             {observationRows.map((row) => (
-              <div className="historyRow topologyEvidenceGrid" key={row.id} role="row">
+              <div
+                className="historyRow topologyEvidenceGrid"
+                key={row.id}
+                role="row"
+              >
                 <span className="historyPrimary" role="cell">
                   <EvidenceMobileLabel>Observation</EvidenceMobileLabel>
                   <strong>{humanStatus(row.kind)}</strong>
@@ -913,46 +1022,65 @@ export function TopologyEvidencePanel({
             <span role="columnheader">Created</span>
           </div>
           {rows.map((row) => {
-            const signalLabel = row.signalLabel ?? humanStatus(row.signalStatus);
+            const signalLabel =
+              row.signalLabel ?? humanStatus(row.signalStatus);
             return (
-            <div className="historyRow topologyEvidenceGrid" key={row.job.id} role="row">
-              <span className="historyPrimary" role="cell">
-                <EvidenceMobileLabel>Command</EvidenceMobileLabel>
-                <strong>{humanStatus(row.job.command_type)}</strong>
-                <small>job {shortId(row.job.id)}</small>
-                {onOpenJobDetails ? (
-                  <button
-                    className="secondaryAction compactAction"
-                    onClick={() => onOpenJobDetails(row.job.id)}
-                    type="button"
-                  >
-                    <ExternalLink size={14} />
-                    <span>Open job details</span>
-                  </button>
-                ) : null}
-              </span>
-              <span className="topologyEvidenceStatusCell" role="cell">
-                <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
+              <div
+                className="historyRow topologyEvidenceGrid"
+                key={row.job.id}
+                role="row"
+                title={`${humanStatus(row.job.command_type)}: ${signalLabel}; ${row.metric}; ${row.target}; created ${formatFullTime(row.job.created_at)}`}
+              >
                 <span
-                  className={`status ${evidenceStatusBadgeClass(row)}`}
-                  data-value-tooltip="true"
-                  title={signalLabel}
+                  className="historyPrimary"
+                  role="cell"
+                  title={`${humanStatus(row.job.command_type)} job ${row.job.id}`}
                 >
-                  {signalLabel}
+                  <EvidenceMobileLabel>Command</EvidenceMobileLabel>
+                  <strong>{humanStatus(row.job.command_type)}</strong>
+                  <small>job {shortId(row.job.id)}</small>
+                  {onOpenJobDetails ? (
+                    <button
+                      className="secondaryAction compactAction"
+                      onClick={() => onOpenJobDetails(row.job.id)}
+                      title={`Open retained job detail for ${row.job.id}`}
+                      type="button"
+                    >
+                      <ExternalLink size={14} />
+                      <span>Open job details</span>
+                    </button>
+                  ) : null}
                 </span>
-              </span>
-              <span className="topologyMetric" role="cell">
-                <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
-                <strong>{row.metric}</strong>
-                <small>{row.metricDetail}</small>
-              </span>
-              <span className="topologyMetric" role="cell">
-                <EvidenceMobileLabel>Target</EvidenceMobileLabel>
-                <strong>{row.target}</strong>
-                <small>{row.targetDetail}</small>
-              </span>
-              <EvidenceTime label="Created" value={row.job.created_at} />
-            </div>
+                <span className="topologyEvidenceStatusCell" role="cell">
+                  <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
+                  <span
+                    className={`status ${evidenceStatusBadgeClass(row)}`}
+                    data-value-tooltip="true"
+                    title={signalLabel}
+                  >
+                    {signalLabel}
+                  </span>
+                </span>
+                <span
+                  className="topologyMetric"
+                  role="cell"
+                  title={`${row.metric}; ${row.metricDetail}`}
+                >
+                  <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
+                  <strong>{row.metric}</strong>
+                  <small>{row.metricDetail}</small>
+                </span>
+                <span
+                  className="topologyMetric"
+                  role="cell"
+                  title={`${row.target}; ${row.targetDetail}`}
+                >
+                  <EvidenceMobileLabel>Target</EvidenceMobileLabel>
+                  <strong>{row.target}</strong>
+                  <small>{row.targetDetail}</small>
+                </span>
+                <EvidenceTime label="Created" value={row.job.created_at} />
+              </div>
             );
           })}
         </div>
@@ -1237,9 +1365,11 @@ function buildOspfUpdatePlanRow(
   const proposalStatus =
     plan.status === "noop"
       ? "healthy"
-      : plan.status === "review_degraded" || plan.status === "adapter_unavailable"
+      : plan.status === "review_degraded" ||
+          plan.status === "adapter_unavailable"
         ? "degraded"
-        : plan.status === "needs_adapter_status" || plan.status === "automatic_waiting_evidence"
+        : plan.status === "needs_adapter_status" ||
+            plan.status === "automatic_waiting_evidence"
           ? "unknown"
           : "recorded";
   const bandwidthHealth = bandwidthEvidenceHealth({
@@ -1248,9 +1378,7 @@ function buildOspfUpdatePlanRow(
     measuredThroughputMbps: plan.evidence.throughput_avg_mbps,
   });
   const signalStatus =
-    bandwidthHealth.signalStatus === "degraded"
-      ? "degraded"
-      : proposalStatus;
+    bandwidthHealth.signalStatus === "degraded" ? "degraded" : proposalStatus;
   const delta =
     plan.maximum_cost_delta === 0
       ? "unchanged"
@@ -1458,7 +1586,9 @@ function throughputBaselineFor(
   return null;
 }
 
-function throughputBaselineKeys(identity: ThroughputBaselineIdentity): string[] {
+function throughputBaselineKeys(
+  identity: ThroughputBaselineIdentity,
+): string[] {
   const keys: string[] = [];
   if (identity.planId) {
     keys.push(`plan-id:${identity.planId}`);
@@ -1493,7 +1623,10 @@ function throughputSampleSignalLabel(
   return sampleLabel;
 }
 
-function sampleFreshnessLabel(status: TopologyObservationState, observedAt: string): string {
+function sampleFreshnessLabel(
+  status: TopologyObservationState,
+  observedAt: string,
+): string {
   if (isEvidenceTimestampStale(observedAt)) {
     return status === "degraded" ? "Stale failed sample" : "Stale sample";
   }
@@ -1538,12 +1671,17 @@ function buildNetworkEvidenceFreshness(
   };
 }
 
-function isEvidenceTimestampStale(timestamp: string | null | undefined): boolean {
+function isEvidenceTimestampStale(
+  timestamp: string | null | undefined,
+): boolean {
   if (!timestamp) {
     return false;
   }
   const ms = timestampMillis(timestamp);
-  return Number.isFinite(ms) && Date.now() - ms > DEFAULT_NETWORK_MEASUREMENT_FRESH_AFTER_MS;
+  return (
+    Number.isFinite(ms) &&
+    Date.now() - ms > DEFAULT_NETWORK_MEASUREMENT_FRESH_AFTER_MS
+  );
 }
 
 function buildTrendRow(
@@ -1561,7 +1699,9 @@ function buildTrendRow(
     throughputBaselines,
   );
   const throughputHealth =
-    trend.kind === "network_speed_test" && trend.throughput_avg_mbps !== null && baseline
+    trend.kind === "network_speed_test" &&
+    trend.throughput_avg_mbps !== null &&
+    baseline
       ? bandwidthEvidenceHealth({
           configuredBandwidthMbps: baseline.configuredBandwidthMbps,
           effectiveBandwidthMbps: baseline.effectiveBandwidthMbps,
@@ -1575,9 +1715,7 @@ function buildTrendRow(
         ? "healthy"
         : "recorded";
   const signalStatus =
-    throughputHealth?.signalStatus === "degraded"
-      ? "degraded"
-      : sampleStatus;
+    throughputHealth?.signalStatus === "degraded" ? "degraded" : sampleStatus;
   const metric =
     trend.throughput_avg_mbps !== null
       ? `${formatMetric(trend.throughput_avg_mbps)} Mbps avg`
@@ -1596,7 +1734,11 @@ function buildTrendRow(
     sampleCount: trend.sample_count,
     signalLabel:
       trend.kind === "network_speed_test"
-        ? throughputSampleSignalLabel(sampleStatus, trend.latest_observed_at, throughputHealth)
+        ? throughputSampleSignalLabel(
+            sampleStatus,
+            trend.latest_observed_at,
+            throughputHealth,
+          )
         : humanStatus(signalStatus),
     signalStatus,
     metric,
@@ -1697,15 +1839,17 @@ function buildObservationRow(
           })
         : null;
     const speedSignalStatus =
-      throughputHealth?.signalStatus === "degraded"
-        ? "degraded"
-        : signalStatus;
+      throughputHealth?.signalStatus === "degraded" ? "degraded" : signalStatus;
     return {
       id: observation.id,
       jobId: observation.job_id,
       source: observation.source,
       kind: observation.kind,
-      signalLabel: throughputSampleSignalLabel(signalStatus, observation.observed_at, throughputHealth),
+      signalLabel: throughputSampleSignalLabel(
+        signalStatus,
+        observation.observed_at,
+        throughputHealth,
+      ),
       signalStatus: speedSignalStatus,
       metric:
         observation.throughput_mbps === null
@@ -1803,9 +1947,7 @@ function buildLatencyCurveGroups(
         maxLatency: Math.max(
           1,
           ...points.flatMap((point) =>
-            typeof point.latencyAvgMs === "number"
-              ? [point.latencyAvgMs]
-              : [],
+            typeof point.latencyAvgMs === "number" ? [point.latencyAvgMs] : [],
           ),
         ),
         points,
@@ -1919,16 +2061,20 @@ function buildEvidenceRow(
             measuredThroughputMbps: throughputMbps,
           })
         : null;
-    const sampleStatus: TopologyObservationState = allSucceeded ? "healthy" : "degraded";
+    const sampleStatus: TopologyObservationState = allSucceeded
+      ? "healthy"
+      : "degraded";
     const signalStatus =
-      throughputHealth?.signalStatus === "degraded"
-        ? "degraded"
-        : sampleStatus;
+      throughputHealth?.signalStatus === "degraded" ? "degraded" : sampleStatus;
     return {
       job,
       kind: "network_speed_test",
       signalKind: "observation",
-      signalLabel: throughputSampleSignalLabel(sampleStatus, job.created_at, throughputHealth),
+      signalLabel: throughputSampleSignalLabel(
+        sampleStatus,
+        job.created_at,
+        throughputHealth,
+      ),
       signalStatus,
       metric:
         throughputMbps === null
@@ -2087,10 +2233,7 @@ function humanStatus(value: string): string {
   return readableTelemetryToken(value);
 }
 
-function runtimeSummaryDetail(
-  reasons: string[],
-  fallback: string,
-): string {
+function runtimeSummaryDetail(reasons: string[], fallback: string): string {
   const parts = reasons.map(humanStatus);
   return parts.length > 0 ? parts.join(", ") : fallback;
 }

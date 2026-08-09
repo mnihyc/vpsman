@@ -472,7 +472,19 @@ export function MultiFileActionsPanel({
           <span>{executionSummary}</span>
         </div>
         <div className="headerActionStack">
-          <button className="secondaryAction" disabled={pending || loading} onClick={() => void refreshPreview()} type="button">
+          <button
+            className="secondaryAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A bulk file operation is already running."
+                : loading
+                  ? "Bulk file scope is already refreshing."
+                  : undefined
+            }
+            disabled={pending || loading}
+            onClick={() => void refreshPreview()}
+            type="button"
+          >
             <RefreshCw size={14} />
             <span>Refresh scope</span>
           </button>
@@ -755,9 +767,10 @@ export function MultiFileActionsPanel({
             </div>
           )}
           {action === "write_text" && (
-            <label>
+            <label title="File content is intentionally omitted from tooltips because it may contain sensitive values.">
               <span>Content</span>
               <textarea
+                data-value-tooltip-skip="true"
                 onChange={(event) => {
                   setContent(event.target.value);
                   invalidateBulkReview();
@@ -826,6 +839,15 @@ export function MultiFileActionsPanel({
           )}
           <button
             className={runBulkActionClass(action)}
+            data-tooltip-disabled-reason={
+              pending
+                ? "A bulk file operation is already running."
+                : !privilegeMaterial
+                  ? "Unlock privilege before reviewing this bulk file operation."
+                  : loading
+                    ? "Wait for the bulk target scope to finish loading."
+                    : bulkDraftError ?? undefined
+            }
             disabled={
               pending ||
               !privilegeMaterial ||
@@ -890,11 +912,31 @@ export function MultiFileActionsPanel({
               lastSummary.map((group) => (
                 <details key={group.key} open>
                   <summary>
-                    <span className={`status ${bulkSummaryStatusClass(group)}`}>{group.status}</span>
+                    <span
+                      className={`status ${bulkSummaryStatusClass(group)}`}
+                      title={`Bulk file result state: ${group.status}. Exact per-target detail is excluded from tooltips.`}
+                    >
+                      {group.status}
+                    </span>
                     <strong>{vpsCountLabel(group.clientIds.length)}</strong>
-                    <span>{group.reason || group.label}</span>
+                    <span
+                      data-tooltip-sensitive="true"
+                      data-value-tooltip-skip="true"
+                      title="Bulk file result reason is displayed here; exact per-target detail is excluded from tooltips."
+                    >
+                      {group.reason || group.label}
+                    </span>
                   </summary>
-                  {group.detail && <p className="bulkSummaryDetail">{group.detail}</p>}
+                  {group.detail && (
+                    <p
+                      className="bulkSummaryDetail"
+                      data-tooltip-sensitive="true"
+                      data-value-tooltip-skip="true"
+                      title="Bulk file result detail is displayed here; exact per-target content is excluded from tooltips."
+                    >
+                      {group.detail}
+                    </p>
+                  )}
                   {(group.sha256Hex || group.preview) && (
                     <div className="bulkEvidenceBox">
                       {group.sha256Hex && (

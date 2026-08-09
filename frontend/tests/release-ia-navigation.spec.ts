@@ -195,13 +195,14 @@ async function visibleDisabledControlsWithoutReason(page: Page) {
 
     return Array.from(
       document.querySelectorAll<HTMLElement>(
-        'button:disabled, [role="button"][aria-disabled="true"]',
+        'button:disabled, input:disabled, select:disabled, textarea:disabled, [aria-disabled="true"]',
       ),
     )
       .filter(isVisible)
       .map((element) => {
         const reason = [
           element.getAttribute("title") ?? "",
+          element.getAttribute("data-tooltip-disabled-reason") ?? "",
           describedText(element),
         ]
           .map((value) => value.trim())
@@ -212,6 +213,102 @@ async function visibleDisabledControlsWithoutReason(page: Page) {
           element.textContent?.replace(/\s+/g, " ").trim() ??
           element.tagName.toLowerCase();
         return `${name || element.tagName.toLowerCase()} (${element.className || "no class"})`;
+      })
+      .filter((value): value is string => Boolean(value));
+  });
+}
+
+async function visibleSemanticElementsWithoutTooltip(page: Page) {
+  return page.evaluate(() => {
+    const selector = [
+      "button",
+      "a[href]",
+      "input:not([type='hidden'])",
+      "select",
+      "textarea",
+      "label",
+      "legend",
+      "summary",
+      "dt",
+      "dd",
+      "th",
+      "td",
+      "[role='cell']",
+      "[role='columnheader']",
+      "[role='link']",
+      ".metric",
+      ".metricCard",
+      ".consoleStatusBadge",
+      ".gridCounts > *",
+      ".gridPageLabel",
+      ".consoleInlineDetailGrid > span",
+      ".vpsFactRow",
+      ".vpsResourceFact",
+      ".topologyMetric",
+      "[data-fact-kind]",
+      ".timeSeriesCoverage",
+    ].join(",");
+    const sensitive =
+      /password|passphrase|secret|token|private|credential|verifier|salt|api[-_ ]?key|\botp\b|totp|one[-_ ]?time|authenticator|verification code|setup key|enrollment key|\brecovery\b/i;
+
+    function isVisible(element: HTMLElement) {
+      const style = window.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity) > 0
+      );
+    }
+
+    function isSensitiveControl(element: HTMLElement) {
+      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
+        return false;
+      }
+      if (element instanceof HTMLInputElement && element.type === "password") return true;
+      return sensitive.test(
+        [
+          element.name,
+          element.id,
+          element.autocomplete,
+          element.getAttribute("aria-label"),
+          element.placeholder,
+          element.closest("label")?.textContent,
+        ]
+          .filter(Boolean)
+          .join(" "),
+      );
+    }
+
+    function effectiveTitle(element: HTMLElement) {
+      let current: HTMLElement | null = element;
+      while (current && current !== document.body) {
+        const title = current.getAttribute("title")?.trim() ?? "";
+        if (title) return title;
+        current = current.parentElement;
+      }
+      return "";
+    }
+
+    return Array.from(document.querySelectorAll<HTMLElement>(selector))
+      .filter(isVisible)
+      .filter(
+        (element) =>
+          !element.closest(
+            "pre, code, .srOnly, .visuallyHidden, [aria-hidden='true'], [data-value-tooltip-skip='true'], [data-tooltip-sensitive='true']",
+          ),
+      )
+      .filter((element) => !isSensitiveControl(element))
+      .map((element) => {
+        const title = effectiveTitle(element);
+        if (title && title !== "-") return null;
+        const name =
+          element.getAttribute("aria-label") ??
+          element.textContent?.replace(/\s+/g, " ").trim().slice(0, 80) ??
+          element.tagName.toLowerCase();
+        return `${element.tagName.toLowerCase()}: ${name || "unnamed"}`;
       })
       .filter((value): value is string => Boolean(value));
   });
@@ -786,6 +883,10 @@ test(
     await expect(transferMetric).toContainText("in loaded history");
 
     await openConsoleSubpage(page, "Fleet", "Monitor");
+    await page
+      .getByLabel("VPS cards density")
+      .getByRole("button", { name: "Comfortable", exact: true })
+      .click();
     const card = page
       .getByLabel("VPS monitor cards")
       .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" });
@@ -799,7 +900,7 @@ test(
     await expect(
       signals.locator(".vpsMonitorSignal").filter({ hasText: "Transfer" }),
     ).toContainText("≥1 failed");
-    await expect(card).toContainText("counts use capped loaded pages");
+    await expect(card).not.toContainText("counts use capped loaded pages");
 
     await card.click();
     const alertFact = page
@@ -892,6 +993,9 @@ test("release IA reaches every configured page and subpage", async ({
         page.getByText(/Http 404 \(404\)|HTTP 404 \(404\)/),
       ).toHaveCount(0);
       await expect(page.getByText(/Loading .* workspace/)).toHaveCount(0);
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      const missingTooltips = await visibleSemanticElementsWithoutTooltip(page);
+      expect(missingTooltips, `${view} / ${subpage.label}`).toEqual([]);
     }
   }
 });
@@ -4537,6 +4641,110 @@ test("observability webhook rule editor retains registry and navigation context"
   );
 });
 
+test("raw editors and delivery evidence keep payload data out of tooltip titles", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the adapter registry and dense delivery grids are covered on desktop",
+  );
+  const rawJsonSentinel = "raw-json-tooltip-sentinel";
+  const rawTomlSentinel = "raw-toml-tooltip-sentinel";
+  const argvSentinel = "argv-tooltip-sentinel";
+  const environmentSentinel = "environment-tooltip-sentinel";
+  const adapterSentinel = "adapter-tooltip-sentinel";
+  const fixtureDestination = "https://hooks.example/vpsman/edge-capacity";
+  const fixtureBody =
+    "{rule.name} {event.kind} count={matched_vps.length} {matched_vps.0.display_name}";
+  const fixtureDeliveryError = "fixture receiver returned 503";
+  const expectNoPayloadTitles = async (values: string[]) => {
+    await page.waitForTimeout(50);
+    const titles = await page
+      .locator("[title]")
+      .evaluateAll((elements) =>
+        elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
+      );
+    for (const value of values) {
+      expect(titles).not.toContain(value);
+    }
+  };
+
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Config", "Bulk patch");
+  const jsonEditor = page.getByLabel("Patch generator values JSON");
+  await jsonEditor.fill(`{"probe":"${rawJsonSentinel}"}`);
+  await expect(jsonEditor).toHaveAttribute("data-tooltip-sensitive", "true");
+  await expect(jsonEditor).toHaveAttribute("title", /content is excluded/);
+  await activate(
+    page.getByRole("button", { name: "Temporary patch", exact: true }),
+  );
+  const tomlEditor = page.getByLabel(
+    "Temporary bulk runtime config patch TOML",
+  );
+  await tomlEditor.fill(`[probe]\nvalue = "${rawTomlSentinel}"`);
+  await expect(tomlEditor).toHaveAttribute("data-tooltip-sensitive", "true");
+  await expectNoPayloadTitles([rawJsonSentinel, rawTomlSentinel]);
+
+  await openConsoleSubpage(page, "Config", "Sources");
+  const sources = page.locator(".configurationSourcesPanel");
+  await activate(
+    sources.getByRole("tab", { name: "Configuration presets" }),
+  );
+  await activate(sources.getByRole("button", { name: "New preset" }));
+  const presetDrawer = page.getByRole("complementary", {
+    name: "New configuration preset",
+  });
+  await presetDrawer
+    .getByLabel("Preset behavior")
+    .selectOption("command_execution");
+  const argvEditor = presetDrawer.getByLabel("Shell command arguments");
+  const environmentEditor = presetDrawer.getByLabel(
+    "Command environment values",
+  );
+  await argvEditor.fill(`/opt/operator/${argvSentinel}`);
+  await environmentEditor.fill(`PROBE=${environmentSentinel}`);
+  await expect(argvEditor).toHaveAttribute("data-tooltip-sensitive", "true");
+  await expect(environmentEditor).toHaveAttribute(
+    "data-tooltip-sensitive",
+    "true",
+  );
+  await expect(argvEditor.locator("..")).toHaveAttribute(
+    "title",
+    /arguments are excluded/,
+  );
+  await expectNoPayloadTitles([argvSentinel, environmentSentinel]);
+
+  await openConsoleSubpage(page, "Network", "Tunnel plans");
+  const adapterRegistry = page.getByLabel("Network adapter definitions");
+  await activate(
+    adapterRegistry.getByRole("button", { name: "Tunnel runtime adapter" }),
+  );
+  const adapterDrawer = page.getByRole("complementary", {
+    name: "New tunnel runtime adapter",
+  });
+  const adapterEditor = adapterDrawer.getByLabel("Status adapter command");
+  await adapterEditor.fill(`/opt/operator/${adapterSentinel}`);
+  await expect(adapterEditor).toHaveAttribute("data-tooltip-sensitive", "true");
+  await expect(adapterEditor.locator("..")).toHaveAttribute(
+    "title",
+    /arguments are excluded/,
+  );
+  await expectNoPayloadTitles([adapterSentinel]);
+
+  await openConsoleSubpage(page, "Observability", "Event webhooks");
+  const ruleGrid = page.getByLabel("Webhook rules data grid");
+  await expect(ruleGrid).toContainText(fixtureDestination);
+  await activate(ruleGrid.getByLabel(/Expand Webhook rules row/).first());
+  await expect(ruleGrid).toContainText(fixtureBody);
+  await expectNoPayloadTitles([fixtureDestination, fixtureBody]);
+
+  await activate(page.getByRole("tab", { name: /Deliveries/ }));
+  const deliveryGrid = page.getByLabel("Webhook delivery history data grid");
+  await expect(deliveryGrid).toContainText(fixtureDestination);
+  await expect(deliveryGrid).toContainText(fixtureDeliveryError);
+  await expectNoPayloadTitles([fixtureDestination, fixtureDeliveryError]);
+});
+
 test("config bulk patch requires reviewed scope and privilege before apply", async ({
   page,
 }, testInfo) => {
@@ -4930,7 +5138,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   await controls.getByRole("button", { name: "Disk" }).click();
   await expect(
     page.getByText(
-      /Metric definition: Each chart point averages retained 60-second free-space ratios/,
+      /Metric definition: Each chart point derives free space from retained per-snapshot aggregate-filesystem used ratios/,
     ),
   ).toBeVisible();
   const diskFigureLabel = await page
@@ -5049,10 +5257,15 @@ test("observability network metrics is chart-first and mutation-free", async ({
   await expect(
     panel.getByText(/Metric definition: Each point is the mean RTT/),
   ).toBeVisible();
-  await expect(panel.getByText(/Sparse data: 1 measured point/)).toBeVisible();
+  await expect(
+    panel.getByText(/Sparse data: 1\/4 measured points present/),
+  ).toBeVisible();
   await expect(
     panel.getByLabel("Network metrics latency chart data coverage"),
-  ).toContainText("1/1 points present");
+  ).toContainText("1/2 points present");
+  await expect(
+    panel.getByLabel("Network metrics latency chart data coverage"),
+  ).toContainText("1 gap");
   await expect(panel.locator(".timeSeriesLegend").first()).toContainText(
     "sfo-fra-gre",
   );
@@ -5105,9 +5318,9 @@ test("observability network metrics is chart-first and mutation-free", async ({
   await expect(
     panel.getByLabel("Network endpoint comparison"),
   ).not.toContainText("wg-import");
-  await expect(panel.getByLabel("Network endpoint comparison")).toContainText(
-    /no measurement/i,
-  );
+  await expect(
+    panel.getByLabel("Network endpoint comparison"),
+  ).not.toContainText(/no measurement/i);
   await expect(panel.getByLabel("Network endpoint comparison")).toContainText(
     "Unverified",
   );
@@ -5882,7 +6095,7 @@ test("audit job evidence proves who ran what without leaving Audit", async ({
     "edge-sfo-01",
   );
   await expect(detail.getByLabel("Job outputs for selected job")).toContainText(
-    "network_speed_test",
+    "tcp_throughput",
   );
 
   for (const name of [
@@ -5959,16 +6172,19 @@ test("audit sessions correlates terminal and auth evidence without emulator cont
   await expect(
     terminalGrid.getByLabel("Selected terminal session evidence"),
   ).toHaveCount(0);
-  const terminalRecord = terminalGrid
+  const terminalRecords = terminalGrid
     .locator(".gridBody [role=row], .gridMobileCard")
-    .filter({ hasText: "61616161" })
-    .first();
+    .filter({ hasText: "Stale state" })
+    .filter({ hasText: "Replayable transcript" });
+  await expect(terminalRecords).toHaveCount(1);
+  const terminalRecord = terminalRecords.first();
   await expect(terminalRecord).toHaveAttribute("aria-expanded", "false");
   await terminalRecord.click();
   await expect(terminalRecord).toHaveAttribute("aria-expanded", "true");
   const detail = terminalGrid
     .locator(".gridExpandedRow")
     .getByLabel("Selected terminal session evidence");
+  await expect(detail).toContainText("61616161");
   await expect(detail).toContainText("Started");
   await expect(detail).toContainText("Last activity");
   await expect(detail).toContainText("Expiry");
@@ -7187,7 +7403,9 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
   await expect(page.getByLabel("Network test review contract")).toHaveCount(0);
   const trendCharts = page.getByLabel("Network test trend charts");
   await expect(trendCharts).toBeVisible();
-  await expect(trendCharts).toContainText("Single evidence bucket");
+  await expect(trendCharts).toContainText(
+    "No trend line yet; capture another run to compare movement.",
+  );
   await expect(trendCharts).toContainText(
     "10.1 Mbps avg - 10% of expected 100 Mbps",
   );
@@ -7221,7 +7439,9 @@ test("network evidence stays read-mostly and links to network action pages", asy
   ).toBeVisible();
   const evidenceControls = page.getByLabel("Network evidence controls");
   await expect(
-    evidenceControls.getByLabel("Network evidence time range"),
+    evidenceControls.getByLabel("Network evidence time range", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     evidenceControls.getByText("Advanced filters", { exact: true }),
@@ -7295,7 +7515,7 @@ test("network evidence stays read-mostly and links to network action pages", asy
   const ospfTable = page.getByLabel("OSPF updater plans data grid");
   await expect(ospfTable).toBeVisible();
   await expect(
-    ospfTable.getByTitle("Review required", { exact: true }),
+    ospfTable.getByText("Review required", { exact: true }),
   ).toBeVisible();
   if ((page.viewportSize()?.width ?? 0) <= 720) {
     const ospfPlanCard = ospfTable
@@ -7440,11 +7660,23 @@ test("network tunnel plans expose only explicit plan-owned runtime and routing c
     "Partially verified · Peer probe failed; not proof of disconnect",
   );
   if (isMobileViewport) {
-    await expect(planDetail.getByTitle("Agent builtin")).toBeVisible();
+    const runtimeOwnership = planDetail
+      .locator(".tunnelPlanFacts > span")
+      .filter({ hasText: "Runtime ownership" });
     await expect(
-      planDetail.getByTitle("agent-sfo-01 / agent-fra-02"),
+      runtimeOwnership.getByText("Agent builtin", { exact: true }),
     ).toBeVisible();
-    await expect(planDetail.getByTitle("L Healthy · R Healthy")).toBeVisible();
+    await expect(
+      planDetail.getByLabel("Endpoints: agent-sfo-01 / agent-fra-02", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    const applyState = planDetail
+      .locator(".tunnelPlanFacts > span")
+      .filter({ hasText: "Apply state" });
+    await expect(
+      applyState.getByText("L Healthy · R Healthy", { exact: true }),
+    ).toBeVisible();
   }
   await expect(
     planDetail.getByRole("button", {

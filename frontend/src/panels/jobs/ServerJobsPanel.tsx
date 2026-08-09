@@ -184,7 +184,10 @@ export function ServerJobsPanel({
       {
         cell: (job) => (
           <span className="historyPrimary">
-            <span className={`status ${serverJobStatusBadgeClass(job.status)}`}>
+            <span
+              className={`status ${serverJobStatusBadgeClass(job.status)}`}
+              title={`Maintenance job status: ${displayToken(job.status)}`}
+            >
               {displayToken(job.status)}
             </span>
             <small>{job.error ?? job.expression ?? "no details"}</small>
@@ -351,6 +354,9 @@ export function ServerJobsPanel({
             <div className="headerActionStack">
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason={
+                  loading ? "Artifact cleanup data is already refreshing." : undefined
+                }
                 disabled={loading}
                 onClick={onRefresh}
                 type="button"
@@ -629,6 +635,15 @@ export function ServerJobsPanel({
             <div className="retentionActions">
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason={
+                  pending
+                    ? "A cleanup operation is already running."
+                    : !expressionValid
+                      ? "Correct the cleanup criteria before previewing."
+                      : domains.length === 0
+                        ? "Select at least one artifact type before previewing."
+                        : undefined
+                }
                 disabled={pending || !expressionValid || domains.length === 0}
                 onClick={() => void previewCleanup()}
                 title="Build a reviewed cleanup snapshot for the selected domains"
@@ -639,6 +654,15 @@ export function ServerJobsPanel({
               </button>
               <button
                 className="secondaryAction dangerAction"
+                data-tooltip-disabled-reason={
+                  pending
+                    ? "A cleanup operation is already running."
+                    : cleanupCanDelete
+                      ? undefined
+                      : previewEmpty
+                        ? "No artifacts match the current preview."
+                        : "Deletion requires a fresh preview with age, protection, and affected-object evidence."
+                }
                 disabled={pending || !cleanupCanDelete}
                 onClick={() => setConfirmOpen(true)}
                 title={
@@ -688,7 +712,11 @@ export function ServerJobsPanel({
               {
                 label: "Preview hash",
                 title: preview?.preview_hash,
-                value: preview ? shortHash(preview.preview_hash) : "-",
+                value: preview ? (
+                  shortHash(preview.preview_hash)
+                ) : (
+                  <span data-tooltip-empty-reason="Run Preview to create the cleanup snapshot hash.">-</span>
+                ),
               },
               {
                 label: "Retention detail",
@@ -722,6 +750,9 @@ export function ServerJobsPanel({
             </div>
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                loading ? "Maintenance jobs are already refreshing." : undefined
+              }
               disabled={loading}
               onClick={onRefresh}
               type="button"
@@ -796,13 +827,17 @@ export function ServerJobsPanel({
             items={[
               {
                 label: "Job",
-                value: cancelJobSnapshot ? shortId(cancelJobSnapshot.id) : "-",
+                value: cancelJobSnapshot ? (
+                  shortId(cancelJobSnapshot.id)
+                ) : (
+                  <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">-</span>
+                ),
               },
               {
                 label: "Type",
                 value: cancelJobSnapshot
                   ? displayToken(cancelJobSnapshot.job_type)
-                  : "-",
+                  : <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">-</span>,
               },
               {
                 label: "Matched",

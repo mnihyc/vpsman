@@ -66,6 +66,11 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     expectedClients,
   );
   await assertPrivateFixtureSemantics(privateGrid);
+  await expect(
+    cardNamed(privateGrid, "Unconfigured traffic").locator(
+      '[data-fact-kind="billing"]',
+    ),
+  ).toHaveAttribute("title", /Billing is not configured/);
 
   const privateDensity = page.getByLabel("VPS cards density");
   await privateDensity.getByRole("button", { name: "Compact" }).click();
@@ -108,6 +113,20 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     { timeout: 30_000 },
   );
   await assertSharedFixtureSemantics(sharedGrid);
+  await expect(
+    page.getByRole("combobox", { name: "Filter shared VPSs by status" }),
+  ).toHaveAttribute("title", /All statuses/);
+  const visibleShareSecret = visibleShareFragment.split("/").at(-1) ?? "";
+  expect(visibleShareSecret).not.toBe("");
+  expect(
+    await page.locator("[title]").evaluateAll(
+      (elements, secret) =>
+        elements.some((element) =>
+          (element.getAttribute("title") ?? "").includes(secret),
+        ),
+      visibleShareSecret,
+    ),
+  ).toBe(false);
 
   const sharedDensity = page.getByLabel("Shared view density");
   await sharedDensity.getByRole("button", { name: "Compact" }).click();

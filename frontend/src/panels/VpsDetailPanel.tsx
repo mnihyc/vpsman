@@ -644,7 +644,12 @@ function SummaryTab({
                 {formatUptime(related.uptime.uptime_secs)}
               </span>
             ) : (
-              <span title="Agent-reported uptime is unavailable; - is shown">-</span>
+              <span
+                data-tooltip-empty-reason="Agent-reported uptime is unavailable"
+                title="Agent-reported uptime is unavailable"
+              >
+                -
+              </span>
             )
           }
         />

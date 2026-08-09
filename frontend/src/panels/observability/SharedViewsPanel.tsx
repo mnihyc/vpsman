@@ -554,9 +554,7 @@ export function SharedViewsPanel({
           share_ids: targetUpdateReview.shares.map((share) => share.id),
         } satisfies BulkUpdateMonitoringShareTargetsRequest,
       );
-      setShares((current) =>
-        applyTargetChanges(current, response.changes),
-      );
+      setShares((current) => applyTargetChanges(current, response.changes));
       setFeedback({
         message: `Updated frozen targets for ${response.changes.length} shared ${response.changes.length === 1 ? "view" : "views"}. Existing public client identities were preserved.`,
         tone: "success",
@@ -629,9 +627,16 @@ export function SharedViewsPanel({
     () => [
       {
         cell: (share) => (
-          <span className="historyPrimary">
-            <strong>{share.name}</strong>
-            <small>{shortShareId(share.id)}</small>
+          <span
+            className="historyPrimary"
+            title={`Shared view ${share.name}; internal ID ${shortShareId(share.id)}`}
+          >
+            <strong title={`Shared view name: ${share.name}`}>
+              {share.name}
+            </strong>
+            <small title="Short internal shared-view identifier">
+              {shortShareId(share.id)}
+            </small>
           </span>
         ),
         header: "Name",
@@ -643,7 +648,13 @@ export function SharedViewsPanel({
       },
       {
         align: "end",
-        cell: (share) => share.target_count,
+        cell: (share) => (
+          <span
+            title={`${share.target_count} VPS${share.target_count === 1 ? "" : "s"} in the frozen public scope`}
+          >
+            {share.target_count}
+          </span>
+        ),
         header: "VPSs",
         id: "targets",
         searchValue: (share) => share.target_count,
@@ -651,7 +662,13 @@ export function SharedViewsPanel({
         sortValue: (share) => share.target_count,
       },
       {
-        cell: (share) => visibleDataLabel(share),
+        cell: (share) => (
+          <span
+            title={`Publicly visible data groups: ${visibleDataLabel(share)}`}
+          >
+            {visibleDataLabel(share)}
+          </span>
+        ),
         header: "Visible data",
         id: "visibility",
         searchValue: visibleDataLabel,
@@ -662,7 +679,10 @@ export function SharedViewsPanel({
         cell: (share) => {
           const status = effectiveShareStatus(share);
           return (
-            <ConsoleStatusBadge tone={shareStatusTone(status)}>
+            <ConsoleStatusBadge
+              tone={shareStatusTone(status)}
+              title={`Shared view lifecycle status: ${shareStatusLabel(status)}`}
+            >
               {shareStatusLabel(status)}
             </ConsoleStatusBadge>
           );
@@ -699,7 +719,12 @@ export function SharedViewsPanel({
               {formatCompactTime(share.last_visited_at)}
             </time>
           ) : (
-            <span className="mutedText">Never</span>
+            <span
+              className="mutedText"
+              title="This shared view has never been accessed"
+            >
+              Never
+            </span>
           ),
         header: "Last accessed",
         id: "last_accessed",
@@ -712,7 +737,13 @@ export function SharedViewsPanel({
       },
       {
         align: "end",
-        cell: (share) => share.visitor_count,
+        cell: (share) => (
+          <span
+            title={`${share.visitor_count} unique public visitor${share.visitor_count === 1 ? "" : "s"}`}
+          >
+            {share.visitor_count}
+          </span>
+        ),
         header: "Visitors",
         id: "visitors",
         searchValue: (share) => share.visitor_count,
@@ -863,6 +894,7 @@ export function SharedViewsPanel({
               onClick={() => setStatusFilter(option.status)}
               role="tab"
               tabIndex={statusFilter === option.status ? 0 : -1}
+              title={`${option.label}: ${sharesByStatus[option.status].length} shared views. ${option.detail}`}
               type="button"
             >
               <strong>
@@ -892,6 +924,7 @@ export function SharedViewsPanel({
                 <button
                   className="primaryAction compactAction"
                   onClick={() => void copyDisplayedShareUrl()}
+                  title="Copy the displayed bearer URL without adding it to a tooltip"
                   type="button"
                 >
                   <Copy size={14} />
@@ -910,7 +943,7 @@ export function SharedViewsPanel({
             <div className="consoleInlineDetailGrid">
               <span>
                 <strong>{sharedViewUrl.name}</strong>
-                <pre>{sharedViewUrl.url}</pre>
+                <pre data-value-tooltip-skip="true">{sharedViewUrl.url}</pre>
               </span>
               <span>
                 <strong>Share ID</strong>
@@ -959,6 +992,11 @@ export function SharedViewsPanel({
                   className="secondaryAction compactAction"
                   disabled={loading || pending}
                   onClick={() => void loadShares()}
+                  title={
+                    loading || pending
+                      ? "Wait for the current shared-view request to finish"
+                      : "Refresh shared-view lifecycle, target, and access evidence"
+                  }
                   type="button"
                 >
                   <RefreshCw size={14} />
@@ -968,6 +1006,11 @@ export function SharedViewsPanel({
                   className="primaryAction compactAction"
                   disabled={pending}
                   onClick={openCreate}
+                  title={
+                    pending
+                      ? "Wait for the current shared-view operation to finish"
+                      : "Create a public read-only monitoring view with frozen targets"
+                  }
                   type="button"
                 >
                   <Plus size={14} />
@@ -992,7 +1035,14 @@ export function SharedViewsPanel({
             void reviewCreate();
           }}
         >
-          <label className="consoleField fieldWide">
+          <label
+            className="consoleField fieldWide"
+            title={
+              pending
+                ? "Display-name editing is disabled while a shared-view operation is pending"
+                : "Public display name shown to both operators and visitors"
+            }
+          >
             <span>Display name</span>
             <input
               aria-label="Shared view display name"
@@ -1001,6 +1051,12 @@ export function SharedViewsPanel({
               maxLength={128}
               onChange={(event) => updateDraft({ name: event.target.value })}
               placeholder="Customer A"
+              title={
+                pending
+                  ? "Wait for the current shared-view operation to finish before editing the display name"
+                  : draft.name ||
+                    "Public display name; do not include sensitive addresses or credentials"
+              }
               value={draft.name}
             />
             <small>
@@ -1008,7 +1064,14 @@ export function SharedViewsPanel({
             </small>
           </label>
 
-          <div className="consoleField fieldFull">
+          <div
+            className="consoleField fieldFull"
+            title={
+              pending
+                ? "Frozen-scope editing is disabled while a shared-view operation is pending"
+                : "The server resolves this selector into an exact frozen public VPS list during review"
+            }
+          >
             <span>Frozen VPS scope</span>
             <div className="targetSelector">
               <div className="targetSelectorHeader">
@@ -1049,7 +1112,14 @@ export function SharedViewsPanel({
             </small>
           </div>
 
-          <label className="consoleField">
+          <label
+            className="consoleField"
+            title={
+              pending
+                ? "Expiry editing is disabled while a shared-view operation is pending"
+                : "Duration before the public bearer link expires"
+            }
+          >
             <span>Expiry amount</span>
             <input
               aria-label="Shared view expiry amount"
@@ -1060,11 +1130,23 @@ export function SharedViewsPanel({
                 updateDraft({ durationValue: Number(event.target.value) })
               }
               step={1}
+              title={
+                pending
+                  ? "Wait for the current shared-view operation to finish before editing expiry"
+                  : `Expire the shared view after ${durationLabel(draft.durationValue, draft.durationUnit)}`
+              }
               type="number"
               value={draft.durationValue}
             />
           </label>
-          <label className="consoleField">
+          <label
+            className="consoleField"
+            title={
+              pending
+                ? "Expiry-unit selection is disabled while a shared-view operation is pending"
+                : "Unit for the public shared-view expiry duration"
+            }
+          >
             <span>Expiry unit</span>
             <select
               aria-label="Shared view expiry unit"
@@ -1073,6 +1155,11 @@ export function SharedViewsPanel({
                 updateDraft({
                   durationUnit: event.target.value as DurationUnit,
                 })
+              }
+              title={
+                pending
+                  ? "Wait for the current shared-view operation to finish before changing expiry units"
+                  : `Expiry unit: ${draft.durationUnit}`
               }
               value={draft.durationUnit}
             >
@@ -1094,14 +1181,36 @@ export function SharedViewsPanel({
             </small>
           </div>
           {visibilityOptions(draft.visibility).map((option) => (
-            <div className="consoleField" key={option.field}>
-              <span>{option.label}</span>
-              <label className="checkLine borderedToggle">
+            <div
+              className="consoleField"
+              key={option.field}
+              title={`${option.label}: ${option.detail}`}
+            >
+              <span title={`Public visibility group: ${option.label}`}>
+                {option.label}
+              </span>
+              <label
+                className="checkLine borderedToggle"
+                title={
+                  pending
+                    ? `${option.label} visibility is disabled while a shared-view operation is pending`
+                    : option.disabled
+                      ? `${option.label} visibility requires its parent visibility group`
+                      : option.detail
+                }
+              >
                 <input
                   checked={option.checked}
                   disabled={pending || option.disabled}
                   onChange={(event) =>
                     updateVisibility(option.field, event.target.checked)
+                  }
+                  title={
+                    pending
+                      ? `Wait for the current shared-view operation to finish before changing ${option.label} visibility`
+                      : option.disabled
+                        ? `${option.label} visibility requires its parent visibility group`
+                        : `${option.checked ? "Hide" : "Show"} ${option.label.toLocaleLowerCase()} in the public view`
                   }
                   type="checkbox"
                 />
@@ -1121,6 +1230,11 @@ export function SharedViewsPanel({
               className="secondaryAction"
               disabled={pending}
               onClick={closeCreate}
+              title={
+                pending
+                  ? "Wait for the current shared-view operation to finish before closing the drawer"
+                  : "Cancel shared-view creation"
+              }
               type="button"
             >
               Cancel
@@ -1128,6 +1242,22 @@ export function SharedViewsPanel({
             <button
               className="primaryAction"
               disabled={pending || !draftReady}
+              title={
+                pending
+                  ? "The shared-view selector is already being resolved for review"
+                  : !draft.name.trim()
+                    ? "Enter a public display name"
+                    : selectorParse.error
+                      ? `Fix the VPS selector: ${selectorParse.error}`
+                      : !draft.selectorExpression.trim()
+                        ? "Enter a VPS selector expression"
+                        : durationSeconds(
+                              draft.durationValue,
+                              draft.durationUnit,
+                            ) === null
+                          ? "Choose an expiry from one minute through 365 days"
+                          : "Resolve the selector and review the exact public visibility snapshot"
+              }
               type="submit"
             >
               <Link2 size={16} />
@@ -1232,7 +1362,14 @@ export function SharedViewsPanel({
       >
         {pendingAction?.kind === "extend" ? (
           <div className="formRow">
-            <label className="consoleField">
+            <label
+              className="consoleField"
+              title={
+                pending
+                  ? "Extension editing is disabled while the lifecycle operation is pending"
+                  : "Additional duration applied to every selected active shared view"
+              }
+            >
               <span>Extension amount</span>
               <input
                 aria-label="Shared view extension amount"
@@ -1245,11 +1382,23 @@ export function SharedViewsPanel({
                   setFeedback(null);
                 }}
                 step={1}
+                title={
+                  pending
+                    ? "Wait for the current shared-view lifecycle operation to finish"
+                    : `Extend selected shared views by ${durationLabel(extensionValue, extensionUnit)}`
+                }
                 type="number"
                 value={extensionValue}
               />
             </label>
-            <label className="consoleField">
+            <label
+              className="consoleField"
+              title={
+                pending
+                  ? "Extension-unit selection is disabled while the lifecycle operation is pending"
+                  : "Unit for the reviewed shared-view expiry extension"
+              }
+            >
               <span>Extension unit</span>
               <select
                 aria-label="Shared view extension unit"
@@ -1259,6 +1408,11 @@ export function SharedViewsPanel({
                   setActionError(null);
                   setFeedback(null);
                 }}
+                title={
+                  pending
+                    ? "Wait for the current shared-view lifecycle operation to finish"
+                    : `Extension unit: ${extensionUnit}`
+                }
                 value={extensionUnit}
               >
                 <option value="minutes">Minutes</option>

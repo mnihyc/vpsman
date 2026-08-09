@@ -1447,6 +1447,7 @@ export function AccessPanel({
           <div className="headerActionStack">
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason="Access evidence is already refreshing."
               disabled={loading}
               onClick={() => void onRefresh()}
               type="button"
@@ -1653,11 +1654,13 @@ export function AccessPanel({
                     </span>
                   </div>
                   <div className="totpActionGrid">
-                    <label>
+                    <label title="Current password field; password content is excluded from tooltips.">
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
+                        data-tooltip-disabled-reason="Password entry is unavailable while a TOTP action is in progress."
+                        data-tooltip-sensitive="true"
                         disabled={totpPending}
                         id="totp-disable-password"
                         name="totp_disable_password"
@@ -1673,11 +1676,13 @@ export function AccessPanel({
                         value={totpPassword}
                       />
                     </label>
-                    <label>
+                    <label title="Authenticator code field; one-time code content is excluded from tooltips.">
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
                         autoComplete="one-time-code"
+                        data-tooltip-disabled-reason="Authenticator-code entry is unavailable while a TOTP action is in progress."
+                        data-tooltip-sensitive="true"
                         disabled={totpPending}
                         id="totp-disable-code"
                         inputMode="numeric"
@@ -1695,6 +1700,13 @@ export function AccessPanel({
                     </label>
                     <button
                       className="secondaryAction dangerAction"
+                      data-tooltip-disabled-reason={
+                        totpPending
+                          ? "TOTP disable review is unavailable while another TOTP action is in progress."
+                          : !totpPassword
+                            ? "Enter the current password before reviewing TOTP disable."
+                            : "Enter the current authenticator code before reviewing TOTP disable."
+                      }
                       disabled={totpPending || !totpPassword || !totpCode}
                       type="submit"
                     >
@@ -1753,11 +1765,13 @@ export function AccessPanel({
                     </li>
                   </ol>
                   <div className="totpActionGrid">
-                    <label>
+                    <label title="Current password field; password content is excluded from tooltips.">
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
                         autoComplete="current-password"
+                        data-tooltip-disabled-reason="Password entry is unavailable while a TOTP action is in progress."
+                        data-tooltip-sensitive="true"
                         disabled={totpPending}
                         id="totp-setup-password"
                         name="totp_setup_password"
@@ -1779,6 +1793,11 @@ export function AccessPanel({
                     {!totpSetup && (
                       <button
                         className="secondaryAction"
+                        data-tooltip-disabled-reason={
+                          totpPending
+                            ? "TOTP setup is already in progress."
+                            : "Enter the current password before generating TOTP setup material."
+                        }
                         disabled={totpPending || !totpPassword}
                         type="submit"
                       >
@@ -1797,11 +1816,17 @@ export function AccessPanel({
                         </span>
                       </div>
                     )}
-                    <label>
+                    <label title="Authenticator code field; one-time code content is excluded from tooltips.">
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
                         autoComplete="one-time-code"
+                        data-tooltip-disabled-reason={
+                          totpPending
+                            ? "Authenticator-code entry is unavailable while a TOTP action is in progress."
+                            : "Generate and scan the TOTP setup material before entering a code."
+                        }
+                        data-tooltip-sensitive="true"
                         disabled={totpPending || !totpSetup}
                         id="totp-setup-code"
                         inputMode="numeric"
@@ -1819,6 +1844,15 @@ export function AccessPanel({
                     </label>
                     <button
                       className="primaryAction"
+                      data-tooltip-disabled-reason={
+                        totpPending
+                          ? "TOTP setup is already in progress."
+                          : !totpPassword
+                            ? "Enter the current password before completing TOTP setup."
+                            : !totpSetup
+                              ? "Generate and scan the TOTP setup material before completing setup."
+                              : "Enter the current authenticator code before completing TOTP setup."
+                      }
                       disabled={totpPending || !totpPassword || !totpCode}
                       type={totpSetup ? "submit" : "button"}
                     >
@@ -1838,6 +1872,7 @@ export function AccessPanel({
                   </div>
                   <button
                     className="secondaryAction dangerAction"
+                    data-tooltip-disabled-reason="TOTP cannot be disabled because this account has no active TOTP factor."
                     disabled
                     type="button"
                   >
@@ -2148,6 +2183,11 @@ export function AccessPanel({
                   }
                   aria-invalid={Boolean(identityClientIdError)}
                   aria-label="Agent identity client ID"
+                  data-tooltip-disabled-reason={
+                    !canManageOperators
+                      ? "VPS identities can be changed only by an admin operator."
+                      : "The VPS client ID is unavailable while the identity action is in progress."
+                  }
                   disabled={!canManageOperators || identityPending}
                   id="agent-identity-client-id"
                   name="agent_identity_client_id"
@@ -2174,6 +2214,11 @@ export function AccessPanel({
                 <span>Noise public key</span>
                 <textarea
                   aria-label="Agent identity public key hex"
+                  data-tooltip-disabled-reason={
+                    !canManageOperators
+                      ? "VPS identities can be changed only by an admin operator."
+                      : "The Noise public key is unavailable while the identity action is in progress."
+                  }
                   disabled={!canManageOperators || identityPending}
                   id="agent-identity-public-key"
                   name="agent_identity_public_key"
@@ -2200,6 +2245,11 @@ export function AccessPanel({
                 </small>
                 <button
                   className="secondaryAction compact"
+                  data-tooltip-disabled-reason={
+                    !canManageOperators
+                      ? "VPS keypairs can be generated only by an admin operator."
+                      : "A keypair cannot be generated while the identity action is in progress."
+                  }
                   disabled={!canManageOperators || identityPending}
                   onClick={() => {
                     clearIdentityReview();
@@ -2212,18 +2262,20 @@ export function AccessPanel({
                 </button>
               </label>
               {privateKeyHex && (
-                <div className="inlineSecret">
+                <div className="inlineSecret" data-tooltip-sensitive="true">
                   <strong>Private key - shown once</strong>
                   <div className="secretRow">
                     <input
                       aria-label="Agent identity private key"
                       className="monospace"
+                      data-tooltip-sensitive="true"
                       readOnly
                       value={privateKeyHex}
                     />
                     <button
                       className="secondaryAction compact"
                       onClick={() => void handleCopyPrivateKey()}
+                      title="Copy the one-time private key to the clipboard; key content is excluded from tooltips."
                       type="button"
                     >
                       <Copy size={15} />
@@ -2240,6 +2292,13 @@ export function AccessPanel({
                 <span>Display name</span>
                 <input
                   aria-label="Agent identity display name"
+                  data-tooltip-disabled-reason={
+                    identityMode === "rotate"
+                      ? "Display name is unchanged during key rotation."
+                      : !canManageOperators
+                        ? "VPS identities can be changed only by an admin operator."
+                        : "Display name is unavailable while the identity action is in progress."
+                  }
                   disabled={
                     !canManageOperators ||
                     identityPending ||
@@ -2261,6 +2320,13 @@ export function AccessPanel({
                 <span>Tags</span>
                 <input
                   aria-label="Agent identity tags"
+                  data-tooltip-disabled-reason={
+                    identityMode === "rotate"
+                      ? "Tags are unchanged during key rotation."
+                      : !canManageOperators
+                        ? "VPS identities can be changed only by an admin operator."
+                        : "Tags are unavailable while the identity action is in progress."
+                  }
                   disabled={
                     !canManageOperators ||
                     identityPending ||
@@ -2282,6 +2348,14 @@ export function AccessPanel({
               </label>
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason={
+                  !canManageOperators
+                    ? "VPS identities can be changed only by an admin operator."
+                    : identityPending || identityReviewPending
+                      ? "An identity action is already in progress."
+                      : (identityClientIdError ??
+                        "Enter a valid 64-character Noise public key before reviewing this identity.")
+                }
                 disabled={!identityDraftReady}
                 title={
                   identityDraftReady && !privilegeMaterial
@@ -2389,6 +2463,16 @@ export function AccessPanel({
           </label>
           <button
             className="secondaryAction dangerAction"
+            data-tooltip-disabled-reason={
+              !canManageOperators
+                ? "VPS identities can be revoked only by an admin operator."
+                : !privilegeMaterial
+                  ? "Unlock local privilege before revoking a VPS identity key."
+                  : revokePending || revokeReviewPending
+                    ? "A VPS identity revoke action is already in progress."
+                    : (revokeTargetError ??
+                      "Choose a registered VPS identity before revoking its key.")
+            }
             disabled={!canRevokeClientKey}
             type="submit"
           >
@@ -2741,7 +2825,10 @@ function GatewaySessionDetailGrid({
       </span>
       <span>
         <strong>Noise key</strong>
-        <span className="monoValue">
+        <span
+          className="monoValue"
+          data-tooltip-empty-reason="The gateway session did not report a Noise public key."
+        >
           {session.noise_public_key_hex ?? "-"}
         </span>
       </span>
@@ -3271,9 +3358,18 @@ function InstallCommand({
             <button
               aria-describedby={installValidationDescription}
               className="secondaryAction compact"
+              data-tooltip-disabled-reason={
+                installValidationDescription
+                  ? "Enter a valid gateway public key and gateway endpoint before copying the install command."
+                  : "A one-time VPS identity and private key are required before copying an install command."
+              }
               disabled={!canBuildCommand}
               onClick={() => void handleCopy()}
-              title="Copy the complete one-line install command."
+              title={
+                canBuildCommand
+                  ? "Copy the complete one-line install command."
+                  : undefined
+              }
               type="button"
             >
               <Copy size={15} />
@@ -3375,14 +3471,24 @@ function InstallCommand({
         tone={savePending ? "progress" : installFeedback?.tone}
       />
       {hasInstallIdentity ? (
-        <pre>
+        <pre
+          data-tooltip-sensitive="true"
+          data-value-tooltip-skip="true"
+          title="Agent install command. Exact command content is excluded from tooltips."
+        >
           <code>{installCommand}</code>
         </pre>
       ) : null}
       {hasInstallIdentity && installMode === "staged" ? (
         <div className="installCommandFollowup" role="note">
           <strong>Then run in foreground</strong>
-          <code title={foregroundStartCommand}>{foregroundStartCommand}</code>
+          <code
+            data-tooltip-sensitive="true"
+            data-value-tooltip-skip="true"
+            title="Foreground agent start command. Exact command content is excluded from tooltips."
+          >
+            {foregroundStartCommand}
+          </code>
         </div>
       ) : null}
     </div>

@@ -384,6 +384,9 @@ export function AgentUpdateReleasesPanel({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              loading ? "Agent update releases are already loading" : undefined
+            }
             disabled={loading}
             onClick={onRefresh}
             type="button"
@@ -404,6 +407,7 @@ export function AgentUpdateReleasesPanel({
           <span className="releaseActionStack">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={startUpdateDisabledReason ?? undefined}
               disabled={Boolean(startUpdateDisabledReason)}
               onClick={() =>
                 onOpenDispatchPreset({
@@ -429,6 +433,7 @@ export function AgentUpdateReleasesPanel({
           <span className="releaseActionStack">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={rollbackDisabledReason ?? undefined}
               disabled={Boolean(rollbackDisabledReason)}
               onClick={() =>
                 onOpenDispatchPreset({
@@ -577,6 +582,7 @@ export function AgentUpdateReleasesPanel({
               <span>Artifact URL</span>
               <input
                 aria-label="Release artifact URL"
+                data-value-tooltip-skip="true"
                 onChange={(event) => setReleaseArtifactUrl(event.target.value)}
                 placeholder="https://updates.example/vpsman-agent-linux-x86_64"
                 value={releaseArtifactUrl}
@@ -610,6 +616,7 @@ export function AgentUpdateReleasesPanel({
               <span>Rollback URL</span>
               <input
                 aria-label="Rollback artifact URL"
+                data-value-tooltip-skip="true"
                 onChange={(event) => setRollbackArtifactUrl(event.target.value)}
                 placeholder="https://updates.example/vpsman-agent-previous"
                 value={rollbackArtifactUrl}
@@ -638,6 +645,11 @@ export function AgentUpdateReleasesPanel({
           <div className="releaseFormActions">
             <button
               className="primaryAction"
+              data-tooltip-disabled-reason={
+                releasePending
+                  ? "An agent update release is already being recorded"
+                  : undefined
+              }
               disabled={releasePending}
               onClick={() => void reviewAgentUpdateRelease()}
               type="button"

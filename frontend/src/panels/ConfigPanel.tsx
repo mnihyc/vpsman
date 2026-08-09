@@ -148,8 +148,7 @@ const VPS_RULE_KEYS = [
   "traffic.selectors",
 ] as const;
 const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX = "[traffic.selectors]";
-const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER =
-  `Default when unset: ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX}`;
+const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER = `Default when unset: ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX}`;
 const RUNTIME_CONFIG_QUEUED_STALE_MS = 60 * 60 * 1000;
 
 type BulkConfigApplySnapshot = {
@@ -350,6 +349,11 @@ export function ConfigPanel({
               className="secondaryAction"
               disabled={loading || pending}
               onClick={onRefresh}
+              title={
+                loading || pending
+                  ? "Wait for the current configuration request to finish"
+                  : "Refresh configuration sources and retained runtime evidence"
+              }
               type="button"
             >
               <RefreshCw size={15} />
@@ -1091,7 +1095,11 @@ function ConfigCurrentStateRowsList({
 }
 
 type ConfigApplyStatusKind =
-  "current" | "failed" | "queued" | "stale" | "unknown";
+  | "current"
+  | "failed"
+  | "queued"
+  | "stale"
+  | "unknown";
 
 type ConfigCurrentStateRow = {
   actionKind: "inspect" | "none" | "retry" | "unavailable";
@@ -2153,19 +2161,23 @@ function BulkConfigApply({
             )}
             <textarea
               aria-label="Patch generator values JSON"
+              data-tooltip-sensitive="true"
               onChange={(event) => {
                 setValuesText(event.target.value);
                 setRendered(null);
                 clearBulkConfigReview();
               }}
               rows={7}
+              title="Patch generator values JSON editor; content is excluded from tooltips"
               value={valuesText}
             />
             {rendered && (
               <textarea
                 aria-label="Rendered bulk runtime config patch TOML"
+                data-tooltip-sensitive="true"
                 readOnly
                 rows={8}
+                title="Rendered runtime configuration patch; content is excluded from tooltips"
                 value={rendered.toml}
               />
             )}
@@ -2173,12 +2185,14 @@ function BulkConfigApply({
         ) : (
           <textarea
             aria-label="Temporary bulk runtime config patch TOML"
+            data-tooltip-sensitive="true"
             onChange={(event) => {
               setTemporaryToml(event.target.value);
               clearBulkConfigReview();
             }}
             placeholder="[telemetry]\n# paste one incremental TOML patch"
             rows={14}
+            title="Temporary runtime configuration patch editor; content is excluded from tooltips"
             value={temporaryToml}
           />
         )}
@@ -2470,9 +2484,13 @@ function BulkConfigApply({
                       placeholder="What this generator changes"
                     />
                   </label>
-                  <label className="consoleField fieldFull">
+                  <label
+                    className="consoleField fieldFull"
+                    title="Patch generator field schema editor; JSON content is excluded from tooltips"
+                  >
                     <span>Field schema JSON</span>
                     <textarea
+                      data-tooltip-sensitive="true"
                       required
                       rows={7}
                       value={patchGeneratorEditor.fieldSchemaText}
@@ -2483,9 +2501,13 @@ function BulkConfigApply({
                       }
                     />
                   </label>
-                  <label className="consoleField fieldFull">
+                  <label
+                    className="consoleField fieldFull"
+                    title="Patch generator body editor; template content is excluded from tooltips"
+                  >
                     <span>Generator body</span>
                     <textarea
+                      data-tooltip-sensitive="true"
                       required
                       rows={8}
                       value={patchGeneratorEditor.rawGeneratorBody}
@@ -2497,9 +2519,13 @@ function BulkConfigApply({
                       placeholder="[section]\nkey = {{value}}"
                     />
                   </label>
-                  <label className="consoleField fieldFull">
+                  <label
+                    className="consoleField fieldFull"
+                    title="Patch generator documentation metadata editor; JSON content is excluded from tooltips"
+                  >
                     <span>Docs metadata JSON</span>
                     <textarea
+                      data-tooltip-sensitive="true"
                       required
                       rows={6}
                       value={patchGeneratorEditor.docsMetadataText}
@@ -2528,7 +2554,12 @@ function BulkConfigApply({
                     className="primaryAction"
                     disabled={pending || Boolean(patchGeneratorDraftError)}
                     onClick={() => void savePatchGeneratorEditor()}
-                    title={patchGeneratorDraftError ?? "Save custom generator"}
+                    title={
+                      pending
+                        ? "Wait for the current configuration operation to finish"
+                        : (patchGeneratorDraftError ??
+                          "Save the custom patch generator")
+                    }
                     type="button"
                   >
                     Save generator
@@ -2557,23 +2588,43 @@ function BulkConfigApply({
           {
             label: "Selector",
             value: applySnapshot?.selectorExpression ?? "-",
+            title:
+              applySnapshot?.selectorExpression ??
+              "No frozen selector is available because the bulk patch review is not open",
           },
           {
             label: "Targets",
             value: `${applySnapshot?.clientIds.length ?? 0}`,
           },
-          { label: "Source", value: applySnapshot?.patchSource ?? "-" },
-          { label: "Patch", value: applySnapshot?.patchName ?? "-" },
+          {
+            label: "Source",
+            value: applySnapshot?.patchSource ?? "-",
+            title:
+              applySnapshot?.patchSource ??
+              "No patch source is available because the bulk patch review is not open",
+          },
+          {
+            label: "Patch",
+            value: applySnapshot?.patchName ?? "-",
+            title:
+              applySnapshot?.patchName ??
+              "No patch name is available because the bulk patch review is not open",
+          },
           {
             label: "Sections",
             value: applySnapshot?.patchSections.join(", ") ?? "-",
+            title:
+              applySnapshot?.patchSections.join(", ") ||
+              "No rendered configuration sections are available",
           },
           {
             label: "Payload",
             value: applySnapshot?.payloadHashHex
               ? shortId(applySnapshot.payloadHashHex)
               : "-",
-            title: applySnapshot?.payloadHashHex ?? "-",
+            title:
+              applySnapshot?.payloadHashHex ??
+              "No frozen payload hash is available because the bulk patch review is not open",
           },
         ]}
         onCancel={() => {
@@ -3236,8 +3287,10 @@ function SingleVpsConfig({
             </span>
             <textarea
               aria-label="VPS redacted runtime config TOML"
+              data-tooltip-sensitive="true"
               readOnly
               rows={18}
+              title="Redacted runtime configuration; TOML content is excluded from tooltips"
               value={redactedToml}
             />
             <span className="formHint">
@@ -3276,12 +3329,14 @@ function SingleVpsConfig({
             />
             <textarea
               aria-label="One-VPS runtime config override TOML"
+              data-tooltip-sensitive="true"
               onChange={(event) => {
                 clearSingleConfigReview();
                 setOverrideToml(event.target.value);
               }}
               placeholder="[update]\n# one incremental override for this VPS"
               rows={14}
+              title="One-VPS runtime configuration override editor; TOML content is excluded from tooltips"
               value={overrideToml}
             />
             <ActionFeedback
@@ -3355,28 +3410,44 @@ function SingleVpsConfig({
         error={actionError}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
-          { label: "VPS", value: applySnapshot?.target.display_name ?? "-" },
+          {
+            label: "VPS",
+            value: applySnapshot?.target.display_name ?? "-",
+            title:
+              applySnapshot?.target.display_name ??
+              "No VPS is available because the one-VPS review is not open",
+          },
           {
             label: "Selector",
             value: applySnapshot?.selectorExpression ?? "-",
+            title:
+              applySnapshot?.selectorExpression ??
+              "No frozen one-VPS selector is available because the review is not open",
           },
           {
             label: "Base hash",
             value: applySnapshot?.baseHash
               ? shortId(applySnapshot.baseHash)
               : "-",
-            title: applySnapshot?.baseHash ?? "-",
+            title:
+              applySnapshot?.baseHash ??
+              "No base hash is available; read the selected VPS runtime configuration first",
           },
           {
             label: "Sections",
             value: applySnapshot?.patchSections.join(", ") ?? "-",
+            title:
+              applySnapshot?.patchSections.join(", ") ||
+              "No validated configuration sections are available",
           },
           {
             label: "Payload",
             value: applySnapshot?.payloadHashHex
               ? shortId(applySnapshot.payloadHashHex)
               : "-",
-            title: applySnapshot?.payloadHashHex ?? "-",
+            title:
+              applySnapshot?.payloadHashHex ??
+              "No frozen payload hash is available because the one-VPS review is not open",
           },
           {
             label: "Timeout",
@@ -3652,8 +3723,7 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   traffic_selector_empty: "Enter at least one interface selector.",
   traffic_selector_empty_item:
     "Remove the empty selector entry between commas.",
-  traffic_selector_source_invalid:
-    "Selector source must be host or tunnel.",
+  traffic_selector_source_invalid: "Selector source must be host or tunnel.",
   traffic_selector_interface_required: "Each selector needs an interface name.",
   traffic_selector_interface_invalid:
     "Use an exact interface name without spaces or wildcards.",
@@ -4510,15 +4580,30 @@ function VpsRulesPanel({
         {
           label: "Selector",
           value: reviewSnapshot?.selectorExpression ?? "-",
+          title:
+            reviewSnapshot?.selectorExpression ??
+            "No frozen VPS selector is available because the rule review is not open",
         },
-        { label: "Operation", value: reviewSnapshot?.operation ?? "-" },
+        {
+          label: "Operation",
+          value: reviewSnapshot?.operation ?? "-",
+          title:
+            reviewSnapshot?.operation ??
+            "No rule operation is available because the review is not open",
+        },
         {
           label: "Set keys",
           value: Object.keys(reviewSnapshot?.values ?? {}).join(", ") || "-",
+          title:
+            Object.keys(reviewSnapshot?.values ?? {}).join(", ") ||
+            "This reviewed operation does not set any VPS rule keys",
         },
         {
           label: "Unset keys",
           value: reviewSnapshot?.keys.join(", ") || "-",
+          title:
+            reviewSnapshot?.keys.join(", ") ||
+            "This reviewed operation does not unset any VPS rule keys",
         },
         {
           label: "Matched VPS",
@@ -4664,6 +4749,11 @@ function VpsRulesPanel({
                   onClick={() => {
                     setEditMode("upsert");
                   }}
+                  title={
+                    applyPending
+                      ? "Wait for the current VPS rule operation to finish"
+                      : "Set typed rule values on the reviewed VPS scope"
+                  }
                   type="button"
                 >
                   Set values
@@ -4675,6 +4765,11 @@ function VpsRulesPanel({
                   onClick={() => {
                     setEditMode("unset");
                   }}
+                  title={
+                    applyPending
+                      ? "Wait for the current VPS rule operation to finish"
+                      : "Remove selected rule keys from the reviewed VPS scope"
+                  }
                   type="button"
                 >
                   Unset values
@@ -4719,13 +4814,27 @@ function VpsRulesPanel({
                     className="secondaryAction compactAction"
                     disabled={applyPending}
                     onClick={() => changeSelectorExpression("")}
+                    title={
+                      applyPending
+                        ? "Wait for the current VPS rule operation to finish"
+                        : selectorExpression.trim()
+                          ? "Clear the VPS rule selector and its prefilled field values"
+                          : "The VPS rule selector is already empty"
+                    }
                     type="button"
                   >
                     Clear
                   </button>
                 </div>
               </div>
-              <label className="consoleField">
+              <label
+                className="consoleField"
+                title={
+                  applyPending
+                    ? "VPS selector editing is disabled while a rule operation is pending"
+                    : "Select the exact VPS scope for the reviewed rule mutation"
+                }
+              >
                 <span>VPS selector expression</span>
                 <SearchExpressionInput
                   agents={agents}
@@ -4786,8 +4895,8 @@ function VpsRulesPanel({
                   <div>
                     <h4 title={CONFIG_HELP.ruleSetValues}>Common rule cards</h4>
                     <span title={CONFIG_HELP.ruleSetValues}>
-                      Typed fields for billing, live rate, quota, reset day,
-                      and traffic interfaces
+                      Typed fields for billing, live rate, quota, reset day, and
+                      traffic interfaces
                     </span>
                   </div>
                 </div>
@@ -4796,7 +4905,15 @@ function VpsRulesPanel({
                   aria-label="Common VPS rule fields"
                 >
                   {VPS_RULE_FIELD_DEFINITIONS.map((field) => (
-                    <label className="vpsRuleTypedCard" key={field.key}>
+                    <label
+                      className="vpsRuleTypedCard"
+                      key={field.key}
+                      title={
+                        applyPending
+                          ? `Editing ${field.label} is disabled while a VPS rule operation is pending`
+                          : field.help
+                      }
+                    >
                       <span>
                         <ConfigHelpLabel
                           help={field.help}
@@ -4822,17 +4939,32 @@ function VpsRulesPanel({
                           );
                         }}
                         placeholder={field.placeholder}
-                        title={field.help}
+                        title={
+                          applyPending
+                            ? `Wait for the current VPS rule operation to finish before editing ${field.label}`
+                            : field.help
+                        }
                         value={typedRuleValues[field.key] ?? ""}
                       />
                     </label>
                   ))}
                 </div>
-                <details className="vpsRulesAdvancedRaw">
-                  <summary>Advanced raw key/value</summary>
+                <details
+                  className="vpsRulesAdvancedRaw"
+                  title="Edit advanced VPS rule key/value lines not covered by the common typed cards"
+                >
+                  <summary title="Show or hide the advanced raw VPS rule editor">
+                    Advanced raw key/value
+                  </summary>
                   <textarea
                     aria-label="VPS rule set values"
+                    data-tooltip-sensitive="true"
                     disabled={applyPending}
+                    title={
+                      applyPending
+                        ? "Wait for the current VPS rule operation to finish before editing raw values"
+                        : "One typed key=value VPS rule update per line"
+                    }
                     value={valuesText}
                     onChange={(event) => {
                       ruleDraftTouchedRef.current = true;
@@ -4855,13 +4987,26 @@ function VpsRulesPanel({
                 </div>
                 <div className="checkListPanel compactChecklist">
                   {VPS_RULE_KEYS.map((key) => (
-                    <label className="checkLine" key={key}>
+                    <label
+                      className="checkLine"
+                      key={key}
+                      title={
+                        applyPending
+                          ? `Unsetting ${key} is disabled while a VPS rule operation is pending`
+                          : `Select ${key} for reviewed removal from matched VPSs`
+                      }
+                    >
                       <input
                         aria-label={`Unset ${key}`}
                         checked={unsetKeys.includes(key)}
                         disabled={applyPending}
                         onChange={(event) =>
                           toggleUnsetKey(key, event.target.checked)
+                        }
+                        title={
+                          applyPending
+                            ? `Wait for the current VPS rule operation to finish before selecting ${key}`
+                            : `Unset VPS rule key ${key}`
                         }
                         type="checkbox"
                       />
@@ -5182,6 +5327,11 @@ function VpsRulesPreviewTable({
             className="primaryAction compactAction"
             disabled={pending}
             onClick={onRequestApply}
+            title={
+              pending
+                ? "Wait for the current VPS rule operation to finish"
+                : `${finalActionSummary}; open the final reviewed write confirmation`
+            }
             type="button"
           >
             {finalActionLabel}

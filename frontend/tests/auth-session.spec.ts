@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expectPrivilegeVerifiedForViewport } from "./support/consoleNavigation";
 
 const accessToken = "a".repeat(64);
 const refreshToken = "b".repeat(64);
@@ -96,7 +97,16 @@ test("keeps ordinary bearer login authenticated across browser reload", async ({
     page.getByText("Sign in with an existing operator account."),
   ).toBeVisible();
   await page.getByLabel("Username").fill("session-admin");
-  await page.getByLabel("Password").fill("session-password-123");
+  const password = page.getByLabel("Password");
+  await password.fill("session-password-123");
+  await expect(password).not.toHaveAttribute("title", /session-password-123/);
+  expect(
+    await page.locator("[title]").evaluateAll((elements) =>
+      elements.some((element) =>
+        (element.getAttribute("title") ?? "").includes("session-password-123"),
+      ),
+    ),
+  ).toBe(false);
   await activate(page.getByRole("button", { name: "Sign in" }));
 
   await expectAuthenticatedConsoleShell(page);
@@ -223,9 +233,7 @@ test("sign out revokes the bearer session and clears privilege before reauthenti
       .getByLabel("Unlock with privilege material")
       .getByRole("button", { name: "Unlock", exact: true }),
   );
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
 
   await activate(
     page.locator(".topbar").getByRole("button", { name: "Open sessions" }),

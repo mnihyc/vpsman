@@ -5,11 +5,13 @@ import { expect, test } from "@playwright/test";
 const RUNTIME_OR_FALLBACK_TOKENS = new Set([
   "--console-sticky-offset",
   "--radix-context-menu-content-available-height",
+  "--radix-dropdown-menu-content-available-height",
 ]);
 
 const UNSTYLED_BEHAVIOR_MARKERS = new Set([
   "actionDrawerInitialFocus",
   "jobEvidenceDetailActionFeedback",
+  "operationHint",
   "policyDryRunValidationFeedback",
 ]);
 

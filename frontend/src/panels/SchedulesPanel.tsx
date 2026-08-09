@@ -283,6 +283,17 @@ export function SchedulesPanel({
     cronShapeValid &&
     selectorExpression.trim().length > 0 &&
     !selectorParse.error;
+  const scheduleReviewUnavailableReason = pending
+    ? "A schedule change is already in progress"
+    : !name.trim()
+      ? "Enter a schedule name"
+      : scheduleOperation === null
+        ? "Select a command template or enter a valid command"
+        : !cronShapeValid
+          ? "Enter a valid five-field UTC cron expression"
+          : !selectorExpression.trim()
+            ? "Enter a VPS selector expression"
+            : selectorParse.error ?? undefined;
   const status = schedulesTruncated
     ? `${formatLowerBoundCount(schedules.length, true)} loaded schedules`
     : countPhrase(schedules.length, "schedule");
@@ -322,6 +333,7 @@ export function SchedulesPanel({
     },
     {
       label: "Operation",
+      title: "Reviewed scheduled operation; command content is excluded from tooltips",
       value: pendingScheduleSnapshot
         ? (pendingScheduleSnapshot.selectedTemplateName ??
           operationSummary(pendingScheduleSnapshot.operation))
@@ -389,6 +401,8 @@ export function SchedulesPanel({
               className={
                 scheduleOperationInvalid(schedule) ? "status warn" : undefined
               }
+              data-value-tooltip-skip="true"
+              title="Scheduled operation summary; command content is excluded from tooltips"
             >
               {scheduleOperationInvalid(schedule)
                 ? "Invalid saved operation"
@@ -1131,6 +1145,7 @@ export function SchedulesPanel({
       },
       {
         label: "Operation",
+        title: "Reviewed scheduled operation; command content is excluded from tooltips",
         value: scheduleOperationInvalid(action.schedule)
           ? "Invalid saved operation · repair required"
           : `${operationSummary(action.schedule.operation)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
@@ -1315,6 +1330,13 @@ export function SchedulesPanel({
             <div className="inlineActions">
               <button
                 className="secondaryAction compactAction"
+                data-tooltip-disabled-reason={
+                  pending
+                    ? "A schedule change is already in progress"
+                    : !onOpenScheduledRuns
+                      ? "Scheduled-run history is unavailable in this context"
+                      : undefined
+                }
                 disabled={pending || !onOpenScheduledRuns}
                 onClick={onOpenScheduledRuns}
                 title="Open worker-created schedule execution history in Jobs / Scheduled runs"
@@ -1325,6 +1347,13 @@ export function SchedulesPanel({
               </button>
               <button
                 className="secondaryAction compactAction"
+                data-tooltip-disabled-reason={
+                  loading
+                    ? "Schedules are already loading"
+                    : pending
+                      ? "A schedule change is already in progress"
+                      : undefined
+                }
                 disabled={loading || pending}
                 onClick={onRefresh}
                 type="button"
@@ -1393,6 +1422,13 @@ export function SchedulesPanel({
           toolbarActions={
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "A schedule change is already in progress"
+                  : editingScheduleId !== null
+                    ? "Finish or cancel the current schedule edit first"
+                    : undefined
+              }
               disabled={pending || editingScheduleId !== null}
               onClick={() => setComposerRevealRequest((current) => current + 1)}
               title={
@@ -1466,6 +1502,13 @@ export function SchedulesPanel({
             </label>
             <button
               className="primaryAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "A schedule change is already in progress"
+                  : !deferDraft.deferredUntil
+                    ? "Choose when this schedule should resume"
+                    : undefined
+              }
               disabled={pending || !deferDraft.deferredUntil}
               type="submit"
             >
@@ -1584,6 +1627,12 @@ export function SchedulesPanel({
               <span>Command argv</span>
               <textarea
                 aria-label="Schedule job argv"
+                data-tooltip-disabled-reason={
+                  selectedTemplate
+                    ? "The selected template supplies this operation"
+                    : undefined
+                }
+                data-value-tooltip-skip="true"
                 disabled={selectedTemplate !== null}
                 onChange={(event) => setCommandText(event.target.value)}
                 rows={3}
@@ -1639,6 +1688,11 @@ export function SchedulesPanel({
                 />
                 <input
                   aria-label="Schedule catch-up limit"
+                  data-tooltip-disabled-reason={
+                    catchUpPolicy !== "run_all_limited"
+                      ? "Catch-up limit applies only to Run limited backlog"
+                      : undefined
+                  }
                   disabled={catchUpPolicy !== "run_all_limited"}
                   min={1}
                   max={25}
@@ -1740,7 +1794,10 @@ export function SchedulesPanel({
                   </span>
                 ))}
               </div>
-              <small>
+              <small
+                data-value-tooltip-skip="true"
+                title="Schedule target preview and operation summary; command content is excluded from tooltips"
+              >
                 {selectorExpression.trim()
                   ? `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save; `
                   : "No target selector; "}
@@ -1761,6 +1818,9 @@ export function SchedulesPanel({
                 {editingScheduleId ? (
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending ? "A schedule change is already in progress" : undefined
+                    }
                     disabled={pending}
                     onClick={resetScheduleComposer}
                     type="button"
@@ -1770,6 +1830,7 @@ export function SchedulesPanel({
                 ) : null}
                 <button
                   className="primaryAction"
+                  data-tooltip-disabled-reason={scheduleReviewUnavailableReason}
                   disabled={pending || !ready}
                   type="submit"
                 >
@@ -2305,7 +2366,10 @@ function ScheduleExpandedDetail({
     <div className="consoleInlineDetailGrid scheduleExpandedDetail">
       <span>
         <strong>Operation</strong>
-        <span>
+        <span
+          data-value-tooltip-skip="true"
+          title="Scheduled operation summary; command content is excluded from tooltips"
+        >
           {scheduleOperationInvalid(schedule)
             ? "Invalid saved operation"
             : operationSummary(schedule.operation)}

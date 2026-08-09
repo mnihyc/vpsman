@@ -388,6 +388,7 @@ export function TerminalSessionsPanel({
         <span className="historyPrimary">
           <span
             className={`status ${terminalSessionStateBadgeClass(session.state)}`}
+            title={`${session.state}; ${formatSessionLifecycle(session)}`}
           >
             {session.state}
           </span>
@@ -402,7 +403,10 @@ export function TerminalSessionsPanel({
     {
       cell: (session) => (
         <span className="historyPrimary">
-          <strong title={formatArgv(session.argv)}>
+          <strong
+            data-value-tooltip-skip="true"
+            title="Terminal launch command; arguments are shown inline and intentionally omitted from the tooltip."
+          >
             {formatArgv(session.argv) || "Terminal"}
           </strong>
           <small>{formatShellContext(session)}</small>
@@ -874,6 +878,9 @@ export function TerminalSessionsPanel({
             )}
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading ? "Terminal session inventory is already refreshing." : undefined
+              }
               disabled={loading}
               onClick={onRefresh}
               title={
@@ -1024,6 +1031,13 @@ export function TerminalSessionsPanel({
           </span>
           <button
             className="primaryAction compactAction"
+            data-tooltip-disabled-reason={
+              launchPending
+                ? "A terminal-open request is already running."
+                : !launchTarget
+                  ? "Choose one VPS before opening a terminal."
+                  : undefined
+            }
             disabled={!launchTarget || launchPending}
             onClick={() => void openNewTerminal()}
             title={launchPrimaryTitle}
@@ -1040,7 +1054,7 @@ export function TerminalSessionsPanel({
         />
       </div>
       <div className="terminalSummaryStrip">
-        <span>
+        <span title={`${formatLowerBoundCount(openSessions, sessionsTruncated)} terminal sessions are open${sessionsTruncated ? " in the loaded page" : ""}.`}>
           <strong>
             {formatLowerBoundCount(openSessions, sessionsTruncated)}
           </strong>
@@ -1048,7 +1062,7 @@ export function TerminalSessionsPanel({
             {sessionsTruncated ? "Open in loaded sessions" : "Open"}
           </small>
         </span>
-        <span>
+        <span title={`${formatLowerBoundCount(replayableSessions, sessionsTruncated)} terminal sessions retain replayable output${sessionsTruncated ? " in the loaded page" : ""}.`}>
           <strong>
             {formatLowerBoundCount(replayableSessions, sessionsTruncated)}
           </strong>
@@ -1056,7 +1070,7 @@ export function TerminalSessionsPanel({
             {sessionsTruncated ? "Replayable in loaded sessions" : "Replayable"}
           </small>
         </span>
-        <span>
+        <span title={`${formatBytes(retainedBytes)} terminal output is retained${sessionsTruncated ? " across the loaded page" : ""}.`}>
           <strong>{formatBytes(retainedBytes)}</strong>
           <small>
             {sessionsTruncated
@@ -1064,7 +1078,7 @@ export function TerminalSessionsPanel({
               : "Retained output"}
           </small>
         </span>
-        <span>
+        <span title={followingLive ? "The selected terminal is following live output." : "The selected terminal is not following live output."}>
           <strong>{followingLive ? "Following" : "Not following"}</strong>
           <small>Live follow</small>
         </span>
@@ -1077,7 +1091,10 @@ export function TerminalSessionsPanel({
                 ? clientLabel(presentedActiveSession.client_id)
                 : "No active terminal"}
             </strong>
-            <span>
+            <span
+              data-value-tooltip-skip="true"
+              title="Active terminal session identifier and launch command; command contents are intentionally omitted from the tooltip."
+            >
               {presentedActiveSession
                 ? `${shortId(presentedActiveSession.session_id)} - ${formatArgv(presentedActiveSession.argv) || "terminal"}`
                 : "Open a terminal session to attach retained output"}
@@ -1086,6 +1103,9 @@ export function TerminalSessionsPanel({
           <div className="rowActions compactRowActions">
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                activeSession ? undefined : "Select a terminal session before loading replay."
+              }
               disabled={!activeSession}
               onClick={() =>
                 activeSession && void loadDurableReplay(activeSession)
@@ -1138,6 +1158,9 @@ export function TerminalSessionsPanel({
             </button>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                activeSession ? undefined : "Select a terminal session before opening focused replay."
+              }
               disabled={!activeSession}
               onClick={() => setTerminalFocusOpen(true)}
               title="Open the active terminal replay in a full-screen focused workspace."
@@ -1167,7 +1190,13 @@ export function TerminalSessionsPanel({
             <small>Lifecycle</small>
           </span>
           <span>
-            <strong>
+            <strong
+              data-tooltip-empty-reason={
+                presentedActiveSession
+                  ? undefined
+                  : "No terminal session is selected, so no working directory is available."
+              }
+            >
               {presentedActiveSession
                 ? (presentedActiveSession.cwd ?? "Working directory not reported")
                 : "-"}
@@ -1175,7 +1204,13 @@ export function TerminalSessionsPanel({
             <small>Working directory</small>
           </span>
           <span>
-            <strong>
+            <strong
+              data-tooltip-empty-reason={
+                presentedActiveSession
+                  ? undefined
+                  : "No terminal session is selected, so no replay range is available."
+              }
+            >
               {presentedActiveSession
                 ? formatOutputRange(presentedActiveSession)
                 : "-"}
@@ -1183,7 +1218,13 @@ export function TerminalSessionsPanel({
             <small>Replay range</small>
           </span>
           <span>
-            <strong>
+            <strong
+              data-tooltip-empty-reason={
+                presentedActiveSession
+                  ? undefined
+                  : "No terminal session is selected, so no input state is available."
+              }
+            >
               {presentedActiveSession
                 ? formatLastInput(presentedActiveSession)
                 : "-"}
@@ -1432,17 +1473,32 @@ export function TerminalSessionsPanel({
         items={[
           {
             label: "VPS",
-            value: closeSession ? clientLabel(closeSession.client_id) : "-",
+            value: closeSession ? (
+              clientLabel(closeSession.client_id)
+            ) : (
+              <span data-tooltip-empty-reason="No terminal close review is active.">-</span>
+            ),
           },
           {
             label: "Session",
-            value: closeSession?.session_id ?? "-",
+            value: closeSession?.session_id ?? (
+              <span data-tooltip-empty-reason="No terminal close review is active.">-</span>
+            ),
           },
           {
             label: "Command",
             value: closeSession
-              ? formatArgv(closeSession.argv) || "terminal"
-              : "-",
+              ? (
+                  <span
+                    data-value-tooltip-skip="true"
+                    title="Terminal launch command; command contents are intentionally omitted from the tooltip."
+                  >
+                    {formatArgv(closeSession.argv) || "terminal"}
+                  </span>
+                )
+              : (
+                  <span data-tooltip-empty-reason="No terminal close review is active.">-</span>
+                ),
           },
         ]}
         onCancel={() => setCloseSession(null)}

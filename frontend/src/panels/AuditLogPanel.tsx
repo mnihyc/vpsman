@@ -652,7 +652,10 @@ export function AuditLogPanel({
             tone={error ? "danger" : "progress"}
           />
           <div className="auditEventSummary" aria-label="Audit event summary">
-            <div className="auditEventMetric">
+            <div
+              className="auditEventMetric"
+              title={`Visible audit events: ${hasAuditFilters ? `${filteredAudits.length} of ${auditsTruncated ? "at least " : ""}${audits.length}` : `${auditsTruncated ? "at least " : ""}${audits.length}`}.`}
+            >
               <span>Visible events</span>
               <strong>
                 {hasAuditFilters
@@ -667,7 +670,14 @@ export function AuditLogPanel({
                     : "All returned events"}
               </p>
             </div>
-            <div className="auditEventMetric">
+            <div
+              className="auditEventMetric"
+              title={
+                latestVisibleAudit
+                  ? `Latest visible audit event: ${formatFullTime(latestVisibleAudit.created_at)}.`
+                  : "No audit events match the current filters."
+              }
+            >
               <span>Latest visible</span>
               <strong>
                 {latestVisibleAudit
@@ -676,12 +686,22 @@ export function AuditLogPanel({
               </strong>
               <p>{lastAuditTime}</p>
             </div>
-            <div className="auditEventMetric">
+            <div
+              className="auditEventMetric"
+              title={`${relatedAuditCount} visible audit events link to job, terminal, session, or schedule evidence.`}
+            >
               <span>Related evidence</span>
               <strong>{relatedAuditCount} linked</strong>
               <p>Job, terminal, session, or schedule references in metadata.</p>
             </div>
-            <div className="auditEventMetric">
+            <div
+              className="auditEventMetric"
+              title={
+                auditActors.length > 0
+                  ? `${auditActors.length} distinct actors are visible in the loaded audit events.`
+                  : "No actor identity is available in the loaded audit events."
+              }
+            >
               <span>Known actors</span>
               <strong>{auditActors.length || "None"}</strong>
               <p>
@@ -801,6 +821,7 @@ export function AuditLogPanel({
             <div className="auditFilterActions">
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason="No audit filters are active."
                 disabled={!hasAuditFilters}
                 onClick={() => setAuditFilters(EMPTY_AUDIT_FILTERS)}
                 type="button"
@@ -872,6 +893,7 @@ export function AuditLogPanel({
             toolbarActions={
               <button
                 className="secondaryAction compactAction"
+                data-tooltip-disabled-reason="Audit records are already refreshing."
                 disabled={loading}
                 onClick={onRefresh}
                 type="button"
@@ -895,6 +917,7 @@ export function AuditLogPanel({
             </div>
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason="History-retention data is already refreshing."
               disabled={loading}
               onClick={onRefresh}
               type="button"
@@ -1105,7 +1128,16 @@ export function AuditLogPanel({
                 </span>
                 <span>
                   <strong>Cleanup cutoff</strong>
-                  <small>Older than {retentionDays || "-"} days</small>
+                  <small
+                    data-tooltip-empty-reason="No cleanup cutoff is configured for the selected history domain."
+                    title={
+                      retentionDays.trim()
+                        ? `Cleanup includes records older than ${retentionDays} days.`
+                        : "No cleanup cutoff is configured for the selected history domain."
+                    }
+                  >
+                    Older than {retentionDays || "-"} days
+                  </small>
                 </span>
                 <span>
                   <strong>Cleanup review</strong>
@@ -1131,6 +1163,11 @@ export function AuditLogPanel({
                 </button>
                 <button
                   className="secondaryAction dangerAction"
+                  data-tooltip-disabled-reason={
+                    !pruneSnapshot
+                      ? "Preview cleanup before deleting retained history."
+                      : "The cleanup preview found no retained history rows to delete."
+                  }
                   disabled={!pruneSnapshot || pruneSnapshot.reviewedRows === 0}
                   onClick={() => setPruneConfirmationOpen(true)}
                   title={
@@ -1184,6 +1221,7 @@ export function AuditLogPanel({
               </div>
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason="History export is disabled by the selected retention policy."
                 disabled={!exportEnabled}
                 onClick={() => void exportSelectedHistory()}
                 type="button"
@@ -1471,7 +1509,9 @@ function AuditEventDetailPanel({
             <span>{audit.target}</span>
           </span>
         </div>
-        <pre className="auditEventMetadata">{jsonText(audit.metadata)}</pre>
+        <pre className="auditEventMetadata" data-value-tooltip-skip="true">
+          {jsonText(audit.metadata)}
+        </pre>
       </details>
     </div>
   );

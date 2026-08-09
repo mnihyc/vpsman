@@ -51,10 +51,27 @@ export function TargetImpactPreview({
     .reduce((count, group) => count + group.agents.length, 0);
 
   return (
-    <section className="targetImpactPreview" aria-label={title}>
-      <div className="targetImpactHeader">
-        <strong>{title}</strong>
-        <span>
+    <section
+      className="targetImpactPreview"
+      aria-label={title}
+      title={`${title}: ${
+        targets.length === 0
+          ? emptyText
+          : `${targets.length} target${targets.length === 1 ? "" : "s"} for ${operationLabel(mode)}`
+      }`}
+    >
+      <div
+        className="targetImpactHeader"
+        title="Capability preflight for the exact selected VPS set"
+      >
+        <strong title={title}>{title}</strong>
+        <span
+          title={
+            targets.length === 0
+              ? emptyText
+              : `${targets.length} selected targets for ${operationLabel(mode)}`
+          }
+        >
           {targets.length === 0
             ? emptyText
             : `${targets.length} target${targets.length === 1 ? "" : "s"} / ${operationLabel(mode)}`}
@@ -63,23 +80,42 @@ export function TargetImpactPreview({
       {targets.length > 0 && (
         <div className="targetImpactGrid">
           {groups.map((group) => (
-            <div className={`targetImpactGroup ${group.key}`} key={group.key}>
-              <div className="targetImpactGroupHeader">
+            <div
+              className={`targetImpactGroup ${group.key}`}
+              key={group.key}
+              title={impactGroupTitle(group, mode, unavailableLabel)}
+            >
+              <div
+                className="targetImpactGroupHeader"
+                title={impactGroupTitle(group, mode, unavailableLabel)}
+              >
                 {impactIcon(group.key)}
-                <strong>{group.agents.length}</strong>
-                <span>
-                  {group.key === "unavailable"
-                    ? unavailableLabel
-                    : group.label}
+                <strong
+                  title={`${group.agents.length} targets in this capability group`}
+                >
+                  {group.agents.length}
+                </strong>
+                <span title={impactGroupTitle(group, mode, unavailableLabel)}>
+                  {group.key === "unavailable" ? unavailableLabel : group.label}
                 </span>
               </div>
-              <TargetImpactChips agents={group.agents} mode={vpsNameDisplayMode} />
+              <TargetImpactChips
+                agents={group.agents}
+                mode={vpsNameDisplayMode}
+              />
             </div>
           ))}
         </div>
       )}
       {attentionCount > 0 && (
-        <p className="targetImpactHint">
+        <p
+          className="targetImpactHint"
+          title={
+            forceUnprivileged
+              ? "Targets that are not ready will still be dispatched as privilege-unlocked best effort"
+              : "At least one selected target needs review or cannot run this operation"
+          }
+        >
           {forceUnprivileged
             ? "Forced targets will be dispatched as privilege-unlocked best effort."
             : "Non-ready targets selected."}
@@ -104,9 +140,14 @@ export function targetImpactModeForDispatch(mode: string): TargetImpactMode {
   return "generic";
 }
 
-export function resolveAgentsById(agents: AgentView[], clientIds: string[]): AgentView[] {
+export function resolveAgentsById(
+  agents: AgentView[],
+  clientIds: string[],
+): AgentView[] {
   const byId = new Map(agents.map((agent) => [agent.id, agent]));
-  return clientIds.map((clientId) => byId.get(clientId)).filter((agent): agent is AgentView => Boolean(agent));
+  return clientIds
+    .map((clientId) => byId.get(clientId))
+    .filter((agent): agent is AgentView => Boolean(agent));
 }
 
 export function LocalTargetPreview({
@@ -127,7 +168,11 @@ export function LocalTargetPreview({
     return null;
   }
   return (
-    <div aria-label={ariaLabel} className="targetChipList">
+    <div
+      aria-label={ariaLabel}
+      className="targetChipList"
+      title={`${agents.length} locally matched VPS${agents.length === 1 ? "" : "s"}`}
+    >
       {visibleAgents.map((agent) => (
         <span className="targetChip" key={agent.id} title={agent.id}>
           {formatVpsName(agent, vpsNameDisplayMode)}
@@ -137,6 +182,7 @@ export function LocalTargetPreview({
         <button
           className="targetChip mutedChip showMoreChip"
           onClick={() => setExpanded(true)}
+          title={`Show ${remaining} additional matched VPS${remaining === 1 ? "" : "s"}`}
           type="button"
         >
           Show {remaining} more
@@ -145,6 +191,7 @@ export function LocalTargetPreview({
         <button
           className="targetChip mutedChip showMoreChip"
           onClick={() => setExpanded(false)}
+          title="Collapse the matched VPS list"
           type="button"
         >
           Show fewer
@@ -191,38 +238,55 @@ function classifyTarget(
     return "stale";
   }
   if (mode === "generic") {
-    return target.capabilities.privilege_mode === "unknown" ? "observation_only" : "ready";
+    return target.capabilities.privilege_mode === "unknown"
+      ? "observation_only"
+      : "ready";
   }
   if (target.capabilities.privilege_mode === "unknown") {
     return "observation_only";
   }
   if (mode === "root_network_mutation") {
-    return target.capabilities.privilege_mode === "root" && target.capabilities.can_manage_runtime_tunnels
+    return target.capabilities.privilege_mode === "root" &&
+      target.capabilities.can_manage_runtime_tunnels
       ? "ready"
       : target.capabilities.can_attempt_privileged_ops
         ? "degraded"
         : "unsupported";
   }
   if (mode === "process_limits") {
-    return target.capabilities.privilege_mode === "root" && target.capabilities.can_apply_process_limits
+    return target.capabilities.privilege_mode === "root" &&
+      target.capabilities.can_apply_process_limits
       ? "ready"
       : target.capabilities.can_attempt_privileged_ops
         ? "degraded"
         : "unsupported";
   }
-  return target.capabilities.privilege_mode === "root" && target.capabilities.can_attempt_privileged_ops
+  return target.capabilities.privilege_mode === "root" &&
+    target.capabilities.can_attempt_privileged_ops
     ? "ready"
     : target.capabilities.can_attempt_privileged_ops
       ? "degraded"
       : "unsupported";
 }
 
-function TargetImpactChips({ agents, mode }: { agents: AgentView[]; mode: VpsNameDisplayMode }) {
+function TargetImpactChips({
+  agents,
+  mode,
+}: {
+  agents: AgentView[];
+  mode: VpsNameDisplayMode;
+}) {
   const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) {
-    return <small>No targets</small>;
+    return (
+      <small title="No selected VPS belongs to this capability group">
+        No targets
+      </small>
+    );
   }
-  const visible = expanded ? agents : agents.slice(0, COLLAPSED_TARGET_CHIP_LIMIT);
+  const visible = expanded
+    ? agents
+    : agents.slice(0, COLLAPSED_TARGET_CHIP_LIMIT);
   const remaining = agents.length - visible.length;
   return (
     <div className="targetChipList impactTargetChips">
@@ -256,6 +320,21 @@ function impactIcon(key: TargetImpactGroup["key"]) {
     return <ShieldQuestion size={16} />;
   }
   return <ShieldAlert size={16} />;
+}
+
+function impactGroupTitle(
+  group: TargetImpactGroup,
+  mode: TargetImpactMode,
+  unavailableLabel: string,
+): string {
+  const label = group.key === "unavailable" ? unavailableLabel : group.label;
+  const detail =
+    group.key === "ready"
+      ? "can run the operation with the reported capabilities"
+      : group.key === "needs_review"
+        ? "has stale, degraded, forced, or observation-only capability evidence"
+        : "has unavailable evidence or does not report the required capability";
+  return `${group.agents.length} ${label.toLocaleLowerCase()} target${group.agents.length === 1 ? "" : "s"} for ${operationLabel(mode)}; ${detail}`;
 }
 
 function operationLabel(mode: TargetImpactMode): string {

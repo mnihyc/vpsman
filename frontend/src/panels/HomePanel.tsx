@@ -408,6 +408,9 @@ export function HomePanel({
               <button
                 className="primaryAction compactAction"
                 aria-label="Open terminal for selected VPS"
+                data-tooltip-disabled-reason={
+                  quickTarget ? undefined : "Select a VPS before opening a terminal"
+                }
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenTerminal(quickTarget)}
                 title="Open terminal for the selected VPS"
@@ -419,6 +422,9 @@ export function HomePanel({
               <button
                 className="secondaryAction compactAction"
                 aria-label="Browse files on selected VPS"
+                data-tooltip-disabled-reason={
+                  quickTarget ? undefined : "Select a VPS before browsing files"
+                }
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenFiles(quickTarget)}
                 title="Browse files on the selected VPS"
@@ -430,6 +436,9 @@ export function HomePanel({
               <button
                 className="secondaryAction compactAction"
                 aria-label="Dispatch command to selected VPS"
+                data-tooltip-disabled-reason={
+                  quickTarget ? undefined : "Select a VPS before dispatching a command"
+                }
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenDispatch(quickTarget)}
                 title="Dispatch a command to the selected VPS"
@@ -441,6 +450,9 @@ export function HomePanel({
               <button
                 className="secondaryAction compactAction"
                 aria-label="Run backup on selected VPS"
+                data-tooltip-disabled-reason={
+                  quickTarget ? undefined : "Select a VPS before running a backup"
+                }
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenBackup(quickTarget)}
                 title="Run a backup on the selected VPS"
@@ -452,6 +464,9 @@ export function HomePanel({
               <button
                 className="secondaryAction compactAction"
                 aria-label="View network for selected VPS"
+                data-tooltip-disabled-reason={
+                  quickTarget ? undefined : "Select a VPS before viewing network state"
+                }
                 disabled={!quickTarget}
                 onClick={() => quickTarget && onOpenNetwork(quickTarget)}
                 title="View network state for the selected VPS"
@@ -749,13 +764,24 @@ export function HomePanel({
             ) : (
               <div className="homeActionList">
                 {attentionItems.map((item) => (
-                  <button className={`homeActionRow ${item.tone}`} key={item.id} onClick={item.onOpen} type="button">
+                  <button
+                    className={`homeActionRow ${item.tone}`}
+                    key={item.id}
+                    onClick={item.onOpen}
+                    title={`Open ${item.labelTitle ?? item.label}.`}
+                    type="button"
+                  >
                     <span className="homeActionGlyph" aria-hidden="true">
                       {item.tone === "critical" ? <AlertTriangle size={16} /> : <Activity size={16} />}
                     </span>
                     <span className="homeActionText">
                       <strong title={item.labelTitle}>{item.label}</strong>
-                      <small>{item.detail}</small>
+                      <small
+                        data-value-tooltip-skip="true"
+                        title={`Operational detail for ${item.label}; exact retained content is excluded from tooltips`}
+                      >
+                        {item.detail}
+                      </small>
                     </span>
                     <span className="homeActionMeta" title={item.metaTitle}>
                       {item.meta}
@@ -894,13 +920,24 @@ function HomeActionPanel({
       ) : (
         <div className="homeActionList">
           {items.map((item) => (
-            <button className={`homeActionRow ${item.tone}`} key={item.id} onClick={item.onOpen} type="button">
+            <button
+              className={`homeActionRow ${item.tone}`}
+              key={item.id}
+              onClick={item.onOpen}
+              title={`Open ${item.labelTitle ?? item.label}.`}
+              type="button"
+            >
               <span className="homeActionGlyph" aria-hidden="true">
                 {item.tone === "critical" ? <AlertTriangle size={16} /> : <Activity size={16} />}
               </span>
               <span className="homeActionText">
                 <strong title={item.labelTitle}>{item.label}</strong>
-                <small>{item.detail}</small>
+                <small
+                  data-value-tooltip-skip="true"
+                  title={`Operational detail for ${item.label}; exact retained content is excluded from tooltips`}
+                >
+                  {item.detail}
+                </small>
               </span>
               <span className="homeActionMeta" title={item.metaTitle}>
                 {item.meta}

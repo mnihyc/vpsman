@@ -3,11 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { renderSVG } from "uqr";
 import type { TotpSetupResponse } from "../types";
 
-export function TotpEnrollmentQr({
-  setup,
-}: {
-  setup: TotpSetupResponse;
-}) {
+export function TotpEnrollmentQr({ setup }: { setup: TotpSetupResponse }) {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   useEffect(() => {
     setCopyStatus(null);
@@ -48,10 +44,7 @@ export function TotpEnrollmentQr({
   }
 
   return (
-    <section
-      aria-label="Authenticator QR code"
-      className="totpEnrollmentPanel"
-    >
+    <section aria-label="Authenticator QR code" className="totpEnrollmentPanel">
       <div className="totpQrFrame">
         {qr.dataUrl ? (
           <img
@@ -73,7 +66,9 @@ export function TotpEnrollmentQr({
         <div className="totpManualKey">
           <span>
             <small>Manual setup key</small>
-            <code data-value-tooltip-skip="true">{setup.secret_base32}</code>
+            <code data-tooltip-sensitive="true" data-value-tooltip-skip="true">
+              {setup.secret_base32}
+            </code>
           </span>
           <button
             className="secondaryAction compactAction"

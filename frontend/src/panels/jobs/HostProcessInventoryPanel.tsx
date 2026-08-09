@@ -185,7 +185,12 @@ export function HostProcessInventoryPanel({
         cell: (row) => (
           <span className="historyPrimary">
             <strong title={row.name}>{row.name}</strong>
-            <small title={row.command}>{compactCommand(row.command, row.name)}</small>
+            <small
+              data-value-tooltip-skip="true"
+              title="Process command reported by the selected host; arguments are intentionally omitted from the tooltip."
+            >
+              {compactCommand(row.command, row.name)}
+            </small>
           </span>
         ),
         header: "Process",
@@ -269,7 +274,16 @@ export function HostProcessInventoryPanel({
         </div>
         <div className="headerActionStack">
           <div className="processHeaderActions">
-            <label className="processTargetPicker">
+            <label
+              className="processTargetPicker"
+              title={
+                agents.length === 0
+                  ? "No VPS is available in the current fleet scope."
+                  : refreshing
+                    ? "The VPS cannot change while a host-process snapshot refresh is running."
+                    : "Choose the VPS whose host processes should be inspected."
+              }
+            >
               <span>VPS</span>
               <VpsCombobox
                 agents={agents}
@@ -282,6 +296,9 @@ export function HostProcessInventoryPanel({
             </label>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                refreshing ? "A host-process snapshot refresh is already running." : refreshUnavailable ?? undefined
+              }
               disabled={Boolean(refreshUnavailable) || refreshing}
               onClick={() => void refreshSnapshot()}
               title={refreshUnavailable ?? "Capture a new bounded /proc snapshot"}
@@ -326,19 +343,28 @@ export function HostProcessInventoryPanel({
         aria-label="Host process snapshot summary"
         className="processSupervisorSummaryStrip"
       >
-        <span>
+        <span title={`${rows.length} processes are included in the retained bounded snapshot.`}>
           <strong>{rows.length}</strong>
           <small>Processes shown</small>
         </span>
-        <span>
+        <span title={`${formatKib(totalRssKib)} total resident memory is reported across the displayed processes.`}>
           <strong>{formatKib(totalRssKib)}</strong>
           <small>Reported RSS</small>
         </span>
-        <span>
+        <span title={`${rootCount} displayed processes report Linux user ID 0.`}>
           <strong>{rootCount}</strong>
           <small>UID 0</small>
         </span>
-        <span className={inventory?.truncated ? "attention" : undefined}>
+        <span
+          className={inventory?.truncated ? "attention" : undefined}
+          title={
+            !inventory
+              ? "No host-process snapshot has been retained."
+              : inventory.truncated
+                ? "The agent bounded this process snapshot; additional processes may exist."
+                : "The retained process snapshot was not truncated."
+          }
+        >
           <strong>
             {!inventory
               ? "No snapshot"
@@ -348,13 +374,13 @@ export function HostProcessInventoryPanel({
           </strong>
           <small>Snapshot</small>
         </span>
-        <span>
+        <span title={inventory?.source ? `Snapshot source: ${inventory.source}.` : "No process snapshot source has been reported."}>
           <strong title={inventory?.source ?? undefined}>
             {inventory?.source ?? "No source"}
           </strong>
           <small>Agent source</small>
         </span>
-        <span>
+        <span title={inventory?.observed_at ? `Snapshot observed ${formatFullTime(inventory.observed_at)}.` : "No process snapshot observation time has been reported."}>
           <strong title={inventory?.observed_at ? formatFullTime(inventory.observed_at) : undefined}>
             {inventory?.observed_at
               ? formatCompactTime(inventory.observed_at)
@@ -394,7 +420,11 @@ export function HostProcessInventoryPanel({
               <span>Name</span>
               <strong title={row.name}>{row.name}</strong>
               <span>Command</span>
-              <strong className="processEvidenceValue" title={row.command}>
+              <strong
+                className="processEvidenceValue"
+                data-value-tooltip-skip="true"
+                title="Process command reported by the selected host; command contents are intentionally omitted from the tooltip."
+              >
                 {row.command || row.name}
               </strong>
               <span>PID</span>

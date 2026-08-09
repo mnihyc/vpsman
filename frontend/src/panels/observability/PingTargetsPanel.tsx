@@ -99,6 +99,7 @@ type Feedback = {
 
 type RuntimeEvidence = {
   label: string;
+  tooltipSensitive?: boolean;
   title: string;
   tone: "neutral" | "ok" | "warning";
 };
@@ -250,9 +251,7 @@ export function PingTargetsPanel({
     change();
   }
 
-  function enterReviewWorkflow(
-    workflow: "editor" | "targets" | "lifecycle",
-  ) {
+  function enterReviewWorkflow(workflow: "editor" | "targets" | "lifecycle") {
     invalidateReviewGeneration();
     setReviewPending(false);
     setSaveReview(null);
@@ -655,7 +654,19 @@ export function PingTargetsPanel({
           const evidence =
             runtimeEvidence[target.id] ?? runtimeEvidenceForTarget(target);
           return (
-            <span title={evidence.title}>
+            <span
+              data-tooltip-sensitive={
+                evidence.tooltipSensitive ? "true" : undefined
+              }
+              data-value-tooltip-skip={
+                evidence.tooltipSensitive ? "true" : undefined
+              }
+              title={
+                evidence.tooltipSensitive
+                  ? "Runtime-sync evidence is shown here; exact runtime diagnostic content is excluded from tooltips."
+                  : evidence.title
+              }
+            >
               <ConsoleStatusBadge tone={evidence.tone}>
                 {evidence.label}
               </ConsoleStatusBadge>
@@ -818,6 +829,11 @@ export function PingTargetsPanel({
                 className="secondaryAction compactAction"
                 disabled={loading}
                 onClick={() => void refreshTargets()}
+                title={
+                  loading
+                    ? "Ping target definitions are already loading"
+                    : "Refresh Ping target definitions, frozen assignments, and runtime evidence"
+                }
                 type="button"
               >
                 <RefreshCw size={14} />
@@ -827,6 +843,11 @@ export function PingTargetsPanel({
                 className="primaryAction compactAction"
                 disabled={pending || reviewPending}
                 onClick={openCreate}
+                title={
+                  pending || reviewPending
+                    ? "Wait for the current Ping target review or operation to finish"
+                    : "Create a reusable ICMP or TCP Ping target"
+                }
                 type="button"
               >
                 <Plus size={14} />
@@ -861,7 +882,14 @@ export function PingTargetsPanel({
             tone="danger"
           />
           <div className="formRow">
-            <label className="actionDrawerInitialFocus">
+            <label
+              className="actionDrawerInitialFocus"
+              title={
+                pending
+                  ? "Ping target name editing is disabled while an operation is pending"
+                  : "Unique operator-facing Ping target name"
+              }
+            >
               <span>Name</span>
               <input
                 aria-label="Ping target name"
@@ -872,10 +900,21 @@ export function PingTargetsPanel({
                 }
                 placeholder="Frankfurt gateway"
                 required
+                title={
+                  pending
+                    ? "Wait for the current Ping target operation to finish before editing the name"
+                    : name || "Unique operator-facing Ping target name"
+                }
                 value={name}
               />
             </label>
-            <label>
+            <label
+              title={
+                pending
+                  ? "Probe selection is disabled while a Ping target operation is pending"
+                  : "ICMP sends echo probes; TCP opens a connection to the configured port"
+              }
+            >
               <span>Probe</span>
               <select
                 aria-label="Ping target probe"
@@ -887,6 +926,11 @@ export function PingTargetsPanel({
                     if (next === "icmp") setPort("");
                   });
                 }}
+                title={
+                  pending
+                    ? "Wait for the current Ping target operation to finish before changing probe type"
+                    : "Choose ICMP echo or TCP connection probes"
+                }
                 value={probeKind}
               >
                 <option value="icmp">ICMP</option>
@@ -895,7 +939,13 @@ export function PingTargetsPanel({
             </label>
           </div>
           <div className="formRow">
-            <label>
+            <label
+              title={
+                pending
+                  ? "Host editing is disabled while a Ping target operation is pending"
+                  : "Hostname or literal IPv4/IPv6 address probed by assigned VPSs"
+              }
+            >
               <span>Host or IP</span>
               <input
                 aria-label="Ping target host or IP"
@@ -906,11 +956,22 @@ export function PingTargetsPanel({
                 }
                 placeholder="edge.example.net or 2001:db8::1"
                 required
+                title={
+                  pending
+                    ? "Wait for the current Ping target operation to finish before editing the host"
+                    : host || "Hostname or literal IPv4/IPv6 address"
+                }
                 value={host}
               />
             </label>
             {probeKind === "tcp" && (
-              <label>
+              <label
+                title={
+                  pending
+                    ? "TCP port editing is disabled while a Ping target operation is pending"
+                    : "TCP destination port opened by each probe"
+                }
+              >
                 <span>TCP port</span>
                 <input
                   aria-label="Ping target TCP port"
@@ -921,24 +982,52 @@ export function PingTargetsPanel({
                     changeEditorDraft(() => setPort(event.target.value))
                   }
                   required
+                  title={
+                    pending
+                      ? "Wait for the current Ping target operation to finish before editing the TCP port"
+                      : port
+                        ? `TCP probe destination port ${port}`
+                        : "Enter a TCP destination port from 1 to 65535"
+                  }
                   type="number"
                   value={port}
                 />
               </label>
             )}
           </div>
-          <label className="inlineCheck tightCheck">
+          <label
+            className="inlineCheck tightCheck"
+            title={
+              pending
+                ? "Enabled state is disabled while a Ping target operation is pending"
+                : "Only enabled targets dispatch probes and can be selected as primary"
+            }
+          >
             <input
               checked={enabled}
               disabled={pending}
               onChange={(event) =>
                 changeEditorDraft(() => setEnabled(event.target.checked))
               }
+              title={
+                pending
+                  ? "Wait for the current Ping target operation to finish before changing enabled state"
+                  : enabled
+                    ? "This Ping target will dispatch probes"
+                    : "This Ping target will remain saved without dispatching probes"
+              }
               type="checkbox"
             />
             <span>Enabled</span>
           </label>
-          <div className="targetSelector">
+          <div
+            className="targetSelector"
+            title={
+              pending
+                ? "VPS selector editing is disabled while a Ping target operation is pending"
+                : "The server resolves this expression to a frozen VPS assignment list during review"
+            }
+          >
             <div className="targetSelectorHeader">
               <strong>VPS selector</strong>
               <span>
@@ -991,6 +1080,27 @@ export function PingTargetsPanel({
             className="primaryAction"
             disabled={
               pending || reviewPending || !editorReady || saveReview !== null
+            }
+            title={
+              pending
+                ? "Wait for the current Ping target operation to finish"
+                : reviewPending
+                  ? "The VPS selector is already being resolved for review"
+                  : saveReview !== null
+                    ? "Finish or cancel the current Ping target review"
+                    : !name.trim()
+                      ? "Enter a Ping target name"
+                      : !host.trim()
+                        ? "Enter a Ping target host or IP address"
+                        : probeKind === "tcp" && !validPort(port)
+                          ? "Enter a valid TCP port from 1 to 65535"
+                          : parsedSelector.error
+                            ? `Fix the VPS selector: ${parsedSelector.error}`
+                            : !selectorExpression.trim()
+                              ? "Enter a VPS selector expression"
+                              : editor?.mode === "edit"
+                                ? "Resolve the selector if changed and review the Ping target update"
+                                : "Resolve the selector and review the new Ping target"
             }
             type="submit"
           >
@@ -1186,9 +1296,16 @@ function renderTargetAssignments({
   ];
   return (
     <div className="compactForm">
-      <div className="targetSelectorHeader">
-        <strong>Frozen VPS assignments</strong>
-        <span>
+      <div
+        className="targetSelectorHeader"
+        title={`${detail.assignments.length} frozen VPS assignments; ${detail.target.primary_count} primary cards`}
+      >
+        <strong title="VPS assignments frozen when the Ping target selector was last resolved">
+          Frozen VPS assignments
+        </strong>
+        <span
+          title={`${detail.assignments.length} assigned; ${detail.target.primary_count} primary; saved selector expression shown`}
+        >
           {detail.assignments.length} assigned · {detail.target.primary_count}{" "}
           primary · selector <code>{detail.target.selector_expression}</code>
         </span>
@@ -1427,6 +1544,7 @@ function runtimeEvidenceFor(
             `${record.client_id}: ${dispatchFailureReason(record.error, record.status, "Ping runtime sync")}`,
         )
         .join("; "),
+      tooltipSensitive: true,
       tone: "warning",
     };
   }
@@ -1445,6 +1563,7 @@ function runtimeEvidenceForTarget(target: PingTargetView): RuntimeEvidence {
         ? "Not applicable"
         : humanizeRuntimeState(state),
     title: target.runtime_sync.reason,
+    tooltipSensitive: state === "failed",
     tone:
       state === "applied"
         ? "ok"

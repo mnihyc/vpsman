@@ -518,12 +518,22 @@ function NetworkOverview({
               className="secondaryAction"
               disabled={loading}
               onClick={() => void onRefresh()}
+              title={
+                loading
+                  ? "Network posture is already refreshing"
+                  : "Refresh tunnel declarations, endpoint runtime evidence, and routing control state"
+              }
               type="button"
             >
               <RefreshCcw size={16} />
               Refresh
             </button>
-            <button className="primaryAction" onClick={onCreate} type="button">
+            <button
+              className="primaryAction"
+              onClick={onCreate}
+              title="Create a declared tunnel plan between two VPS endpoints"
+              type="button"
+            >
               <CirclePlus size={17} />
               Create plan
             </button>
@@ -1168,14 +1178,18 @@ function TunnelPlansWorkspace({
         header: "Latest latency",
         cell: (plan) => {
           const edge = runtimeEdgeByPlan.get(plan.id);
+          const latencyTitle =
+            edge?.latest_latency_avg_ms == null
+              ? "No retained reachability latency evidence exists in the graph range"
+              : `Latest average latency ${formatNetworkMeasurement(edge.latest_latency_avg_ms)} ms in the graph range`;
           return (
-            <span className="historyPrimary">
-              <strong>
+            <span className="historyPrimary" title={latencyTitle}>
+              <strong title={latencyTitle}>
                 {edge?.latest_latency_avg_ms == null
                   ? "-"
                   : `${formatNetworkMeasurement(edge.latest_latency_avg_ms)} ms`}
               </strong>
-              <small>
+              <small title={latencyTitle}>
                 {edge?.latest_latency_avg_ms == null
                   ? "No reachability evidence"
                   : "Latest in graph range"}
@@ -1198,14 +1212,18 @@ function TunnelPlansWorkspace({
         header: "Latest speed",
         cell: (plan) => {
           const edge = runtimeEdgeByPlan.get(plan.id);
+          const speedTitle =
+            edge?.latest_speed_mbps == null
+              ? "No retained speed-test evidence exists in the graph range"
+              : `Latest measured speed ${formatNetworkMeasurement(edge.latest_speed_mbps)} Mbps in the graph range`;
           return (
-            <span className="historyPrimary">
-              <strong>
+            <span className="historyPrimary" title={speedTitle}>
+              <strong title={speedTitle}>
                 {edge?.latest_speed_mbps == null
                   ? "-"
                   : `${formatNetworkMeasurement(edge.latest_speed_mbps)} Mbps`}
               </strong>
-              <small>
+              <small title={speedTitle}>
                 {edge?.latest_speed_mbps == null
                   ? "No speed evidence"
                   : "Latest speed test in graph range"}
@@ -1436,7 +1454,12 @@ function TunnelPlansWorkspace({
                 {tunnelPlanCorruptions.length === 1 ? "" : "s"} need repair
               </strong>
               {tunnelPlanCorruptions.map((plan) => (
-                <div key={plan.id} title={plan.configuration_error}>
+                <div
+                  data-tooltip-sensitive="true"
+                  data-value-tooltip-skip="true"
+                  key={plan.id}
+                  title="The persisted tunnel-plan configuration error is shown here; its exact content is excluded from tooltips."
+                >
                   {plan.name} · {plan.left_client_id} / {plan.right_client_id} ·
                   revision {plan.revision}: {plan.configuration_error}
                 </div>
@@ -1490,6 +1513,11 @@ function TunnelPlansWorkspace({
                 className="secondaryAction compactAction"
                 disabled={loading}
                 onClick={() => void onRefresh()}
+                title={
+                  loading
+                    ? "Tunnel plans are already refreshing"
+                    : "Refresh saved tunnel plans and endpoint runtime evidence"
+                }
                 type="button"
               >
                 <RefreshCcw size={14} />
@@ -1982,7 +2010,10 @@ function TunnelPlanDetails({
           />
         ) : null}
         {plan.kind === "openvpn" && isAgentBuiltinTunnelPlan(plan) ? (
-          <PlanFact label="OpenVPN runtime" value={formatOpenvpnRuntime(plan)} />
+          <PlanFact
+            label="OpenVPN runtime"
+            value={formatOpenvpnRuntime(plan)}
+          />
         ) : null}
         {plan.builtin_credentials?.kind === "wireguard" ? (
           <PlanFact
@@ -2021,6 +2052,13 @@ function TunnelPlanDetails({
               setAssessment(event.target.value as TunnelConnectionAssessment);
               setAssessmentFeedback(null);
             }}
+            title={
+              assessmentPending
+                ? "Wait for the current connectivity assessment save to finish"
+                : !plan.enabled
+                  ? "Enable the tunnel plan before recording an operator connectivity assessment"
+                  : "Choose whether connectivity remains machine-derived or carries an audited operator annotation"
+            }
             value={assessment}
           >
             <option value="automatic">Automatic (measured)</option>
@@ -2041,8 +2079,12 @@ function TunnelPlanDetails({
               }}
               placeholder="e.g. application traffic verified; ICMP blocked"
               title={
-                assessmentNote ||
-                "Explain the operator evidence for this assessment"
+                assessmentPending
+                  ? "Wait for the current connectivity assessment save to finish"
+                  : !plan.enabled
+                    ? "Enable the tunnel plan before recording an operator evidence note"
+                    : assessmentNote ||
+                      "Explain the operator evidence for this assessment"
               }
               value={assessmentNote}
             />
@@ -2052,13 +2094,15 @@ function TunnelPlanDetails({
           className="secondaryAction compactAction"
           disabled={assessmentPending || !assessmentChanged || !assessmentValid}
           title={
-            !plan.enabled
-              ? "Enable the plan before recording a connectivity assessment"
-              : !assessmentChanged
-                ? "No assessment changes to save"
-                : !assessmentValid
-                  ? "Add an evidence note of 500 characters or fewer"
-                  : "Save this audited display assessment without changing runtime or OSPF automation"
+            assessmentPending
+              ? "Connectivity assessment is already being saved"
+              : !plan.enabled
+                ? "Enable the plan before recording a connectivity assessment"
+                : !assessmentChanged
+                  ? "No assessment changes to save"
+                  : !assessmentValid
+                    ? "Add an evidence note of 500 characters or fewer"
+                    : "Save this audited display assessment without changing runtime or OSPF automation"
           }
           type="submit"
         >
@@ -2250,6 +2294,11 @@ function TunnelPlanEvidenceDetails({
           className="secondaryAction compactAction"
           disabled={loading}
           onClick={() => void loadEvidence()}
+          title={
+            loading
+              ? `Evidence for ${plan.name} is already loading`
+              : `Refresh retained automatic and manual evidence for ${plan.name}`
+          }
           type="button"
         >
           <RefreshCcw size={14} />
@@ -2270,6 +2319,11 @@ function TunnelPlanEvidenceDetails({
           className="secondaryAction compactAction"
           disabled={loading}
           onClick={() => void loadEvidence("custom")}
+          title={
+            loading
+              ? `Evidence for ${plan.name} is already loading`
+              : `Apply the custom evidence range for ${plan.name}`
+          }
           type="button"
         >
           Apply custom range
@@ -2324,10 +2378,26 @@ function TunnelPlanEvidenceDetails({
         <Metric label="Manual probes" value={manualCount} />
       </div>
       <div className="topologyNetworkTrendChartGrid">
-        <article className="topologyNetworkTrendChartCard">
-          <div className="topologyNetworkTrendChartHeader">
-            <strong>Latency</strong>
-            <span>
+        <article
+          className="topologyNetworkTrendChartCard"
+          title={`Retained latency evidence for ${plan.name}`}
+        >
+          <div
+            className="topologyNetworkTrendChartHeader"
+            title={
+              latestReachability
+                ? `Latest ${latestReachability.source} latency sample ${formatCompactTime(latestReachability.observed_at)}`
+                : "No latency samples exist in the selected range"
+            }
+          >
+            <strong title={`Latency evidence for ${plan.name}`}>Latency</strong>
+            <span
+              title={
+                latestReachability
+                  ? `Latest ${latestReachability.source} latency sample ${formatCompactTime(latestReachability.observed_at)}`
+                  : "No latency samples exist in the selected range"
+              }
+            >
               {latestReachability
                 ? `${latestReachability.source} · ${formatCompactTime(latestReachability.observed_at)}`
                 : "No samples"}
@@ -2345,10 +2415,28 @@ function TunnelPlanEvidenceDetails({
             }
           />
         </article>
-        <article className="topologyNetworkTrendChartCard">
-          <div className="topologyNetworkTrendChartHeader">
-            <strong>Speed test</strong>
-            <span>
+        <article
+          className="topologyNetworkTrendChartCard"
+          title={`Retained manual speed-test evidence for ${plan.name}`}
+        >
+          <div
+            className="topologyNetworkTrendChartHeader"
+            title={
+              latestSpeed
+                ? `Latest manual speed test ${formatCompactTime(latestSpeed.observed_at)}`
+                : "No speed-test samples exist in the selected range"
+            }
+          >
+            <strong title={`Speed-test evidence for ${plan.name}`}>
+              Speed test
+            </strong>
+            <span
+              title={
+                latestSpeed
+                  ? `Latest manual speed test ${formatCompactTime(latestSpeed.observed_at)}`
+                  : "No speed-test samples exist in the selected range"
+              }
+            >
               {latestSpeed
                 ? `manual · ${formatCompactTime(latestSpeed.observed_at)}`
                 : "No samples"}
@@ -3257,7 +3345,8 @@ function TunnelPlanComposer({
                     onChange={(event) =>
                       update(
                         "wireguardEndpointMode",
-                        event.target.value as RuntimeTunnelWireguardEndpointMode,
+                        event.target
+                          .value as RuntimeTunnelWireguardEndpointMode,
                       )
                     }
                     value={form.wireguardEndpointMode}
@@ -3497,9 +3586,11 @@ function TunnelPlanComposer({
               }
               onClick={() => void allocate()}
               title={
-                !form.includeIpv4 && !form.includeIpv6
-                  ? "Select IPv4 or IPv6 before allocating addresses"
-                  : "Allocate an unused endpoint pair from the configured pool"
+                allocationPending
+                  ? "Address allocation is already in progress"
+                  : !form.includeIpv4 && !form.includeIpv6
+                    ? "Select IPv4 or IPv6 before allocating addresses"
+                    : "Allocate an unused endpoint pair from the configured pool"
               }
               type="button"
             >
@@ -4050,6 +4141,13 @@ function AdapterDefinitionField({
             !clientId || (domain !== "routing_cost" && definitions.length === 0)
           }
           onChange={(event) => onChange(event.target.value)}
+          title={
+            !clientId
+              ? `Select the endpoint VPS before choosing ${label.toLocaleLowerCase()}`
+              : domain !== "routing_cost" && definitions.length === 0
+                ? `No compatible ${label.toLocaleLowerCase()} definitions exist; create one first`
+                : `Choose the ${label.toLocaleLowerCase()} used by this endpoint`
+          }
           value={value}
         >
           <option value="">
@@ -4143,13 +4241,18 @@ function Metric({
   tone?: "normal" | "warning";
   value: number | string;
 }) {
+  const semanticTitle =
+    title ??
+    (value === "-"
+      ? `${label} is unavailable because no retained measurement was reported`
+      : `${label}: ${value}`);
   return (
     <span
       className={tone === "warning" ? "hasAttention" : undefined}
-      title={title}
+      title={semanticTitle}
     >
-      <small>{label}</small>
-      <strong>{value}</strong>
+      <small title={label}>{label}</small>
+      <strong title={semanticTitle}>{value}</strong>
     </span>
   );
 }
@@ -4166,7 +4269,7 @@ function WorkflowLink({
   onClick: () => void;
 }) {
   return (
-    <button onClick={onClick} type="button">
+    <button onClick={onClick} title={`${label}: ${detail}`} type="button">
       <span className="workflowIcon">{icon}</span>
       <span>
         <strong>{label}</strong>
@@ -4187,12 +4290,24 @@ function PlanFact({
   value: string;
 }) {
   return (
-    <span>
-      <small>{label}</small>
+    <span
+      title={
+        title ??
+        (value === "-"
+          ? `${label} is not reported for this tunnel plan`
+          : `${label}: ${value}`)
+      }
+    >
+      <small title={label}>{label}</small>
       <strong
         aria-label={title ? `${label}: ${title}` : undefined}
         tabIndex={title ? 0 : undefined}
-        title={title ?? value}
+        title={
+          title ??
+          (value === "-"
+            ? `${label} is not reported for this tunnel plan`
+            : `${label}: ${value}`)
+        }
       >
         {value}
       </strong>
@@ -4247,10 +4362,11 @@ function tunnelEndpointStateTitle(
   return [
     `${label} desired: ${runtimeConfig.desired}`,
     `Runtime config: ${tunnelRuntimeConfigLabel(runtimeConfig)}`,
-    runtimeConfig.error,
     runtimeConfig.job_id ? `Job ${runtimeConfig.job_id}` : null,
     runtimeConfig.updated_at ? `Apply state ${runtimeConfig.updated_at}` : null,
-    reason ? readableTelemetryToken(reason) : null,
+    runtimeConfig.error || reason
+      ? "Exact runtime diagnostic content is excluded from tooltips"
+      : null,
     observedAt ? `Observed ${observedAt}` : "No endpoint observation",
   ]
     .filter(Boolean)
@@ -4326,18 +4442,11 @@ function tunnelConnectivityPresentation(
       label,
       statusClass:
         plan.connection_assessment === "connected" ? "info" : "warning",
-      title: `${label} assessed by ${actor}; ${plan.connection_assessment_note ?? "no evidence note"}. Runtime reconciliation and automatic OSPF still use machine evidence.`,
+      title: `${label} assessed by ${actor}; ${plan.connection_assessment_note ? "an evidence note is retained, with its exact content excluded from tooltips" : "no evidence note is retained"}. Runtime reconciliation and automatic OSPF still use machine evidence.`,
     };
   }
   const left = edge?.left_reachability_state ?? "unknown";
   const right = edge?.right_reachability_state ?? "unknown";
-  const reasons = [
-    edge?.left_reachability_reason,
-    edge?.right_reachability_reason,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .map(readableTelemetryToken)
-    .join("; ");
   if (left === "reachable" && right === "reachable") {
     return {
       detail: "Measured on both endpoints",
@@ -4353,14 +4462,16 @@ function tunnelConnectivityPresentation(
         detail: "Peer probe failed; not proof of disconnect",
         label: "Partially verified",
         statusClass: "warning",
-        title: `One endpoint has positive reachability evidence while the peer probe failed${reasons ? `; ${reasons}` : ""}.`,
+        title:
+          "One endpoint has positive reachability evidence while the peer probe failed. Exact probe diagnostic content is excluded from tooltips.",
       };
     }
     return {
       detail: "Probe failed; not proof of disconnect",
       label: "Unverified",
       statusClass: "warning",
-      title: `A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic${reasons ? `; ${reasons}` : ""}.`,
+      title:
+        "A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic. Exact probe diagnostic content is excluded from tooltips.",
     };
   }
   if (left === "stale" || right === "stale") {
@@ -4373,7 +4484,7 @@ function tunnelConnectivityPresentation(
       detail: `${staleEndpoints.join(" and ")} endpoint evidence expired`,
       label: hasCurrentPeer ? "Partially verified" : "Stale",
       statusClass: "warning",
-      title: `The ${staleEndpoints.join(" and ")} endpoint's latest reachability sample exceeded its declared monitoring window${reasons ? `; ${reasons}` : ""}.`,
+      title: `The ${staleEndpoints.join(" and ")} endpoint's latest reachability sample exceeded its declared monitoring window. Exact probe diagnostic content is excluded from tooltips.`,
     };
   }
   if (left === "reachable" || right === "reachable") {
@@ -4381,7 +4492,8 @@ function tunnelConnectivityPresentation(
       detail: "One endpoint measured",
       label: "Partially verified",
       statusClass: "info",
-      title: `Only one endpoint has positive reachability evidence${reasons ? `; ${reasons}` : ""}.`,
+      title:
+        "Only one endpoint has positive reachability evidence. Exact probe diagnostic content is excluded from tooltips.",
     };
   }
   if (left === "not_configured" && right === "not_configured") {
@@ -4397,7 +4509,8 @@ function tunnelConnectivityPresentation(
     detail: "Awaiting reachability evidence",
     label: "Unverified",
     statusClass: "neutral",
-    title: reasons || "No current endpoint reachability evidence is available.",
+    title:
+      "No current endpoint reachability evidence is available. Exact probe diagnostic content is excluded from tooltips.",
   };
 }
 
@@ -4638,9 +4751,10 @@ function validateTunnelPlanForm(form: TunnelPlanForm): string | null {
   )
     return `Bandwidth must be a whole number from ${MIN_TUNNEL_BANDWIDTH_MBPS} to ${MAX_TUNNEL_BANDWIDTH_MBPS} Mbps`;
   if (form.runtimeManager === "agent_builtin") {
-    const minimumMtu = form.includeIpv6 || form.kind === "sit"
-      ? MIN_IPV6_TUNNEL_MTU
-      : MIN_TUNNEL_MTU;
+    const minimumMtu =
+      form.includeIpv6 || form.kind === "sit"
+        ? MIN_IPV6_TUNNEL_MTU
+        : MIN_TUNNEL_MTU;
     const mtuError =
       validateIntegerRange(
         form.leftMtu,
@@ -5161,8 +5275,7 @@ function tunnelPlanListenerResources(
     }));
   }
   if (plan.kind === "wireguard") {
-    const options =
-      runtime?.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
+    const options = runtime?.wireguard ?? DEFAULT_RUNTIME_WIREGUARD_OPTIONS;
     return [
       {
         clientId: plan.left_client_id,
@@ -5756,8 +5869,7 @@ function formatTunnelAddresses(plan: TunnelPlanRecord): string {
 
 function isAgentBuiltinTunnelPlan(plan: TunnelPlanRecord): boolean {
   return (
-    (plan.plan.runtime_control?.manager ?? "agent_builtin") ===
-    "agent_builtin"
+    (plan.plan.runtime_control?.manager ?? "agent_builtin") === "agent_builtin"
   );
 }
 
@@ -5770,8 +5882,7 @@ function formatEndpointUnderlay(
 
 function formatRuntimeBinding(plan: TunnelPlanRecord): string {
   const control = plan.plan.runtime_control;
-  if (!control || control.manager === "agent_builtin")
-    return "Agent builtin";
+  if (!control || control.manager === "agent_builtin") return "Agent builtin";
   if (control.manager === "external_observed")
     return "External observed; no mutation";
   return `Custom adapters ${shortId(control.left_adapter_template_id ?? "missing")} / ${shortId(control.right_adapter_template_id ?? "missing")}`;

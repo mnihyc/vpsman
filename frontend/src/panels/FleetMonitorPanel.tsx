@@ -651,7 +651,20 @@ export function FleetMonitorPanel({
             <small title="Aggregate configured traffic accounting, including reset cycles and no-reset totals">
               Traffic
             </small>
-            <strong title={trafficTotal}>{trafficTotal}</strong>
+            <strong
+              data-tooltip-empty-reason={
+                fleetSnapshot.trafficCount === 0
+                  ? "No VPS in this view has configured traffic accounting"
+                  : undefined
+              }
+              title={
+                fleetSnapshot.trafficCount > 0
+                  ? trafficTotal
+                  : "No VPS in this view has configured traffic accounting"
+              }
+            >
+              {trafficTotal}
+            </strong>
             <em title={trafficSummary}>{trafficSummary}</em>
           </span>
         </div>
@@ -1193,7 +1206,13 @@ export function VpsMonitorCard({
               </span>
             ) : null}
           </small>
-          <strong>
+          <strong
+            data-tooltip-empty-reason={
+              !billing || billing.disabled
+                ? "Billing is not configured for this VPS"
+                : undefined
+            }
+          >
             {billing && !billing.disabled ? billing.display : "-"}
           </strong>
         </span>

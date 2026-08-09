@@ -1,9 +1,6 @@
 import { useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
-import {
-  handleTabListKeyDown,
-  tabId,
-} from "../../components/AccessibleTabs";
+import { handleTabListKeyDown, tabId } from "../../components/AccessibleTabs";
 import {
   DeliveryPreviewSection,
   WebhookDeliveryHistoryGrid,
@@ -30,11 +27,21 @@ type WebhooksPanelProps = {
   agents: AgentView[];
   apiError: string | null;
   onDeleteWebhookRule: (ruleId: string, reviewedName: string) => Promise<void>;
-  onDispatchWebhookRules: (request: WebhookRuleDispatchRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onDryRunWebhookRule: (request: WebhookRuleDryRunRequest) => Promise<WebhookRuleDryRunRecord>;
-  onProcessWebhookRuleDeliveries: (request: WebhookRuleProcessRequest) => Promise<WebhookRuleDeliveryRecord[]>;
-  onRotateWebhookDeliveryHistory: (request: WebhookDeliveryRotationRequest) => Promise<WebhookDeliveryRotationResponse>;
-  onUpsertWebhookRule: (request: WebhookRuleRequest) => Promise<WebhookRuleRecord>;
+  onDispatchWebhookRules: (
+    request: WebhookRuleDispatchRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onDryRunWebhookRule: (
+    request: WebhookRuleDryRunRequest,
+  ) => Promise<WebhookRuleDryRunRecord>;
+  onProcessWebhookRuleDeliveries: (
+    request: WebhookRuleProcessRequest,
+  ) => Promise<WebhookRuleDeliveryRecord[]>;
+  onRotateWebhookDeliveryHistory: (
+    request: WebhookDeliveryRotationRequest,
+  ) => Promise<WebhookDeliveryRotationResponse>;
+  onUpsertWebhookRule: (
+    request: WebhookRuleRequest,
+  ) => Promise<WebhookRuleRecord>;
   webhookRuleDeliveries: WebhookRuleDeliveryRecord[];
   webhookRules: WebhookRuleRecord[];
 };
@@ -53,18 +60,25 @@ export function WebhooksPanel({
 }: WebhooksPanelProps) {
   const [activeTab, setActiveTab] = useState<WebhookConfigTab>("rules");
   const [ruleEditorOpen, setRuleEditorOpen] = useState(false);
-  const [previewRows, setPreviewRows] = useState<WebhookRuleDeliveryRecord[] | null>(null);
-  const [dryRunPreview, setDryRunPreview] = useState<WebhookRuleDryRunRecord | null>(null);
+  const [previewRows, setPreviewRows] = useState<
+    WebhookRuleDeliveryRecord[] | null
+  >(null);
+  const [dryRunPreview, setDryRunPreview] =
+    useState<WebhookRuleDryRunRecord | null>(null);
   const disabledRules = webhookRules.filter((rule) => !rule.enabled).length;
   const failedDeliveries = webhookRuleDeliveries.filter((delivery) =>
     ["failed", "permanently_failed"].includes(delivery.status),
   ).length;
-  const queuedDeliveries = webhookRuleDeliveries.filter((delivery) => delivery.status === "queued").length;
+  const queuedDeliveries = webhookRuleDeliveries.filter(
+    (delivery) => delivery.status === "queued",
+  ).length;
 
   function openDeliveryEvidence() {
     setActiveTab("deliveries");
     window.requestAnimationFrame(() => {
-      const target = document.getElementById("observability-webhook-deliveries");
+      const target = document.getElementById(
+        "observability-webhook-deliveries",
+      );
       target?.scrollIntoView({ block: "start", behavior: "smooth" });
     });
   }
@@ -94,7 +108,10 @@ export function WebhooksPanel({
         <div className="sectionHeader">
           <div>
             <h2>Event webhooks</h2>
-            <span>Event webhooks are independent from alert notification destinations.</span>
+            <span>
+              Event webhooks are independent from alert notification
+              destinations.
+            </span>
           </div>
         </div>
 
@@ -104,7 +121,10 @@ export function WebhooksPanel({
           tone="danger"
         />
 
-        <div className="metricGrid observabilityMetricsSummary" aria-label="Webhook routing summary">
+        <div
+          className="metricGrid observabilityMetricsSummary"
+          aria-label="Webhook routing summary"
+        >
           <MetricTile
             actionLabel="Rules"
             detail={`${disabledRules} disabled ${disabledRules === 1 ? "rule" : "rules"}`}
@@ -112,9 +132,27 @@ export function WebhooksPanel({
             onAction={() => setActiveTab("rules")}
             value={String(webhookRules.length)}
           />
-          <MetricTile actionLabel="Deliveries" detail="Queued event webhook rows awaiting processing" label="Queued" onAction={openDeliveryEvidence} value={String(queuedDeliveries)} />
-          <MetricTile actionLabel="Open failed deliveries" detail="Failed event webhook deliveries, separate from alert notification failures" label="Failures" onAction={openDeliveryEvidence} value={String(failedDeliveries)} />
-          <MetricTile actionLabel="History" detail="Retained event webhook delivery rows" label="Deliveries" onAction={openDeliveryEvidence} value={String(webhookRuleDeliveries.length)} />
+          <MetricTile
+            actionLabel="Deliveries"
+            detail="Queued event webhook rows awaiting processing"
+            label="Queued"
+            onAction={openDeliveryEvidence}
+            value={String(queuedDeliveries)}
+          />
+          <MetricTile
+            actionLabel="Open failed deliveries"
+            detail="Failed event webhook deliveries, separate from alert notification failures"
+            label="Failures"
+            onAction={openDeliveryEvidence}
+            value={String(failedDeliveries)}
+          />
+          <MetricTile
+            actionLabel="History"
+            detail="Retained event webhook delivery rows"
+            label="Deliveries"
+            onAction={openDeliveryEvidence}
+            value={String(webhookRuleDeliveries.length)}
+          />
         </div>
 
         <div
@@ -124,8 +162,16 @@ export function WebhooksPanel({
           onKeyDown={handleTabListKeyDown}
         >
           {[
-            ["rules", "Rules", "Create rules, send tests, and retry failed deliveries"],
-            ["deliveries", "Deliveries", "Previewed, queued, failed, and retained event webhooks"],
+            [
+              "rules",
+              "Rules",
+              "Create rules, send tests, and retry failed deliveries",
+            ],
+            [
+              "deliveries",
+              "Deliveries",
+              "Previewed, queued, failed, and retained event webhooks",
+            ],
             ["maintenance", "Maintenance", "Reviewed retention cleanup"],
           ].map(([id, label, detail]) => (
             <button
@@ -137,6 +183,7 @@ export function WebhooksPanel({
               onClick={() => setActiveTab(id as WebhookConfigTab)}
               role="tab"
               tabIndex={activeTab === id ? 0 : -1}
+              title={`${label}: ${detail}`}
               type="button"
             >
               <strong>{label}</strong>
@@ -154,8 +201,14 @@ export function WebhooksPanel({
           >
             <div className="dashboardSectionHeader">
               <div>
-                <h2 id="observability-webhook-rules-title">Event webhook rules</h2>
-                <span>Create event webhook rules, preview matching events, send reviewed tests, and retry failed deliveries without mixing alert notification channels into this workflow.</span>
+                <h2 id="observability-webhook-rules-title">
+                  Event webhook rules
+                </h2>
+                <span>
+                  Create event webhook rules, preview matching events, send
+                  reviewed tests, and retry failed deliveries without mixing
+                  alert notification channels into this workflow.
+                </span>
               </div>
             </div>
             <WebhookRuleManager
@@ -186,17 +239,38 @@ export function WebhooksPanel({
           >
             <div className="dashboardSectionHeader">
               <div>
-                <h2 id="observability-webhook-deliveries-title">Event webhook deliveries</h2>
-                <span>Dry-run previews, queued tests, retained status, target, attempts, and event webhook errors. Alert notification deliveries stay on Alerts.</span>
+                <h2 id="observability-webhook-deliveries-title">
+                  Event webhook deliveries
+                </h2>
+                <span>
+                  Dry-run previews, queued tests, retained status, target,
+                  attempts, and event webhook errors. Alert notification
+                  deliveries stay on Alerts.
+                </span>
               </div>
             </div>
             {dryRunPreview || previewRows !== null ? (
-              <DeliveryPreviewSection count={previewRows?.length ?? 0} onClear={clearPreview} title="Event webhook delivery preview">
-                {dryRunPreview ? <WebhookDryRunNotice agents={agents} preview={dryRunPreview} /> : null}
-                <WebhookDeliveryHistoryGrid deliveries={previewRows ?? []} preview />
+              <DeliveryPreviewSection
+                count={previewRows?.length ?? 0}
+                onClear={clearPreview}
+                title="Event webhook delivery preview"
+              >
+                {dryRunPreview ? (
+                  <WebhookDryRunNotice
+                    agents={agents}
+                    preview={dryRunPreview}
+                  />
+                ) : null}
+                <WebhookDeliveryHistoryGrid
+                  deliveries={previewRows ?? []}
+                  preview
+                />
               </DeliveryPreviewSection>
             ) : null}
-            <WebhookDeliveryHistoryGrid deliveries={webhookRuleDeliveries} preview={false} />
+            <WebhookDeliveryHistoryGrid
+              deliveries={webhookRuleDeliveries}
+              preview={false}
+            />
           </section>
         ) : null}
 
@@ -209,11 +283,19 @@ export function WebhooksPanel({
           >
             <div className="dashboardSectionHeader">
               <div>
-                <h2 id="observability-webhook-maintenance-title">Event webhook maintenance</h2>
-                <span>Review retained event webhook cleanup by age, status, and rule before deleting delivery history rows.</span>
+                <h2 id="observability-webhook-maintenance-title">
+                  Event webhook maintenance
+                </h2>
+                <span>
+                  Review retained event webhook cleanup by age, status, and rule
+                  before deleting delivery history rows.
+                </span>
               </div>
             </div>
-            <WebhookDeliveryMaintenancePanel onRotate={onRotateWebhookDeliveryHistory} rules={webhookRules} />
+            <WebhookDeliveryMaintenancePanel
+              onRotate={onRotateWebhookDeliveryHistory}
+              rules={webhookRules}
+            />
           </section>
         ) : null}
       </div>
@@ -235,11 +317,16 @@ function MetricTile({
   value: string;
 }) {
   return (
-    <div className="metricCard">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
-      <button className="linkButton metricCardAction" onClick={onAction} type="button">
+    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
+      <span title={label}>{label}</span>
+      <strong title={`${label}: ${value}`}>{value}</strong>
+      <small title={detail}>{detail}</small>
+      <button
+        className="linkButton metricCardAction"
+        onClick={onAction}
+        title={`${actionLabel} for ${label.toLocaleLowerCase()}`}
+        type="button"
+      >
         {actionLabel}
       </button>
     </div>

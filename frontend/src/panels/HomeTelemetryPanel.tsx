@@ -64,6 +64,7 @@ type HomeTelemetryPanelProps = {
 };
 
 type DrawerMetric = {
+  emptyReason?: string;
   label: string;
   value: string;
   tone?: "critical" | "warning" | "ok" | "info" | "neutral";
@@ -259,7 +260,16 @@ export function HomeTelemetryPanel({
                 </button>
               ))}
             </div>
-            <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading ? "A dashboard refresh is already in progress" : undefined
+              }
+              disabled={loading}
+              onClick={onRefresh}
+              title="Refresh dashboard telemetry"
+              type="button"
+            >
               <RefreshCw size={16} />
               <span>{loading ? "Refreshing" : "Refresh"}</span>
             </button>
@@ -381,6 +391,11 @@ export function HomeTelemetryPanel({
           </label>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              !customRangeActive && !preferences.endAt.trim()
+                ? "The dashboard is already using its selected time window"
+                : undefined
+            }
             disabled={!customRangeActive && !preferences.endAt.trim()}
             onClick={() => onPreferencesChange({ endAt: "", startAt: "" })}
             type="button"
@@ -868,6 +883,7 @@ export function HomeTelemetryPanel({
                               value: status.label,
                             },
                             {
+                              emptyReason: "This VPS has no assigned tags",
                               label: "Tags",
                               value: agent.tags.join(", ") || "-",
                             },
@@ -911,7 +927,14 @@ export function HomeTelemetryPanel({
       >
         <div className="dashboardDrawerMetrics">
           {(drawer?.metrics ?? []).map((metric) => (
-            <div className="dashboardDrawerMetric" key={metric.label}>
+            <div
+              className="dashboardDrawerMetric"
+              data-tooltip-empty-reason={metric.emptyReason}
+              key={metric.label}
+              title={`${metric.label}: ${
+                metric.value === "-" ? metric.emptyReason ?? "No value is available" : metric.value
+              }`}
+            >
               <span>{metric.label}</span>
               <strong>{metric.value}</strong>
               {metric.tone && <ConsoleStatusBadge tone={metric.tone}>{metric.tone}</ConsoleStatusBadge>}
@@ -939,7 +962,12 @@ function HomeMetricCard({
   value: string;
 }) {
   return (
-    <button className={`dashboardMetricCard ${tone}`} onClick={onClick} type="button">
+    <button
+      className={`dashboardMetricCard ${tone}`}
+      onClick={onClick}
+      title={`${label}: ${value}. ${detail}`}
+      type="button"
+    >
       <span className="dashboardMetricIcon">{icon}</span>
       <span>
         <small>{label}</small>

@@ -742,9 +742,15 @@ export function FleetWorkspace({
           const uptime = uptimeByClientRef.current.get(agent.id);
           const uptimeTitle = uptime
             ? `Agent-reported uptime ${formatUptime(uptime.uptime_secs)}; sampled ${formatCompactTime(uptime.observed_at)}`
-            : "Agent-reported uptime is unavailable; - is shown";
+            : "Agent-reported uptime is unavailable";
           return (
-            <span className="historyPrimary" title={uptimeTitle}>
+            <span
+              className="historyPrimary"
+              data-tooltip-empty-reason={
+                uptime ? undefined : "Agent-reported uptime is unavailable"
+              }
+              title={uptimeTitle}
+            >
               <strong title={uptimeTitle}>
                 {formatUptime(uptime?.uptime_secs)}
               </strong>
@@ -1319,6 +1325,13 @@ export function FleetWorkspace({
             ),
         ]),
       ];
+      if (completed.length === 0 && failedRequests.length > 0) {
+        // No inventory mutation occurred, so keep the reviewed operation in
+        // the confirmation error path instead of reporting a completed bulk
+        // outcome. Inline prompts remain retryable and overlay prompts retain
+        // their detached failure alert after submission.
+        throw new Error(failureReasons.join(" "));
+      }
       const total = deleteSnapshot.targets.length;
       const deletionMessage =
         total === 1 && completed.length === 1
@@ -1935,6 +1948,11 @@ function FleetInstancesPanel({
           <>
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                onRegisterVps
+                  ? undefined
+                  : "VPS registration is unavailable in this context"
+              }
               disabled={!onRegisterVps}
               onClick={() => onRegisterVps?.()}
               type="button"
@@ -1951,6 +1969,11 @@ function FleetInstancesPanel({
                 Table
               </button>
               <button
+                data-tooltip-disabled-reason={
+                  onOpenMonitor
+                    ? undefined
+                    : "The VPS card monitor is unavailable in this context"
+                }
                 disabled={!onOpenMonitor}
                 onClick={() => onOpenMonitor?.()}
                 type="button"
@@ -2357,6 +2380,13 @@ function FleetInstanceDetail({
           </label>
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              aliasPending
+                ? "The VPS rename is already in progress"
+                : aliasDraft.trim() === agent.display_name
+                  ? "Enter a different display name before renaming"
+                  : undefined
+            }
             disabled={aliasPending || aliasDraft.trim() === agent.display_name}
             type="submit"
           >
@@ -2411,6 +2441,13 @@ function FleetInstanceDetail({
           </label>
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              tagPending
+                ? "A tag change is already in progress"
+                : !tagDraft.trim()
+                  ? "Enter a tag before adding it"
+                  : undefined
+            }
             disabled={tagPending || !tagDraft.trim()}
             type="submit"
           >
@@ -2426,6 +2463,9 @@ function FleetInstanceDetail({
           sortTagsByDisplayOrder(agent.tags, tagDisplayOrder).map((tag) => (
             <button
               className="tagEditChip"
+              data-tooltip-disabled-reason={
+                tagPending ? "A tag change is already in progress" : undefined
+              }
               disabled={tagPending}
               key={tag}
               onClick={() => void mutateTag("remove", tag)}
@@ -2547,10 +2587,13 @@ function FleetInstanceDetail({
               label="Uptime"
               value={
                 <span
+                  data-tooltip-empty-reason={
+                    uptime ? undefined : "Agent-reported uptime is unavailable"
+                  }
                   title={
                     uptime
                       ? `Agent-reported uptime ${formatUptime(uptime.uptime_secs)}; sampled ${formatCompactTime(uptime.observed_at)}`
-                      : "Agent-reported uptime is unavailable; - is shown"
+                      : "Agent-reported uptime is unavailable"
                   }
                 >
                   {uptime
@@ -2873,6 +2916,9 @@ function ConfigPreviewBlock({
         <span>{summary}</span>
         <button
           className="secondaryAction compactAction"
+          data-tooltip-disabled-reason={
+            pending ? "The effective agent config is already loading" : undefined
+          }
           disabled={pending}
           onClick={onLoad}
           type="button"
@@ -3165,7 +3211,17 @@ function TrafficRulesDetail({
         size: 120,
         minSize: 100,
         sortValue: (row) => row.alert?.actual_value ?? -1,
-        cell: (row) => formatMetricValue(row.alert?.actual_value),
+        cell: (row) => (
+          <span
+            data-tooltip-empty-reason={
+              row.alert?.actual_value == null
+                ? "No active alert has reported an actual metric value for this rule"
+                : undefined
+            }
+          >
+            {formatMetricValue(row.alert?.actual_value)}
+          </span>
+        ),
       },
       {
         id: "threshold",
@@ -3261,7 +3317,17 @@ function TrafficRulesDetail({
         size: 120,
         minSize: 100,
         sortValue: (row) => row.actual_value ?? -1,
-        cell: (row) => formatMetricValue(row.actual_value),
+        cell: (row) => (
+          <span
+            data-tooltip-empty-reason={
+              row.actual_value == null
+                ? "This alert did not record an actual metric value"
+                : undefined
+            }
+          >
+            {formatMetricValue(row.actual_value)}
+          </span>
+        ),
       },
       {
         id: "threshold",
@@ -3269,7 +3335,17 @@ function TrafficRulesDetail({
         size: 120,
         minSize: 100,
         sortValue: (row) => row.threshold_value ?? -1,
-        cell: (row) => formatMetricValue(row.threshold_value),
+        cell: (row) => (
+          <span
+            data-tooltip-empty-reason={
+              row.threshold_value == null
+                ? "This alert did not record a numeric threshold value"
+                : undefined
+            }
+          >
+            {formatMetricValue(row.threshold_value)}
+          </span>
+        ),
       },
       {
         id: "state",
@@ -3325,6 +3401,11 @@ function TrafficRulesDetail({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              selectedPolicyId
+                ? undefined
+                : "No alert policy is linked to this VPS"
+            }
             disabled={!selectedPolicyId}
             type="button"
             onClick={() =>
@@ -3636,6 +3717,11 @@ function FleetSelectionPanel({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              agents.length !== 1
+                ? "Select exactly one VPS to open its file browser"
+                : undefined
+            }
             disabled={agents.length !== 1}
             onClick={() => onOpenFileBrowser(agents)}
             type="button"
@@ -3688,6 +3774,13 @@ function FleetSelectionPanel({
           />
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A bulk tag change is already in progress"
+                : !tagToAdd.trim()
+                  ? "Enter a tag before adding it to the selected VPSs"
+                  : undefined
+            }
             disabled={pending || !tagToAdd.trim()}
             type="submit"
           >
@@ -3709,6 +3802,13 @@ function FleetSelectionPanel({
           />
           <button
             className="secondaryAction compactAction dangerAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "A bulk tag change is already in progress"
+                : !tagToRemove.trim()
+                  ? "Enter a tag before removing it from the selected VPSs"
+                  : undefined
+            }
             disabled={pending || !tagToRemove.trim()}
             type="submit"
           >
@@ -4056,15 +4156,17 @@ function ConsoleField({
   className,
   hint,
   label,
+  labelTitle,
 }: {
   children: ReactNode;
   className?: string;
   hint?: ReactNode;
   label: ReactNode;
+  labelTitle?: string;
 }) {
   return (
     <div className={className ? `consoleField ${className}` : "consoleField"}>
-      <span>{label}</span>
+      <span title={labelTitle}>{label}</span>
       {children}
       {hint && <small>{hint}</small>}
     </div>
@@ -4497,7 +4599,10 @@ function ChannelDetailGrid({
       </span>
       <span>
         <strong>Delivery</strong>
-        <span>
+        <span
+          data-tooltip-sensitive="true"
+          title="Configured notification destination"
+        >
           {channel.delivery_kind}: {channel.target}
         </span>
       </span>
@@ -4538,7 +4643,12 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
       </span>
       <span>
         <strong>Target</strong>
-        <span>{rule.target}</span>
+        <span
+          data-tooltip-sensitive="true"
+          title="Configured webhook destination"
+        >
+          {rule.target}
+        </span>
       </span>
       <span>
         <strong>Cooldown</strong>
@@ -4554,7 +4664,13 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
       </span>
       <span>
         <strong>Body template</strong>
-        <span className="monoValue">{rule.body_template}</span>
+        <span
+          className="monoValue"
+          data-tooltip-sensitive="true"
+          title="Webhook message body template; content is excluded from tooltips"
+        >
+          {rule.body_template}
+        </span>
       </span>
       <span>
         <strong>Updated</strong>
@@ -5409,6 +5525,11 @@ export function FleetAlertPolicyManager({
             toolbarActions={
               <button
                 className="primaryAction compactAction"
+                data-tooltip-disabled-reason={
+                  policyWorkflowBusy
+                    ? "An alert policy save or delete is already in progress"
+                    : undefined
+                }
                 disabled={policyWorkflowBusy}
                 onClick={createPolicy}
                 type="button"
@@ -5448,6 +5569,11 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      dryRunPending || savePending
+                        ? "An alert policy preview or save is already in progress"
+                        : policyPreviewValidation ?? undefined
+                    }
                     disabled={
                       dryRunPending ||
                       savePending ||
@@ -5464,6 +5590,11 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
+                    data-tooltip-disabled-reason={
+                      dryRunPending || savePending
+                        ? "An alert policy preview or save is already in progress"
+                        : policySaveValidation ?? undefined
+                    }
                     disabled={
                       dryRunPending ||
                       savePending ||
@@ -5483,6 +5614,11 @@ export function FleetAlertPolicyManager({
                 <>
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      dryRunPending || savePending
+                        ? "An alert policy preview or save is already in progress"
+                        : policyPreviewValidation ?? undefined
+                    }
                     disabled={
                       dryRunPending ||
                       savePending ||
@@ -5499,6 +5635,11 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="primaryAction"
+                    data-tooltip-disabled-reason={
+                      dryRunPending || savePending
+                        ? "An alert policy preview or save is already in progress"
+                        : policySaveValidation ?? undefined
+                    }
                     disabled={
                       dryRunPending ||
                       savePending ||
@@ -5515,6 +5656,11 @@ export function FleetAlertPolicyManager({
                   </button>
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      policyWorkflowBusy
+                        ? "An alert policy save or delete is already in progress"
+                        : undefined
+                    }
                     disabled={policyWorkflowBusy}
                     type="button"
                     onClick={createPolicy}
@@ -5644,6 +5790,11 @@ export function FleetAlertPolicyManager({
                       </label>
                       <button
                         className="secondaryAction compactAction"
+                        data-tooltip-disabled-reason={
+                          ruleDrafts.length <= 1
+                            ? "An alert policy must keep at least one rule"
+                            : undefined
+                        }
                         disabled={ruleDrafts.length <= 1}
                         onClick={() => removeRuleDraft(draft.localId)}
                         type="button"
@@ -6263,7 +6414,7 @@ export function FleetAlertNotificationManager({
         sortValue: (channel) => channel.name,
         searchValue: (channel) => `${channel.name} ${channel.notes ?? ""}`,
         cell: (channel) => (
-          <span className="historyPrimary">
+          <span className="historyPrimary" data-value-tooltip-skip="true">
             <strong>{channel.name}</strong>
             <small>{channel.notes || "no notes"}</small>
           </span>
@@ -6332,7 +6483,11 @@ export function FleetAlertNotificationManager({
         sortValue: (channel) => `${channel.delivery_kind}:${channel.target}`,
         searchValue: (channel) => `${channel.delivery_kind} ${channel.target}`,
         cell: (channel) => (
-          <span className="historyPrimary">
+          <span
+            className="historyPrimary"
+            data-tooltip-sensitive="true"
+            title="Configured notification destination"
+          >
             <strong>{channel.delivery_kind}</strong>
             <small>{channel.target}</small>
           </span>
@@ -6929,6 +7084,7 @@ export function FleetAlertNotificationManager({
         },
         {
           label: "Delivery",
+          title: saveSnapshot ? "Configured notification destination" : undefined,
           value: saveSnapshot
             ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
             : "-",
@@ -6981,6 +7137,11 @@ export function FleetAlertNotificationManager({
           toolbarActions={
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                channelWorkflowBusy
+                  ? "A notification channel or delivery operation is already in progress"
+                  : undefined
+              }
               disabled={channelWorkflowBusy}
               onClick={createChannel}
               type="button"
@@ -6995,6 +7156,13 @@ export function FleetAlertNotificationManager({
             actions={
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason={
+                  !detailChannel
+                    ? "This notification channel no longer exists"
+                    : detailChannel.configuration_error
+                      ? "Stored filters are invalid; delete and replace this channel"
+                      : undefined
+                }
                 disabled={
                   !detailChannel || Boolean(detailChannel.configuration_error)
                 }
@@ -7030,6 +7198,11 @@ export function FleetAlertNotificationManager({
               <>
                 <button
                   className="primaryAction"
+                  data-tooltip-disabled-reason={
+                    savePending
+                      ? "A notification channel save is already in progress"
+                      : channelDraftValidation ?? undefined
+                  }
                   disabled={savePending || channelDraftValidation !== null}
                   title={
                     channelDraftValidation ??
@@ -7098,6 +7271,11 @@ export function FleetAlertNotificationManager({
                 ) : (
                   <input
                     aria-label="Notification scope value"
+                    data-tooltip-disabled-reason={
+                      scopeKind === "global"
+                        ? "Global notification channels do not use a scope value"
+                        : undefined
+                    }
                     disabled={scopeKind === "global"}
                     value={scopeValue}
                     onChange={(event) => setScopeValue(event.target.value)}
@@ -7167,11 +7345,13 @@ export function FleetAlertNotificationManager({
               </ConsoleField>
               <ConsoleField
                 label="Delivery target"
+                labelTitle="Configured notification destination; exact URL is excluded from tooltips"
                 className="fieldWide"
                 hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
               >
                 <input
                   aria-label="Delivery target"
+                  data-tooltip-sensitive="true"
                   placeholder="https://hooks.example/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
@@ -7224,6 +7404,13 @@ export function FleetAlertNotificationManager({
         <div className="consoleOperationsActions">
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              channelWorkflowBusy
+                ? "A notification channel or delivery operation is already in progress"
+                : !hasEnabledChannels
+                  ? "Create and enable a notification channel first"
+                  : undefined
+            }
             disabled={channelWorkflowBusy || !hasEnabledChannels}
             title={
               hasEnabledChannels
@@ -7237,6 +7424,13 @@ export function FleetAlertNotificationManager({
           </button>
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason={
+              channelWorkflowBusy
+                ? "A notification channel or delivery operation is already in progress"
+                : !hasEnabledChannels
+                  ? "Create and enable a notification channel first"
+                  : undefined
+            }
             disabled={channelWorkflowBusy || !hasEnabledChannels}
             title={
               hasEnabledChannels
@@ -7252,6 +7446,13 @@ export function FleetAlertNotificationManager({
             <>
               <button
                 className="secondaryAction"
+                data-tooltip-disabled-reason={
+                  channelWorkflowBusy
+                    ? "A notification channel or delivery operation is already in progress"
+                    : !hasQueuedDeliveries
+                      ? "No queued notification deliveries are available"
+                      : undefined
+                }
                 disabled={channelWorkflowBusy || !hasQueuedDeliveries}
                 title={
                   hasQueuedDeliveries
@@ -7267,6 +7468,11 @@ export function FleetAlertNotificationManager({
           ) : (
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                channelWorkflowBusy
+                  ? "A notification channel or delivery operation is already in progress"
+                  : undefined
+              }
               disabled={channelWorkflowBusy}
               type="button"
               onClick={onOpenDeliveries}
@@ -7276,6 +7482,13 @@ export function FleetAlertNotificationManager({
           )}
           <button
             className="primaryAction"
+            data-tooltip-disabled-reason={
+              channelWorkflowBusy
+                ? "A notification channel or delivery operation is already in progress"
+                : !hasQueuedDeliveries
+                  ? "No queued notification deliveries are available"
+                  : undefined
+            }
             disabled={channelWorkflowBusy || !hasQueuedDeliveries}
             title={
               hasQueuedDeliveries
@@ -7423,7 +7636,11 @@ export function NotificationDeliveryHistoryGrid({
               {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
-              <small className="deliveryErrorText" title={delivery.error}>
+              <small
+                className="deliveryErrorText"
+                data-tooltip-sensitive="true"
+                title="Notification delivery error; exact content is excluded from tooltips"
+              >
                 {shortDeliveryError(delivery.error)}
               </small>
             )}
@@ -7456,9 +7673,15 @@ export function NotificationDeliveryHistoryGrid({
         searchValue: (delivery) =>
           `${delivery.delivery_kind} ${delivery.target}`,
         cell: (delivery) => (
-          <span className="historyPrimary">
+          <span
+            className="historyPrimary"
+            data-tooltip-sensitive="true"
+            title="Configured notification destination"
+          >
             <strong>{delivery.delivery_kind}</strong>
-            <small>{delivery.target}</small>
+            <small title="Configured notification destination">
+              {delivery.target}
+            </small>
           </span>
         ),
       },
@@ -7506,7 +7729,12 @@ export function NotificationDeliveryHistoryGrid({
           <strong>{delivery.channel_name}</strong>
           <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.delivery_kind}</span>
-          <span>{delivery.target}</span>
+          <span
+            data-tooltip-sensitive="true"
+            title="Configured notification destination"
+          >
+            {delivery.target}
+          </span>
           <span>{delivery.attempt_count} attempts</span>
           {delivery.next_attempt_at && (
             <span title={delivery.next_attempt_at}>
@@ -7514,7 +7742,11 @@ export function NotificationDeliveryHistoryGrid({
             </span>
           )}
           {delivery.error && (
-            <span className="deliveryErrorText" title={delivery.error}>
+            <span
+              className="deliveryErrorText"
+              data-tooltip-sensitive="true"
+              title="Notification delivery error; exact content is excluded from tooltips"
+            >
               error: {delivery.error}
             </span>
           )}
@@ -7803,7 +8035,14 @@ export function WebhookRuleManager({
         minSize: 180,
         sortValue: (rule) => rule.target,
         searchValue: (rule) => rule.target,
-        cell: (rule) => <small title={rule.target}>{rule.target}</small>,
+        cell: (rule) => (
+          <small
+            data-tooltip-sensitive="true"
+            title="Configured webhook destination"
+          >
+            {rule.target}
+          </small>
+        ),
       },
       {
         id: "state",
@@ -8500,6 +8739,7 @@ export function WebhookRuleManager({
         },
         {
           label: "Target",
+          title: saveSnapshot ? "Configured webhook destination" : undefined,
           value: saveSnapshot?.request.target ?? "-",
         },
         {
@@ -8508,7 +8748,9 @@ export function WebhookRuleManager({
         },
         {
           label: "Body template",
-          title: saveSnapshot?.request.body_template || undefined,
+          title: saveSnapshot
+            ? "Webhook message body template; content is excluded from tooltips"
+            : undefined,
           value: saveSnapshot?.request.body_template || "Default message",
         },
         {
@@ -8575,6 +8817,11 @@ export function WebhookRuleManager({
           toolbarActions={
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                webhookWorkflowBusy
+                  ? "A webhook rule or delivery operation is already in progress"
+                  : undefined
+              }
               disabled={webhookWorkflowBusy}
               onClick={createRule}
               type="button"
@@ -8662,6 +8909,11 @@ export function WebhookRuleManager({
                 ) : null}
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    queuePending || savePending
+                      ? "A webhook preview, delivery, or save is already in progress"
+                      : webhookDraftValidation ?? undefined
+                  }
                   disabled={
                     queuePending ||
                     savePending ||
@@ -8678,6 +8930,11 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
+                  data-tooltip-disabled-reason={
+                    queuePending || savePending
+                      ? "A webhook preview, delivery, or save is already in progress"
+                      : webhookDraftValidation ?? undefined
+                  }
                   disabled={
                     queuePending ||
                     savePending ||
@@ -8701,6 +8958,11 @@ export function WebhookRuleManager({
                 {!focusedEditorMode ? (
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      webhookWorkflowBusy
+                        ? "A webhook rule or delivery operation is already in progress"
+                        : undefined
+                    }
                     disabled={webhookWorkflowBusy}
                     type="button"
                     onClick={createRule}
@@ -8778,11 +9040,13 @@ export function WebhookRuleManager({
               </ConsoleField>
               <ConsoleField
                 label="Target URL"
+                labelTitle="Configured webhook destination; exact URL is excluded from tooltips"
                 className="fieldFull"
                 hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
               >
                 <input
                   aria-label="Webhook target"
+                  data-tooltip-sensitive="true"
                   placeholder="https://hooks.example.net/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
@@ -8800,6 +9064,12 @@ export function WebhookRuleManager({
                 <input
                   aria-label="Webhook signing secret"
                   autoComplete="new-password"
+                  data-tooltip-disabled-reason={
+                    clearSigningSecret
+                      ? "Clear existing signing secret is selected"
+                      : undefined
+                  }
+                  data-value-tooltip-skip="true"
                   disabled={clearSigningSecret}
                   placeholder={
                     existingSecretConfigured
@@ -8850,6 +9120,7 @@ export function WebhookRuleManager({
               </ConsoleField>
               <ConsoleField
                 label="Body template"
+                labelTitle="Webhook message body template; content is excluded from tooltips"
                 className="fieldFull"
                 hint="Renders the message field in the fixed webhook JSON envelope. Available placeholders: {vps.name}, {vps.display_name}, {vps.id}, {vps.status}, {vps.tags}, {event.kind}, {event.id}, {rule.id}, {rule.name}."
               >
@@ -8906,6 +9177,13 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasEnabledRules
+                        ? "Create and enable a webhook rule first"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
@@ -8919,6 +9197,13 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasEnabledRules
+                        ? "Create and enable a webhook rule first"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
@@ -8932,6 +9217,13 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasFailedDeliveries
+                        ? "No failed event webhook deliveries are available"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasFailedDeliveries}
                   title={
                     hasFailedDeliveries
@@ -8948,6 +9240,13 @@ export function WebhookRuleManager({
               <>
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasEnabledRules
+                        ? "Create and enable a webhook rule first"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
@@ -8961,6 +9260,13 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasEnabledRules
+                        ? "Create and enable a webhook rule first"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasEnabledRules}
                   title={
                     hasEnabledRules
@@ -8974,6 +9280,13 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="secondaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasQueuedDeliveries
+                        ? "No queued event webhook deliveries are available"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasQueuedDeliveries}
                   title={
                     hasQueuedDeliveries
@@ -8987,6 +9300,13 @@ export function WebhookRuleManager({
                 </button>
                 <button
                   className="primaryAction"
+                  data-tooltip-disabled-reason={
+                    webhookWorkflowBusy
+                      ? "A webhook rule or delivery operation is already in progress"
+                      : !hasQueuedDeliveries
+                        ? "No queued event webhook deliveries are available"
+                        : undefined
+                  }
                   disabled={webhookWorkflowBusy || !hasQueuedDeliveries}
                   title={
                     hasQueuedDeliveries
@@ -9156,7 +9476,11 @@ export function WebhookDryRunNotice({
 }) {
   const matchedNames = webhookMatchedVpsNames(preview.matched_vps);
   return (
-    <div className="consoleInlineNotice">
+    <div
+      className="consoleInlineNotice"
+      data-tooltip-sensitive="true"
+      title="Server-resolved webhook dry-run evidence; rendered content is excluded from tooltips"
+    >
       <strong>
         {preview.matched_vps.length}{" "}
         {preview.matched_vps.length === 1 ? "VPS" : "VPSs"} matched webhook dry
@@ -9190,7 +9514,11 @@ function WebhookRuleSamplePreview({
   const matchedNames = webhookMatchedVpsNames(preview.matched_vps);
   const samplePayload = JSON.stringify(preview.payload_context, null, 2);
   return (
-    <div className="webhookRuleSamplePreview">
+    <div
+      className="webhookRuleSamplePreview"
+      data-tooltip-sensitive="true"
+      title="Webhook sample payload; rendered content is excluded from tooltips"
+    >
       <div className="consoleInlineNotice">
         <strong>
           {preview.matched_vps.length}{" "}
@@ -9262,7 +9590,11 @@ export function WebhookDeliveryHistoryGrid({
               {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
-              <small className="deliveryErrorText" title={delivery.error}>
+              <small
+                className="deliveryErrorText"
+                data-tooltip-sensitive="true"
+                title="Webhook delivery error; exact content is excluded from tooltips"
+              >
                 {shortDeliveryError(delivery.error)}
               </small>
             )}
@@ -9277,7 +9609,12 @@ export function WebhookDeliveryHistoryGrid({
         sortValue: (delivery) => delivery.target,
         searchValue: (delivery) => delivery.target,
         cell: (delivery) => (
-          <small title={delivery.target}>{delivery.target}</small>
+          <small
+            data-tooltip-sensitive="true"
+            title="Configured webhook delivery destination"
+          >
+            {delivery.target}
+          </small>
         ),
       },
       {
@@ -9338,7 +9675,12 @@ export function WebhookDeliveryHistoryGrid({
           <strong>{delivery.rule_name}</strong>
           <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.event_kind}</span>
-          <span>{delivery.target}</span>
+          <span
+            data-tooltip-sensitive="true"
+            title="Configured webhook delivery destination"
+          >
+            {delivery.target}
+          </span>
           <span>{delivery.attempt_count} attempts</span>
           <span
             className="monoValue"
@@ -9348,7 +9690,11 @@ export function WebhookDeliveryHistoryGrid({
             {webhookMatchedVpsNames(delivery.matched_vps) || "none"}
           </span>
           {delivery.error && (
-            <span className="deliveryErrorText" title={delivery.error}>
+            <span
+              className="deliveryErrorText"
+              data-tooltip-sensitive="true"
+              title="Webhook delivery error; exact content is excluded from tooltips"
+            >
               error: {delivery.error}
             </span>
           )}
@@ -9459,6 +9805,11 @@ export function WebhookDeliveryMaintenancePanel({
           <>
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                rotationPending
+                  ? "A webhook delivery rotation review is already in progress"
+                  : undefined
+              }
               disabled={rotationPending}
               type="button"
               onClick={() => void rotate(false)}
@@ -9467,6 +9818,15 @@ export function WebhookDeliveryMaintenancePanel({
             </button>
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                rotationPending
+                  ? "A webhook delivery rotation review is already in progress"
+                  : !rotationPreview
+                    ? "Review the rotation before reviewing cleanup"
+                    : rotationPreview.matched_count === 0
+                      ? "The reviewed rotation has no matching deliveries to clean up"
+                      : undefined
+              }
               disabled={
                 rotationPending ||
                 !rotationPreview ||
@@ -9651,7 +10011,14 @@ function WebhookTemplateEditor({
     });
   }, [value]);
 
-  return <div className="webhookCodeMirror" ref={containerRef} />;
+  return (
+    <div
+      className="webhookCodeMirror"
+      data-tooltip-sensitive="true"
+      ref={containerRef}
+      title="Webhook message body template; content is excluded from tooltips"
+    />
+  );
 }
 
 function alertTone(severity: string): "critical" | "warning" | "info" {
@@ -10143,6 +10510,17 @@ function NetworkInterfacesPanel({
         <div className="interfaceActions">
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? "Host interfaces are already being refreshed"
+                : !selectedAgent
+                  ? "Select exactly one VPS before refreshing host interfaces"
+                  : !privilegeReady
+                    ? "Unlock privilege before refreshing host interfaces"
+                    : !live
+                      ? "The selected VPS must be live to refresh host interfaces"
+                      : undefined
+            }
             disabled={pending || !selectedAgent || !privilegeReady || !live}
             onClick={onRefresh}
             type="button"

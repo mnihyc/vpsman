@@ -6,7 +6,10 @@ import {
   Route,
   SlidersHorizontal,
 } from "lucide-react";
-import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../../components/TimeSeriesChart";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { NetworkEvidenceRangeControls } from "../../components/NetworkEvidenceRangeControls";
@@ -25,7 +28,10 @@ import {
   type NetworkObservationMetric,
 } from "../../telemetryMetrics";
 import { formatCompactTime, timestampMillis } from "../../utils";
-import { pushHistoryEntry, useHistoryEntryState } from "../../historyEntryState";
+import {
+  pushHistoryEntry,
+  useHistoryEntryState,
+} from "../../historyEntryState";
 import {
   DEFAULT_NETWORK_EVIDENCE_WINDOW,
   NETWORK_EVIDENCE_OBSERVATION_LIMIT,
@@ -176,8 +182,7 @@ export function NetworkMetricsPanel({
               : selectedFilters.health,
       limit: NETWORK_EVIDENCE_OBSERVATION_LIMIT,
       planIds: selectedFilters.planId ? [selectedFilters.planId] : undefined,
-      source:
-        selectedFilters.source === "all" ? "" : selectedFilters.source,
+      source: selectedFilters.source === "all" ? "" : selectedFilters.source,
       startAt: customStartAt,
       window: windowOverride,
     };
@@ -273,7 +278,8 @@ export function NetworkMetricsPanel({
             : "healthy",
       ),
   );
-  const latestReachability = latestReachabilityObservations(declaredObservations);
+  const latestReachability =
+    latestReachabilityObservations(declaredObservations);
   const currentReachability = latestReachability.filter(isCurrentReachability);
   const currentReachabilityByEndpoint = new Map(
     currentReachability.map((observation) => [
@@ -317,7 +323,11 @@ export function NetworkMetricsPanel({
     Number(Boolean(draftFilters.planId)) +
     Number(draftFilters.health !== "all") +
     Number(draftFilters.source !== "all");
-  const groups = buildMetricGroups(declaredTrends, declaredObservations, declaredTunnels);
+  const groups = buildMetricGroups(
+    declaredTrends,
+    declaredObservations,
+    declaredTunnels,
+  );
   const overlays = buildOverlayRows(
     currentReachability,
     declaredTunnels,
@@ -345,7 +355,9 @@ export function NetworkMetricsPanel({
     ...declaredObservations.map((observation) => observation.observed_at),
     ...declaredTrends.map((trend) => trend.latest_observed_at),
   ]);
-  const oldestEvidence = oldestTime(declaredObservations.map((observation) => observation.observed_at));
+  const oldestEvidence = oldestTime(
+    declaredObservations.map((observation) => observation.observed_at),
+  );
   const degradedCount =
     currentReachability.filter((observation) => observation.healthy === false)
       .length +
@@ -408,18 +420,39 @@ export function NetworkMetricsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Network metrics</h2>
-            <span>Read-only metrics for enabled declared tunnels. Retained evidence for disabled plans remains available on Network / Evidence.</span>
+            <span>
+              Read-only metrics for enabled declared tunnels. Retained evidence
+              for disabled plans remains available on Network / Evidence.
+            </span>
           </div>
-          <div className="sectionActions" aria-label="Network metrics action links">
-            <button className="secondaryAction compactAction" onClick={onOpenTests} type="button">
+          <div
+            className="sectionActions"
+            aria-label="Network metrics action links"
+          >
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenTests}
+              title="Open Network tests to run current tunnel diagnostics"
+              type="button"
+            >
               <Activity size={14} />
               Open Network tests
             </button>
-            <button className="secondaryAction compactAction" onClick={onOpenOspf} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenOspf}
+              title="Open reviewed OSPF routing-cost recommendations"
+              type="button"
+            >
               <Route size={14} />
               Open OSPF review
             </button>
-            <button className="secondaryAction compactAction" onClick={onOpenEvidence} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenEvidence}
+              title="Open retained network evidence and command results"
+              type="button"
+            >
               <GitBranch size={14} />
               Open evidence
             </button>
@@ -439,110 +472,131 @@ export function NetworkMetricsPanel({
             startAt={customStartAt}
             window={evidenceWindow}
           />
-          <details className="fleetMetricsAdvancedFilters">
-          <summary>
-            <SlidersHorizontal size={14} />
-            <span>Advanced filters</span>
-            {activeAdvancedFilters > 0 ? <b>{activeAdvancedFilters}</b> : null}
-          </summary>
-          <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid networkMetricsAdvancedFilterGrid">
-            <label>
-              <span>VPS endpoint</span>
-              <VpsCombobox
-                agents={agents}
-                ariaLabel="Network metrics VPS endpoint"
-                onChange={(clientId) =>
-                  setDraftFilters((current) => ({
-                    ...current,
-                    clientId,
-                  }))
+          <details
+            className="fleetMetricsAdvancedFilters"
+            title="Restrict retained network evidence by endpoint, plan, source, or health"
+          >
+            <summary
+              title={`${activeAdvancedFilters} advanced network metric filter${activeAdvancedFilters === 1 ? "" : "s"} active`}
+            >
+              <SlidersHorizontal size={14} />
+              <span>Advanced filters</span>
+              {activeAdvancedFilters > 0 ? (
+                <b>{activeAdvancedFilters}</b>
+              ) : null}
+            </summary>
+            <div className="dashboardControlBar fleetMetricsAdvancedFilterGrid networkMetricsAdvancedFilterGrid">
+              <label>
+                <span>VPS endpoint</span>
+                <VpsCombobox
+                  agents={agents}
+                  ariaLabel="Network metrics VPS endpoint"
+                  onChange={(clientId) =>
+                    setDraftFilters((current) => ({
+                      ...current,
+                      clientId,
+                    }))
+                  }
+                  placeholder="All VPS endpoints"
+                  value={draftFilters.clientId}
+                />
+              </label>
+              <label>
+                <span>Tunnel plan</span>
+                <select
+                  aria-label="Network metrics tunnel plan"
+                  onChange={(event) =>
+                    setDraftFilters((current) => ({
+                      ...current,
+                      planId: event.target.value,
+                    }))
+                  }
+                  value={draftFilters.planId}
+                >
+                  <option value="">All enabled plans</option>
+                  {unavailablePlanFilter ? (
+                    <option value={unavailablePlanFilter}>
+                      Unavailable saved plan · {unavailablePlanFilter}
+                    </option>
+                  ) : null}
+                  {enabledPlans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Source</span>
+                <select
+                  aria-label="Network metrics evidence source"
+                  onChange={(event) =>
+                    setDraftFilters((current) => ({
+                      ...current,
+                      source: event.target
+                        .value as NetworkMetricFilters["source"],
+                    }))
+                  }
+                  value={draftFilters.source}
+                >
+                  <option value="all">Automatic and manual</option>
+                  <option value="automatic">Automatic monitor</option>
+                  <option value="manual">Manual test</option>
+                </select>
+              </label>
+              <label>
+                <span>Health</span>
+                <select
+                  aria-label="Network metrics health"
+                  onChange={(event) =>
+                    setDraftFilters((current) => ({
+                      ...current,
+                      health: event.target
+                        .value as NetworkMetricFilters["health"],
+                    }))
+                  }
+                  value={draftFilters.health}
+                >
+                  <option value="all">All states</option>
+                  <option value="healthy">Healthy</option>
+                  <option value="degraded">Degraded</option>
+                  <option value="unverified">Unverified</option>
+                </select>
+              </label>
+              <div className="dashboardScopeHint">
+                {unavailablePlanFilter
+                  ? "The saved plan filter is no longer enabled or visible. Reset or select another plan."
+                  : "Range and filters are applied by the API. Every enabled plan remains eligible unless explicitly filtered."}
+              </div>
+              <button
+                className="secondaryAction compactAction"
+                disabled={activeAdvancedFilters === 0}
+                onClick={() => void resetEvidenceFilters()}
+                title={
+                  activeAdvancedFilters === 0
+                    ? "No advanced network metric filters are active"
+                    : `Reset ${activeAdvancedFilters} active advanced network metric filter${activeAdvancedFilters === 1 ? "" : "s"}`
                 }
-                placeholder="All VPS endpoints"
-                value={draftFilters.clientId}
-              />
-            </label>
-            <label>
-              <span>Tunnel plan</span>
-              <select
-                aria-label="Network metrics tunnel plan"
-                onChange={(event) =>
-                  setDraftFilters((current) => ({
-                    ...current,
-                    planId: event.target.value,
-                  }))
-                }
-                value={draftFilters.planId}
+                type="button"
               >
-                <option value="">All enabled plans</option>
-                {unavailablePlanFilter ? (
-                  <option value={unavailablePlanFilter}>
-                    Unavailable saved plan · {unavailablePlanFilter}
-                  </option>
-                ) : null}
-                {enabledPlans.map((plan) => (
-                  <option key={plan.id} value={plan.id}>
-                    {plan.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>Source</span>
-              <select
-                aria-label="Network metrics evidence source"
-                onChange={(event) =>
-                  setDraftFilters((current) => ({
-                    ...current,
-                    source: event.target.value as NetworkMetricFilters["source"],
-                  }))
+                Reset filters
+              </button>
+              <button
+                className="secondaryAction compactAction"
+                disabled={refreshing}
+                onClick={() =>
+                  void refreshEvidence(evidenceWindow, draftFilters)
                 }
-                value={draftFilters.source}
-              >
-                <option value="all">Automatic and manual</option>
-                <option value="automatic">Automatic monitor</option>
-                <option value="manual">Manual test</option>
-              </select>
-            </label>
-            <label>
-              <span>Health</span>
-              <select
-                aria-label="Network metrics health"
-                onChange={(event) =>
-                  setDraftFilters((current) => ({
-                    ...current,
-                    health: event.target.value as NetworkMetricFilters["health"],
-                  }))
+                title={
+                  refreshing
+                    ? "Network evidence is already refreshing"
+                    : "Apply the selected range and advanced network filters"
                 }
-                value={draftFilters.health}
+                type="button"
               >
-                <option value="all">All states</option>
-                <option value="healthy">Healthy</option>
-                <option value="degraded">Degraded</option>
-                <option value="unverified">Unverified</option>
-              </select>
-            </label>
-            <div className="dashboardScopeHint">
-              {unavailablePlanFilter
-                ? "The saved plan filter is no longer enabled or visible. Reset or select another plan."
-                : "Range and filters are applied by the API. Every enabled plan remains eligible unless explicitly filtered."}
+                Apply filters
+              </button>
             </div>
-            <button
-              className="secondaryAction compactAction"
-              disabled={activeAdvancedFilters === 0}
-              onClick={() => void resetEvidenceFilters()}
-              type="button"
-            >
-              Reset filters
-            </button>
-            <button
-              className="secondaryAction compactAction"
-              disabled={refreshing}
-              onClick={() => void refreshEvidence(evidenceWindow, draftFilters)}
-              type="button"
-            >
-              Apply filters
-            </button>
-          </div>
           </details>
         </div>
         <div className="observabilityMetricsRefreshState">
@@ -550,6 +604,11 @@ export function NetworkMetricsPanel({
             className="secondaryAction compactAction"
             disabled={refreshing}
             onClick={() => void refreshEvidence()}
+            title={
+              refreshing
+                ? "Network evidence is already refreshing"
+                : "Refresh retained evidence for the current network range"
+            }
             type="button"
           >
             <RefreshCcw size={14} />
@@ -573,7 +632,10 @@ export function NetworkMetricsPanel({
           />
         ) : null}
 
-        <div className="metricGrid observabilityMetricsSummary" aria-label="Network metrics summary">
+        <div
+          className="metricGrid observabilityMetricsSummary"
+          aria-label="Network metrics summary"
+        >
           <MetricTile
             detail={
               oldestEvidence && latestEvidence
@@ -583,9 +645,21 @@ export function NetworkMetricsPanel({
             label="Evidence range"
             value={evidenceWindowSummary(oldestEvidence, latestEvidence)}
           />
-          <MetricTile detail="retained test/status records; charts include only records containing the selected metric" label="Observations" value={String(observationCount)} />
-          <MetricTile detail="trend groups plus endpoint health" label="Degraded signals" value={String(degradedCount)} />
-          <MetricTile detail="recommendations with non-zero cost delta" label="OSPF review" value={String(ospfDeltaCount)} />
+          <MetricTile
+            detail="retained test/status records; charts include only records containing the selected metric"
+            label="Observations"
+            value={String(observationCount)}
+          />
+          <MetricTile
+            detail="trend groups plus endpoint health"
+            label="Degraded signals"
+            value={String(degradedCount)}
+          />
+          <MetricTile
+            detail="recommendations with non-zero cost delta"
+            label="OSPF review"
+            value={String(ospfDeltaCount)}
+          />
         </div>
 
         {evidence.isStale && (
@@ -593,15 +667,28 @@ export function NetworkMetricsPanel({
             <div>
               <strong>Stale network evidence</strong>
               <span>
-                Last selected-metric sample {evidence.lastSampleLabel}; retained window {evidence.windowLabel}. {selectedMetric === "throughput" ? "Run a capped speed test" : "Wait for the next automatic monitor or run a manual probe"} before using stale evidence to change routing.
+                Last selected-metric sample {evidence.lastSampleLabel}; retained
+                window {evidence.windowLabel}.{" "}
+                {selectedMetric === "throughput"
+                  ? "Run a capped speed test"
+                  : "Wait for the next automatic monitor or run a manual probe"}{" "}
+                before using stale evidence to change routing.
               </span>
             </div>
             <div>
-              <button className="secondaryAction compactAction" onClick={onOpenEvidence} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenEvidence}
+                type="button"
+              >
                 <GitBranch size={14} />
                 Open evidence
               </button>
-              <button className="secondaryAction compactAction" onClick={onOpenTests} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenTests}
+                type="button"
+              >
                 <Activity size={14} />
                 Run test
               </button>
@@ -609,13 +696,24 @@ export function NetworkMetricsPanel({
           </div>
         )}
 
-        <section className="dashboardSection observabilityChartSection" aria-labelledby="observability-network-charts-title">
+        <section
+          className="dashboardSection observabilityChartSection"
+          aria-labelledby="observability-network-charts-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-network-charts-title">Latency, loss, and throughput</h2>
-              <span>Charts use retained observations only; run new diagnostics from Network / Tests.</span>
+              <h2 id="observability-network-charts-title">
+                Latency, loss, and throughput
+              </h2>
+              <span>
+                Charts use retained observations only; run new diagnostics from
+                Network / Tests.
+              </span>
             </div>
-            <div className="dashboardSectionTools" aria-label="Network metric selector">
+            <div
+              className="dashboardSectionTools"
+              aria-label="Network metric selector"
+            >
               {chartOptions.map((option) => (
                 <button
                   aria-pressed={selectedMetric === option.key}
@@ -630,7 +728,10 @@ export function NetworkMetricsPanel({
               ))}
             </div>
           </div>
-          <div className="observabilityNetworkChartGrid single" aria-label="Network metrics charts">
+          <div
+            className="observabilityNetworkChartGrid single"
+            aria-label="Network metrics charts"
+          >
             <NetworkChartCard
               emptyLabel={selectedChart.emptyLabel}
               definition={selectedChart.definition}
@@ -649,53 +750,142 @@ export function NetworkMetricsPanel({
           </div>
         </section>
 
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-network-groups-title">
+        <section
+          className="dashboardSection observabilityGroupSection"
+          aria-labelledby="observability-network-groups-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-network-groups-title">Tunnel grouping</h2>
-              <span>Grouped by explicit declared plan ID and endpoint pair.</span>
+              <span>
+                Grouped by explicit declared plan ID and endpoint pair.
+              </span>
             </div>
           </div>
-          <div className="observabilityNetworkGroupGrid" aria-label="Network metrics tunnel grouping">
+          <div
+            className="observabilityNetworkGroupGrid"
+            aria-label="Network metrics tunnel grouping"
+          >
             {groups.map((group) => (
-              <div className="observabilityNetworkGroupTile" key={group.key}>
-                <span>{group.label}</span>
-                <strong>{group.peerLabel}</strong>
-                <small>
-                  {group.sampleCount} samples, {group.degradedCount} degraded, {group.endpointCount} endpoint{group.endpointCount === 1 ? "" : "s"}
+              <div
+                className="observabilityNetworkGroupTile"
+                key={group.key}
+                title={`${group.label}, ${group.peerLabel}: ${group.sampleCount} retained samples and ${group.degradedCount} degraded`}
+              >
+                <span title={`Declared tunnel plan: ${group.label}`}>
+                  {group.label}
+                </span>
+                <strong title={`Endpoint pair: ${group.peerLabel}`}>
+                  {group.peerLabel}
+                </strong>
+                <small
+                  title={`${group.sampleCount} retained samples; ${group.degradedCount} degraded; ${group.endpointCount} endpoints`}
+                >
+                  {group.sampleCount} samples, {group.degradedCount} degraded,{" "}
+                  {group.endpointCount} endpoint
+                  {group.endpointCount === 1 ? "" : "s"}
                 </small>
                 <dl>
-                  <div>
-                    <dt>Avg latency</dt>
-                    <dd>{formatNullableMetric(group.latencyMs, "ms")}</dd>
+                  <div
+                    title={
+                      group.latencyMs === null
+                        ? "Average latency is unavailable because no retained latency measurements matched"
+                        : `Average latency ${formatNullableMetric(group.latencyMs, "ms")}`
+                    }
+                  >
+                    <dt title="Mean retained latency for this tunnel group">
+                      Avg latency
+                    </dt>
+                    <dd
+                      title={
+                        group.latencyMs === null
+                          ? "No retained latency measurement matched this group"
+                          : `Average latency ${formatNullableMetric(group.latencyMs, "ms")}`
+                      }
+                    >
+                      {formatNullableMetric(group.latencyMs, "ms")}
+                    </dd>
                   </div>
-                  <div>
-                    <dt>Avg loss</dt>
-                    <dd>{formatLoss(group.lossRatio)}</dd>
+                  <div
+                    title={
+                      group.lossRatio === null
+                        ? "Average packet loss is unavailable because no retained loss measurements matched"
+                        : `Average packet loss ${formatLoss(group.lossRatio)}`
+                    }
+                  >
+                    <dt title="Mean retained packet loss for this tunnel group">
+                      Avg loss
+                    </dt>
+                    <dd
+                      title={
+                        group.lossRatio === null
+                          ? "No retained packet-loss measurement matched this group"
+                          : `Average packet loss ${formatLoss(group.lossRatio)}`
+                      }
+                    >
+                      {formatLoss(group.lossRatio)}
+                    </dd>
                   </div>
-                  <div>
-                    <dt>Avg throughput</dt>
-                    <dd>{formatNullableMetric(group.throughputMbps, "Mbps")}</dd>
+                  <div
+                    title={
+                      group.throughputMbps === null
+                        ? "Average throughput is unavailable because no retained speed measurement matched"
+                        : `Average throughput ${formatNullableMetric(group.throughputMbps, "Mbps")}`
+                    }
+                  >
+                    <dt title="Mean retained throughput for this tunnel group">
+                      Avg throughput
+                    </dt>
+                    <dd
+                      title={
+                        group.throughputMbps === null
+                          ? "No retained throughput measurement matched this group"
+                          : `Average throughput ${formatNullableMetric(group.throughputMbps, "Mbps")}`
+                      }
+                    >
+                      {formatNullableMetric(group.throughputMbps, "Mbps")}
+                    </dd>
                   </div>
                 </dl>
-                <small>{group.latestObservedAt ? `Latest ${formatCompactTime(group.latestObservedAt)}` : "No recent evidence"}</small>
+                <small
+                  title={
+                    group.latestObservedAt
+                      ? `Latest retained observation ${formatEvidenceTime(group.latestObservedAt)}`
+                      : "No retained observation exists for this tunnel group"
+                  }
+                >
+                  {group.latestObservedAt
+                    ? `Latest ${formatCompactTime(group.latestObservedAt)}`
+                    : "No recent evidence"}
+                </small>
               </div>
             ))}
             {!groups.length && (
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No tunnel groups</strong>
-                <span>Retained network trends have not been collected yet.</span>
+                <span>
+                  Retained network trends have not been collected yet.
+                </span>
               </div>
             )}
           </div>
         </section>
 
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-network-endpoints-title">
+        <section
+          className="dashboardSection observabilityGroupSection"
+          aria-labelledby="observability-network-endpoints-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-network-endpoints-title">Endpoint comparison</h2>
-              <span>Endpoint telemetry covers only declared plans. Failed or absent reachability probes remain unverified and do not assert that a tunnel is disconnected.</span>
+              <h2 id="observability-network-endpoints-title">
+                Endpoint comparison
+              </h2>
+              <span>
+                Endpoint telemetry covers only declared plans. Failed or absent
+                reachability probes remain unverified and do not assert that a
+                tunnel is disconnected.
+              </span>
             </div>
           </div>
           <div
@@ -715,11 +905,13 @@ export function NetworkMetricsPanel({
             {declaredTunnels.map((tunnel) => (
               <EndpointRow
                 key={`${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`}
-                observation={latestReachability.find(
-                  (observation) =>
-                    observation.plan_id === tunnel.plan_id &&
-                    observation.client_id === tunnel.client_id,
-                ) ?? null}
+                observation={
+                  latestReachability.find(
+                    (observation) =>
+                      observation.plan_id === tunnel.plan_id &&
+                      observation.client_id === tunnel.client_id,
+                  ) ?? null
+                }
                 tunnel={tunnel}
               />
             ))}
@@ -727,32 +919,59 @@ export function NetworkMetricsPanel({
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No endpoint telemetry</strong>
-                <span>Endpoint comparison appears after tunnel telemetry is retained.</span>
+                <span>
+                  Endpoint comparison appears after tunnel telemetry is
+                  retained.
+                </span>
               </div>
             )}
           </div>
         </section>
 
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-network-overlays-title">
+        <section
+          className="dashboardSection observabilityGroupSection"
+          aria-labelledby="observability-network-overlays-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-network-overlays-title">Network review signals</h2>
-              <span>Derived from unhealthy observations, latency or adapter state, and OSPF cost changes.</span>
+              <h2 id="observability-network-overlays-title">
+                Network review signals
+              </h2>
+              <span>
+                Derived from unhealthy observations, latency or adapter state,
+                and OSPF cost changes.
+              </span>
             </div>
           </div>
-          <div className="observabilityOverlayList" aria-label="Network metrics review signals">
+          <div
+            className="observabilityOverlayList"
+            aria-label="Network metrics review signals"
+          >
             {overlays.map((overlay) => (
-              <div className={`observabilityOverlayRow ${overlay.severity}`} key={overlay.key}>
-                <span>{overlay.source}</span>
-                <strong>{overlay.label}</strong>
-                <small>{overlay.detail}</small>
+              <div
+                className={`observabilityOverlayRow ${overlay.severity}`}
+                key={overlay.key}
+                title={`${overlay.source}: ${overlay.label}. ${overlay.detail}`}
+              >
+                <span title={`Review signal source: ${overlay.source}`}>
+                  {overlay.source}
+                </span>
+                <strong
+                  title={`${overlay.severity} network review signal: ${overlay.label}`}
+                >
+                  {overlay.label}
+                </strong>
+                <small title={overlay.detail}>{overlay.detail}</small>
               </div>
             ))}
             {!overlays.length && (
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No review signals</strong>
-                <span>No unhealthy observations, degraded declared endpoints, or OSPF cost changes are present.</span>
+                <span>
+                  No unhealthy observations, degraded declared endpoints, or
+                  OSPF cost changes are present.
+                </span>
               </div>
             )}
           </div>
@@ -829,24 +1048,35 @@ function NetworkChartCard({
   valueFormatter: (value: number | null) => string;
 }) {
   return (
-    <article className="dashboardCurveCard">
-      <div className="dashboardChartHeader">
-        <span>{title}</span>
-        <small>
+    <article className="dashboardCurveCard" title={`${title}: ${definition}`}>
+      <div
+        className="dashboardChartHeader"
+        title={`${title} retained measurement coverage`}
+      >
+        <span title={definition}>{title}</span>
+        <small
+          title={
+            observedPoints
+              ? `${observedPoints} retained measurements across ${times.length} timestamps`
+              : emptyLabel
+          }
+        >
           {observedPoints
             ? `${observedPoints} measurement${observedPoints === 1 ? "" : "s"} · ${times.length} timestamp${times.length === 1 ? "" : "s"}`
             : "No measurements"}
         </small>
       </div>
       <p className="observabilityRangeLine">
-        Time filter: retained evidence · Window: {evidence.windowLabel} · Last sample: {evidence.lastSampleLabel}
+        Time filter: retained evidence · Window: {evidence.windowLabel} · Last
+        sample: {evidence.lastSampleLabel}
       </p>
       <p className="observabilityMetricDefinition" title={definition}>
         Metric definition: {definition}
       </p>
       {evidence.isSparse && (
         <p className="observabilitySparseNotice">
-          Sparse data: {evidence.pointLabel}. This chart shows points only; do not read it as a continuous trend.
+          Sparse data: {evidence.pointLabel}. This chart shows points only; do
+          not read it as a continuous trend.
         </p>
       )}
       {throughputBenchmark ? (
@@ -854,8 +1084,9 @@ function NetworkChartCard({
           aria-label="Network throughput benchmark"
           className="observabilitySparseNotice"
         >
-          Average throughput {formatMetric(throughputBenchmark.throughputMbps)} Mbps ·
-          expected {formatMetric(throughputBenchmark.configuredBandwidthMbps)} Mbps ·{" "}
+          Average throughput {formatMetric(throughputBenchmark.throughputMbps)}{" "}
+          Mbps · expected{" "}
+          {formatMetric(throughputBenchmark.configuredBandwidthMbps)} Mbps ·{" "}
           {throughputBenchmark.status} · sample{" "}
           {throughputBenchmark.latestObservedAt
             ? formatCompactTime(throughputBenchmark.latestObservedAt)
@@ -918,12 +1149,20 @@ function throughputRatio(
         recommendation.configured_bandwidth_mbps;
 }
 
-function MetricTile({ detail, label, value }: { detail: string; label: string; value: string }) {
+function MetricTile({
+  detail,
+  label,
+  value,
+}: {
+  detail: string;
+  label: string;
+  value: string;
+}) {
   return (
-    <div className="metricCard">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
+    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
+      <span title={label}>{label}</span>
+      <strong title={`${label}: ${value}`}>{value}</strong>
+      <small title={detail}>{detail}</small>
     </div>
   );
 }
@@ -946,20 +1185,35 @@ function EndpointRow({
   const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
   const reachability = formatReachabilityObservation(observation);
   return (
-    <div className="observabilityEndpointRow" role="row">
-      <strong role="cell">
+    <div
+      className="observabilityEndpointRow"
+      role="row"
+      title={`${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}; ${tunnel.plan_name ?? tunnel.interface}; ${formatEndpointRuntime(tunnel)}; ${reachability}; ${traffic}`}
+    >
+      <strong
+        role="cell"
+        title={`Endpoint ${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}`}
+      >
         <span aria-hidden="true" className="observabilityEndpointMobileLabel">
           Endpoint
         </span>
-        <span>{endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}</span>
+        <span>
+          {endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)}
+        </span>
       </strong>
-      <span role="cell">
+      <span
+        role="cell"
+        title={`Declared plan or interface: ${tunnel.plan_name ?? tunnel.interface}`}
+      >
         <span aria-hidden="true" className="observabilityEndpointMobileLabel">
           Plan / interface
         </span>
         <span>{tunnel.plan_name ?? tunnel.interface}</span>
       </span>
-      <span role="cell">
+      <span
+        role="cell"
+        title={`Latest reported tunnel runtime: ${formatEndpointRuntime(tunnel)}`}
+      >
         <span aria-hidden="true" className="observabilityEndpointMobileLabel">
           Runtime
         </span>
@@ -974,7 +1228,10 @@ function EndpointRow({
         </span>
         <span>{reachability}</span>
       </span>
-      <span role="cell">
+      <span
+        role="cell"
+        title={`Cumulative reported tunnel counters: ${traffic}`}
+      >
         <span aria-hidden="true" className="observabilityEndpointMobileLabel">
           Traffic
         </span>
@@ -1014,7 +1271,8 @@ function buildObservationChart(
     ),
     values: times.map(
       (time) =>
-        group.find(({ observation }) => observation.observed_at === time)?.measurement ?? null,
+        group.find(({ observation }) => observation.observed_at === time)
+          ?.measurement ?? null,
     ),
   }));
   return {
@@ -1049,20 +1307,39 @@ function buildMetricGroups(
   return Array.from(grouped.entries())
     .map(([key, group]) => {
       const trend = group[0] ?? null;
-      const relatedObservations = observations.filter((observation) => observationGroupKey(observation) === key);
-      const relatedTunnels = tunnels.filter((tunnel) => tunnelGroupKey(tunnel) === key);
-      const trendSampleCount = group.reduce((total, item) => total + item.sample_count, 0);
+      const relatedObservations = observations.filter(
+        (observation) => observationGroupKey(observation) === key,
+      );
+      const relatedTunnels = tunnels.filter(
+        (tunnel) => tunnelGroupKey(tunnel) === key,
+      );
+      const trendSampleCount = group.reduce(
+        (total, item) => total + item.sample_count,
+        0,
+      );
       return {
         degradedCount: group.length
           ? group.reduce((total, item) => total + item.degraded_count, 0)
-          : relatedObservations.filter((observation) => observation.healthy === false).length,
+          : relatedObservations.filter(
+              (observation) => observation.healthy === false,
+            ).length,
         endpointCount: new Set([
-          ...group.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
-          ...relatedObservations.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
-          ...relatedTunnels.flatMap((item) => [item.client_id, item.peer_client_id].filter(Boolean)),
+          ...group.flatMap((item) =>
+            [item.client_id, item.peer_client_id].filter(Boolean),
+          ),
+          ...relatedObservations.flatMap((item) =>
+            [item.client_id, item.peer_client_id].filter(Boolean),
+          ),
+          ...relatedTunnels.flatMap((item) =>
+            [item.client_id, item.peer_client_id].filter(Boolean),
+          ),
         ]).size,
         key,
-        label: trend?.plan_name ?? relatedObservations[0]?.plan_name ?? relatedTunnels[0]?.plan_name ?? "Declared tunnel",
+        label:
+          trend?.plan_name ??
+          relatedObservations[0]?.plan_name ??
+          relatedTunnels[0]?.plan_name ??
+          "Declared tunnel",
         latestObservedAt: latestTime([
           ...group.map((item) => item.latest_observed_at),
           ...relatedObservations.map((item) => item.observed_at),
@@ -1070,18 +1347,30 @@ function buildMetricGroups(
         ]),
         lossRatio:
           weightedTrendMetric(group, (item) => item.packet_loss_avg_ratio) ??
-          averageMetric(relatedObservations.map((item) => item.packet_loss_ratio)),
-        peerLabel: endpointPairLabel(group, relatedObservations, relatedTunnels),
+          averageMetric(
+            relatedObservations.map((item) => item.packet_loss_ratio),
+          ),
+        peerLabel: endpointPairLabel(
+          group,
+          relatedObservations,
+          relatedTunnels,
+        ),
         sampleCount: trendSampleCount || relatedObservations.length,
         throughputMbps:
           weightedTrendMetric(group, (item) => item.throughput_avg_mbps) ??
-          averageMetric(relatedObservations.map((item) => item.throughput_mbps)),
+          averageMetric(
+            relatedObservations.map((item) => item.throughput_mbps),
+          ),
         latencyMs:
           weightedTrendMetric(group, (item) => item.latency_avg_ms) ??
           averageMetric(relatedObservations.map((item) => item.latency_avg_ms)),
       };
     })
-    .sort((left, right) => (right.degradedCount - left.degradedCount) || left.label.localeCompare(right.label));
+    .sort(
+      (left, right) =>
+        right.degradedCount - left.degradedCount ||
+        left.label.localeCompare(right.label),
+    );
 }
 
 function latestReachabilityObservations(
@@ -1136,17 +1425,15 @@ function buildOverlayRows(
       severity: "critical" as const,
       source: "Unhealthy observation",
     }));
-  const tunnelRows = tunnels
-    .filter(isTunnelRuntimeDegraded)
-    .map((tunnel) => {
-      return {
-        detail: `${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)} ${tunnel.interface}: ${formatEndpointRuntime(tunnel)}`,
-        key: `tunnel:${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`,
-        label: tunnel.plan_name ?? tunnel.interface,
-        severity: "critical" as const,
-        source: "Declared endpoint degraded",
-      };
-    });
+  const tunnelRows = tunnels.filter(isTunnelRuntimeDegraded).map((tunnel) => {
+    return {
+      detail: `${endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id)} ${tunnel.interface}: ${formatEndpointRuntime(tunnel)}`,
+      key: `tunnel:${tunnel.client_id}:${tunnel.interface}:${tunnel.observed_at}`,
+      label: tunnel.plan_name ?? tunnel.interface,
+      severity: "critical" as const,
+      source: "Declared endpoint degraded",
+    };
+  });
   const ospfRows = recommendations
     .filter((recommendation) => recommendation.cost_delta !== 0)
     .map((recommendation) => ({
@@ -1161,8 +1448,9 @@ function buildOverlayRows(
 
 function isTunnelRuntimeDegraded(tunnel: TelemetryTunnelRecord): boolean {
   return (
-    tunnel.operstate !== null && tunnel.operstate !== "up" ||
-    tunnel.adapter_health?.configured === true && tunnel.adapter_health.success === false ||
+    (tunnel.operstate !== null && tunnel.operstate !== "up") ||
+    (tunnel.adapter_health?.configured === true &&
+      tunnel.adapter_health.success === false) ||
     Boolean(tunnel.traffic_status && tunnel.traffic_status !== "ok")
   );
 }
@@ -1188,7 +1476,10 @@ function tunnelGroupKey(tunnel: TelemetryTunnelRecord): string {
   return tunnel.plan_id ?? "";
 }
 
-function observationGroupLabel(key: string, group: NetworkObservationRecord[]): string {
+function observationGroupLabel(
+  key: string,
+  group: NetworkObservationRecord[],
+): string {
   const first = group[0] ?? null;
   return first?.plan_name ?? first?.interface_name ?? key;
 }
@@ -1220,9 +1511,13 @@ function endpointPairLabel(
   const observation =
     observations.find((item) => item.peer_client_id) ?? observations[0] ?? null;
   if (observation) {
-    return endpointDirectionLabel(observation.client_id, observation.peer_client_id);
+    return endpointDirectionLabel(
+      observation.client_id,
+      observation.peer_client_id,
+    );
   }
-  const tunnel = tunnels.find((item) => item.peer_client_id) ?? tunnels[0] ?? null;
+  const tunnel =
+    tunnels.find((item) => item.peer_client_id) ?? tunnels[0] ?? null;
   if (tunnel) {
     return endpointDirectionLabel(tunnel.client_id, tunnel.peer_client_id);
   }
@@ -1231,7 +1526,8 @@ function endpointPairLabel(
 
 function averageMetric(values: Array<number | null>): number | null {
   const measured = values.filter(
-    (value): value is number => typeof value === "number" && Number.isFinite(value),
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value),
   );
   return measured.length
     ? measured.reduce((total, value) => total + value, 0) / measured.length
@@ -1246,7 +1542,8 @@ function weightedTrendMetric(
   let weightTotal = 0;
   for (const trend of trends) {
     const measurement = value(trend);
-    if (typeof measurement !== "number" || !Number.isFinite(measurement)) continue;
+    if (typeof measurement !== "number" || !Number.isFinite(measurement))
+      continue;
     const weight = Math.max(1, trend.sample_count);
     weightedTotal += measurement * weight;
     weightTotal += weight;
@@ -1305,12 +1602,18 @@ function formatNullableMetric(value: number | null, unit: string): string {
 }
 
 function formatLoss(value: number | null | undefined): string {
-  return value === null || value === undefined ? "No measurement" : `${formatMetric(value * 100)}%`;
+  return value === null || value === undefined
+    ? "No measurement"
+    : `${formatMetric(value * 100)}%`;
 }
 
 function formatMetric(value: number): string {
   if (!Number.isFinite(value)) return "No measurement";
-  return value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1) : value.toFixed(2);
+  return value >= 100
+    ? value.toFixed(0)
+    : value >= 10
+      ? value.toFixed(1)
+      : value.toFixed(2);
 }
 
 function buildNetworkEvidence(
@@ -1328,7 +1631,9 @@ function buildNetworkEvidence(
   return {
     isSparse: chart.observedPoints > 0 && chart.observedPoints <= 3,
     isStale: Number.isFinite(latestMs) && Date.now() - latestMs > staleMs,
-    lastSampleLabel: latestEvidence ? formatCompactTime(latestEvidence) : "No samples",
+    lastSampleLabel: latestEvidence
+      ? formatCompactTime(latestEvidence)
+      : "No samples",
     pointLabel:
       chart.observedPoints === totalPossiblePoints
         ? `${chart.observedPoints} measured point${chart.observedPoints === 1 ? "" : "s"}`
@@ -1354,7 +1659,9 @@ function evidenceWindowSummary(
   if (!Number.isFinite(durationMs)) {
     return "Invalid timestamps";
   }
-  return durationMs > 0 ? `${formatDuration(durationMs)} retained` : "Single timestamp";
+  return durationMs > 0
+    ? `${formatDuration(durationMs)} retained`
+    : "Single timestamp";
 }
 
 function formatDuration(valueMs: number): string {
@@ -1373,13 +1680,20 @@ function endpointDirectionLabel(
   return `${clientId} -> ${peerClientId ?? "peer not reported"}`;
 }
 
-function observationDirectionLabel(observation: NetworkObservationRecord): string {
-  return endpointDirectionLabel(observation.client_id, observation.peer_client_id);
+function observationDirectionLabel(
+  observation: NetworkObservationRecord,
+): string {
+  return endpointDirectionLabel(
+    observation.client_id,
+    observation.peer_client_id,
+  );
 }
 
 function formatEndpointRuntime(tunnel: TelemetryTunnelRecord): string {
   const ownership = readableNetworkToken(tunnel.ownership_mode);
-  const operstate = tunnel.operstate ? readableNetworkToken(tunnel.operstate) : null;
+  const operstate = tunnel.operstate
+    ? readableNetworkToken(tunnel.operstate)
+    : null;
   return operstate ? `${ownership}; ${operstate}` : ownership;
 }
 

@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
 import {
   activate,
+  expectPrivilegeVerifiedForViewport,
   lockPrivilegeFromVault,
   openConsoleSubpage,
   unlockPrivilegeFromTop,
@@ -162,9 +163,7 @@ test("submits the privilege unlock form with Enter", async ({
   await verifier.press("Enter");
 
   await expect(dialog).toBeHidden();
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await expect(
     page.locator(".topbar").getByRole("button", { name: "Lock privilege" }),
   ).toHaveCount(0);
@@ -182,9 +181,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
 
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   const storedGrant = await page.evaluate(() => {
     const raw = window.localStorage.getItem("vpsman.privilegeGrant");
     return raw ? (JSON.parse(raw) as Record<string, unknown>) : null;
@@ -206,9 +203,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
 
   await page.reload();
   await waitForConsoleShell(page);
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await expect
     .poll(async () =>
       page.evaluate(() => {
@@ -245,9 +240,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
     .toBe(true);
   await activate(prompt.getByRole("button", { name: "Cancel" }));
   await expect(vault.getByRole("button", { name: "Lock now" })).toBeVisible();
-  await expect(
-    page.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   expect(
     await page.evaluate(() =>
       window.localStorage.getItem("vpsman.privilegeGrant"),
@@ -258,9 +251,7 @@ test("restores a persistent verified unlock after refresh and confirms before lo
   await installConsoleApiMock(peerPage);
   await peerPage.goto("/");
   await waitForConsoleShell(peerPage);
-  await expect(
-    peerPage.getByLabel("Privilege verified for this browser"),
-  ).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(peerPage);
 
   await lockPrivilegeFromVault(page);
   expect(
@@ -689,10 +680,13 @@ test("shows the effective agent update policy without inferring from optional TO
   await expect(manifestUrl).toHaveValue(
     "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
   );
-  await expect(manifestUrl).toHaveAttribute(
+  await expect(manifestUrl).not.toHaveAttribute("title", /.+/);
+  const manifestUrlLabel = manifestUrl.locator("..");
+  await expect(manifestUrlLabel).toHaveAttribute(
     "title",
-    "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
+    /value is intentionally omitted from tooltips/i,
   );
+  await expect(manifestUrlLabel).not.toHaveAttribute("title", /https?:\/\//i);
   await expect(composer).toContainText(
     "stages its newer architecture-specific artifact without activating or restarting it",
   );
@@ -755,15 +749,17 @@ test("uses persisted terminal-open evidence when retained audit rows are insuffi
   await expect(
     terminalGrid.getByLabel("Selected terminal session evidence"),
   ).toHaveCount(0);
-  const terminalRecord = terminalGrid
-    .locator(".gridBody [role=row], .gridMobileCard")
-    .filter({ hasText: "61616161" })
-    .first();
+  const terminalRecords = terminalGrid.locator(
+    ".gridBody [role=row], .gridMobileCard",
+  );
+  await expect(terminalRecords).toHaveCount(1);
+  const terminalRecord = terminalRecords.first();
   await terminalRecord.click();
   await expect(terminalRecord).toHaveAttribute("aria-expanded", "true");
   const detail = terminalGrid
     .locator(".gridExpandedRow")
     .getByLabel("Selected terminal session evidence");
+  await expect(detail).toContainText("61616161");
   await expect(detail).toContainText("2030");
   await expect(detail).not.toContainText("Open time unavailable");
 });

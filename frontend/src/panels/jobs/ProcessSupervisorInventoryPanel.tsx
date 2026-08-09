@@ -478,7 +478,9 @@ export function ProcessSupervisorInventoryPanel({
               const observedStateDetail = `${processTimingEvidence(row).observedLabel}; ${state.detail}`;
               return (
                 <>
-                  <span className={`status ${state.tone}`}>{state.label}</span>
+                  <span className={`status ${state.tone}`} title={state.detail}>
+                    {state.label}
+                  </span>
                   <small title={observedStateDetail}>{formatCompactHealthEvidence(row)}</small>
                 </>
               );
@@ -495,8 +497,8 @@ export function ProcessSupervisorInventoryPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong>{formatCpuPrimary(row)}</strong>
-            <small>{formatCpuSecondary(row)}</small>
+            <strong title={formatCpuTooltip(row)}>{formatCpuPrimary(row)}</strong>
+            <small title={formatCpuTooltip(row)}>{formatCpuSecondary(row)}</small>
           </span>
         ),
         header: "CPU",
@@ -509,8 +511,8 @@ export function ProcessSupervisorInventoryPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong>{formatMemoryPrimary(row)}</strong>
-            <small>{formatProcessCardinality(row)}</small>
+            <strong title={formatMemoryTooltip(row)}>{formatMemoryPrimary(row)}</strong>
+            <small title={formatMemoryTooltip(row)}>{formatProcessCardinality(row)}</small>
           </span>
         ),
         header: "Memory",
@@ -588,7 +590,14 @@ export function ProcessSupervisorInventoryPanel({
         </div>
         <div className="headerActionStack">
           <div className="processHeaderActions">
-            <label className="processTargetPicker">
+            <label
+              className="processTargetPicker"
+              title={
+                agents.length === 0
+                  ? "No VPS is available in the current fleet scope."
+                  : "Focus managed-process inventory and actions on one VPS."
+              }
+            >
               <span>VPS focus</span>
               <VpsCombobox
                 agents={agents}
@@ -601,6 +610,9 @@ export function ProcessSupervisorInventoryPanel({
             </label>
             <button
               className="primaryAction compactAction"
+              data-tooltip-disabled-reason={
+                focusedAgent ? undefined : "Choose one VPS before starting a managed process."
+              }
               disabled={!focusedAgent}
               onClick={() =>
                 focusedAgent &&
@@ -622,6 +634,15 @@ export function ProcessSupervisorInventoryPanel({
             </button>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading
+                  ? "Process inventory is still loading."
+                  : actionPending
+                    ? "Wait for the current process action to finish."
+                    : scopedAgents.length === 0
+                      ? "No VPS is available in the current scope."
+                      : undefined
+              }
               disabled={loading || actionPending || scopedAgents.length === 0}
               onClick={() => void refreshProcessStatus()}
               title={
@@ -653,23 +674,32 @@ export function ProcessSupervisorInventoryPanel({
         </div>
       ) : null}
       <div className="processSupervisorSummaryStrip" aria-label="Process supervisor health summary">
-        <span>
+        <span title={`${formatLowerBoundCount(runningCount, inventoryTruncated)} of ${scopedInventory.length} loaded managed processes are observed running.`}>
           <strong>{formatLowerBoundCount(runningCount, inventoryTruncated)} / {scopedInventory.length}</strong>
           <small>{inventoryTruncated ? "Observed running in loaded page" : "Observed running"}</small>
         </span>
-        <span className={desiredOnlyLimitCount > 0 ? "attention" : undefined}>
+        <span
+          className={desiredOnlyLimitCount > 0 ? "attention" : undefined}
+          title={`${formatLowerBoundCount(desiredOnlyLimitCount, inventoryTruncated)} loaded processes have requested limits that are not fully enforced.`}
+        >
           <strong>{formatLowerBoundCount(desiredOnlyLimitCount, inventoryTruncated)}</strong>
           <small>{inventoryTruncated ? "Desired-only limits in loaded page" : "Desired-only limits"}</small>
         </span>
-        <span className={restartedCount > 0 ? "attention" : undefined}>
+        <span
+          className={restartedCount > 0 ? "attention" : undefined}
+          title={`${formatLowerBoundCount(restartedCount, inventoryTruncated)} loaded processes report automatic restart attempts.`}
+        >
           <strong>{formatLowerBoundCount(restartedCount, inventoryTruncated)}</strong>
           <small>{inventoryTruncated ? "With restarts in loaded page" : "With automatic restarts"}</small>
         </span>
-        <span>
+        <span title={`${formatBytes(retainedMemoryBytes)} current cgroup memory is reported across loaded processes.`}>
           <strong>{formatBytes(retainedMemoryBytes)}</strong>
           <small>{inventoryTruncated ? "Cgroup memory in loaded page" : "Cgroup memory"}</small>
         </span>
-        <span className={chronologyWarningCount > 0 ? "attention" : undefined}>
+        <span
+          className={chronologyWarningCount > 0 ? "attention" : undefined}
+          title={`${formatLowerBoundCount(chronologyWarningCount, inventoryTruncated)} loaded processes have inconsistent or invalid chronology evidence.`}
+        >
           <strong>
             {inventoryTruncated
               ? formatLowerBoundCount(chronologyWarningCount, true)
@@ -677,7 +707,7 @@ export function ProcessSupervisorInventoryPanel({
           </strong>
           <small>{inventoryTruncated ? "Chronology warnings in loaded page" : "Chronology"}</small>
         </span>
-        <span>
+        <span title={`${formatLowerBoundCount(logBackedCount, inventoryTruncated)} loaded processes retain stdout or stderr log paths.`}>
           <strong>{formatLowerBoundCount(logBackedCount, inventoryTruncated)}</strong>
           <small>{inventoryTruncated ? "With log paths in loaded page" : "With log paths"}</small>
         </span>
@@ -799,7 +829,7 @@ export function ProcessSupervisorInventoryPanel({
               <span>Timeline detail</span>
               <strong>{processTimingEvidence(row).detail}</strong>
               <span>Resource snapshot</span>
-              <strong>{formatResourceSecondary(row)}</strong>
+              <strong title={formatResourceTooltip(row)}>{formatResourceSecondary(row)}</strong>
               <span>Automatic restart attempts</span>
               <strong>{processRestartEvidence(row).primary}</strong>
               <span>Last exit</span>
@@ -809,9 +839,31 @@ export function ProcessSupervisorInventoryPanel({
               <span>Process exit code</span>
               <strong>{row.process_exit_code ?? "No exit reported"}</strong>
               <span>stdout log</span>
-              <strong className="processEvidenceValue" title={row.stdout_log ?? undefined}>{row.stdout_log ?? "Not reported"}</strong>
+              <strong
+                className="processEvidenceValue"
+                data-tooltip-sensitive={row.stdout_log ? "true" : undefined}
+                data-value-tooltip-skip={row.stdout_log ? "true" : undefined}
+                title={
+                  row.stdout_log
+                    ? "Retained stdout log content is shown here; its exact value is excluded from tooltips."
+                    : "No retained stdout log content was reported."
+                }
+              >
+                {row.stdout_log ?? "Not reported"}
+              </strong>
               <span>stderr log</span>
-              <strong className="processEvidenceValue" title={row.stderr_log ?? undefined}>{row.stderr_log ?? "Not reported"}</strong>
+              <strong
+                className="processEvidenceValue"
+                data-tooltip-sensitive={row.stderr_log ? "true" : undefined}
+                data-value-tooltip-skip={row.stderr_log ? "true" : undefined}
+                title={
+                  row.stderr_log
+                    ? "Retained stderr log content is shown here; its exact value is excluded from tooltips."
+                    : "No retained stderr log content was reported."
+                }
+              >
+                {row.stderr_log ?? "Not reported"}
+              </strong>
               <span>Started</span>
               <strong>{formatUnixTime(row.started_unix)}</strong>
               <span>Observed</span>
@@ -1023,8 +1075,27 @@ function formatCpuSecondary(row: ProcessSupervisorInventoryRecord): string {
     : formatCompactLimitEvidence(row.limit_effectiveness_status);
 }
 
+function formatCpuTooltip(row: ProcessSupervisorInventoryRecord): string {
+  return row.cgroup_cpu_weight !== null
+    ? `Reported cgroup CPU weight ${row.cgroup_cpu_weight}; ${formatLimitEvidence(row.limit_effectiveness_status)}.`
+    : `No cgroup CPU weight was reported; ${formatLimitEvidence(row.limit_effectiveness_status)}.`;
+}
+
 function formatMemoryPrimary(row: ProcessSupervisorInventoryRecord): string {
   return row.cgroup_memory_current_bytes !== null ? formatBytes(row.cgroup_memory_current_bytes) : "No data";
+}
+
+function formatMemoryTooltip(row: ProcessSupervisorInventoryRecord): string {
+  const memory = row.cgroup_memory_current_bytes !== null
+    ? `${formatBytes(row.cgroup_memory_current_bytes)} current cgroup memory`
+    : "No current cgroup memory was reported";
+  const processes = row.cgroup_process_count !== null
+    ? `${row.cgroup_process_count} cgroup process${row.cgroup_process_count === 1 ? "" : "es"}`
+    : "cgroup process count not reported";
+  const pids = row.cgroup_pids_current !== null
+    ? `${row.cgroup_pids_current} current PID${row.cgroup_pids_current === 1 ? "" : "s"}`
+    : "current PID count not reported";
+  return `${memory}; ${processes}; ${pids}.`;
 }
 
 function formatProcessCardinality(row: ProcessSupervisorInventoryRecord): string {
@@ -1043,6 +1114,10 @@ function formatResourceSecondary(row: ProcessSupervisorInventoryRecord): string 
     row.cgroup_status ? `cgroup ${row.cgroup_status.replace(/_/g, " ")}` : "cgroup -",
   ];
   return parts.join("; ");
+}
+
+function formatResourceTooltip(row: ProcessSupervisorInventoryRecord): string {
+  return `${formatCpuTooltip(row)} ${formatMemoryTooltip(row)} Cgroup status ${row.cgroup_status?.replace(/_/g, " ") ?? "not reported"}.`;
 }
 
 function formatSourceCommand(value: string): string {

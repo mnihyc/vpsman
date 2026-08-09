@@ -756,7 +756,7 @@ export function ConfigurationSourcesPanel({
         cell: (source) => (
           <span
             className={`status ${syncTone(source.runtime_sync.state)}`}
-            title={source.runtime_sync.reason}
+            title={`Runtime synchronization state: ${tokenLabel(source.runtime_sync.state)}.${source.runtime_sync.state === "failed" ? " Exact persisted agent error content is excluded from tooltips." : ""}`}
           >
             {tokenLabel(source.runtime_sync.state)}
           </span>
@@ -1074,6 +1074,11 @@ export function ConfigurationSourcesPanel({
               onClick={() =>
                 void runPanelAction(setPending, setActionError, onRefresh)
               }
+              title={
+                loading || pending
+                  ? "Wait for the current configuration source request to finish"
+                  : "Refresh configuration source presets, assignments, and effective evidence"
+              }
               type="button"
             >
               <RefreshCw size={15} />
@@ -1282,8 +1287,18 @@ export function ConfigurationSourcesPanel({
               void reviewOverride(effectiveAssignPresetId ? "set" : "reset");
             }}
           >
-            <fieldset className="configurationDrawerFields" disabled={pending}>
-              <strong>Choose behavior and preset</strong>
+            <fieldset
+              className="configurationDrawerFields"
+              disabled={pending}
+              title={
+                pending
+                  ? "Assignment fields are disabled while the reviewed configuration request is pending"
+                  : "Choose a behavior, preset, and exact VPS target scope"
+              }
+            >
+              <strong title="Choose the configuration behavior and source preset to assign">
+                Choose behavior and preset
+              </strong>
               <div className="formRow">
                 <label>
                   <span>Behavior</span>
@@ -1311,6 +1326,7 @@ export function ConfigurationSourcesPanel({
                       <button
                         className="linkButton"
                         onClick={() => openCreate(assignBehavior)}
+                        title={`Create an alternative ${behaviorLabel(assignBehavior)} preset`}
                         type="button"
                       >
                         create a preset
@@ -1455,6 +1471,11 @@ export function ConfigurationSourcesPanel({
                   onClick={() =>
                     void inspectEffectiveConfig(directTargetIds[0])
                   }
+                  title={
+                    pending
+                      ? "Wait for the current configuration assignment request to finish"
+                      : `Inspect the current effective configuration for ${reviewedVpsLabel(directTargetIds[0], agentById, vpsNameDisplayMode)}`
+                  }
                   type="button"
                 >
                   Inspect current effective config
@@ -1482,7 +1503,9 @@ export function ConfigurationSourcesPanel({
                   </span>
                   <textarea
                     aria-label="Effective agent config TOML"
+                    data-tooltip-sensitive="true"
                     readOnly
+                    title="Effective agent configuration; TOML content is excluded from tooltips"
                     value={renderedConfig.toml}
                   />
                 </details>
@@ -1498,7 +1521,15 @@ export function ConfigurationSourcesPanel({
             className="compactForm structuredDefinitionForm"
             onSubmit={submitPresetEditor}
           >
-            <fieldset className="configurationDrawerFields" disabled={pending}>
+            <fieldset
+              className="configurationDrawerFields"
+              disabled={pending}
+              title={
+                pending
+                  ? "Preset fields are disabled while the reviewed configuration request is pending"
+                  : `${drawerTitle(drawer)} fields`
+              }
+            >
               {drawer.kind === "create" ? (
                 <span className="formHint">
                   Create a reusable alternative for one behavior. VPSs keep
@@ -1547,6 +1578,11 @@ export function ConfigurationSourcesPanel({
                           setEditorBehavior(behavior);
                           replaceEditorDefinition(defaultDefinition(behavior));
                         }}
+                        title={
+                          drawer.kind === "edit"
+                            ? "Preset behavior is immutable after creation; clone the preset to use another behavior"
+                            : "Behavior whose configuration fields this preset supplies"
+                        }
                         value={editorBehavior}
                       >
                         {BEHAVIORS.map((behavior) => (
@@ -1562,6 +1598,11 @@ export function ConfigurationSourcesPanel({
                         aria-label="Preset name"
                         disabled={drawer.kind === "edit"}
                         onChange={(event) => setEditorName(event.target.value)}
+                        title={
+                          drawer.kind === "edit"
+                            ? "Preset name is immutable after creation; clone the preset to choose another name"
+                            : "Unique operator-facing preset name"
+                        }
                         value={editorName}
                       />
                     </label>
@@ -1611,13 +1652,24 @@ export function ConfigurationSourcesPanel({
               <button
                 className="primaryAction"
                 disabled={pending || !editorName.trim()}
+                title={
+                  pending
+                    ? "Wait for the current configuration request to finish"
+                    : !editorName.trim()
+                      ? "Enter a preset name before continuing"
+                      : drawer.kind === "create"
+                        ? "Create this reusable configuration preset"
+                        : drawer.kind === "clone"
+                          ? "Create a new preset from the copied definition"
+                          : "Review the preset definition update before applying it"
+                }
                 type="submit"
               >
                 {drawer.kind === "create"
                   ? "Create preset"
                   : drawer.kind === "clone"
                     ? "Clone preset"
-                  : "Review preset update"}
+                    : "Review preset update"}
               </button>
               {renderConfirmationPrompt(presetConfirmationOpen)}
             </fieldset>
@@ -1821,10 +1873,11 @@ function PresetDefinitionEditor({
           onChange={(value) => onTextDraftChange("environment_keep", value)}
           value={textDrafts.environment_keep ?? ""}
         />
-        <label>
+        <label title="Command environment value editor; values are excluded from tooltips">
           <span>Environment values (KEY=value, one per line)</span>
           <textarea
             aria-label="Command environment values"
+            data-tooltip-sensitive="true"
             onChange={(event) =>
               onTextDraftChange("environment_set", event.target.value)
             }
@@ -1893,7 +1946,6 @@ function PresetDefinitionEditor({
         />
       ) : null}
 
-
       {behavior === "latency_probe" && source === "configured_ping_argv" ? (
         <ArgvField
           label="Ping arguments"
@@ -1952,10 +2004,11 @@ function ArgvField({
   value: string;
 }) {
   return (
-    <label>
+    <label title={`${label} editor; command arguments are excluded from tooltips`}>
       <span>{label} (one argument per line)</span>
       <textarea
         aria-label={label}
+        data-tooltip-sensitive="true"
         onChange={(event) => onChange(event.target.value)}
         placeholder={"/absolute/path/to/executable\n--argument"}
         value={value}
@@ -1974,10 +2027,11 @@ function StringListField({
   value: string;
 }) {
   return (
-    <label>
+    <label title={`${label} editor; environment names are excluded from tooltips`}>
       <span>{label} (one per line)</span>
       <textarea
         aria-label={label}
+        data-tooltip-sensitive="true"
         onChange={(event) => onChange(event.target.value)}
         value={value}
       />

@@ -27,6 +27,8 @@ interface ScreenshotEntry {
   detailTab?: string;
   prepare?:
     | "alert-policy-editor"
+    | "audit-job-detail"
+    | "audit-session-detail"
     | "bulk-group-schedule-review"
     | "config-bulk-patch-preview"
     | "configuration-assignment-drawer"
@@ -893,6 +895,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Job evidence",
     heading: "Job audit evidence",
     id: "46-audit-job-evidence",
+    prepare: "audit-job-detail",
     requiredText: [
       "Job evidence ledger",
       "Selected job proof",
@@ -904,6 +907,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Sessions",
     heading: "Session evidence",
     id: "47-audit-sessions",
+    prepare: "audit-session-detail",
     requiredText: [
       "Terminal session evidence",
       "Operator session evidence",
@@ -1257,6 +1261,37 @@ async function navigateAndScreenshot(
     await expectSectionBelowToolbar(
       page.locator(".consoleDetailPanel", { hasText: "Create alert policy" }),
     );
+  }
+
+  if (entry.prepare === "audit-job-detail") {
+    const grid = page.getByLabel("Job evidence ledger data grid");
+    const record = grid
+      .locator(".gridBody [role=row], .gridMobileCard")
+      .filter({ hasText: "agent update" })
+      .first();
+    await expect(record).toBeVisible({ timeout: 5_000 });
+    await record.click();
+    const detail = grid.getByLabel("Selected job evidence detail");
+    await expect(detail).toContainText("Audit event missing", {
+      timeout: 5_000,
+    });
+    await scrollSectionBelowToolbar(detail);
+  }
+
+  if (entry.prepare === "audit-session-detail") {
+    const grid = page.getByLabel("Terminal session evidence data grid");
+    const record = grid
+      .locator(".gridBody [role=row], .gridMobileCard")
+      .filter({ hasText: "Stale state" })
+      .filter({ hasText: "Replayable transcript" })
+      .first();
+    await expect(record).toBeVisible({ timeout: 5_000 });
+    await record.click();
+    const detail = grid.getByLabel("Selected terminal session evidence");
+    await expect(
+      detail.getByLabel("Transcript references for selected session"),
+    ).toBeVisible({ timeout: 5_000 });
+    await scrollSectionBelowToolbar(detail);
   }
 
   if (entry.prepare === "fleet-delete-success") {
@@ -1634,14 +1669,22 @@ async function navigateAndScreenshot(
 
   if (entry.prepare === "vps-rules-preview") {
     await page
+      .getByLabel("VPS rules selector expression")
+      .fill("id:agent-sfo-01");
+    await expect(
+      page.getByText("Loaded 3 existing rules for agent-sfo-01", {
+        exact: true,
+      }),
+    ).toBeVisible({ timeout: 5_000 });
+    await page
       .getByRole("textbox", { name: "Reset day", exact: true })
-      .fill("14");
+      .fill("15");
     await page
       .getByRole("textbox", { name: "Total quota", exact: true })
       .fill("4TB");
     await page
       .getByRole("textbox", { name: "Interfaces / selectors", exact: true })
-      .fill("ens3, eth0+tx");
+      .fill("ens3, eth0+rx");
     await page.getByRole("button", { name: "Preview changes" }).click();
     await expect(page.getByLabel("Preview changes data grid")).toBeVisible({
       timeout: 5_000,

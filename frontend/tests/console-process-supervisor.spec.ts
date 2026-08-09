@@ -48,10 +48,14 @@ test("keeps host process scope and target routable while refreshing a read-only 
   await expect(inventory.getByText("sshd", { exact: true }).first()).toBeVisible();
   await expect(inventory.getByText("node", { exact: true }).first()).toBeVisible();
   await expect(inventory.getByText("146 MiB")).toBeVisible();
-  const command = inventory.getByTitle(
-    "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000",
+  const reportedCommand =
+    "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000";
+  const command = inventory.getByText(reportedCommand, { exact: true }).first();
+  await expect(command).toBeVisible();
+  await expect(command).toHaveAttribute(
+    "title",
+    "Process command reported by the selected host; arguments are intentionally omitted from the tooltip.",
   );
-  await expect(command.first()).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     await activate(
       inventory.getByLabel("Host process inventory mobile card 4242"),
@@ -273,40 +277,68 @@ test("refreshes process observations on every scoped VPS and reports partial fai
   await expect(inventory.getByText("Status refreshed from 2/3 VPS; 1 VPS did not complete successfully.")).toBeVisible();
 });
 
-test("reviews the exact process start command without exposing environment values", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "desktop covers process start review detail");
+test("reviews the exact process start command without exposing environment values", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "desktop covers process start review detail",
+  );
+
+  const argvTooltipSentinel = "argv-tooltip-secret-7e91";
+  const environmentTooltipSentinel = "environment-tooltip-secret-4b62";
+  const reviewedCommand = `/usr/bin/env sh -c 'printf ${argvTooltipSentinel}'`;
 
   await page.goto("/");
   await unlockPrivilegeFromTop(page);
   await openManagedProcesses(page);
 
-  const inventory = page.locator(".fleetPanel", { hasText: "Process supervisor inventory" });
+  const inventory = page.locator(".fleetPanel", {
+    hasText: "Process supervisor inventory",
+  });
   await expect(
     inventory.getByRole("button", { name: "Start process", exact: true }),
   ).toBeDisabled();
   await inventory.getByLabel("Process target VPS").fill("edge-sfo-01");
   await page.getByRole("option", { name: /edge-sfo-01/ }).click();
-  await activate(inventory.getByRole("button", { name: "Start process", exact: true }));
-  const composer = page.locator(".consoleDetailPanel", { hasText: "Process operation" });
+  await activate(
+    inventory.getByRole("button", { name: "Start process", exact: true }),
+  );
+  const composer = page.locator(".consoleDetailPanel", {
+    hasText: "Process operation",
+  });
   await expect(
     composer.getByLabel("Bulk target selector expression"),
   ).toHaveValue("id:agent-sfo-01");
   await composer.getByLabel("Supervisor process name").fill("report-worker");
-  await composer
-    .getByLabel("Supervisor command argv")
-    .fill("/usr/bin/env sh -c 'printf ready'");
+  await composer.getByLabel("Supervisor command argv").fill(reviewedCommand);
   await composer.getByLabel("Supervisor cwd").fill("/srv/reporting");
   await composer
     .getByLabel("Supervisor environment")
-    .fill("REGION=eu-west\nREPORT_TOKEN=must-not-render");
-  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
+    .fill(`REGION=eu-west\nREPORT_TOKEN=${environmentTooltipSentinel}`);
+  await activate(
+    composer.getByRole("button", { name: "Dispatch", exact: true }),
+  );
 
   const prompt = composer.getByLabel("Confirm job dispatch");
   await expect(prompt).toContainText("report-worker");
-  await expect(prompt).toContainText("/usr/bin/env sh -c 'printf ready'");
+  await expect(prompt).toContainText(reviewedCommand);
   await expect(prompt).toContainText("/srv/reporting");
   await expect(prompt).toContainText("REGION, REPORT_TOKEN (values hidden)");
-  await expect(prompt).not.toContainText("must-not-render");
+  await expect(prompt).not.toContainText(environmentTooltipSentinel);
+  const promptTitles = await prompt
+    .locator("[title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? ""),
+    );
+  expect(promptTitles.join("\n")).not.toContain(argvTooltipSentinel);
+  expect(promptTitles.join("\n")).not.toContain(environmentTooltipSentinel);
+  await expect(
+    prompt.locator("dd", { hasText: reviewedCommand }),
+  ).toHaveAttribute(
+    "title",
+    "Command argv is shown in this confirmation; its exact value is excluded from tooltips.",
+  );
 });
 
 test("uses the common process inventory grid on mobile", async ({ page }, testInfo) => {

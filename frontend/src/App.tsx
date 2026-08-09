@@ -48,7 +48,6 @@ import {
 } from "./utils";
 import { useDashboardData } from "./hooks/useDashboardData";
 import { useFleetViews } from "./hooks/useFleetViews";
-import { useValueTooltips } from "./useValueTooltips";
 import { parsePublicShareRouteHash } from "./publicShareRoute";
 import { agentDisplayState } from "./agentDisplayState";
 import type {
@@ -838,7 +837,6 @@ function releaseTargetId(target: ReleaseRouteTarget): string {
 }
 
 export function App() {
-  useValueTooltips();
   const initialRouteRef = useRef<ConsoleRouteState | null>(
     readConsoleRouteFromLocation(),
   );

@@ -43,9 +43,13 @@ export function RestoreArchiveTransferSelect({
           disabled={disabled || options.length === 0}
           onChange={(event) => onChange(event.target.value)}
           title={
-            selected
-              ? selected.path
-              : "Completed upload transfer whose bytes match the selected backup artifact"
+            disabled
+              ? "Archive selection is unavailable for this restore state"
+              : options.length === 0
+                ? emptyMessage
+                : selected
+                  ? selected.path
+                  : "Completed upload transfer whose bytes match the selected backup artifact"
           }
           value={selected ? selected.key : ""}
         >
@@ -68,7 +72,15 @@ export function RestoreArchiveTransferSelect({
           ))}
         </select>
       </label>
-      <div className="restoreArchiveSummary" aria-live="polite">
+      <div
+        className="restoreArchiveSummary"
+        aria-live="polite"
+        title={
+          selected
+            ? `${selected.path}; ${formatBytes(selected.sizeBytes)}; SHA-256 ${shortHash(selected.sha256Hex)}; observed ${formatTime(selected.observedAt)}`
+            : emptyMessage
+        }
+      >
         {selected ? (
           <>
             <div>
@@ -96,7 +108,9 @@ export function RestoreArchiveTransferSelect({
           </>
         ) : (
           <div className="restoreArchiveEmptyState">
-            <span className="restoreArchiveEmpty">{emptyMessage}</span>
+            <span className="restoreArchiveEmpty" title={emptyMessage}>
+              {emptyMessage}
+            </span>
             {onDownloadPackage || onOpenTransfers ? (
               <div className="restoreArchiveActions">
                 {onDownloadPackage ? (
@@ -104,7 +118,11 @@ export function RestoreArchiveTransferSelect({
                     className="secondaryAction"
                     disabled={pending}
                     onClick={onDownloadPackage}
-                    title="Download the selected backup package to this browser"
+                    title={
+                      pending
+                        ? "Wait for the current restore operation to finish"
+                        : "Download the selected backup package to this browser"
+                    }
                     type="button"
                   >
                     <Download size={15} />
@@ -116,7 +134,11 @@ export function RestoreArchiveTransferSelect({
                     className="secondaryAction"
                     disabled={pending}
                     onClick={onOpenTransfers}
-                    title="Open Remote / Transfers with the selected restore target"
+                    title={
+                      pending
+                        ? "Wait for the current restore operation to finish"
+                        : "Open Remote / Transfers with the selected restore target"
+                    }
                     type="button"
                   >
                     <Upload size={15} />

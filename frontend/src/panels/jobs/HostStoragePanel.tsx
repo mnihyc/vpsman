@@ -416,7 +416,16 @@ export function HostStoragePanel({
         </div>
         <div className="headerActionStack">
           <div className="processHeaderActions storageHeaderActions">
-            <label className="processTargetPicker">
+            <label
+              className="processTargetPicker"
+              title={
+                agents.length === 0
+                  ? "No VPS is available in the current fleet scope."
+                  : refreshing
+                    ? "The VPS cannot change while storage inventory is refreshing."
+                    : "Choose the VPS whose storage should be inspected."
+              }
+            >
               <span>VPS</span>
               <VpsCombobox
                 agents={agents}
@@ -433,6 +442,9 @@ export function HostStoragePanel({
             >
               <input
                 checked={route.includePseudoMounts}
+                data-tooltip-disabled-reason={
+                  refreshing ? "System-mount scope cannot change while storage inventory is refreshing." : undefined
+                }
                 disabled={refreshing}
                 onChange={(event) =>
                   updateRoute(route.clientId, event.currentTarget.checked)
@@ -443,6 +455,9 @@ export function HostStoragePanel({
             </label>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                refreshing ? "A storage inventory refresh is already running." : refreshUnavailable ?? undefined
+              }
               disabled={Boolean(refreshUnavailable) || refreshing}
               onClick={() => void refreshInventory()}
               title={
@@ -510,29 +525,41 @@ export function HostStoragePanel({
         aria-label="Storage inventory summary"
         className="processSupervisorSummaryStrip storageSummaryStrip"
       >
-        <span className={capability?.status !== "supported" ? "attention" : undefined}>
+        <span
+          className={capability?.status !== "supported" ? "attention" : undefined}
+          title={capability ? `${providerLabel(capability.provider)} capability is ${readableToken(capability.status)}.` : "The storage inventory provider has not been checked."}
+        >
           <strong title={capability?.provider_version ?? undefined}>
             {providerLabel(capability?.provider ?? null)}
           </strong>
           <small>Provider</small>
         </span>
-        <span>
+        <span title={`${formatBytes(rawDiskBytes)} raw capacity is reported across top-level disk devices.`}>
           <strong>{formatBytes(rawDiskBytes)}</strong>
           <small>Raw disks</small>
         </span>
-        <span>
+        <span title={`${mounts.length} mount records are included in the current snapshot view.`}>
           <strong>{mounts.length}</strong>
           <small>Mounts shown</small>
         </span>
-        <span className={readOnlyMounts > 0 ? "attention" : undefined}>
+        <span
+          className={readOnlyMounts > 0 ? "attention" : undefined}
+          title={`${readOnlyMounts} displayed mounts are read-only.`}
+        >
           <strong>{readOnlyMounts}</strong>
           <small>Read-only mounts</small>
         </span>
-        <span className={highUsageFilesystems > 0 ? "attention" : undefined}>
+        <span
+          className={highUsageFilesystems > 0 ? "attention" : undefined}
+          title={`${highUsageFilesystems} filesystems report at least 85% usage.`}
+        >
           <strong>{highUsageFilesystems}</strong>
           <small>At least 85% used</small>
         </span>
-        <span className={capability && !capability.can_report_filesystem_usage ? "attention" : undefined}>
+        <span
+          className={capability && !capability.can_report_filesystem_usage ? "attention" : undefined}
+          title={capability?.can_report_filesystem_usage ? `${measuredFilesystems} filesystems include usage measurements.` : "The detected provider does not report filesystem usage."}
+        >
           <strong>
             {capability?.can_report_filesystem_usage
               ? `${measuredFilesystems} measured`
@@ -540,7 +567,7 @@ export function HostStoragePanel({
           </strong>
           <small>Usage coverage</small>
         </span>
-        <span>
+        <span title={inventory?.observed_at ? `Storage inventory observed ${formatFullTime(inventory.observed_at)}.` : "No storage inventory observation time has been reported."}>
           <strong
             title={
               inventory?.observed_at

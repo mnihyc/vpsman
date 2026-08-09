@@ -1,6 +1,9 @@
 import { Activity, RefreshCw, SlidersHorizontal } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
-import { TimeSeriesChart, type TimeSeriesChartLine } from "../../components/TimeSeriesChart";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../../components/TimeSeriesChart";
 import { VpsCombobox } from "../../components/VpsCombobox";
 import { dashboardChartColors } from "../../colorPalette";
 import { formatLowerBoundCount } from "../../constants";
@@ -43,12 +46,18 @@ type FleetMetricsPanelProps = {
   window: DashboardWindow;
 };
 
-const resourceMetricOptions: Array<{ label: string; value: DashboardResourceMetric }> = [
+const resourceMetricOptions: Array<{
+  label: string;
+  value: DashboardResourceMetric;
+}> = [
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
   { label: "Disk", value: "disk_free" },
 ];
-const pointDensityOptions: Array<{ label: string; value: DashboardPointDensity }> = [
+const pointDensityOptions: Array<{
+  label: string;
+  value: DashboardPointDensity;
+}> = [
   { label: "Compact", value: "compact" },
   { label: "Balanced", value: "balanced" },
   { label: "Dense", value: "dense" },
@@ -90,9 +99,14 @@ export function FleetMetricsPanel({
   const resourceCurve = overview?.resource_curve ?? null;
   const resourceChart = resourceChartData(resourceCurve?.series ?? []);
   const latestSampleAt = resourceCurve?.latest_sample_at ?? null;
-  const sampledClients = resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
-  const customRangeActive = Boolean(preferences.startAt.trim() || preferences.endAt.trim());
-  const selectedRangeName = customRangeActive ? "Custom" : dashboardWindowLabel(window);
+  const sampledClients =
+    resourceCurve?.sampled_clients ?? overview?.resources.sampled_clients ?? 0;
+  const customRangeActive = Boolean(
+    preferences.startAt.trim() || preferences.endAt.trim(),
+  );
+  const selectedRangeName = customRangeActive
+    ? "Custom"
+    : dashboardWindowLabel(window);
   const resourceEvidence = buildResourceEvidence(
     overview,
     selectedRangeName,
@@ -100,25 +114,33 @@ export function FleetMetricsPanel({
     sampledClients,
     latestSampleAt,
   );
-  const freshness = buildTelemetryFreshness(
-    overview,
-    latestSampleAt,
-  );
-  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? dashboardWindowOptions;
+  const freshness = buildTelemetryFreshness(overview, latestSampleAt);
+  const windowOptions =
+    overview?.available_filters.windows.map((option) => option.value) ??
+    dashboardWindowOptions;
   const groupOptions = overview?.available_filters.group_by_options ?? [];
   const excludedClients = resourceCurve?.excluded_clients ?? 0;
   const matchedClients = overview?.scope.matched_clients ?? 0;
   const selectedScopeLabel = dashboardScopeLabel(preferences, overview);
-  const scopeOptions = dashboardScopeValueOptions(preferences.scopeKind, overview);
+  const scopeOptions = dashboardScopeValueOptions(
+    preferences.scopeKind,
+    overview,
+  );
   const activeAdvancedFilters =
-    Number(preferences.scopeKind !== "all" && Boolean(preferences.scopeValue.trim())) +
+    Number(
+      preferences.scopeKind !== "all" && Boolean(preferences.scopeValue.trim()),
+    ) +
     Number(customRangeActive) +
     Number(preferences.pointDensity !== "balanced");
-  const generatedAt = overview?.generated_at ? formatCompactTime(overview.generated_at) : "No refresh evidence";
+  const generatedAt = overview?.generated_at
+    ? formatCompactTime(overview.generated_at)
+    : "No refresh evidence";
   const timeRange = overview
     ? `${formatCompactTime(overview.time_range.start_at)} - ${formatCompactTime(overview.time_range.end_at)}`
     : "Waiting for metrics";
-  const selectedGroupLabel = groupOptions.find((option) => option.value === preferences.groupBy)?.label ?? preferences.groupBy;
+  const selectedGroupLabel =
+    groupOptions.find((option) => option.value === preferences.groupBy)
+      ?.label ?? preferences.groupBy;
 
   return (
     <section className="workspace singleColumn observabilityMetricsWorkspace">
@@ -126,13 +148,29 @@ export function FleetMetricsPanel({
         <div className="sectionHeader">
           <div>
             <h2>Fleet metrics</h2>
-            <span>Read-only CPU, memory, disk, and fleet grouping analysis from retained telemetry.</span>
+            <span>
+              Read-only CPU, memory, disk, and fleet grouping analysis from
+              retained telemetry.
+            </span>
           </div>
           <div className="sectionActions">
-            <span className="fleetMetricsScopeSummary" title={`Current metrics scope: ${selectedScopeLabel}`}>
+            <span
+              className="fleetMetricsScopeSummary"
+              title={`Current metrics scope: ${selectedScopeLabel}`}
+            >
               Scope: {selectedScopeLabel}
             </span>
-            <button className="secondaryAction compactAction" disabled={loading} onClick={onRefresh} type="button">
+            <button
+              className="secondaryAction compactAction"
+              disabled={loading}
+              onClick={onRefresh}
+              title={
+                loading
+                  ? "Fleet metrics are already refreshing"
+                  : "Refresh retained fleet metrics"
+              }
+              type="button"
+            >
               <RefreshCw size={14} />
               Refresh
             </button>
@@ -157,13 +195,18 @@ export function FleetMetricsPanel({
           </div>
         )}
 
-        <div className="observabilityMetricsControls" aria-label="Fleet metrics controls">
+        <div
+          className="observabilityMetricsControls"
+          aria-label="Fleet metrics controls"
+        >
           <div className="timeRangeTabs" aria-label="Fleet metrics time range">
             {windowOptions.map((option) => (
               <button
                 aria-label={dashboardWindowAccessibleLabel(option)}
                 aria-pressed={!customRangeActive && window === option}
-                className={!customRangeActive && window === option ? "active" : ""}
+                className={
+                  !customRangeActive && window === option ? "active" : ""
+                }
                 key={option}
                 onClick={() => onWindowChange(option)}
                 title={dashboardWindowAccessibleLabel(option)}
@@ -173,13 +216,21 @@ export function FleetMetricsPanel({
               </button>
             ))}
           </div>
-          <div className="dashboardSectionTools" aria-label="Fleet resource metric">
+          <div
+            className="dashboardSectionTools"
+            aria-label="Fleet resource metric"
+            title="Choose the retained resource metric plotted for each VPS"
+          >
             {resourceMetricOptions.map((option) => (
               <button
                 aria-pressed={preferences.resourceMetric === option.value}
-                className={preferences.resourceMetric === option.value ? "active" : ""}
+                className={
+                  preferences.resourceMetric === option.value ? "active" : ""
+                }
                 key={option.value}
-                onClick={() => onPreferencesChange({ resourceMetric: option.value })}
+                onClick={() =>
+                  onPreferencesChange({ resourceMetric: option.value })
+                }
                 title={resourceMetricDefinition(option.value)}
                 type="button"
               >
@@ -187,13 +238,17 @@ export function FleetMetricsPanel({
               </button>
             ))}
           </div>
-          <label className="dashboardToolbarSelect">
+          <label
+            className="dashboardToolbarSelect"
+            title="Group retained fleet evidence by the selected VPS attribute"
+          >
             <span>Group by</span>
             <select
               aria-label="Fleet metrics group by"
               onChange={(event) =>
                 onPreferencesChange({
-                  groupBy: event.target.value as DashboardPreferences["groupBy"],
+                  groupBy: event.target
+                    .value as DashboardPreferences["groupBy"],
                 })
               }
               value={preferences.groupBy}
@@ -210,8 +265,13 @@ export function FleetMetricsPanel({
               ))}
             </select>
           </label>
-          <details className="fleetMetricsAdvancedFilters">
-            <summary>
+          <details
+            className="fleetMetricsAdvancedFilters"
+            title="Restrict fleet metrics by scope, point density, or custom dates"
+          >
+            <summary
+              title={`${activeAdvancedFilters} advanced fleet metric filter${activeAdvancedFilters === 1 ? "" : "s"} active`}
+            >
               <SlidersHorizontal size={14} />
               <span>Advanced filters</span>
               {activeAdvancedFilters > 0 && <b>{activeAdvancedFilters}</b>}
@@ -244,7 +304,9 @@ export function FleetMetricsPanel({
                   <VpsCombobox
                     agents={agents}
                     ariaLabel="Fleet metrics scope value"
-                    onChange={(value) => onPreferencesChange({ scopeValue: value })}
+                    onChange={(value) =>
+                      onPreferencesChange({ scopeValue: value })
+                    }
                     placeholder="Search scoped VPS"
                     value={preferences.scopeValue}
                   />
@@ -254,7 +316,9 @@ export function FleetMetricsPanel({
                   <span>Scope value</span>
                   <select
                     aria-label="Fleet metrics scope value"
-                    onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
+                    onChange={(event) =>
+                      onPreferencesChange({ scopeValue: event.target.value })
+                    }
                     value={preferences.scopeValue}
                   >
                     <option value="">Select {preferences.scopeKind}</option>
@@ -289,7 +353,9 @@ export function FleetMetricsPanel({
                 <input
                   aria-label="Fleet metrics start date"
                   onChange={(event) =>
-                    onPreferencesChange({ startAt: dateTimeLocalToIso(event.target.value) })
+                    onPreferencesChange({
+                      startAt: dateTimeLocalToIso(event.target.value),
+                    })
                   }
                   type="datetime-local"
                   value={isoToDateTimeLocal(preferences.startAt)}
@@ -300,7 +366,9 @@ export function FleetMetricsPanel({
                 <input
                   aria-label="Fleet metrics end date"
                   onChange={(event) =>
-                    onPreferencesChange({ endAt: dateTimeLocalToIso(event.target.value) })
+                    onPreferencesChange({
+                      endAt: dateTimeLocalToIso(event.target.value),
+                    })
                   }
                   type="datetime-local"
                   value={isoToDateTimeLocal(preferences.endAt)}
@@ -318,6 +386,11 @@ export function FleetMetricsPanel({
                     startAt: "",
                   })
                 }
+                title={
+                  activeAdvancedFilters === 0
+                    ? "No advanced fleet metric filters are active"
+                    : `Reset ${activeAdvancedFilters} active advanced fleet metric filter${activeAdvancedFilters === 1 ? "" : "s"}`
+                }
                 type="button"
               >
                 Reset filters
@@ -326,49 +399,116 @@ export function FleetMetricsPanel({
           </details>
         </div>
 
-        <section className="dashboardSection observabilityChartSection" aria-labelledby="observability-fleet-resource-title">
+        <section
+          className="dashboardSection observabilityChartSection"
+          aria-labelledby="observability-fleet-resource-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
-              <h2 id="observability-fleet-resource-title">{resourceMetricTitle(preferences.resourceMetric)} by VPS</h2>
+              <h2 id="observability-fleet-resource-title">
+                {resourceMetricTitle(preferences.resourceMetric)} by VPS
+              </h2>
               <span>
-                Live scan cards stay in Home and Fleet / Monitor; this page analyzes retained telemetry without mutation controls.
+                Live scan cards stay in Home and Fleet / Monitor; this page
+                analyzes retained telemetry without mutation controls.
               </span>
             </div>
           </div>
           <div className="dashboardNetworkPanel resourceCurvePanel">
             <div className="dashboardCurveCard">
-              <div className="dashboardChartHeader">
-                <span>{resourceMetricTitle(preferences.resourceMetric)} trend</span>
-                <small>{sampledClients} sampled VPS</small>
+              <div
+                className="dashboardChartHeader"
+                title={`${resourceMetricTitle(preferences.resourceMetric)} retained trend for ${sampledClients} sampled VPS${sampledClients === 1 ? "" : "s"}`}
+              >
+                <span
+                  title={resourceMetricDefinition(preferences.resourceMetric)}
+                >
+                  {resourceMetricTitle(preferences.resourceMetric)} trend
+                </span>
+                <small
+                  title={`${sampledClients} VPS${sampledClients === 1 ? "" : "s"} contribute retained samples`}
+                >
+                  {sampledClients} sampled VPS
+                </small>
               </div>
               <p className="observabilityRangeLine">
-                Selected: {selectedRangeName} · Data available: {resourceEvidence.dataAvailableValue} · Last sample: {resourceEvidence.lastSampleValue}
+                Selected: {selectedRangeName} · Data available:{" "}
+                {resourceEvidence.dataAvailableValue} · Last sample:{" "}
+                {resourceEvidence.lastSampleValue}
               </p>
               <p
                 className="observabilityMetricDefinition"
                 title={resourceMetricDefinition(preferences.resourceMetric)}
               >
-                Metric definition: {resourceMetricDefinition(preferences.resourceMetric)}
+                Metric definition:{" "}
+                {resourceMetricDefinition(preferences.resourceMetric)}
               </p>
-              <div className="observabilityChartEvidence" aria-label="Fleet resource freshness">
-                <div>
-                  <span>Selected window</span>
-                  <strong>{selectedRangeName}</strong>
-                  <small>{resourceEvidence.selectedRangeLabel}</small>
+              <div
+                className="observabilityChartEvidence"
+                aria-label="Fleet resource freshness"
+              >
+                <div
+                  title={`Selected window: ${selectedRangeName}. ${resourceEvidence.selectedRangeLabel}`}
+                >
+                  <span title="Requested metrics time window">
+                    Selected window
+                  </span>
+                  <strong title={selectedRangeName}>{selectedRangeName}</strong>
+                  <small title={resourceEvidence.selectedRangeLabel}>
+                    {resourceEvidence.selectedRangeLabel}
+                  </small>
                 </div>
-                <div className={resourceEvidence.isSparse ? "warning" : undefined}>
-                  <span>Data available</span>
-                  <strong>{resourceEvidence.dataAvailableValue}</strong>
-                  <small>{resourceEvidence.sampleSpanLabel}</small>
+                <div
+                  className={resourceEvidence.isSparse ? "warning" : undefined}
+                  title={`Retained data available: ${resourceEvidence.dataAvailableValue}. ${resourceEvidence.sampleSpanLabel}`}
+                >
+                  <span title="Actual retained telemetry coverage">
+                    Data available
+                  </span>
+                  <strong title={resourceEvidence.dataAvailableValue}>
+                    {resourceEvidence.dataAvailableValue}
+                  </strong>
+                  <small title={resourceEvidence.sampleSpanLabel}>
+                    {resourceEvidence.sampleSpanLabel}
+                  </small>
                 </div>
-                <div className={resourceEvidence.isSparse ? "warning" : undefined}>
-                  <span>Chart treatment</span>
-                  <strong>{resourceEvidence.isSparse ? "Points only" : "Trend line"}</strong>
-                  <small>{resourceEvidence.isSparse ? "Sparse evidence; no trend implied" : "Enough samples for line reading"}</small>
+                <div
+                  className={resourceEvidence.isSparse ? "warning" : undefined}
+                  title={
+                    resourceEvidence.isSparse
+                      ? "Sparse retained evidence is plotted as isolated points; continuity is not implied"
+                      : "Retained sample density supports a connected trend line"
+                  }
+                >
+                  <span title="How retained samples are rendered">
+                    Chart treatment
+                  </span>
+                  <strong
+                    title={
+                      resourceEvidence.isSparse
+                        ? "Sparse evidence is rendered as points only"
+                        : "Samples are rendered as a trend line"
+                    }
+                  >
+                    {resourceEvidence.isSparse ? "Points only" : "Trend line"}
+                  </strong>
+                  <small
+                    title={
+                      resourceEvidence.isSparse
+                        ? "Sparse evidence; no trend implied"
+                        : "Enough samples for line reading"
+                    }
+                  >
+                    {resourceEvidence.isSparse
+                      ? "Sparse evidence; no trend implied"
+                      : "Enough samples for line reading"}
+                  </small>
                 </div>
               </div>
               {resourceEvidence.sparseNotice && (
-                <p className="observabilitySparseNotice">{resourceEvidence.sparseNotice}</p>
+                <p className="observabilitySparseNotice">
+                  {resourceEvidence.sparseNotice}
+                </p>
               )}
               <TimeSeriesChart
                 ariaLabel="Fleet resource usage curve"
@@ -377,10 +517,15 @@ export function FleetMetricsPanel({
                 lines={resourceChart.lines}
                 pointsOnly={resourceEvidence.isSparse}
                 times={resourceChart.times}
-                valueFormatter={(value) => formatResourceValue(preferences.resourceMetric, value)}
+                valueFormatter={(value) =>
+                  formatResourceValue(preferences.resourceMetric, value)
+                }
               />
             </div>
-            <div className="dashboardTopClients" aria-label="Top resource VPS list">
+            <div
+              className="dashboardTopClients"
+              aria-label="Top resource VPS list"
+            >
               <div className="dashboardSideRailHeader">
                 <strong>Top VPS</strong>
                 <span>{resourceCurve?.series.length ?? 0} shown</span>
@@ -397,24 +542,39 @@ export function FleetMetricsPanel({
                   <span>
                     <strong>{series.label}</strong>
                     <small>
-                      {resourcePeakLabel(preferences.resourceMetric)} {formatResourceValue(preferences.resourceMetric, series.peak)}
+                      {resourcePeakLabel(preferences.resourceMetric)}{" "}
+                      {formatResourceValue(
+                        preferences.resourceMetric,
+                        series.peak,
+                      )}
                     </small>
                   </span>
-                  <b>{formatResourceValue(preferences.resourceMetric, series.current)}</b>
+                  <b>
+                    {formatResourceValue(
+                      preferences.resourceMetric,
+                      series.current,
+                    )}
+                  </b>
                 </button>
               ))}
               {!resourceCurve?.series.length && (
                 <div className="emptyState compactEmpty">
                   <Activity size={18} />
                   <strong>No resource rows</strong>
-                  <span>Telemetry is unavailable for the current scope and time range.</span>
+                  <span>
+                    Telemetry is unavailable for the current scope and time
+                    range.
+                  </span>
                 </div>
               )}
             </div>
           </div>
         </section>
 
-        <div className="metricGrid observabilityMetricsSummary" aria-label="Fleet metrics summary">
+        <div
+          className="metricGrid observabilityMetricsSummary"
+          aria-label="Fleet metrics summary"
+        >
           <MetricTile
             label="Current metric"
             value={resourceMetricTitle(preferences.resourceMetric)}
@@ -425,7 +585,11 @@ export function FleetMetricsPanel({
             value={selectedScopeLabel}
             detail={`${matchedClients} matched · ${sampledClients} with retained samples`}
           />
-          <MetricTile label="Selected range" value={selectedRangeName} detail={resourceEvidence.selectedRangeLabel || timeRange} />
+          <MetricTile
+            label="Selected range"
+            value={selectedRangeName}
+            detail={resourceEvidence.selectedRangeLabel || timeRange}
+          />
           <MetricTile
             label="Telemetry freshness"
             value={loading ? "Refreshing" : freshness.label}
@@ -440,22 +604,37 @@ export function FleetMetricsPanel({
 
         <WarningDefinitionStrip overview={overview} />
 
-        <section className="dashboardSection observabilityGroupSection" aria-labelledby="observability-fleet-groups-title">
+        <section
+          className="dashboardSection observabilityGroupSection"
+          aria-labelledby="observability-fleet-groups-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="observability-fleet-groups-title">Fleet grouping</h2>
-              <span>Provider, tag, country, status, and client group summaries for scan/comparison work.</span>
+              <span>
+                Provider, tag, country, status, and client group summaries for
+                scan/comparison work.
+              </span>
             </div>
           </div>
-          <div className="observabilityGroupGrid" aria-label="Fleet metrics group breakdown">
+          <div
+            className="observabilityGroupGrid"
+            aria-label="Fleet metrics group breakdown"
+          >
             {(overview?.label_clusters ?? []).map((cluster) => (
-              <GroupTile cluster={cluster} key={`${cluster.kind}:${cluster.label}`} />
+              <GroupTile
+                cluster={cluster}
+                key={`${cluster.kind}:${cluster.label}`}
+              />
             ))}
             {!overview?.label_clusters.length && (
               <div className="emptyState compactEmpty">
                 <Activity size={18} />
                 <strong>No groups</strong>
-                <span>Group summaries are unavailable until dashboard telemetry loads.</span>
+                <span>
+                  Group summaries are unavailable until dashboard telemetry
+                  loads.
+                </span>
               </div>
             )}
           </div>
@@ -465,12 +644,20 @@ export function FleetMetricsPanel({
   );
 }
 
-function MetricTile({ detail, label, value }: { detail: string; label: string; value: string }) {
+function MetricTile({
+  detail,
+  label,
+  value,
+}: {
+  detail: string;
+  label: string;
+  value: string;
+}) {
   return (
-    <div className="metricCard">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <small>{detail}</small>
+    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
+      <span title={label}>{label}</span>
+      <strong title={`${label}: ${value}`}>{value}</strong>
+      <small title={detail}>{detail}</small>
     </div>
   );
 }
@@ -480,20 +667,34 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
     ? " in the loaded operations page"
     : "";
   return (
-    <div className="observabilityGroupTile">
-      <span>{cluster.kind}</span>
-      <strong>{cluster.label}</strong>
-      <small>
+    <div
+      className="observabilityGroupTile"
+      title={`${cluster.kind} group ${cluster.label}: ${cluster.online}/${cluster.total} online`}
+    >
+      <span title={`Grouping dimension: ${cluster.kind}`}>{cluster.kind}</span>
+      <strong title={`Group value: ${cluster.label}`}>{cluster.label}</strong>
+      <small
+        title={
+          cluster.kind === "date"
+            ? `${cluster.total} network samples in this date group`
+            : `${cluster.online} of ${cluster.total} VPSs online in this group`
+        }
+      >
         {cluster.kind === "date"
           ? `${cluster.total} network samples, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} running jobs${boundedSuffix}`
           : `${cluster.online}/${cluster.total} online, ${cluster.offline} offline, ${cluster.stale} stale, ${cluster.revoked} access revoked, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
-        , {formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps)} aggregate interval-average rate
+        , {formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps)}{" "}
+        aggregate interval-average rate
       </small>
     </div>
   );
 }
 
-function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecord | null }) {
+function WarningDefinitionStrip({
+  overview,
+}: {
+  overview: DashboardOverviewRecord | null;
+}) {
   const activeAlerts = overview?.operations.active_alerts ?? 0;
   const alertsTruncated = overview?.operations.alerts_truncated ?? false;
   const criticalAlerts = overview?.operations.critical_alerts ?? 0;
@@ -501,9 +702,13 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
   const infoAlerts = Math.max(0, activeAlerts - criticalAlerts - warningAlerts);
   const affectedVpsCount = uniqueAffectedVpsCount(overview);
   const groupedAlerts =
-    overview?.label_clusters.reduce((total, cluster) => total + cluster.warnings, 0) ?? 0;
+    overview?.label_clusters.reduce(
+      (total, cluster) => total + cluster.warnings,
+      0,
+    ) ?? 0;
   const groupedAlertsTruncated =
-    overview?.label_clusters.some((cluster) => cluster.counts_truncated) ?? false;
+    overview?.label_clusters.some((cluster) => cluster.counts_truncated) ??
+    false;
   const unavailableVps =
     (overview?.summary.offline ?? 0) +
     (overview?.summary.stale ?? 0) +
@@ -515,7 +720,8 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
       value: formatLowerBoundCount(activeAlerts, alertsTruncated),
     },
     {
-      detail: "unique VPSs named by the recent alert and degraded-agent rows shown",
+      detail:
+        "unique VPSs named by the recent alert and degraded-agent rows shown",
       label: "VPS in shown evidence",
       value: String(affectedVpsCount),
     },
@@ -525,19 +731,28 @@ function WarningDefinitionStrip({ overview }: { overview: DashboardOverviewRecor
       value: formatLowerBoundCount(groupedAlerts, groupedAlertsTruncated),
     },
     {
-      detail: "offline, stale, and access-revoked VPSs in the retained overview scope",
+      detail:
+        "offline, stale, and access-revoked VPSs in the retained overview scope",
       label: "Unavailable VPS",
       value: String(unavailableVps),
     },
   ];
 
   return (
-    <div className="observabilityWarningDefinitions" aria-label="Fleet metrics availability definitions">
+    <div
+      className="observabilityWarningDefinitions"
+      aria-label="Fleet metrics availability definitions"
+    >
       {definitions.map((definition) => (
-        <div key={definition.label}>
-          <span>{definition.label}</span>
-          <strong>{definition.value}</strong>
-          <small>{definition.detail}</small>
+        <div
+          key={definition.label}
+          title={`${definition.label}: ${definition.value}. ${definition.detail}`}
+        >
+          <span title={definition.label}>{definition.label}</span>
+          <strong title={`${definition.label}: ${definition.value}`}>
+            {definition.value}
+          </strong>
+          <small title={definition.detail}>{definition.detail}</small>
         </div>
       ))}
     </div>
@@ -548,12 +763,20 @@ function vpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function resourceChartData(series: DashboardResourceSeriesRecord[]): ResourceChartData {
-  const times = sortedUniqueTimes(series.flatMap((entry) => entry.points.map((point) => point.bucket_start)));
+function resourceChartData(
+  series: DashboardResourceSeriesRecord[],
+): ResourceChartData {
+  const times = sortedUniqueTimes(
+    series.flatMap((entry) => entry.points.map((point) => point.bucket_start)),
+  );
   const lines = series.map((entry, index) => ({
     color: dashboardChartColors[index % dashboardChartColors.length],
     label: entry.label,
-    values: times.map((time) => entry.points.find((point) => point.bucket_start === time)?.value ?? null),
+    values: times.map(
+      (time) =>
+        entry.points.find((point) => point.bucket_start === time)?.value ??
+        null,
+    ),
   }));
   return {
     lines,
@@ -567,10 +790,15 @@ function resourceChartData(series: DashboardResourceSeriesRecord[]): ResourceCha
 }
 
 function sortedUniqueTimes(times: string[]): string[] {
-  return Array.from(new Set(times)).sort((left, right) => Date.parse(left) - Date.parse(right));
+  return Array.from(new Set(times)).sort(
+    (left, right) => Date.parse(left) - Date.parse(right),
+  );
 }
 
-function formatResourceValue(metric: DashboardResourceMetric, value: number | null | undefined): string {
+function formatResourceValue(
+  metric: DashboardResourceMetric,
+  value: number | null | undefined,
+): string {
   if (value === null || value === undefined) {
     return "No data";
   }
@@ -608,8 +836,11 @@ function buildResourceEvidence(
   latestSampleAt: string | null,
 ): ResourceEvidence {
   const firstSample = chart.times[0] ?? null;
-  const lastSample = latestSampleAt ?? chart.times[chart.times.length - 1] ?? null;
-  const selectedStartMs = overview ? Date.parse(overview.time_range.start_at) : NaN;
+  const lastSample =
+    latestSampleAt ?? chart.times[chart.times.length - 1] ?? null;
+  const selectedStartMs = overview
+    ? Date.parse(overview.time_range.start_at)
+    : NaN;
   const selectedEndMs = overview ? Date.parse(overview.time_range.end_at) : NaN;
   const selectedDurationMs =
     Number.isFinite(selectedStartMs) && Number.isFinite(selectedEndMs)
@@ -704,7 +935,9 @@ function buildTelemetryFreshness(
   };
 }
 
-function uniqueAffectedVpsCount(overview: DashboardOverviewRecord | null): number {
+function uniqueAffectedVpsCount(
+  overview: DashboardOverviewRecord | null,
+): number {
   if (!overview) {
     return 0;
   }

@@ -148,10 +148,15 @@ export function AuthPanel({
               {authHeaderSubtitle(mode)}
             </span>
             <div className="authModeSummary" id="auth-mode-summary">
-              <span className="authStatePill">
+              <span
+                className="authStatePill"
+                title={`Authentication state: ${authModeSummaryTitle(mode)}.`}
+              >
                 {authModeSummaryTitle(mode)}
               </span>
-              <span>{authModeSummaryDetail(mode)}</span>
+              <span title={authModeSummaryDetail(mode)}>
+                {authModeSummaryDetail(mode)}
+              </span>
             </div>
           </div>
         </div>
@@ -184,6 +189,7 @@ export function AuthPanel({
           <input
             autoComplete="username"
             autoFocus
+            data-tooltip-disabled-reason="Username entry is unavailable while the console checks whether first-run setup is required."
             disabled={isChecking}
             id="operator-username"
             name="username"
@@ -197,6 +203,7 @@ export function AuthPanel({
             <span>TOTP code</span>
             <input
               autoComplete="one-time-code"
+              data-tooltip-sensitive="true"
               id="operator-totp-code"
               inputMode="numeric"
               maxLength={6}
@@ -210,7 +217,11 @@ export function AuthPanel({
         <label>
           <span>Password</span>
           <input
-            autoComplete={mode === "login" ? "current-password" : "new-password"}
+            autoComplete={
+              mode === "login" ? "current-password" : "new-password"
+            }
+            data-tooltip-disabled-reason="Password entry is unavailable while the console checks whether first-run setup is required."
+            data-tooltip-sensitive="true"
             disabled={isChecking}
             id="operator-password"
             name="password"
@@ -226,10 +237,16 @@ export function AuthPanel({
         <button
           aria-describedby="auth-submit-requirements"
           className="wideAction"
+          data-tooltip-disabled-reason={authSubmitDisabledReason(
+            mode,
+            pending,
+            username,
+            password,
+          )}
           disabled={submitDisabled}
           title={
             submitDisabled
-              ? "Enter username and a password of at least 12 characters."
+              ? authSubmitDisabledReason(mode, pending, username, password)
               : undefined
           }
           type="submit"
@@ -245,6 +262,29 @@ export function AuthPanel({
       </form>
     </section>
   );
+}
+
+function authSubmitDisabledReason(
+  mode: AuthMode,
+  pending: boolean,
+  username: string,
+  password: string,
+): string {
+  if (mode === "checking") {
+    return "Authentication is unavailable while the console checks whether first-run setup is required.";
+  }
+  if (pending) {
+    return mode === "bootstrap"
+      ? "First operator creation is already in progress."
+      : "Sign-in is already in progress.";
+  }
+  if (!username) {
+    return "Enter an operator username before continuing.";
+  }
+  if (password.length < 12) {
+    return "Enter a password of at least 12 characters before continuing.";
+  }
+  return "Authentication is ready.";
 }
 
 function authHeaderSubtitle(mode: AuthMode): string {

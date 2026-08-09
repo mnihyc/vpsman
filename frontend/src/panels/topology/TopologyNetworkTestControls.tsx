@@ -757,7 +757,17 @@ export function TopologyNetworkTestControls({
                   !endpoint
                 }
                 onClick={submitStatus}
-                title="Run read-only status inspection for the selected endpoint; no local privilege unlock is required."
+                title={
+                  pending
+                    ? "Wait for the current network test operation to finish"
+                    : networkSnapshot !== null
+                      ? "Finish or cancel the current reviewed network test before inspecting status"
+                      : !selectedPlan
+                        ? "Select a tunnel plan before inspecting endpoint status"
+                        : !endpoint
+                          ? "Select a tunnel endpoint before inspecting status"
+                          : "Run read-only status inspection for the selected endpoint; no local privilege unlock is required"
+                }
                 type="button"
               >
                 <Search size={17} />
@@ -775,11 +785,19 @@ export function TopologyNetworkTestControls({
                 }
                 onClick={submitProbe}
                 title={
-                  !selectedPlan?.enabled
-                    ? "Enable this plan before running a latency probe"
-                    : privilegeMaterial
-                      ? "Run a latency probe with bounded count and interval"
-                      : "Unlock privilege before running a latency probe"
+                  pending
+                    ? "Wait for the current network test operation to finish"
+                    : networkSnapshot !== null
+                      ? "Finish or cancel the current reviewed network test before running a probe"
+                      : !selectedPlan
+                        ? "Select a tunnel plan before running a latency probe"
+                        : !endpoint
+                          ? "Select a tunnel endpoint before running a latency probe"
+                          : !selectedPlan.enabled
+                            ? "Enable this plan before running a latency probe"
+                            : privilegeMaterial
+                              ? "Run a latency probe with bounded count and interval"
+                              : "Unlock privilege before running a latency probe"
                 }
                 type="button"
               >
@@ -902,11 +920,19 @@ export function TopologyNetworkTestControls({
                 }
                 onClick={submitSpeedTest}
                 title={
-                  !selectedPlan?.enabled
-                    ? "Enable this plan before running a speed test"
-                    : privilegeMaterial
-                      ? "Review the selected directional speed test against both plan endpoints"
-                      : "Unlock privilege before reviewing the speed test"
+                  pending
+                    ? "Wait for the current network test operation to finish"
+                    : networkSnapshot !== null
+                      ? "Finish or cancel the current reviewed network test before reviewing a speed test"
+                      : !selectedPlan
+                        ? "Select a tunnel plan before reviewing a speed test"
+                        : !endpoint
+                          ? "Select a tunnel endpoint before reviewing a speed test"
+                          : !selectedPlan.enabled
+                            ? "Enable this plan before running a speed test"
+                            : privilegeMaterial
+                              ? "Review the selected directional speed test against both plan endpoints"
+                              : "Unlock privilege before reviewing the speed test"
                 }
                 type="button"
               >

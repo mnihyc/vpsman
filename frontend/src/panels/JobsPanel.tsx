@@ -810,7 +810,19 @@ export function JobsPanel({
               <strong title={job.source_schedule_id ?? undefined}>
                 {scheduledRunScheduleLabel(job, schedule)}
               </strong>
-              <small title={schedule?.cadence_error ?? undefined}>
+              <small
+                data-tooltip-sensitive={
+                  schedule?.cadence_error ? "true" : undefined
+                }
+                data-value-tooltip-skip={
+                  schedule?.cadence_error ? "true" : undefined
+                }
+                title={
+                  schedule?.cadence_error
+                    ? "The saved schedule cadence is invalid; exact API error content is excluded from tooltips."
+                    : undefined
+                }
+              >
                 {schedule
                   ? scheduledRunCadenceLabel(schedule)
                   : job.source_schedule_id
@@ -1046,13 +1058,21 @@ export function JobsPanel({
       {
         cell: (target) => {
           const reason = jobTargetReason(target);
-          const rawReason = target.message?.trim();
+          const hasRawReason = Boolean(target.message?.trim());
           return (
             <span
+              data-tooltip-empty-reason={
+                reason === "-"
+                  ? "Completed targets have no failure reason"
+                  : undefined
+              }
+              data-value-tooltip-skip={hasRawReason ? "true" : undefined}
               title={
-                rawReason && rawReason !== reason
-                  ? `${reason} Raw agent reason: ${rawReason}`
-                  : reason
+                reason === "-"
+                  ? "Completed targets have no failure reason"
+                  : hasRawReason
+                    ? "Agent-reported target result; exact content is excluded from tooltips"
+                    : reason
               }
             >
               {reason}
@@ -1066,15 +1086,34 @@ export function JobsPanel({
         sortValue: jobTargetReason,
       },
       {
-        cell: (target) => target.exit_code ?? "-",
+        cell: (target) => (
+          <span
+            data-tooltip-empty-reason={
+              target.exit_code === null
+                ? "The target has not reported a process exit code"
+                : undefined
+            }
+          >
+            {target.exit_code ?? "-"}
+          </span>
+        ),
         header: "Exit",
         id: "exit",
         searchValue: (target) => target.exit_code ?? "",
         sortValue: (target) => target.exit_code ?? Number.MAX_SAFE_INTEGER,
       },
       {
-        cell: (target) =>
-          target.completed_at ? formatTime(target.completed_at) : "-",
+        cell: (target) => (
+          <span
+            data-tooltip-empty-reason={
+              target.completed_at
+                ? undefined
+                : "This target has no recorded completion time"
+            }
+          >
+            {target.completed_at ? formatTime(target.completed_at) : "-"}
+          </span>
+        ),
         header: "Completed",
         id: "completed",
         searchValue: (target) => target.completed_at ?? "",
@@ -1095,7 +1134,15 @@ export function JobsPanel({
             >
               {group.status}
             </strong>
-            <small>exit {group.exit_code ?? "-"}</small>
+            <small
+              data-tooltip-empty-reason={
+                group.exit_code === null
+                  ? "This output group has no reported process exit code"
+                  : undefined
+              }
+            >
+              exit {group.exit_code ?? "-"}
+            </small>
           </span>
         ),
         header: "Outcome",
@@ -1170,6 +1217,11 @@ export function JobsPanel({
         cell: (row) => (
           <span
             className={`status ${jobOutputComparisonStatusBadgeClass(row.status)}`}
+            data-tooltip-empty-reason={
+              row.exit_code === null
+                ? "This target has no reported process exit code"
+                : undefined
+            }
           >
             {row.status} / {row.exit_code ?? "-"}
           </span>
@@ -1412,6 +1464,9 @@ export function JobsPanel({
                 <div className="headerActionStack">
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      loading ? "Job history is already loading" : undefined
+                    }
                     disabled={loading}
                     onClick={onRefresh}
                     type="button"
@@ -1447,6 +1502,11 @@ export function JobsPanel({
                   ].map((link) => (
                     <button
                       className="secondaryAction compactAction"
+                      data-tooltip-disabled-reason={
+                        onOpenRemoteOperations
+                          ? undefined
+                          : "Remote Operations navigation is unavailable in this context"
+                      }
                       disabled={!onOpenRemoteOperations}
                       key={link.subpage}
                       onClick={() => onOpenRemoteOperations?.(link.subpage)}
@@ -1657,6 +1717,13 @@ export function JobsPanel({
                       {fileDownloadStatus && (
                         <button
                           className="secondaryAction compactAction"
+                          data-tooltip-disabled-reason={
+                            outputsLoading
+                              ? "Job outputs are still loading"
+                              : archivePendingKey !== null
+                                ? "Another job archive download is in progress"
+                                : undefined
+                          }
                           disabled={
                             outputsLoading || archivePendingKey !== null
                           }
@@ -1676,6 +1743,13 @@ export function JobsPanel({
                       {outputs.length > 0 && (
                         <button
                           className="secondaryAction compactAction"
+                          data-tooltip-disabled-reason={
+                            outputsLoading
+                              ? "Job outputs are still loading"
+                              : archivePendingKey !== null
+                                ? "Another job archive download is in progress"
+                                : undefined
+                          }
                           disabled={
                             outputsLoading || archivePendingKey !== null
                           }
@@ -1695,6 +1769,13 @@ export function JobsPanel({
                       {targets.length > 0 && (
                         <button
                           className="secondaryAction compactAction"
+                          data-tooltip-disabled-reason={
+                            targetsLoading
+                              ? "Job target results are still loading"
+                              : archivePendingKey !== null
+                                ? "Another job archive download is in progress"
+                                : undefined
+                          }
                           disabled={
                             targetsLoading || archivePendingKey !== null
                           }
@@ -1762,6 +1843,11 @@ export function JobsPanel({
                       </div>
                       <button
                         className="secondaryAction compactAction"
+                        data-tooltip-disabled-reason={
+                          comparisonLoading
+                            ? "The output comparison summary is already loading"
+                            : undefined
+                        }
                         disabled={comparisonLoading}
                         onClick={() =>
                           void compareSelectedJobOutputs(selectedJobId)
@@ -1824,7 +1910,12 @@ export function JobsPanel({
                               <span>Digest</span>
                               <strong>{group.output_digest_hex}</strong>
                               <span>Preview</span>
-                              <strong>{group.preview || "No preview"}</strong>
+                              <strong
+                                data-value-tooltip-skip="true"
+                                title="Output preview; exact job content is excluded from tooltips"
+                              >
+                                {group.preview || "No preview"}
+                              </strong>
                             </div>
                           )}
                           rowActions={comparisonGroupActions}
@@ -1867,7 +1958,12 @@ export function JobsPanel({
                                 {formatBytes(row.byte_count)}
                               </strong>
                               <span>Preview</span>
-                              <strong>{row.preview || "No preview"}</strong>
+                              <strong
+                                data-value-tooltip-skip="true"
+                                title="Output preview; exact job content is excluded from tooltips"
+                              >
+                                {row.preview || "No preview"}
+                              </strong>
                             </div>
                           )}
                           rows={displayedComparisonRows}
@@ -1894,6 +1990,11 @@ export function JobsPanel({
                             {target.stdout && (
                               <button
                                 className="secondaryAction compactAction"
+                                data-tooltip-disabled-reason={
+                                  streamPendingKey === `${target.clientId}:stdout`
+                                    ? "This stdout download is already in progress"
+                                    : undefined
+                                }
                                 disabled={
                                   streamPendingKey ===
                                   `${target.clientId}:stdout`
@@ -1918,6 +2019,11 @@ export function JobsPanel({
                             {target.stderr && (
                               <button
                                 className="secondaryAction compactAction"
+                                data-tooltip-disabled-reason={
+                                  streamPendingKey === `${target.clientId}:stderr`
+                                    ? "This stderr download is already in progress"
+                                    : undefined
+                                }
                                 disabled={
                                   streamPendingKey ===
                                   `${target.clientId}:stderr`
@@ -1942,6 +2048,11 @@ export function JobsPanel({
                             {target.combined && (
                               <button
                                 className="secondaryAction compactAction"
+                                data-tooltip-disabled-reason={
+                                  streamPendingKey === `${target.clientId}:combined`
+                                    ? "This combined-output download is already in progress"
+                                    : undefined
+                                }
                                 disabled={
                                   streamPendingKey ===
                                   `${target.clientId}:combined`
@@ -1995,13 +2106,13 @@ export function JobsPanel({
                         </div>
                         {output.storage === "object_store" ? (
                           <div className="outputArtifact">
-                            <pre>
+                            <pre data-value-tooltip-skip="true">
                               {`artifact ${output.artifact_object_key ?? "retained externally"}\nsha256 ${output.artifact_sha256_hex ?? "-"}`}
                             </pre>
                           </div>
                         ) : output.storage === "artifact_deleted" ? (
                           <div className="outputArtifact deletedArtifact">
-                            <pre>
+                            <pre data-value-tooltip-skip="true">
                               {`artifact deleted\nsha256 ${output.artifact_sha256_hex ?? "-"}\nfull size ${
                                 output.artifact_size_bytes != null
                                   ? formatBytes(output.artifact_size_bytes)
@@ -2010,7 +2121,9 @@ export function JobsPanel({
                             </pre>
                           </div>
                         ) : (
-                          <pre>{decodeOutputPreview(output.data_base64)}</pre>
+                          <pre data-value-tooltip-skip="true">
+                            {decodeOutputPreview(output.data_base64)}
+                          </pre>
                         )}
                       </article>
                     ))}
@@ -2051,6 +2164,13 @@ export function JobsPanel({
                 <div className="inlineActions">
                   <button
                     className="secondaryAction compactAction"
+                    data-tooltip-disabled-reason={
+                      loading
+                        ? "Approval requests are already loading"
+                        : approvalActionPending
+                          ? "An approval decision is being recorded"
+                          : undefined
+                    }
                     disabled={loading || approvalActionPending}
                     onClick={onRefresh}
                     type="button"
@@ -2123,7 +2243,9 @@ export function JobsPanel({
                   },
                   {
                     label: "Request reason",
-                    title: approvalReview?.request_reason ?? undefined,
+                    title: approvalReview?.request_reason
+                      ? "Operator-provided approval request reason"
+                      : undefined,
                     value:
                       approvalReview?.request_reason ?? "No request reason",
                   },
@@ -2152,6 +2274,11 @@ export function JobsPanel({
                           ? "secondaryAction compactAction active"
                           : "secondaryAction compactAction"
                       }
+                      data-tooltip-disabled-reason={
+                        approvalActionPending
+                          ? "An approval decision is being recorded"
+                          : undefined
+                      }
                       disabled={approvalActionPending}
                       onClick={() => {
                         setApprovalDecision("approve");
@@ -2167,6 +2294,11 @@ export function JobsPanel({
                         approvalDecision === "reject"
                           ? "secondaryAction compactAction dangerAction active"
                           : "secondaryAction compactAction dangerAction"
+                      }
+                      data-tooltip-disabled-reason={
+                        approvalActionPending
+                          ? "An approval decision is being recorded"
+                          : undefined
                       }
                       disabled={approvalActionPending}
                       onClick={() => {
@@ -2187,6 +2319,11 @@ export function JobsPanel({
                     </span>
                     <textarea
                       aria-label={approvalDecisionNoteLabel}
+                      data-tooltip-disabled-reason={
+                        approvalActionPending
+                          ? "An approval decision is being recorded"
+                          : undefined
+                      }
                       disabled={approvalActionPending}
                       maxLength={1024}
                       onChange={(event) => {
@@ -2298,6 +2435,9 @@ export function JobsPanel({
                   </button>
                   <button
                     className="secondaryAction compactAction"
+                    data-tooltip-disabled-reason={
+                      loading ? "Scheduled runs are already loading" : undefined
+                    }
                     disabled={loading}
                     onClick={onRefresh}
                     type="button"
@@ -2407,6 +2547,9 @@ export function JobsPanel({
                     </button>
                     <button
                       className="secondaryAction compactAction"
+                      data-tooltip-disabled-reason={
+                        loading ? "Scheduled runs are already loading" : undefined
+                      }
                       disabled={loading}
                       onClick={onRefresh}
                       type="button"

@@ -51,7 +51,11 @@ export function ArtifactUploadForm({
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
           <span>Backup request</span>
-          <select aria-label="Artifact backup request" onChange={(event) => onArtifactBackupIdChange(event.target.value)} value={artifactBackupId}>
+          <select
+            aria-label="Artifact backup request"
+            onChange={(event) => onArtifactBackupIdChange(event.target.value)}
+            value={artifactBackupId}
+          >
             <option value="">Select backup request</option>
             {backups.map((backup) => (
               <option key={backup.id} title={backup.id} value={backup.id}>
@@ -71,13 +75,23 @@ export function ArtifactUploadForm({
         </label>
         <label>
           <span>Artifact file</span>
-          <input aria-label="Backup artifact file" onChange={(event) => onArtifactFileChange(event.target.files?.[0] ?? null)} type="file" />
+          <input
+            aria-label="Backup artifact file"
+            onChange={(event) =>
+              onArtifactFileChange(event.target.files?.[0] ?? null)
+            }
+            type="file"
+          />
         </label>
         <label>
           <span>Upload mode</span>
           <select
             aria-label="Backup artifact upload mode"
-            onChange={(event) => onArtifactUploadModeChange(event.target.value === "chunked" ? "chunked" : "inline")}
+            onChange={(event) =>
+              onArtifactUploadModeChange(
+                event.target.value === "chunked" ? "chunked" : "inline",
+              )
+            }
             value={artifactUploadMode}
           >
             <option value="inline">Inline</option>
@@ -85,7 +99,20 @@ export function ArtifactUploadForm({
           </select>
         </label>
         {!artifactConfirmationOpen && (
-          <button className="primaryAction" disabled={pending || !artifactBackupId || !artifactFile} type="submit">
+          <button
+            className="primaryAction"
+            disabled={pending || !artifactBackupId || !artifactFile}
+            title={
+              pending
+                ? "Wait for the current backup operation to finish"
+                : !artifactBackupId
+                  ? "Select the backup request that owns this artifact"
+                  : !artifactFile
+                    ? "Choose an artifact file before reviewing the upload"
+                    : "Review the selected artifact upload"
+            }
+            type="submit"
+          >
             <Upload size={17} />
             Review upload
           </button>
@@ -102,7 +129,19 @@ export function ArtifactUploadForm({
           />
         </label>
         {!handoffConfirmationOpen && (
-          <button className="secondaryAction" disabled={pending || !artifactBackupId} onClick={onHandoffSubmit} type="button">
+          <button
+            className="secondaryAction"
+            disabled={pending || !artifactBackupId}
+            onClick={onHandoffSubmit}
+            title={
+              pending
+                ? "Wait for the current backup operation to finish"
+                : !artifactBackupId
+                  ? "Select the backup request that owns this transfer package"
+                  : "Review packaging a completed backup transfer as the selected artifact"
+            }
+            type="button"
+          >
             <Upload size={17} />
             Review transfer package
           </button>

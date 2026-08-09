@@ -87,7 +87,7 @@ export function MigrationLinkForm({
 }: MigrationLinkFormProps) {
   const routeValid = Boolean(
     selectedPlan &&
-      selectedPlan.source_client_id !== selectedPlan.target_client_id,
+    selectedPlan.source_client_id !== selectedPlan.target_client_id,
   );
   const archiveReady = Boolean(
     archiveTransferOptions.some((option) => option.key === archiveTransferKey),
@@ -162,9 +162,11 @@ export function MigrationLinkForm({
               onMigrationRestorePlanIdChange(event.target.value)
             }
             title={
-              selectedPlan
-                ? `${clientLabel(selectedPlan.source_client_id)} to ${clientLabel(selectedPlan.target_client_id)} (${restorePlanStatusLabel(selectedPlan.status)})`
-                : "Select a draft restore with a replacement VPS"
+              restorePlans.length === 0
+                ? "No draft restore targets a replacement VPS; create one on Restore first"
+                : selectedPlan
+                  ? `${clientLabel(selectedPlan.source_client_id)} to ${clientLabel(selectedPlan.target_client_id)} (${restorePlanStatusLabel(selectedPlan.status)})`
+                  : "Select a draft restore with a replacement VPS"
             }
             value={migrationRestorePlanId}
           >
@@ -191,6 +193,7 @@ export function MigrationLinkForm({
             <button
               className="secondaryAction compactAction"
               onClick={onOpenRestore}
+              title="Open Restore to create a draft whose destination differs from its source"
               type="button"
             >
               Plan restore
@@ -198,34 +201,77 @@ export function MigrationLinkForm({
           </div>
         )}
         {selectedPlan ? (
-          <div className="migrationPlanSummary" aria-live="polite">
-            <div>
-              <span>Draft restore</span>
-              <strong title={selectedPlan.id}>{shortId(selectedPlan.id)}</strong>
+          <div
+            className="migrationPlanSummary"
+            aria-live="polite"
+            title={`Draft restore ${shortId(selectedPlan.id)} maps ${clientLabel(selectedPlan.source_client_id)} to ${clientLabel(selectedPlan.target_client_id)}; ${restorePlanStatusLabel(selectedPlan.status)}`}
+          >
+            <div title={`Draft restore identifier ${selectedPlan.id}`}>
+              <span title="Selected draft restore">Draft restore</span>
+              <strong title={selectedPlan.id}>
+                {shortId(selectedPlan.id)}
+              </strong>
             </div>
-            <div>
-              <span>Source VPS</span>
-              <strong>{clientLabel(selectedPlan.source_client_id)}</strong>
+            <div
+              title={`Migration source VPS: ${clientLabel(selectedPlan.source_client_id)}`}
+            >
+              <span title="VPS that produced the backup artifact">
+                Source VPS
+              </span>
+              <strong title={clientLabel(selectedPlan.source_client_id)}>
+                {clientLabel(selectedPlan.source_client_id)}
+              </strong>
             </div>
-            <div>
-              <span>Replacement VPS</span>
-              <strong>{clientLabel(selectedPlan.target_client_id)}</strong>
+            <div
+              title={`Migration replacement VPS: ${clientLabel(selectedPlan.target_client_id)}`}
+            >
+              <span title="Replacement VPS that will receive the restored archive">
+                Replacement VPS
+              </span>
+              <strong title={clientLabel(selectedPlan.target_client_id)}>
+                {clientLabel(selectedPlan.target_client_id)}
+              </strong>
             </div>
-            <div>
-              <span>Path behavior</span>
-              <strong>{restoreScopeLabel(selectedPlan)}</strong>
+            <div
+              title={`Restore path behavior: ${restoreScopeLabel(selectedPlan)}`}
+            >
+              <span title="Configuration and path scope included by the draft restore">
+                Path behavior
+              </span>
+              <strong title={restoreScopeLabel(selectedPlan)}>
+                {restoreScopeLabel(selectedPlan)}
+              </strong>
             </div>
-            <div>
-              <span>Restore state</span>
+            <div
+              title={`Draft restore state: ${restorePlanStatusLabel(selectedPlan.status)}`}
+            >
+              <span title="Current draft restore lifecycle state">
+                Restore state
+              </span>
               <strong
                 className={`status ${restorePlanStatusBadgeClass(selectedPlan.status)}`}
+                title={`Draft restore state: ${restorePlanStatusLabel(selectedPlan.status)}`}
               >
                 {restorePlanStatusLabel(selectedPlan.status)}
               </strong>
             </div>
-            <div>
-              <span>Last mapping</span>
-              <strong title={existingLink?.id}>
+            <div
+              title={
+                existingLink
+                  ? `Saved mapping ${existingLink.id}: ${migrationLinkStatusLabel(existingLink.status)}`
+                  : "No migration mapping has been saved for this draft restore"
+              }
+            >
+              <span title="Most recently saved migration mapping for this draft restore">
+                Last mapping
+              </span>
+              <strong
+                title={
+                  existingLink
+                    ? `Saved mapping ${existingLink.id}: ${migrationLinkStatusLabel(existingLink.status)}`
+                    : "No migration mapping has been saved"
+                }
+              >
                 {existingLink
                   ? `${shortId(existingLink.id)} · ${migrationLinkStatusLabel(existingLink.status)}`
                   : "none"}
@@ -259,9 +305,15 @@ export function MigrationLinkForm({
             disabled={pending || !migrationRestorePlanId || !routeValid}
             onClick={() => void onSubmit()}
             title={
-              privilegeReady
-                ? "Review the frozen migration mapping"
-                : "Opens privilege unlock before preparing the mapping review"
+              pending
+                ? "Wait for the current migration operation to finish"
+                : !migrationRestorePlanId
+                  ? "Select a draft restore with a replacement VPS"
+                  : !routeValid
+                    ? "The selected migration route is not valid for review"
+                    : privilegeReady
+                      ? "Review the frozen migration mapping"
+                      : "Opens privilege unlock before preparing the mapping review"
             }
             type="button"
           >
@@ -270,7 +322,9 @@ export function MigrationLinkForm({
         ) : null}
         <div className="sectionHeader compact restoreFormHeader">
           <h3>Cutover restore</h3>
-          <span>Stage the package, rehearse, then explicitly select live mode</span>
+          <span>
+            Stage the package, rehearse, then explicitly select live mode
+          </span>
         </div>
         <RestoreArchiveTransferSelect
           emptyMessage={archiveEmptyMessage}
@@ -368,9 +422,17 @@ export function MigrationLinkForm({
             }
             onClick={() => void onRunMigrationRestore()}
             title={
-              privilegeReady
-                ? "Review the frozen cutover restore"
-                : "Opens privilege unlock before preparing the cutover review"
+              pending
+                ? "Wait for the current migration operation to finish"
+                : !migrationRestorePlanId
+                  ? "Select a draft restore with a replacement VPS"
+                  : !routeValid
+                    ? "The selected migration route is not valid for cutover"
+                    : !archiveReady
+                      ? "Select a staged archive whose bytes match the backup artifact"
+                      : privilegeReady
+                        ? "Review the frozen cutover restore"
+                        : "Opens privilege unlock before preparing the cutover review"
             }
             type="button"
           >

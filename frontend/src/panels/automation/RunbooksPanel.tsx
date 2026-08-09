@@ -170,6 +170,9 @@ export function RunbooksPanel({
             </button>
             <button
               className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                loading ? "Runbook evidence is already loading" : undefined
+              }
               disabled={loading}
               onClick={onRefresh}
               title="Refresh the reviewed operation catalog and latest job evidence."
@@ -272,7 +275,12 @@ export function RunbooksPanel({
                 <div className="runbookCardHeader">
                   <div>
                     <h3>{runbook.template.name}</h3>
-                    <span>{runbook.operationSummary}</span>
+                    <span
+                      data-value-tooltip-skip="true"
+                      title="Reviewed runbook operation summary; command content is excluded from tooltips"
+                    >
+                      {runbook.operationSummary}
+                    </span>
                   </div>
                   <span
                     className={
@@ -286,7 +294,23 @@ export function RunbooksPanel({
                 <dl className="runbookMetaGrid">
                   <div>
                     <dt>Scope</dt>
-                    <dd>{scopeLabel(runbook.template)}</dd>
+                    <dd
+                      data-tooltip-empty-reason={
+                        runbook.template.scope_kind !== "global" &&
+                        !runbook.template.scope_value
+                          ? "This scoped runbook has no stored scope value"
+                          : undefined
+                      }
+                      title={
+                        runbook.template.scope_kind === "global"
+                          ? "This runbook applies to all VPSs in the current operator scope"
+                          : runbook.template.scope_value
+                            ? `${runbook.template.scope_kind} scope: ${runbook.template.scope_value}`
+                            : "This scoped runbook has no stored scope value"
+                      }
+                    >
+                      {scopeLabel(runbook.template)}
+                    </dd>
                   </div>
                   <div>
                     <dt>Targets</dt>

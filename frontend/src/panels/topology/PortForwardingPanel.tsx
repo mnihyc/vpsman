@@ -847,7 +847,14 @@ export function PortForwardingPanel({
                 maxLength={512}
                 onChange={(event) => setForgetReason(event.target.value)}
                 placeholder="Decommission reason"
-                title={!canForget ? forgetBoundary : forgetReason}
+                title={
+                  pending
+                    ? "Wait for the current port-forward operation to finish"
+                    : !canForget
+                      ? forgetBoundary
+                      : forgetReason ||
+                        "Record why a permanently unreachable or decommissioned VPS is being forgotten"
+                }
                 value={forgetReason}
               />
             </label>
@@ -865,9 +872,13 @@ export function PortForwardingPanel({
                 });
               }}
               title={
-                !canForget
-                  ? forgetBoundary
-                  : "Forget only when this VPS is permanently unreachable or decommissioned"
+                pending
+                  ? "Wait for the current port-forward operation to finish"
+                  : !canForget
+                    ? forgetBoundary
+                    : !forgetReason.trim()
+                      ? "Enter a decommission reason before forgetting this removal-pending rule"
+                      : "Forget only when this VPS is permanently unreachable or decommissioned"
               }
               type="button"
             >
@@ -952,7 +963,11 @@ export function PortForwardingPanel({
               </strong>
               {corruptRules.map((rule) => (
                 <div key={rule.id}>
-                  <span title={rule.configuration_error}>
+                  <span
+                    data-tooltip-sensitive="true"
+                    data-value-tooltip-skip="true"
+                    title="The persisted rule configuration error is shown here; its exact content is excluded from tooltips."
+                  >
                     {rule.name} ·{" "}
                     {agentById.get(rule.client_id)?.display_name ||
                       rule.client_id}{" "}
@@ -967,9 +982,13 @@ export function PortForwardingPanel({
                         setCorruptDelete(rule);
                       }}
                       title={
-                        !canWrite
-                          ? writeBoundary
-                          : "Review deletion of this exact corrupt rule"
+                        pending
+                          ? "Wait for the current port-forward operation to finish"
+                          : editor
+                            ? "Close the current port-forward editor before deleting a corrupt rule"
+                            : !canWrite
+                              ? writeBoundary
+                              : "Review deletion of this exact corrupt rule"
                       }
                       type="button"
                     >
@@ -1024,7 +1043,11 @@ export function PortForwardingPanel({
                 className="secondaryAction compactAction"
                 disabled={loading || pending}
                 onClick={() => void refreshRules()}
-                title="Reload latest stored desired state and agent evidence; this does not request a live agent inspection"
+                title={
+                  loading || pending
+                    ? "Wait for the current port-forward request to finish"
+                    : "Reload latest stored desired state and agent evidence; this does not request a live agent inspection"
+                }
                 type="button"
               >
                 <RefreshCcw size={14} /> {loading ? "Refreshing" : "Refresh"}
@@ -1118,7 +1141,7 @@ export function PortForwardingPanel({
                 { label: "Revision", value: String(corruptDelete.revision) },
                 {
                   label: "Configuration error",
-                  title: corruptDelete.configuration_error,
+                  sensitive: true,
                   value: corruptDelete.configuration_error,
                 },
               ]
@@ -1256,7 +1279,11 @@ const PortForwardEditor = forwardRef<
           className="iconButton"
           disabled={pending}
           onClick={onClose}
-          title="Close editor"
+          title={
+            pending
+              ? "Wait for the current port-forward operation to finish before closing the editor"
+              : "Close port-forward editor"
+          }
           type="button"
         >
           <X size={17} />
@@ -1269,7 +1296,15 @@ const PortForwardEditor = forwardRef<
           ref={feedbackRef}
           tone={feedback?.tone}
         />
-        <label>
+        <label
+          title={
+            pending
+              ? "VPS selection is disabled while a port-forward operation is pending"
+              : editing
+                ? "The VPS is immutable after rule creation; clone or create a rule for another VPS"
+                : "VPS whose vpsman-owned nftables table receives this rule"
+          }
+        >
           <span>VPS</span>
           <VpsCombobox
             agents={agents}
@@ -1290,7 +1325,11 @@ const PortForwardEditor = forwardRef<
             }
             placeholder="Public web"
             required
-            title={draft.name}
+            title={
+              pending
+                ? "Wait for the current port-forward operation to finish before editing the rule name"
+                : draft.name || "Operator-facing port-forward rule name"
+            }
             value={draft.name}
           />
         </label>
@@ -1304,6 +1343,11 @@ const PortForwardEditor = forwardRef<
                 disabled={pending}
                 key={protocol}
                 onClick={() => onChange({ ...draft, protocol })}
+                title={
+                  pending
+                    ? "Wait for the current port-forward operation to finish before changing protocol"
+                    : `Match ${protocol === "both" ? "both TCP and UDP" : protocol.toUpperCase()} traffic`
+                }
                 type="button"
               >
                 {protocol === "both" ? "Both" : protocol.toUpperCase()}
@@ -1320,7 +1364,12 @@ const PortForwardEditor = forwardRef<
             }
             placeholder="80,443,10000-10010"
             required
-            title={draft.incoming}
+            title={
+              pending
+                ? "Wait for the current port-forward operation to finish before editing incoming ports"
+                : draft.incoming ||
+                  "Incoming port, range, or comma-separated mappings"
+            }
             value={draft.incoming}
           />
           <small>PORT or START-END, comma separated</small>
@@ -1334,7 +1383,12 @@ const PortForwardEditor = forwardRef<
             }
             placeholder="8080 or 8080,20000-20010"
             required
-            title={draft.target}
+            title={
+              pending
+                ? "Wait for the current port-forward operation to finish before editing target ports"
+                : draft.target ||
+                  "One target port for all incoming ports, or corresponding mappings"
+            }
             value={draft.target}
           />
           <small>One port for all, or corresponding items</small>
@@ -1357,7 +1411,12 @@ const PortForwardEditor = forwardRef<
               }}
               placeholder="192.0.2.40 or app.internal"
               required
-              title={draft.targetInput}
+              title={
+                pending
+                  ? "Wait for the current port-forward operation to finish before editing the target address"
+                  : draft.targetInput ||
+                    "Literal target IP or hostname resolved to one reviewed address"
+              }
               value={draft.targetInput}
             />
           </label>
@@ -1366,7 +1425,13 @@ const PortForwardEditor = forwardRef<
               className="secondaryAction compactAction"
               disabled={pending || resolving}
               onClick={() => void resolveHostname()}
-              title="Resolve on the control plane and select one literal address"
+              title={
+                pending
+                  ? "Wait for the current port-forward operation to finish"
+                  : resolving
+                    ? "The target hostname is already resolving"
+                    : "Resolve on the control plane and select one literal address"
+              }
               type="button"
             >
               <RefreshCcw size={14} /> {resolving ? "Resolving" : "Resolve"}
@@ -1375,7 +1440,15 @@ const PortForwardEditor = forwardRef<
         </div>
         <ActionFeedback message={resolveError} tone="danger" />
         {resolution && (
-          <fieldset className="dnsCandidateList" disabled={pending}>
+          <fieldset
+            className="dnsCandidateList"
+            disabled={pending}
+            title={
+              pending
+                ? "Resolved-address selection is disabled while a port-forward operation is pending"
+                : "Select the exact literal address stored in the reviewed rule"
+            }
+          >
             <legend>Resolved addresses</legend>
             {resolution.candidates.map((candidate) => (
               <label
@@ -1408,7 +1481,11 @@ const PortForwardEditor = forwardRef<
               className={draft.masquerade ? "active" : ""}
               disabled={pending}
               onClick={() => onChange({ ...draft, masquerade: true })}
-              title="Masquerade only connections DNATed by this rule"
+              title={
+                pending
+                  ? "Wait for the current port-forward operation to finish before changing return-path behavior"
+                  : "Masquerade only connections DNATed by this rule"
+              }
               type="button"
             >
               Masquerade
@@ -1418,7 +1495,11 @@ const PortForwardEditor = forwardRef<
               className={!draft.masquerade ? "active" : ""}
               disabled={pending}
               onClick={() => onChange({ ...draft, masquerade: false })}
-              title="Keep source addresses; the target must have a valid return route"
+              title={
+                pending
+                  ? "Wait for the current port-forward operation to finish before changing return-path behavior"
+                  : "Keep source addresses; the target must have a valid return route"
+              }
               type="button"
             >
               Preserve source
@@ -1431,6 +1512,11 @@ const PortForwardEditor = forwardRef<
             disabled={pending}
             onChange={(event) =>
               onChange({ ...draft, enabled: event.target.checked })
+            }
+            title={
+              pending
+                ? "Wait for the current port-forward operation to finish before changing enabled state"
+                : "Enable this desired port-forward rule after the reviewed apply"
             }
             type="checkbox"
           />
@@ -1449,7 +1535,13 @@ const PortForwardEditor = forwardRef<
           ) : mappingPreview.error ? (
             <>
               <ShieldAlert size={16} />
-              <span title={mappingPreview.error}>{mappingPreview.error}</span>
+              <span
+                data-tooltip-sensitive="true"
+                data-value-tooltip-skip="true"
+                title="The port-mapping validation error is shown here; its exact content is excluded from tooltips."
+              >
+                {mappingPreview.error}
+              </span>
             </>
           ) : (
             <>
@@ -1474,6 +1566,11 @@ const PortForwardEditor = forwardRef<
             className="secondaryAction"
             disabled={pending}
             onClick={onClose}
+            title={
+              pending
+                ? "Wait for the current port-forward operation to finish before closing the editor"
+                : "Cancel and close the port-forward editor"
+            }
             type="button"
           >
             Cancel
@@ -1505,9 +1602,12 @@ function Metric({
   value: string | number;
 }) {
   return (
-    <span className={tone === "warning" ? "hasAttention" : ""}>
-      <small>{label}</small>
-      <strong>{value}</strong>
+    <span
+      className={tone === "warning" ? "hasAttention" : ""}
+      title={`${label}: ${value}`}
+    >
+      <small title={label}>{label}</small>
+      <strong title={`${label}: ${value}`}>{value}</strong>
     </span>
   );
 }
@@ -1526,8 +1626,11 @@ function Detail({
   value: string;
 }) {
   return (
-    <div className={tone === "warning" ? "hasAttention" : ""}>
-      <dt>{label}</dt>
+    <div
+      className={tone === "warning" ? "hasAttention" : ""}
+      title={`${label}: ${title ?? value}`}
+    >
+      <dt title={label}>{label}</dt>
       <dd title={title ?? value}>{display ?? value}</dd>
     </div>
   );
@@ -1888,13 +1991,11 @@ function confirmationItems(
     ];
   }
   const rules = state.kind === "bulk" ? state.rules : [state.rule];
-  const items = rules
-    .slice(0, 12)
-    .map((rule) => ({
-      label: agents.get(rule.client_id)?.display_name || rule.client_id,
-      title: `${rule.name}: ${formatPortMappings(rule.mappings)}`,
-      value: rule.name,
-    }));
+  const items = rules.slice(0, 12).map((rule) => ({
+    label: agents.get(rule.client_id)?.display_name || rule.client_id,
+    title: `${rule.name}: ${formatPortMappings(rule.mappings)}`,
+    value: rule.name,
+  }));
   if (rules.length > 12)
     items.push({
       label: "Additional rules",

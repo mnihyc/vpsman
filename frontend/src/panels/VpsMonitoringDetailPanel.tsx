@@ -224,8 +224,16 @@ export function VpsMonitoringDetailPanel({
           />
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              loading
+                ? "Monitoring history is already loading"
+                : query.error
+                  ? "Resolve the monitoring query error before refreshing"
+                  : undefined
+            }
             disabled={loading || Boolean(query.error)}
             onClick={() => setRefreshKey((current) => current + 1)}
+            title="Refresh retained monitoring history"
             type="button"
           >
             <RefreshCw size={15} />
@@ -274,6 +282,11 @@ export function VpsMonitoringDetailPanel({
           </span>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              customStart === appliedCustomStart && customEnd === appliedCustomEnd
+                ? "The displayed custom range already matches these values"
+                : undefined
+            }
             disabled={
               customStart === appliedCustomStart &&
               customEnd === appliedCustomEnd
@@ -542,7 +555,7 @@ function PingHistory({
           <div
             className="vpsMonitoringPingTarget"
             key={`${target.targetId}:${target.generation}`}
-            title={target.reason || undefined}
+            title={`${target.name}: ${pingStatusLabel(target.status)}; latency ${formatMilliseconds(target.latency)}; loss ${formatLoss(target.loss)}.${target.reason ? " Exact probe diagnostic content is excluded from tooltips." : ""}`}
           >
             <span>
               <i style={{ background: target.color }} />
@@ -693,7 +706,13 @@ function TrafficCycle({
               <small title={noReset ? "Reset behavior" : "Current cycle end"}>
                 {noReset ? "Reset" : "Cycle ends"}
               </small>
-              <strong>
+              <strong
+                data-tooltip-empty-reason={
+                  !noReset && !traffic.cycle_end
+                    ? "The current traffic cycle has no reported end time"
+                    : undefined
+                }
+              >
                 {noReset
                   ? "No reset"
                   : traffic.cycle_end

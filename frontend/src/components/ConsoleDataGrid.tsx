@@ -66,6 +66,7 @@ export type ConsoleDataGridColumn<T> = {
   cell: (row: T) => ReactNode;
   enableHiding?: boolean;
   header: string;
+  headerTitle?: string;
   id: string;
   minSize?: number;
   mobilePrimary?: boolean;
@@ -73,6 +74,12 @@ export type ConsoleDataGridColumn<T> = {
   searchValue?: (row: T) => string | number | boolean | null | undefined;
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
+  /**
+   * Return a safe authored tooltip, `undefined` to use the visible-text
+   * decorator, or `null` to explicitly suppress tooltips for sensitive cell
+   * content. Search and sort metadata are never used as tooltip content.
+   */
+  tooltip?: (row: T) => string | null | undefined;
 };
 
 export type ConsoleDataGridAction<T> = {
@@ -163,12 +170,10 @@ export function ConsoleDataGrid<T>({
   const [columnSizing, setColumnSizing] = useState<ColumnSizingState>(
     preferences.columnSizing ?? {},
   );
-  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>(
-    {
-      ...(defaultColumnVisibility ?? {}),
-      ...(preferences.columnVisibility ?? {}),
-    },
-  );
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({
+    ...(defaultColumnVisibility ?? {}),
+    ...(preferences.columnVisibility ?? {}),
+  });
   const [columnOrder, setColumnOrder] = useState<string[]>(
     preferences.columnOrder ?? [],
   );
@@ -310,21 +315,22 @@ export function ConsoleDataGrid<T>({
         minSize: column.minSize ?? 96,
         size: column.size ?? 160,
         enableHiding: column.enableHiding ?? true,
-        cell: ({ row }: { row: Row<T> }) => (
-          <span
-            className={
-              column.align === "end"
-                ? "gridCellContent alignEnd"
-                : "gridCellContent"
-            }
-            title={tooltipFromValue(
-              column.searchValue?.(row.original) ??
-                column.sortValue?.(row.original),
-            )}
-          >
-            {column.cell(row.original)}
-          </span>
-        ),
+        cell: ({ row }: { row: Row<T> }) => {
+          const tooltip = columnTooltip(column, row.original);
+          return (
+            <span
+              className={
+                column.align === "end"
+                  ? "gridCellContent alignEnd"
+                  : "gridCellContent"
+              }
+              data-value-tooltip-skip={tooltip.skip ? "true" : undefined}
+              title={tooltip.title}
+            >
+              {column.cell(row.original)}
+            </span>
+          );
+        },
       })),
     ],
     [columns, controlIdPrefix, hasExpandedRows, selectable, title],
@@ -500,7 +506,13 @@ export function ConsoleDataGrid<T>({
   }
 
   function actionDescription(action: ConsoleDataGridAction<T>, rows: T[]) {
-    return action.description?.(rows) ?? action.label;
+    const description = action.description?.(rows);
+    if (action.disabled?.(rows)) {
+      return (
+        description ?? `${action.label} is unavailable for the selected rows.`
+      );
+    }
+    return description ?? `Activate ${action.label} for the selected rows.`;
   }
 
   function rowDataCells(row: Row<T>) {
@@ -512,11 +524,9 @@ export function ConsoleDataGrid<T>({
       );
   }
 
-  function tooltipForCell(cell: Cell<T, unknown>, row: T): string | undefined {
+  function tooltipForCell(cell: Cell<T, unknown>, row: T): ColumnTooltip {
     const column = dataColumnsById.get(cell.column.id);
-    return tooltipFromValue(
-      column?.searchValue?.(row) ?? column?.sortValue?.(row) ?? cell.getValue(),
-    );
+    return column ? columnTooltip(column, row) : {};
   }
 
   function renderMobileCard(row: Row<T>) {
@@ -540,6 +550,12 @@ export function ConsoleDataGrid<T>({
       }) ??
       dataCells[1] ??
       null;
+    const primaryTooltip = primaryCell
+      ? tooltipForCell(primaryCell, row.original)
+      : {};
+    const stateTooltip = stateCell
+      ? tooltipForCell(stateCell, row.original)
+      : {};
     const primaryRowActions = showMobileRowActions
       ? contextRowActions.filter((action) => !action.hidden?.([row.original]))
       : [];
@@ -622,9 +638,8 @@ export function ConsoleDataGrid<T>({
           ) : null}
           <div
             className="gridMobilePrimary"
-            title={
-              primaryCell ? tooltipForCell(primaryCell, row.original) : rowId
-            }
+            data-value-tooltip-skip={primaryTooltip.skip ? "true" : undefined}
+            title={primaryTooltip.title}
           >
             {primaryCell ? (
               flexRender(
@@ -638,7 +653,8 @@ export function ConsoleDataGrid<T>({
           {stateCell ? (
             <div
               className="gridMobileState"
-              title={tooltipForCell(stateCell, row.original)}
+              data-value-tooltip-skip={stateTooltip.skip ? "true" : undefined}
+              title={stateTooltip.title}
             >
               {flexRender(
                 stateCell.column.columnDef.cell,
@@ -650,23 +666,24 @@ export function ConsoleDataGrid<T>({
 
         {detailCells.length > 0 ? (
           <div className="gridMobileFields">
-            {detailCells.map((cell) => (
-              <div
-                className="gridMobileField"
-                key={cell.id}
-                title={tooltipForCell(cell, row.original)}
-              >
-                <span title={cellHeaderLabel(cell)}>
-                  {cellHeaderLabel(cell)}
-                </span>
+            {detailCells.map((cell) => {
+              const tooltip = tooltipForCell(cell, row.original);
+              return (
                 <div
-                  className="gridMobileFieldValue"
-                  title={tooltipForCell(cell, row.original)}
+                  className="gridMobileField"
+                  data-value-tooltip-skip={tooltip.skip ? "true" : undefined}
+                  key={cell.id}
+                  title={tooltip.title}
                 >
-                  {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  <span title={cellHeaderLabel(cell)}>
+                    {cellHeaderLabel(cell)}
+                  </span>
+                  <div className="gridMobileFieldValue" title={tooltip.title}>
+                    {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : null}
 
@@ -764,7 +781,10 @@ export function ConsoleDataGrid<T>({
   function renderEmptyContent() {
     if (searchError) {
       return (
-        <div className="emptyState compactEmpty">
+        <div
+          className="emptyState compactEmpty"
+          title={`The ${title} search expression is invalid: ${searchError}`}
+        >
           <strong>Invalid table search</strong>
           <span>{searchError}</span>
           <button
@@ -780,7 +800,10 @@ export function ConsoleDataGrid<T>({
     }
     if (rows.length > 0 && globalFilter.trim()) {
       return (
-        <div className="emptyState compactEmpty">
+        <div
+          className="emptyState compactEmpty"
+          title={`No loaded ${itemLabel} match the current ${title} search.`}
+        >
           <strong>
             {rowsTruncated
               ? `No loaded ${itemLabel} match`
@@ -804,14 +827,21 @@ export function ConsoleDataGrid<T>({
     }
     if (rowsTruncated && rows.length === 0) {
       return (
-        <div className="emptyState compactEmpty">
+        <div
+          className="emptyState compactEmpty"
+          title={`No ${itemLabel} are present in the loaded ${title} page.`}
+        >
           No {itemLabel} appear in the loaded page; more may exist.
         </div>
       );
     }
     const emptyContent = empty ?? `No ${itemLabel} match the current view.`;
     if (typeof emptyContent === "string" || typeof emptyContent === "number") {
-      return <div className="emptyState compactEmpty">{emptyContent}</div>;
+      return (
+        <div className="emptyState compactEmpty" title={String(emptyContent)}>
+          {emptyContent}
+        </div>
+      );
     }
     return emptyContent;
   }
@@ -819,16 +849,25 @@ export function ConsoleDataGrid<T>({
   return (
     <div className="consoleDataGrid" aria-label={`${title} data grid`}>
       <div className="gridToolbar">
-        <div className="gridCounts">
-          <strong>{title}</strong>
-          <span>
+        <div
+          className="gridCounts"
+          title={`${title} result and selection summary.`}
+        >
+          <strong title={`${title} data grid.`}>{title}</strong>
+          <span
+            title={`${filteredRows.length} filtered from ${rows.length} loaded ${itemLabel}.`}
+          >
             {rowsTruncated
               ? globalFilter.trim().length > 0
                 ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
                 : `${rows.length} loaded; more may exist`
               : `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? singularItemLabel : itemLabel}`}
           </span>
-          {selectable && <span>{selectedRows.length} selected</span>}
+          {selectable && (
+            <span title={`${selectedRows.length} ${itemLabel} selected.`}>
+              {selectedRows.length} selected
+            </span>
+          )}
         </div>
         <SearchExpressionInput
           ariaLabel={`${title} search`}
@@ -1030,7 +1069,10 @@ export function ConsoleDataGrid<T>({
             >
               <ChevronLeft size={16} />
             </button>
-            <span className="gridPageLabel">
+            <span
+              className="gridPageLabel"
+              title={`Page ${currentPage} of ${pageCount} for ${title}.`}
+            >
               {currentPage} / {pageCount}
             </span>
             <button
@@ -1076,6 +1118,9 @@ export function ConsoleDataGrid<T>({
                         canDrag={sortableColumnIds.includes(header.column.id)}
                         fitDefaultColumns={fitDefaultColumns}
                         header={header}
+                        headerTitle={
+                          dataColumnsById.get(header.column.id)?.headerTitle
+                        }
                         key={header.id}
                       />
                     ))}
@@ -1137,23 +1182,29 @@ export function ConsoleDataGrid<T>({
                           role="row"
                           tabIndex={rowIsActionable ? 0 : undefined}
                         >
-                          {row.getVisibleCells().map((cell) => (
-                            <div
-                              className="gridCell"
-                              key={cell.id}
-                              role="gridcell"
-                              style={gridColumnStyle(
-                                cell.column,
-                                fitDefaultColumns,
-                              )}
-                              title={tooltipForCell(cell, row.original)}
-                            >
-                              {flexRender(
-                                cell.column.columnDef.cell,
-                                cell.getContext(),
-                              )}
-                            </div>
-                          ))}
+                          {row.getVisibleCells().map((cell) => {
+                            const tooltip = tooltipForCell(cell, row.original);
+                            return (
+                              <div
+                                className="gridCell"
+                                data-value-tooltip-skip={
+                                  tooltip.skip ? "true" : undefined
+                                }
+                                key={cell.id}
+                                role="gridcell"
+                                style={gridColumnStyle(
+                                  cell.column,
+                                  fitDefaultColumns,
+                                )}
+                                title={tooltip.title}
+                              >
+                                {flexRender(
+                                  cell.column.columnDef.cell,
+                                  cell.getContext(),
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       )}
                     </ContextMenu.Trigger>
@@ -1304,22 +1355,33 @@ function writeGridPreferences(
   }
 }
 
-function tooltipFromValue(value: unknown): string | undefined {
-  if (value === null || value === undefined) {
-    return undefined;
+type ColumnTooltip = { skip?: boolean; title?: string };
+
+function columnTooltip<T>(
+  column: ConsoleDataGridColumn<T>,
+  row: T,
+): ColumnTooltip {
+  if (!column.tooltip) {
+    return {};
   }
-  const text = String(value).trim();
-  return text ? text : undefined;
+  const authored = column.tooltip(row);
+  if (authored === null) {
+    return { skip: true };
+  }
+  const title = authored?.trim();
+  return title ? { title } : {};
 }
 
 function SortableHeaderCell<T>({
   canDrag,
   fitDefaultColumns,
   header,
+  headerTitle,
 }: {
   canDrag: boolean;
   fitDefaultColumns: boolean;
   header: Header<T, unknown>;
+  headerTitle?: string;
 }) {
   const {
     attributes,
@@ -1336,8 +1398,13 @@ function SortableHeaderCell<T>({
     .filter(Boolean)
     .join(" ");
   const headerDefinition = header.column.columnDef.header;
-  const headerTitle =
+  const headerLabel =
     typeof headerDefinition === "string" ? headerDefinition : "";
+  const effectiveHeaderTitle =
+    headerTitle ??
+    (headerLabel
+      ? `${headerLabel} column. Activate the heading to change sorting.`
+      : undefined);
 
   return (
     <div
@@ -1352,9 +1419,9 @@ function SortableHeaderCell<T>({
     >
       {canDrag && (
         <button
-          aria-label={`Reorder ${headerTitle || header.column.id} column`}
+          aria-label={`Reorder ${headerLabel || header.column.id} column`}
           className="gridDragHandle"
-          title={`Reorder ${headerTitle || header.column.id} column`}
+          title={`Reorder ${headerLabel || header.column.id} column`}
           type="button"
           {...attributes}
           {...listeners}
@@ -1366,7 +1433,7 @@ function SortableHeaderCell<T>({
         <button
           className="gridHeaderButton sortable"
           onClick={header.column.getToggleSortingHandler()}
-          title={headerTitle || undefined}
+          title={effectiveHeaderTitle}
           type="button"
         >
           {flexRender(header.column.columnDef.header, header.getContext())}
@@ -1377,7 +1444,7 @@ function SortableHeaderCell<T>({
               : ""}
         </button>
       ) : (
-        <div className="gridHeaderButton" title={headerTitle || undefined}>
+        <div className="gridHeaderButton" title={effectiveHeaderTitle}>
           {flexRender(header.column.columnDef.header, header.getContext())}
         </div>
       )}
@@ -1416,7 +1483,9 @@ function gridColumnStyle<T>(
 const STRUCTURAL_COLUMN_ORDER = ["__select", "__expand"] as const;
 
 function gridControlId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "grid";
+  return (
+    value.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "grid"
+  );
 }
 
 export function reconcileColumnOrder(

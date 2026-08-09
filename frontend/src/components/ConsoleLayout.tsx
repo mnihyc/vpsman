@@ -111,16 +111,29 @@ export function ConsoleActionDrawer({
 
 export function ConsoleStatusBadge({
   children,
+  title,
   tone = "neutral",
 }: {
   children: ReactNode;
+  title?: string;
   tone?: "critical" | "warning" | "ok" | "info" | "neutral";
 }) {
-  return <span className={`consoleStatusBadge ${tone}`}>{children}</span>;
+  const text = typeof children === "string" || typeof children === "number"
+    ? String(children)
+    : null;
+  return (
+    <span
+      className={`consoleStatusBadge ${tone}`}
+      title={title ?? (text ? `Status: ${text}.` : "Current status.")}
+    >
+      {children}
+    </span>
+  );
 }
 
 export type ConsoleMenuAction = {
   disabled?: boolean;
+  disabledReason?: string;
   label: string;
   onSelect: () => void;
   title?: string;
@@ -140,6 +153,7 @@ export function ConsoleActionMenu({
         <button
           aria-label={label}
           className="secondaryAction compactAction"
+          title={`Open ${label.toLowerCase()}.`}
           type="button"
         >
           <span>Actions</span>
@@ -162,9 +176,10 @@ export function ConsoleActionMenu({
                   : "consoleMenuItem"
               }
               disabled={action.disabled}
+              data-tooltip-disabled-reason={action.disabledReason}
               key={action.label}
               onSelect={action.onSelect}
-              title={action.title}
+              title={consoleActionTitle(action)}
             >
               {action.label}
             </DropdownMenu.Item>
@@ -192,9 +207,10 @@ export function ConsoleInlineActions({
               : "secondaryAction compactAction"
           }
           disabled={action.disabled}
+          data-tooltip-disabled-reason={action.disabledReason}
           key={action.label}
           onClick={action.onSelect}
-          title={action.title}
+          title={consoleActionTitle(action)}
           type="button"
         >
           <span>{action.label}</span>
@@ -234,9 +250,10 @@ export function ConsoleContextActionMenu({
                     : "consoleMenuItem"
                 }
                 disabled={action.disabled}
+                data-tooltip-disabled-reason={action.disabledReason}
                 key={action.label}
                 onSelect={action.onSelect}
-                title={action.title}
+                title={consoleActionTitle(action)}
               >
                 {action.label}
               </ContextMenu.Item>
@@ -284,6 +301,7 @@ export function ConsoleCollapsibleSection({
           <button
             aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
             className="secondaryAction compactAction"
+            title={`${open ? "Collapse" : "Expand"} ${title}.`}
             type="button"
           >
             <ChevronDown
@@ -299,6 +317,13 @@ export function ConsoleCollapsibleSection({
       </Collapsible.Content>
     </Collapsible.Root>
   );
+}
+
+function consoleActionTitle(action: ConsoleMenuAction) {
+  if (action.disabled) {
+    return action.disabledReason ?? action.title ?? `${action.label} is unavailable in the current state.`;
+  }
+  return action.title ?? `Activate ${action.label}.`;
 }
 
 export function ConsoleSplitWorkspace({

@@ -14,7 +14,10 @@ import {
   waitForBulkJobTargets,
   type BulkJobProgress,
 } from "../bulkJobProgress";
-import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import {
+  ConfirmationPrompt,
+  type ConfirmationPromptItem,
+} from "../components/ConfirmationPrompt";
 import { ExecutionResultPanel } from "../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../components/PrivilegeVaultBox";
 import { ActionFeedback } from "../components/ActionFeedback";
@@ -565,12 +568,14 @@ export function JobDispatchPanel({
       false,
       preserveHistoryState,
     );
-  const [networkTrafficImportInterfacesText, setNetworkTrafficImportInterfacesText] =
-    useDispatchHistoryState(
-      "networkTrafficImportInterfacesText",
-      "",
-      preserveHistoryState,
-    );
+  const [
+    networkTrafficImportInterfacesText,
+    setNetworkTrafficImportInterfacesText,
+  ] = useDispatchHistoryState(
+    "networkTrafficImportInterfacesText",
+    "",
+    preserveHistoryState,
+  );
   const [networkTrafficImportStartDate, setNetworkTrafficImportStartDate] =
     useDispatchHistoryState(
       "networkTrafficImportStartDate",
@@ -739,7 +744,10 @@ export function JobDispatchPanel({
 
   function setMode(nextMode: DispatchMode) {
     setModeState(fixedMode ?? nextMode);
-    if (nextMode === "agent_update_check" || nextMode === "network_traffic_import_vnstat") {
+    if (
+      nextMode === "agent_update_check" ||
+      nextMode === "network_traffic_import_vnstat"
+    ) {
       setMaxTimeoutSecs("300");
       setExecutionOptionsOpen(true);
     } else {
@@ -1187,8 +1195,12 @@ export function JobDispatchPanel({
     [commandTemplates],
   );
   const visibleDispatchProgress = dispatchProgress ?? lastDispatchProgress;
-  const dispatchConfirmationItems = [
-    { label: "Operation", value: dispatchConfirmationOperationLabel },
+  const dispatchConfirmationItems: ConfirmationPromptItem[] = [
+    {
+      label: "Operation",
+      sensitive: true,
+      value: dispatchConfirmationOperationLabel,
+    },
     { label: "Submission", value: "Dispatch immediately after confirmation" },
     ...transferReviewItems(activeDispatchConfirmation),
     ...operationReviewItems(
@@ -2000,6 +2012,11 @@ export function JobDispatchPanel({
                       <span>Scope value</span>
                       <input
                         aria-label="Command template scope value"
+                        data-tooltip-disabled-reason={
+                          templateScopeKind === "global"
+                            ? "Global templates do not use a scope value"
+                            : undefined
+                        }
                         disabled={templateScopeKind === "global"}
                         onChange={(event) =>
                           setTemplateScopeValue(event.target.value)
@@ -2016,6 +2033,11 @@ export function JobDispatchPanel({
                   <div className="templateToolbarActions">
                     <button
                       className="secondaryAction"
+                      data-tooltip-disabled-reason={
+                        templatePending
+                          ? "A command template change is already in progress"
+                          : undefined
+                      }
                       disabled={templatePending}
                       onClick={() => void reviewCommandTemplateSave()}
                       type="button"
@@ -2026,6 +2048,15 @@ export function JobDispatchPanel({
                     </button>
                     <button
                       className="secondaryAction dangerAction"
+                      data-tooltip-disabled-reason={
+                        templatePending
+                          ? "A command template change is already in progress"
+                          : !selectedTemplate
+                            ? "Select a saved command template before deleting"
+                            : selectedTemplate.built_in
+                              ? "Built-in command templates cannot be deleted"
+                              : undefined
+                      }
                       disabled={
                         templatePending ||
                         !selectedTemplate ||
@@ -2198,7 +2229,9 @@ export function JobDispatchPanel({
           fileTransferResumeToken={fileTransferResumeToken}
           fileTransferSessionId={fileTransferSessionId}
           mode={mode}
-          networkTrafficImportInterfacesText={networkTrafficImportInterfacesText}
+          networkTrafficImportInterfacesText={
+            networkTrafficImportInterfacesText
+          }
           networkTrafficImportStartDate={networkTrafficImportStartDate}
           processLimit={processLimit}
           setCommandText={setCommandText}
@@ -2229,7 +2262,9 @@ export function JobDispatchPanel({
           setFileTransferRateLimit={setFileTransferRateLimit}
           setFileTransferResumeToken={setFileTransferResumeToken}
           setFileTransferSessionId={setFileTransferSessionId}
-          setNetworkTrafficImportInterfacesText={setNetworkTrafficImportInterfacesText}
+          setNetworkTrafficImportInterfacesText={
+            setNetworkTrafficImportInterfacesText
+          }
           setNetworkTrafficImportStartDate={setNetworkTrafficImportStartDate}
           setProcessLimit={setProcessLimit}
           setSupervisorAction={setSupervisorAction}
@@ -2319,6 +2354,9 @@ export function JobDispatchPanel({
                 >
                   <input
                     checked={rolloutEnabled}
+                    data-tooltip-disabled-reason={
+                      rolloutUnavailableReason ?? undefined
+                    }
                     disabled={Boolean(rolloutUnavailableReason)}
                     onChange={(event) =>
                       setRolloutEnabled(event.target.checked)
@@ -2395,19 +2433,21 @@ export function JobDispatchPanel({
           tone={dispatchConfirmationDestructive ? "danger" : "normal"}
         />
 
-        {!dispatchPromptOpen && !lastRolloutJobId && visibleDispatchProgress && (
-          <ExecutionResultPanel
-            context={
-              lastDispatchContext
-                ? `Dispatch: ${lastDispatchContext}`
-                : undefined
-            }
-            loading={dispatchProgress !== null}
-            onClearResults={clearExecutionResults}
-            onOpenJobDetails={onOpenJobDetails}
-            progress={visibleDispatchProgress}
-          />
-        )}
+        {!dispatchPromptOpen &&
+          !lastRolloutJobId &&
+          visibleDispatchProgress && (
+            <ExecutionResultPanel
+              context={
+                lastDispatchContext
+                  ? `Dispatch: ${lastDispatchContext}`
+                  : undefined
+              }
+              loading={dispatchProgress !== null}
+              onClearResults={clearExecutionResults}
+              onOpenJobDetails={onOpenJobDetails}
+              progress={visibleDispatchProgress}
+            />
+          )}
 
         {!dispatchPromptOpen && transferAccepted && transferProgress && (
           <div
@@ -2472,6 +2512,15 @@ export function JobDispatchPanel({
           <div className="dispatchActions">
             <button
               className="primaryAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "A dispatch review or submission is already in progress"
+                  : !operationReady
+                    ? "Complete the selected operation before dispatching"
+                    : !privilegeMaterial
+                      ? "Unlock privilege before dispatching this operation"
+                      : undefined
+              }
               disabled={pending || !operationReady || !privilegeMaterial}
               type="submit"
             >
@@ -2520,7 +2569,7 @@ function dispatchTargetIdentitySummary(targets: AgentView[]): {
 
 function operationReviewItems(
   operation: CreateJobRequest["operation"] | undefined,
-): Array<{ label: string; title?: string; value: string }> {
+): ConfirmationPromptItem[] {
   if (!operation) {
     return [];
   }
@@ -2592,7 +2641,7 @@ function operationReviewItems(
     process_status: "Refresh process status",
     process_stop: "Stop supervised process",
   };
-  const items: Array<{ label: string; title?: string; value: string }> = [
+  const items: ConfirmationPromptItem[] = [
     { label: "Process", value: processName },
     { label: "Effect", value: effectByType[operation.type] ?? operation.type },
   ];
@@ -2604,13 +2653,13 @@ function operationReviewItems(
         ? `${environmentNames.join(", ")} (values hidden)`
         : "No overrides";
     items.push(
-      { label: "Command argv", title: command, value: command },
+      { label: "Command argv", sensitive: true, value: command },
       {
         label: "Working directory",
-        title: operation.cwd ?? "Agent default",
+        sensitive: true,
         value: operation.cwd ?? "Agent default",
       },
-      { label: "Environment", title: environment, value: environment },
+      { label: "Environment", sensitive: true, value: environment },
     );
   }
   if (operation.type === "process_logs") {

@@ -154,6 +154,11 @@ export function PrivilegeVaultBox({
     return (
       <button
         className="secondaryAction dangerAction"
+        data-tooltip-disabled-reason={
+          pending
+            ? "The local vault cannot be cleared while another privilege action is in progress."
+            : "No saved local privilege vault is available to clear."
+        }
         disabled={pending || disabled}
         onClick={() => setClearVaultPromptOpen(true)}
         type="button"
@@ -194,19 +199,29 @@ export function PrivilegeVaultBox({
     <div className="privilegeStateGrid" aria-label="Privilege vault state">
       <span>
         <small>State</small>
-        <strong>{privilegeStatus}</strong>
+        <strong title={`Privilege state: ${privilegeStatus}.`}>
+          {privilegeStatus}
+        </strong>
       </span>
       <span>
         <small>Unlock scope</small>
-        <strong>{unlockScope}</strong>
+        <strong title={`Privilege unlock scope: ${unlockScope}.`}>
+          {unlockScope}
+        </strong>
       </span>
       <span>
         <small>Unlocked until</small>
-        <strong>{unlockedUntil}</strong>
+        <strong title={`Privilege remains unlocked: ${unlockedUntil}.`}>
+          {unlockedUntil}
+        </strong>
       </span>
       <span>
         <small>{showHandoffState ? "Saved unlock" : "Local vault"}</small>
-        <strong>{localVaultState}</strong>
+        <strong
+          title={`${showHandoffState ? "Saved unlock" : "Local vault"}: ${localVaultState}.`}
+        >
+          {localVaultState}
+        </strong>
       </span>
     </div>
   );
@@ -233,6 +248,7 @@ export function PrivilegeVaultBox({
         <div className="privilegeActionRow">
           <button
             className="secondaryAction"
+            data-tooltip-disabled-reason="Privilege cannot be locked while another privilege action is in progress."
             disabled={pending}
             onClick={() => setLockPromptOpen(true)}
             type="button"
@@ -327,6 +343,7 @@ export function PrivilegeVaultBox({
             <input
               aria-label={label("Vault passphrase")}
               autoComplete="off"
+              data-tooltip-sensitive="true"
               name="vault_unlock_passphrase"
               onChange={(event) => {
                 setUnlockPassphrase(event.target.value);
@@ -338,6 +355,11 @@ export function PrivilegeVaultBox({
             />
             <button
               className="secondaryAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "The saved vault cannot be unlocked while another privilege action is in progress."
+                  : "Enter the local vault passphrase before unlocking."
+              }
               disabled={pending || !unlockPassphrase}
               type="submit"
             >
@@ -368,6 +390,7 @@ export function PrivilegeVaultBox({
               <input
                 aria-label={label("Super password")}
                 autoComplete="off"
+                data-tooltip-sensitive="true"
                 name="privilege_secret"
                 onChange={(event) => {
                   setSuperPassword(event.target.value);
@@ -383,6 +406,7 @@ export function PrivilegeVaultBox({
               <input
                 aria-label={label("Super salt hex")}
                 autoComplete="off"
+                data-tooltip-sensitive="true"
                 name="privilege_salt_hex"
                 onChange={(event) => {
                   setSuperSaltHex(event.target.value);
@@ -417,6 +441,7 @@ export function PrivilegeVaultBox({
                 aria-describedby={vaultPassphraseHintId}
                 aria-label={label("New vault passphrase")}
                 autoComplete="off"
+                data-tooltip-sensitive="true"
                 minLength={MIN_VAULT_PASSPHRASE_LENGTH}
                 name="new_vault_passphrase"
                 onChange={(event) => {
@@ -436,6 +461,13 @@ export function PrivilegeVaultBox({
           )}
           <button
             className="primaryAction"
+            data-tooltip-disabled-reason={privilegeActivationDisabledReason({
+              pending,
+              saveToVault,
+              superPassword,
+              superSaltHex,
+              vaultPassphrase,
+            })}
             disabled={
               pending ||
               !superPassword ||
@@ -461,4 +493,32 @@ export function PrivilegeVaultBox({
       {lockConfirmation}
     </div>
   );
+}
+
+function privilegeActivationDisabledReason({
+  pending,
+  saveToVault,
+  superPassword,
+  superSaltHex,
+  vaultPassphrase,
+}: {
+  pending: boolean;
+  saveToVault: boolean;
+  superPassword: string;
+  superSaltHex: string;
+  vaultPassphrase: string;
+}) {
+  if (pending) {
+    return "Privilege cannot be unlocked while another privilege action is in progress.";
+  }
+  if (!superPassword) {
+    return "Enter the super password before unlocking privilege.";
+  }
+  if (!superSaltHex) {
+    return "Enter the privilege salt before unlocking privilege.";
+  }
+  if (saveToVault && vaultPassphrase.length < MIN_VAULT_PASSPHRASE_LENGTH) {
+    return `Use at least ${MIN_VAULT_PASSPHRASE_LENGTH} characters for the local vault passphrase.`;
+  }
+  return "Privilege material is ready for verification.";
 }

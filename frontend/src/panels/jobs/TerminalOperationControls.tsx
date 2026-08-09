@@ -58,10 +58,14 @@ export function TerminalOperationControls({
           value={terminalSessionId}
         />
       </label>
-      <label className="wideField">
+      <label
+        className="wideField"
+        title="Terminal arguments are entered here; their contents are intentionally omitted from tooltips because arguments may contain sensitive values."
+      >
         <span>Argv</span>
         <textarea
           aria-label="Terminal argv"
+          data-value-tooltip-skip="true"
           onChange={(event) => setTerminalArgv(event.target.value)}
           rows={2}
           value={terminalArgv}

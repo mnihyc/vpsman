@@ -272,10 +272,22 @@ export async function unlockPrivilegeFromTop(page: Page) {
     );
     await expect(dialog).toBeHidden();
   }
-  await expect(verified).toBeVisible();
+  await expectPrivilegeVerifiedForViewport(page);
   await expect(
     topbar.getByRole("button", { name: "Lock privilege" }),
   ).toHaveCount(0);
+}
+
+export async function expectPrivilegeVerifiedForViewport(page: Page) {
+  const verified = page
+    .locator(".topbar")
+    .getByLabel("Privilege verified for this browser");
+  await expect(verified).toHaveCount(1);
+  if ((page.viewportSize()?.width ?? Number.POSITIVE_INFINITY) <= 1080) {
+    await expect(verified).toBeHidden();
+    return;
+  }
+  await expect(verified).toBeVisible();
 }
 
 export async function lockPrivilegeFromVault(page: Page) {

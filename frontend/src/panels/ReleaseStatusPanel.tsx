@@ -17,7 +17,10 @@ export function ReleaseStatusPanel({
 }: ReleaseStatusPanelProps) {
   return (
     <section className="workspace singleColumn">
-      <div className="releaseStatusPanel" aria-label={`${title} release status`}>
+      <div
+        className="releaseStatusPanel"
+        aria-label={`${title} release status`}
+      >
         <div className="sectionHeader">
           <div>
             <h2>{title}</h2>
@@ -61,17 +64,27 @@ function ReleaseStatusList({
   tone: "ready" | "pending" | "blocked";
 }) {
   return (
-    <section className={`releaseStatusList ${tone}`}>
-      <div className="releaseStatusListTitle">
+    <section
+      className={`releaseStatusList ${tone}`}
+      title={`${title}: ${items.length} ${items.length === 1 ? "item" : "items"}.`}
+    >
+      <div
+        className="releaseStatusListTitle"
+        title={`${title} release category.`}
+      >
         {icon}
         <strong>{title}</strong>
       </div>
       {items.length === 0 ? (
-        <p>No items recorded for this category.</p>
+        <p title={`No items are recorded in the ${title} category.`}>
+          No items recorded for this category.
+        </p>
       ) : (
         <ul>
           {items.map((item) => (
-            <li key={item}>{item}</li>
+            <li key={item} title={item}>
+              {item}
+            </li>
           ))}
         </ul>
       )}

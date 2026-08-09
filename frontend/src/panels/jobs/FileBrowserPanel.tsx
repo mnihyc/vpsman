@@ -195,6 +195,29 @@ export function FileBrowserPanel({
   const locationCommandDisabled = !selectedEntry || pending || !privilegeMaterial;
   const selectedDownloadDisabled = !selectedEntry || pending || !privilegeMaterial;
   const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
+  const locationCommandDisabledReason = pending
+    ? "A remote file operation is already running."
+    : !privilegeMaterial
+      ? "Unlock privilege before changing remote files."
+      : !selectedEntry
+        ? "Select a file or directory first."
+        : undefined;
+  const selectedDownloadDisabledReason = pending
+    ? "A remote file operation is already running."
+    : !privilegeMaterial
+      ? "Unlock privilege before downloading remote files."
+      : !selectedEntry
+        ? "Select a file or directory to download."
+        : undefined;
+  const selectedPathCommandDisabledReason = pending
+    ? "A remote file operation is already running."
+    : !privilegeMaterial
+      ? "Unlock privilege before changing remote files."
+      : !selectedEntry
+        ? "Select a file or directory first."
+        : selectedPath === "/"
+          ? "This operation cannot be applied to the filesystem root."
+          : undefined;
   const editorDirty = editorContent !== editorSavedContent;
   const currentEntries = entriesByPath[currentPath] ?? [];
   const currentDirectoryEvidence = directoryEvidenceByPath[currentPath] ?? null;
@@ -1104,11 +1127,39 @@ export function FileBrowserPanel({
       )}
 
       <div className="filePathBar">
-        <button className="iconButton" disabled={pending || currentPath === "/" || !privilegeMaterial || !selectedAgent} onClick={() => void loadDirectory(parentPath(currentPath))} title="Parent directory" type="button">
+        <button
+          className="iconButton"
+          data-tooltip-disabled-reason={
+            pending
+              ? "A remote file operation is already running."
+              : currentPath === "/"
+                ? "The current directory is already the filesystem root."
+                : !privilegeMaterial
+                  ? "Unlock privilege before browsing remote files."
+                  : !selectedAgent
+                    ? "Choose one VPS before browsing remote files."
+                    : undefined
+          }
+          disabled={pending || currentPath === "/" || !privilegeMaterial || !selectedAgent}
+          onClick={() => void loadDirectory(parentPath(currentPath))}
+          title="Parent directory"
+          type="button"
+        >
           <ChevronRight className="rotate180" size={15} />
         </button>
         <button
           className="secondaryAction compactAction pathRefreshAction"
+          data-tooltip-disabled-reason={
+            pending
+              ? "A remote file operation is already running."
+              : loading
+                ? "The directory is already loading."
+                : !privilegeMaterial
+                  ? "Unlock privilege before browsing remote files."
+                  : !selectedAgent
+                    ? "Choose one VPS before browsing remote files."
+                    : undefined
+          }
           disabled={pending || loading || !privilegeMaterial || !selectedAgent}
           onClick={() => void loadDirectory(pathRefreshTarget)}
           title={
@@ -1137,12 +1188,28 @@ export function FileBrowserPanel({
           <input checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} type="checkbox" />
           <span>Hidden</span>
         </label>
-        <button className="secondaryAction" disabled={!selectedPath} onClick={copySelectedPath} type="button">
+        <button
+          className="secondaryAction"
+          data-tooltip-disabled-reason={
+            selectedPath ? undefined : "Select a file or directory before copying its path."
+          }
+          disabled={!selectedPath}
+          onClick={copySelectedPath}
+          type="button"
+        >
           <Copy size={14} />
           <span>Copy path</span>
         </button>
         {onOpenMultiFiles && (
-          <button className="secondaryAction" disabled={!selectedPath} onClick={() => onOpenMultiFiles(selectedPath)} type="button">
+          <button
+            className="secondaryAction"
+            data-tooltip-disabled-reason={
+              selectedPath ? undefined : "Select a file or directory before opening bulk file operations."
+            }
+            disabled={!selectedPath}
+            onClick={() => onOpenMultiFiles(selectedPath)}
+            type="button"
+          >
             <ShieldCheck size={14} />
             <span>Bulk files</span>
           </button>
@@ -1169,6 +1236,13 @@ export function FileBrowserPanel({
         {onOpenTransfers && (
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              !targetClientId
+                ? "Choose one VPS before opening transfer sessions."
+                : !transferReferencePath
+                  ? "Select a file or directory before opening transfer sessions."
+                  : undefined
+            }
             disabled={!transferReferencePath || !targetClientId}
             onClick={() => onOpenTransfers(transferReferencePath)}
             title="Open Remote / Transfers with the selected VPS and path scoped in the transfer table."
@@ -1191,10 +1265,31 @@ export function FileBrowserPanel({
         />
         <aside className="fileTreePane">
           <div className="fileTreeToolbar">
-            <button className="secondaryAction compactAction" disabled={pending || !privilegeMaterial || !selectedAgent} onClick={() => void loadDirectory("/")} type="button">
+            <button
+              className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={
+                pending
+                  ? "A remote file operation is already running."
+                  : !privilegeMaterial
+                    ? "Unlock privilege before browsing remote files."
+                    : !selectedAgent
+                      ? "Choose one VPS before browsing remote files."
+                      : undefined
+              }
+              disabled={pending || !privilegeMaterial || !selectedAgent}
+              onClick={() => void loadDirectory("/")}
+              type="button"
+            >
               /
             </button>
-            <button className="secondaryAction compactAction" disabled={selectedDownloadDisabled} onClick={() => void downloadSelected()} title={selectedDownloadLabel} type="button">
+            <button
+              className="secondaryAction compactAction"
+              data-tooltip-disabled-reason={selectedDownloadDisabledReason}
+              disabled={selectedDownloadDisabled}
+              onClick={() => void downloadSelected()}
+              title={selectedDownloadLabel}
+              type="button"
+            >
               <Download size={13} />
               <span>{selectedDownloadLabel}</span>
             </button>
@@ -1253,6 +1348,17 @@ export function FileBrowserPanel({
                   <button
                     aria-label={editorConflictDetected ? "Review overwrite" : "Review save"}
                     className={editorConflictDetected ? "dangerAction" : "primaryAction"}
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before saving remote files."
+                          : !selectedAgent
+                            ? "Choose one VPS before saving remote files."
+                            : !editorDirty
+                              ? "The editor has no unsaved changes."
+                              : undefined
+                    }
                     disabled={!editorDirty || pending || !privilegeMaterial || !selectedAgent}
                     onClick={() => void saveEditor(editorConflictDetected)}
                     title={
@@ -1303,13 +1409,22 @@ export function FileBrowserPanel({
           </div>
           <div className="fileActionStack">
             <div className="fileDetailsToolbar" aria-label="Selected file actions">
-              <button aria-label={selectedDownloadLabel} className="fileActionButton" disabled={selectedDownloadDisabled} onClick={() => void downloadSelected()} title={selectedDownloadLabel} type="button">
+              <button
+                aria-label={selectedDownloadLabel}
+                className="fileActionButton"
+                data-tooltip-disabled-reason={selectedDownloadDisabledReason}
+                disabled={selectedDownloadDisabled}
+                onClick={() => void downloadSelected()}
+                title={selectedDownloadLabel}
+                type="button"
+              >
                 <Download size={15} />
                 <span>{selectedDownloadLabel}</span>
               </button>
               <button
                 aria-label="Upload here"
                 className="fileActionButton"
+                data-tooltip-disabled-reason={locationCommandDisabledReason}
                 disabled={locationCommandDisabled}
                 onClick={() => {
                   const folder = selectedEntry?.is_dir ? selectedPath : currentPath;
@@ -1328,23 +1443,23 @@ export function FileBrowserPanel({
                 <Upload size={15} />
                 <span>Upload</span>
               </button>
-              <button aria-label="Move or rename selected" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("rename")} title="Move or rename selected" type="button">
+              <button aria-label="Move or rename selected" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("rename")} title="Move or rename selected" type="button">
                 <Scissors size={15} />
                 <span>Move</span>
               </button>
-              <button aria-label="Create file or folder" className="fileActionButton" disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
+              <button aria-label="Create file or folder" className="fileActionButton" data-tooltip-disabled-reason={locationCommandDisabledReason} disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
                 <FilePlus2 size={15} />
                 <span>Create</span>
               </button>
-              <button aria-label="Change selected permissions" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
+              <button aria-label="Change selected permissions" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
                 <ShieldCheck size={15} />
                 <span>Permissions</span>
               </button>
-              <button aria-label="Change selected owner or group" className="fileActionButton" disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
+              <button aria-label="Change selected owner or group" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
                 <UserRound size={15} />
                 <span>Owner</span>
               </button>
-              <button aria-label="Review delete selected" className="fileActionButton dangerFileActionButton" disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
+              <button aria-label="Review delete selected" className="fileActionButton dangerFileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
                 <Trash2 size={15} />
                 <span>Delete</span>
               </button>
@@ -1466,7 +1581,21 @@ export function FileBrowserPanel({
                   </select>
                 </label>
                 <div className="fileCommandActions">
-                  <button className="secondaryAction" disabled={pending || !uploadFile || !privilegeMaterial} onClick={() => void uploadSelectedFile()} type="button">
+                  <button
+                    className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before uploading a remote file."
+                          : !uploadFile
+                            ? "Choose a local file before review."
+                            : undefined
+                    }
+                    disabled={pending || !uploadFile || !privilegeMaterial}
+                    onClick={() => void uploadSelectedFile()}
+                    type="button"
+                  >
                     <Upload size={14} />
                     <span>Review upload</span>
                   </button>
@@ -1521,9 +1650,9 @@ export function FileBrowserPanel({
                   </label>
                 </div>
                 {createType === "file" && (
-                  <label>
+                  <label title="New file content is intentionally omitted from tooltips because it may contain sensitive values.">
                     <span>Content</span>
-                    <textarea aria-label="New file text content" onChange={(event) => {
+                    <textarea aria-label="New file text content" data-value-tooltip-skip="true" onChange={(event) => {
                       setCreateContent(event.target.value);
                       setActionError(null);
                     }} rows={7} value={createContent} />
@@ -1538,6 +1667,15 @@ export function FileBrowserPanel({
                 <div className="fileCommandActions">
                   <button
                     className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before creating a remote file or directory."
+                          : !newName.trim()
+                            ? "Enter a file or directory name before review."
+                            : undefined
+                    }
                     disabled={pending || !privilegeMaterial || !newName.trim()}
                     onClick={() => void submitCreate()}
                     title={newName.trim() ? "Review the exact create operation" : "Enter a name first"}
@@ -1568,7 +1706,21 @@ export function FileBrowserPanel({
                   />
                 </label>
                 <div className="fileCommandActions">
-                  <button className="secondaryAction" disabled={pending || !selectedPath || !privilegeMaterial} onClick={renameSelected} type="button">
+                  <button
+                    className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before moving a remote path."
+                          : !selectedPath
+                            ? "Select a file or directory before moving it."
+                            : undefined
+                    }
+                    disabled={pending || !selectedPath || !privilegeMaterial}
+                    onClick={renameSelected}
+                    type="button"
+                  >
                     <Scissors size={14} />
                     <span>Review move</span>
                   </button>
@@ -1594,7 +1746,21 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileCommandActions">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chmodSelected} type="button">Review permission change</button>
+                  <button
+                    className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before changing remote permissions."
+                          : undefined
+                    }
+                    disabled={pending || !privilegeMaterial}
+                    onClick={chmodSelected}
+                    type="button"
+                  >
+                    Review permission change
+                  </button>
                 </div>
               </section>
             )}
@@ -1623,7 +1789,21 @@ export function FileBrowserPanel({
                   <span>Recursive</span>
                 </label>
                 <div className="fileCommandActions">
-                  <button className="secondaryAction" disabled={pending || !privilegeMaterial} onClick={chownSelected} type="button">Review owner change</button>
+                  <button
+                    className="secondaryAction"
+                    data-tooltip-disabled-reason={
+                      pending
+                        ? "A remote file operation is already running."
+                        : !privilegeMaterial
+                          ? "Unlock privilege before changing remote ownership."
+                          : undefined
+                    }
+                    disabled={pending || !privilegeMaterial}
+                    onClick={chownSelected}
+                    type="button"
+                  >
+                    Review owner change
+                  </button>
                 </div>
               </section>
             )}
@@ -2195,10 +2375,19 @@ function fileConfirmationDetail(confirmation: PendingConfirmation): string {
 function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label: string; value: ReactNode }> {
   const operation = confirmation.operation;
   const items: Array<{ label: string; value: ReactNode }> = [
-    { label: "Selector", value: confirmation.selectorExpression || "-" },
+    {
+      label: "Selector",
+      value: confirmation.selectorExpression || (
+        <span data-tooltip-empty-reason="This single-VPS file operation does not use a selector expression.">-</span>
+      ),
+    },
     {
       label: "Target VPS",
-      value: confirmation.target ? <span title={confirmation.target.id}>{targetNameId(confirmation.target)}</span> : "-",
+      value: confirmation.target ? (
+        <span title={confirmation.target.id}>{targetNameId(confirmation.target)}</span>
+      ) : (
+        <span data-tooltip-empty-reason="No target VPS is attached to this review.">-</span>
+      ),
     },
     { label: "Operation", value: fileOperationSummary(operation) },
     { label: "Privilege", value: "Unlocked vault assertion required" },
@@ -2309,10 +2498,16 @@ function ownershipPolicyLabel(policy: FileOwnershipPolicy): string {
   }
 }
 
-function ownerGroupConfirmationValue(operation: Extract<JobOperation, { type: "file_chown" | "file_push" | "file_push_chunked" }>): string {
+function ownerGroupConfirmationValue(operation: Extract<JobOperation, { type: "file_chown" | "file_push" | "file_push_chunked" }>): ReactNode {
   const owner = operation.owner ?? operation.uid ?? "-";
   const group = operation.group ?? operation.gid ?? "-";
-  return `${owner}:${group} · ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}`;
+  return (
+    <span
+      title={`Owner ${owner === "-" ? "not specified" : owner}; group ${group === "-" ? "not specified" : group}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`}
+    >
+      {owner}:{group} · {ownershipPolicyLabel(operation.ownership_policy ?? "fail")}
+    </span>
+  );
 }
 
 function textDiffPreview(before: string, after: string): string {
