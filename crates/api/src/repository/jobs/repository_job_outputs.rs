@@ -52,6 +52,12 @@ pub(crate) struct PendingFinalJobOutput {
     pub(crate) received_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingNetworkTrafficImportFinalization {
+    pub(crate) job_id: Uuid,
+    pub(crate) client_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct JobOutputArtifactRef {
     pub(crate) object_key: String,
@@ -76,6 +82,178 @@ pub(crate) struct JobOutputCursor {
 }
 
 impl Repository {
+    pub(crate) async fn list_pending_network_traffic_import_finalizations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingNetworkTrafficImportFinalization>> {
+        let limit = limit.clamp(1, 128) as usize;
+        match self {
+            Self::Memory(memory) => {
+                let operations = memory.job_operations.read().await;
+                let targets = memory.job_targets.read().await;
+                let outputs = memory.job_outputs.read().await;
+                let mut retry_not_before =
+                    memory.network_traffic_import_retry_not_before.write().await;
+                retry_not_before.retain(|(job_id, client_id), _| {
+                    targets.iter().any(|target| {
+                        target.job_id == *job_id
+                            && target.client_id == *client_id
+                            && target.completed_at.is_none()
+                            && target_status_is_active(&target.status)
+                    })
+                });
+                let now = unix_now();
+                let mut pending = targets
+                    .iter()
+                    .filter(|target| {
+                        target.completed_at.is_none()
+                            && target_status_is_active(&target.status)
+                            && matches!(
+                                operations.get(&target.job_id),
+                                Some(vpsman_common::JobCommand::NetworkTrafficImportVnstat { .. })
+                            )
+                            && retry_not_before
+                                .get(&(target.job_id, target.client_id.clone()))
+                                .is_none_or(|not_before| *not_before <= now)
+                            && outputs.iter().any(|output| {
+                                output.job_id == target.job_id
+                                    && output.client_id == target.client_id
+                                    && output.done
+                                    && job_output_sequence_contiguous_in_views(
+                                        &outputs,
+                                        output.job_id,
+                                        &output.client_id,
+                                        output.seq,
+                                    )
+                            })
+                    })
+                    .map(|target| PendingNetworkTrafficImportFinalization {
+                        job_id: target.job_id,
+                        client_id: target.client_id.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                pending.sort_by(|left, right| {
+                    retry_not_before
+                        .get(&(left.job_id, left.client_id.clone()))
+                        .cmp(&retry_not_before.get(&(right.job_id, right.client_id.clone())))
+                        .then_with(|| left.job_id.cmp(&right.job_id))
+                        .then_with(|| left.client_id.cmp(&right.client_id))
+                });
+                pending.truncate(limit);
+                Ok(pending)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT target.job_id, target.client_id
+                    FROM job_targets target
+                    JOIN jobs job ON job.id = target.job_id
+                    WHERE target.completed_at IS NULL
+                      AND target.status IN ('dispatching', 'running')
+                      AND job.command_type = 'network_traffic_import_vnstat'
+                      AND (
+                        target.dispatch_lease_until IS NULL
+                        OR target.dispatch_lease_until <= now()
+                      )
+                      AND EXISTS (
+                        SELECT 1
+                        FROM job_outputs final_output
+                        WHERE final_output.job_id = target.job_id
+                          AND final_output.client_id = target.client_id
+                          AND final_output.done = TRUE
+                          AND final_output.seq >= 0
+                          AND (
+                            SELECT COUNT(DISTINCT chunk.seq)
+                            FROM job_outputs chunk
+                            WHERE chunk.job_id = final_output.job_id
+                              AND chunk.client_id = final_output.client_id
+                              AND chunk.seq BETWEEN 0 AND final_output.seq
+                          ) = final_output.seq::bigint + 1
+                      )
+                    ORDER BY
+                        target.dispatch_lease_until ASC NULLS FIRST,
+                        target.job_id,
+                        target.client_id
+                    LIMIT $1
+                    "#,
+                )
+                .bind(i64::try_from(limit).unwrap_or(128))
+                .fetch_all(pool)
+                .await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| {
+                        Ok(PendingNetworkTrafficImportFinalization {
+                            job_id: row.try_get("job_id")?,
+                            client_id: row.try_get("client_id")?,
+                        })
+                    })
+                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?)
+            }
+        }
+    }
+
+    pub(crate) async fn defer_network_traffic_import_finalization(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        message: &str,
+        retry_after_secs: u64,
+    ) -> Result<()> {
+        let retry_after_secs = retry_after_secs.clamp(1, 3_600);
+        match self {
+            Self::Memory(memory) => {
+                let target_updated = {
+                    let mut targets = memory.job_targets.write().await;
+                    if let Some(target) = targets.iter_mut().find(|target| {
+                        target.job_id == job_id
+                            && target.client_id == client_id
+                            && target.completed_at.is_none()
+                            && target_status_is_active(&target.status)
+                    }) {
+                        target.status = vpsman_server_core::TARGET_STATUS_RUNNING.to_string();
+                        target.message = Some(message.to_string());
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if target_updated {
+                    memory
+                        .network_traffic_import_retry_not_before
+                        .write()
+                        .await
+                        .insert(
+                            (job_id, client_id.to_string()),
+                            unix_now().saturating_add(retry_after_secs),
+                        );
+                }
+            }
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_targets
+                    SET status = 'running',
+                        message = $3,
+                        dispatch_lease_until = now() + make_interval(secs => $4::integer),
+                        last_dispatch_error = $3
+                    WHERE job_id = $1
+                      AND client_id = $2
+                      AND completed_at IS NULL
+                      AND status IN ('dispatching', 'running')
+                    "#,
+                )
+                .bind(job_id)
+                .bind(client_id)
+                .bind(message)
+                .bind(i32::try_from(retry_after_secs).unwrap_or(3_600))
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn list_job_outputs(&self, job_id: Uuid) -> Result<Vec<JobOutputView>> {
         match self {
             Self::Memory(memory) => Ok(memory
@@ -1788,7 +1966,7 @@ fn output_stream_from_name(value: &str) -> Result<OutputStream> {
     }
 }
 
-fn job_output_sequence_contiguous_in_views(
+pub(crate) fn job_output_sequence_contiguous_in_views(
     outputs: &[JobOutputView],
     job_id: Uuid,
     client_id: &str,

@@ -348,7 +348,7 @@ test("unauthenticated public shares call only public monitoring APIs", async ({
   ).toEqual([]);
   await expect(
     page.getByRole("combobox", { name: "Filter shared VPSs by status" }),
-  ).toHaveAttribute("title", /Filter shared VPSs by status: All statuses/);
+  ).not.toHaveAttribute("title", /\S/);
   const generatedTitles = await page
     .locator("[title]")
     .evaluateAll((elements) =>
@@ -384,6 +384,130 @@ test("public cards remain static when detail history is not shared", async ({
   );
 });
 
+test("compact public cards preserve long Ping targets and evidence at minimum width", async ({
+  page,
+}) => {
+  const pingTargetName =
+    "Primary customer gateway with a deliberately long operator label";
+  await page.setViewportSize({ width: 320, height: 900 });
+  await installPublicMonitoringApiMock(page, {
+    pingLatencyMs: 123_456_789.1,
+    pingLossRatio: null,
+    pingTargetName,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", { name: /Shared edge/ });
+  const ping = card.locator(".publicMonitoringPing");
+  const heading = ping.locator(".vpsMonitorRowHeading");
+  const evidence = ping.locator(".vpsMonitorPingEvidence > strong");
+  await expect(heading).toHaveText(`Ping · ${pingTargetName}`);
+  await expect(evidence).toHaveText(["123456789.1 ms", "loss unavailable"]);
+  await expect
+    .poll(() =>
+      ping.evaluate((element) => {
+        const headingElement = element.querySelector<HTMLElement>(
+          ".vpsMonitorRowHeading",
+        );
+        const chartElement = element.querySelector<HTMLElement>(
+          ":scope > .vpsMonitorSparkline",
+        );
+        const evidenceElement = element.querySelector<HTMLElement>(
+          ".vpsMonitorPingEvidence",
+        );
+        const evidenceItems = Array.from(
+          element.querySelectorAll<HTMLElement>(
+            ".vpsMonitorPingEvidence > strong",
+          ),
+        );
+        if (!headingElement || !chartElement || !evidenceElement) return false;
+        const headingStyle = getComputedStyle(headingElement);
+        const headingBox = headingElement.getBoundingClientRect();
+        const chartBox = chartElement.getBoundingClientRect();
+        const evidenceBox = evidenceElement.getBoundingClientRect();
+        return (
+          headingStyle.overflow !== "hidden" &&
+          headingStyle.textOverflow !== "ellipsis" &&
+          headingElement.scrollWidth <= headingElement.clientWidth + 1 &&
+          headingElement.scrollHeight <= headingElement.clientHeight + 1 &&
+          evidenceItems.every((item) => {
+            const style = getComputedStyle(item);
+            return (
+              style.overflow !== "hidden" &&
+              style.textOverflow !== "ellipsis" &&
+              item.scrollWidth <= item.clientWidth + 1 &&
+              item.scrollHeight <= item.clientHeight + 1
+            );
+          }) &&
+          chartBox.top >= headingBox.bottom - 1 &&
+          evidenceBox.top >= chartBox.bottom - 1 &&
+          element.getBoundingClientRect().right <= window.innerWidth + 1
+        );
+      }),
+    )
+    .toBe(true);
+});
+
+test("comfortable shared cards align healthy, degraded, and unconfigured Ping evidence", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the focused geometry assertion is viewport-independent and runs once on desktop",
+  );
+  await installPublicMonitoringApiMock(page, {
+    cardCount: 3,
+    pingStateCoverage: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+  await page
+    .getByLabel("Shared view density")
+    .getByRole("button", { name: "Comfortable" })
+    .click();
+
+  const healthy = page
+    .getByRole("link", { name: /Shared edge .* shared monitoring card/ })
+    .locator(".publicMonitoringPing");
+  const degraded = page
+    .getByRole("link", { name: /Frankfurt build .* shared monitoring card/ })
+    .locator(".publicMonitoringPing");
+  const unconfigured = page
+    .getByRole("link", { name: /Tokyo relay .* shared monitoring card/ })
+    .locator(".publicMonitoringPing");
+
+  await expect(healthy.locator(".vpsMonitorRowHeading")).toHaveText(
+    "Ping · Customer gateway",
+  );
+  await expect(
+    healthy.locator(":scope > .vpsMonitorPingDetail"),
+  ).toHaveAttribute("aria-hidden", "true");
+  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
+    "",
+  );
+  await expect(degraded.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
+    "Primary Ping degraded",
+  );
+  await expect(degraded).toHaveAttribute(
+    "title",
+    /Fixture degraded gateway.*24\.5 ms.*20\.0% loss.*Primary Ping degraded/i,
+  );
+  await expect(
+    unconfigured.locator(".vpsMonitorPingEvidence > strong"),
+  ).toHaveText("Unconfigured");
+  await expect(
+    unconfigured.locator(":scope > .vpsMonitorPingDetail"),
+  ).toHaveAttribute("aria-hidden", "true");
+  await expectEqualPublicPingHeights([healthy, degraded, unconfigured]);
+
+  await page
+    .getByLabel("Shared view density")
+    .getByRole("button", { name: "Compact" })
+    .click();
+  await expect(
+    page.getByLabel("Shared VPS cards").locator(".vpsMonitorPingDetail"),
+  ).toHaveCount(0);
+});
+
 test("public cards keep an intentionally empty network-rate selection neutral", async ({
   page,
 }) => {
@@ -394,7 +518,7 @@ test("public cards keep an intentionally empty network-rate selection neutral", 
     name: /Shared edge · Online shared monitoring card/,
   });
   await expect(
-    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence > strong"),
+    card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
   ).toContainText("· Total · 25.0%");
   await expect(card).toBeVisible();
   await expect(card.getByText("Online", { exact: true })).toBeVisible();
@@ -450,9 +574,9 @@ test("public monitoring keeps grid and detail history state without exposing hid
     name: /Shared edge · Online shared monitoring card/,
   });
   await expect(card).toBeVisible();
-  await expect(card.getByText("Updated just now").first()).toHaveAttribute(
+  await expect(card.getByText("Updated just now").first()).not.toHaveAttribute(
     "title",
-    "Updated just now",
+    /\S/,
   );
   await expect(
     card.getByLabel("Current resources for Shared edge"),
@@ -466,30 +590,23 @@ test("public monitoring keeps grid and detail history state without exposing hid
   await expect(publicTraffic.locator(".vpsMonitorRowHeading")).toContainText(
     /Traffic · Resets/,
   );
-  await expect(publicTraffic.locator(".vpsMonitorRowHeading")).toHaveAttribute(
-    "title",
-    /Traffic/,
-  );
   await expect(
-    publicTraffic.locator(".vpsMonitorRowEvidence > strong"),
-  ).toHaveAttribute("title", /\S/);
-  await expect(publicTraffic.locator(":scope > small")).toHaveAttribute(
-    "title",
-    /\S/,
-  );
+    publicTraffic.locator(".vpsMonitorRowHeading"),
+  ).not.toHaveAttribute("title", /\S/);
+  await expect(
+    publicTraffic.locator(".vpsMonitorTrafficQuota"),
+  ).not.toHaveAttribute("title", /\S/);
+  await expect(publicTraffic.locator(":scope > small")).toHaveCount(0);
   const publicPing = card.locator(".publicMonitoringPing");
   await expect(publicPing.locator(".vpsMonitorRowHeading")).toContainText(
     "Ping · Customer gateway",
   );
   await expect(
-    publicPing.locator(':scope > span:not([role="img"])'),
-  ).toHaveAttribute("title", /\S/);
+    publicPing.locator(":scope > .vpsMonitorPingEvidence"),
+  ).not.toHaveAttribute("title", /\S/);
   await expect(
     publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
-  ).toHaveAttribute("title", /\S/);
-  await expect(
-    card.locator(".publicMonitoringPing > small:not(.vpsMonitorRowHeading)"),
-  ).toContainText("Reachable");
+  ).toHaveCount(0);
   await expect(card.getByText("Ok", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Billing", { exact: true })).toHaveCount(0);
   await expect(card.getByText("Uptime", { exact: true })).toHaveCount(0);
@@ -512,6 +629,16 @@ test("public monitoring keeps grid and detail history state without exposing hid
   const isMobile = (page.viewportSize()?.width ?? 1_000) < 500;
   expect(await columnCount()).toBe(isMobile ? 1 : 5);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(publicTraffic.locator(":scope > small")).not.toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(
+    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+  ).not.toHaveAttribute("title", /\S/);
+  await expect(
+    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+  ).toContainText("Reachable");
   const comfortableHeight = await card.evaluate(
     (node) => node.getBoundingClientRect().height,
   );
@@ -933,10 +1060,10 @@ test("public monitoring identifies the most-used finite directional traffic quot
     name: /Shared edge · Online · Warning shared monitoring card/,
   });
   await expect(
-    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence > strong"),
+    card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
   ).toHaveText("1000 B / 800 B · TX · 125%");
   await expect(
-    card.locator(".publicMonitoringTraffic .vpsMonitorRowEvidence"),
+    card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
   ).not.toContainText(/observed/i);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
   await expect(card.locator(".publicMonitoringTraffic > small")).toContainText(
@@ -968,7 +1095,7 @@ test("public monitoring uses counted directional traffic for an unlimited summar
     name: /Shared edge · Online shared monitoring card/,
   });
   const traffic = card.locator(".publicMonitoringTraffic");
-  await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
+  await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
     "1000 B / Unlimited · TX",
   );
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
@@ -1000,7 +1127,7 @@ test("public monitoring presents no-reset accumulation without a synthetic cycle
   });
   const traffic = card.locator(".publicMonitoringTraffic");
   await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText("Traffic");
-  await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
+  await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
     "2.9 KiB / 12 KiB · Total · 25.0%",
   );
 
@@ -1425,6 +1552,22 @@ async function installSharedViewApiMock(page: Page) {
   );
 }
 
+async function expectEqualPublicPingHeights(
+  elements: ReturnType<Page["locator"]>[],
+) {
+  await expect
+    .poll(async () => {
+      const heights = await Promise.all(
+        elements.map(async (element) => {
+          const box = await element.boundingBox();
+          return box?.height ?? Number.POSITIVE_INFINITY;
+        }),
+      );
+      return Math.max(...heights) - Math.min(...heights);
+    })
+    .toBeLessThanOrEqual(1);
+}
+
 async function installPublicMonitoringApiMock(
   page: Page,
   {
@@ -1437,6 +1580,10 @@ async function installPublicMonitoringApiMock(
     mixedTrafficQuotas = false,
     networkRateExpected = true,
     noResetTraffic = false,
+    pingLatencyMs = 18.5,
+    pingLossRatio = 0,
+    pingStateCoverage = false,
+    pingTargetName = "Customer gateway",
     retainTrafficHistory = false,
     supplementalVisibility = edgeCases,
     trafficConfigured = true,
@@ -1450,6 +1597,10 @@ async function installPublicMonitoringApiMock(
     mixedTrafficQuotas?: boolean;
     networkRateExpected?: boolean;
     noResetTraffic?: boolean;
+    pingLatencyMs?: number | null;
+    pingLossRatio?: number | null;
+    pingStateCoverage?: boolean;
+    pingTargetName?: string;
     retainTrafficHistory?: boolean;
     supplementalVisibility?: boolean;
     trafficConfigured?: boolean;
@@ -1503,11 +1654,11 @@ async function installPublicMonitoringApiMock(
       : [],
     primary_ping: {
       checked_at: observedAt,
-      latency_avg_ms: 18.5,
-      loss_ratio: 0,
+      latency_avg_ms: pingLatencyMs,
+      loss_ratio: pingLossRatio,
       state: "ok",
       status: "ok",
-      target_name: "Customer gateway",
+      target_name: pingTargetName,
     },
     primary_ping_history: [
       {
@@ -1518,17 +1669,17 @@ async function installPublicMonitoringApiMock(
         loss_ratio: 0,
         sample_count: 3,
         status: "ok",
-        target_name: "Customer gateway",
+        target_name: pingTargetName,
       },
       {
         bucket_secs: 60,
         bucket_start: new Date(rangeEnd * 1_000).toISOString(),
         checked_at: observedAt,
-        latency_avg_ms: 18.5,
-        loss_ratio: 0,
+        latency_avg_ms: pingLatencyMs,
+        loss_ratio: pingLossRatio,
         sample_count: 3,
         status: "ok",
-        target_name: "Customer gateway",
+        target_name: pingTargetName,
       },
     ],
     status: "online",
@@ -1723,11 +1874,11 @@ async function installPublicMonitoringApiMock(
       bucket_secs: 60,
       bucket_start: new Date(bucket * 1_000).toISOString(),
       checked_at: new Date(bucket * 1_000).toISOString(),
-      latency_avg_ms: 18.5 + Math.sin(index / 3) * 2.5,
+      latency_avg_ms: (pingLatencyMs ?? 18.5) + Math.sin(index / 3) * 2.5,
       loss_ratio: index % 8 === 0 ? 0.03 : 0,
       sample_count: 3,
       status: "ok",
-      target_name: "Customer gateway",
+      target_name: pingTargetName,
     }));
     card.primary_ping_history = primaryHistory;
     const secondaryTargets: NonNullable<
@@ -1834,6 +1985,35 @@ async function installPublicMonitoringApiMock(
           udp_sockets: (card.resources.udp_sockets ?? 4) + index,
         }
       : undefined;
+    const primaryPing =
+      pingStateCoverage && index === 2
+        ? undefined
+        : card.primary_ping
+          ? {
+              ...card.primary_ping,
+              latency_avg_ms:
+                (card.primary_ping.latency_avg_ms ?? 18) + index * 6,
+              loss_ratio:
+                pingStateCoverage && index === 1
+                  ? 0.2
+                  : card.primary_ping.loss_ratio,
+              state:
+                (pingStateCoverage && index === 1) ||
+                (!pingStateCoverage && index === 4)
+                  ? "degraded"
+                  : "ok",
+              status:
+                (pingStateCoverage && index === 1) ||
+                (!pingStateCoverage && index === 4)
+                  ? "degraded"
+                  : "ok",
+              target_name: pingStateCoverage
+                ? index === 1
+                  ? "Fixture degraded gateway"
+                  : "Fixture healthy gateway"
+                : card.primary_ping.target_name,
+            }
+          : undefined;
     return {
       ...card,
       client_key: `${publicClientKey}-${index + 1}`,
@@ -1845,15 +2025,9 @@ async function installPublicMonitoringApiMock(
             tx_bps: (card.network.tx_bps ?? 0) + index * 70_000,
           }
         : undefined,
-      primary_ping: card.primary_ping
-        ? {
-            ...card.primary_ping,
-            latency_avg_ms:
-              (card.primary_ping.latency_avg_ms ?? 18) + index * 6,
-            state: index === 4 ? "degraded" : "ok",
-            status: index === 4 ? "degraded" : "ok",
-          }
-        : undefined,
+      primary_ping: primaryPing,
+      primary_ping_history:
+        pingStateCoverage && index === 2 ? [] : card.primary_ping_history,
       resources: resource,
       status,
       tags: identityContext

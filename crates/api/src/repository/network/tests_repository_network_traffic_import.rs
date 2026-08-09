@@ -15,6 +15,22 @@ fn bucket(
     }
 }
 
+fn interface_bucket(
+    interface: &str,
+    start_unix: u64,
+    duration_secs: u32,
+    rx_bytes: u64,
+    tx_bytes: u64,
+) -> NetworkTrafficImportBucket {
+    NetworkTrafficImportBucket {
+        interface: interface.to_string(),
+        start_unix,
+        duration_secs,
+        rx_bytes,
+        tx_bytes,
+    }
+}
+
 fn minute_rows(traffic: &ExpandedMinuteTraffic) -> Vec<(u64, u64, u64)> {
     traffic
         .segments
@@ -79,6 +95,7 @@ fn explicit_trafficless_year_keeps_ancient_import_continuous_and_bounded() {
         sources: vec![vpsman_common::NetworkTrafficImportSource {
             interface: "eth0".to_string(),
             database_created_unix: Some(start),
+            retained_start_unix: start,
             source_updated_unix: Some(live),
         }],
         batch_count: 1,
@@ -272,6 +289,7 @@ fn prepare_import_stops_immediately_before_first_live_sample() {
         sources: vec![vpsman_common::NetworkTrafficImportSource {
             interface: "eth0".to_string(),
             database_created_unix: Some(start - 60),
+            retained_start_unix: start,
             source_updated_unix: Some(live + 600),
         }],
         batch_count: 1,
@@ -302,6 +320,138 @@ fn prepare_import_stops_immediately_before_first_live_sample() {
 }
 
 #[test]
+fn prepare_import_clamps_each_interface_to_its_distinct_continuous_retained_start() {
+    let requested_start = 1_722_470_400;
+    let eth0_created = requested_start - 3_600;
+    let eth0_effective_start = requested_start + 120;
+    let eth0_live = requested_start + 600;
+    let ens3_created = requested_start - 7_200;
+    let ens3_effective_start = requested_start + 240;
+    let ens3_live = requested_start + 900;
+    let job_id = Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap();
+    let result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".to_string(),
+        status: "collected".to_string(),
+        requested_start_unix: requested_start,
+        collected_until_unix: ens3_live + 60,
+        interfaces: vec!["eth0".to_string(), "ens3".to_string()],
+        sources: vec![
+            vpsman_common::NetworkTrafficImportSource {
+                interface: "eth0".to_string(),
+                database_created_unix: Some(eth0_created),
+                retained_start_unix: eth0_effective_start,
+                source_updated_unix: Some(eth0_live + 60),
+            },
+            vpsman_common::NetworkTrafficImportSource {
+                interface: "ens3".to_string(),
+                database_created_unix: Some(ens3_created),
+                retained_start_unix: ens3_effective_start,
+                source_updated_unix: Some(ens3_live + 60),
+            },
+        ],
+        batch_count: 1,
+        bucket_count: 4,
+        message: String::new(),
+    };
+    let existing = vec![
+        sample_record("agent-a", "eth0", eth0_live, 10, 20, "interface_counters").unwrap(),
+        sample_record("agent-a", "ens3", ens3_live, 30, 40, "interface_counters").unwrap(),
+    ];
+    let buckets = [
+        interface_bucket("eth0", requested_start, 60, 10, 5),
+        interface_bucket(
+            "eth0",
+            eth0_effective_start,
+            u32::try_from(eth0_live - eth0_effective_start).unwrap(),
+            90,
+            45,
+        ),
+        interface_bucket("ens3", requested_start, 120, 20, 10),
+        interface_bucket(
+            "ens3",
+            ens3_effective_start,
+            u32::try_from(ens3_live - ens3_effective_start).unwrap(),
+            120,
+            60,
+        ),
+    ];
+    assert!(validate_result_contract(
+        &["eth0".to_string(), "ens3".to_string()],
+        requested_start,
+        &result,
+        &buckets,
+        ens3_live + 120,
+    )
+    .is_ok());
+    let prepared = prepare_imports(
+        job_id,
+        "agent-a",
+        &["eth0".to_string(), "ens3".to_string()],
+        requested_start,
+        &result,
+        &buckets,
+        ens3_live + 60,
+        &existing,
+    )
+    .unwrap();
+
+    assert_eq!(result.requested_start_unix, requested_start);
+    assert_eq!(prepared[0].start_unix, eth0_effective_start);
+    assert_eq!(prepared[0].traffic.minute_count, 8);
+    assert_eq!(prepared[1].start_unix, ens3_effective_start);
+    assert_eq!(prepared[1].traffic.minute_count, 11);
+    assert_eq!(
+        prepared[0]
+            .samples("agent-a")
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+            .first()
+            .unwrap()
+            .observed_unix,
+        i64::try_from(eth0_effective_start - 60).unwrap()
+    );
+    assert_eq!(
+        prepared[1]
+            .samples("agent-a")
+            .collect::<Result<Vec<_>>>()
+            .unwrap()
+            .first()
+            .unwrap()
+            .observed_unix,
+        i64::try_from(ens3_effective_start - 60).unwrap()
+    );
+}
+
+#[test]
+fn empty_request_accepts_the_agents_bounded_discovered_interface_set() {
+    let start = 1_722_470_400;
+    let result = NetworkTrafficImportResult {
+        r#type: "network_traffic_import_vnstat".to_string(),
+        status: "collected".to_string(),
+        requested_start_unix: start,
+        collected_until_unix: start + 600,
+        interfaces: vec!["eth0".to_string()],
+        sources: vec![vpsman_common::NetworkTrafficImportSource {
+            interface: "eth0".to_string(),
+            database_created_unix: Some(start),
+            retained_start_unix: start,
+            source_updated_unix: Some(start + 600),
+        }],
+        batch_count: 1,
+        bucket_count: 1,
+        message: String::new(),
+    };
+    assert!(validate_result_contract(
+        &[],
+        start,
+        &result,
+        &[bucket(start, 600, 100, 50)],
+        start + 660,
+    )
+    .is_ok());
+}
+
+#[test]
 fn rerun_boundaries_prepare_the_same_replacement_as_full_import_history() {
     let start = 1_722_470_400;
     let live = start + 600;
@@ -315,6 +465,7 @@ fn rerun_boundaries_prepare_the_same_replacement_as_full_import_history() {
         sources: vec![vpsman_common::NetworkTrafficImportSource {
             interface: "eth0".to_string(),
             database_created_unix: Some(start - 60),
+            retained_start_unix: start,
             source_updated_unix: Some(live + 600),
         }],
         batch_count: 1,

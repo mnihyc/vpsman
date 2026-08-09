@@ -2033,7 +2033,7 @@ test(
       .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
       .first();
     const traffic = edgeCard.locator(".vpsMonitorTraffic");
-    await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
+    await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
       "1.7 TiB / 2.3 TiB · TX · 76.0%",
     );
     await expect(traffic).not.toContainText("/ Unlimited");
@@ -5377,11 +5377,13 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   ).toHaveValue(
     "/opt/operator/tunnel-adapter\nstart\n--interface\n{interface}\n--kind\n{kind}\n--remote-underlay\n{remote_underlay}\n--local-address\n{local_address}/{prefix_len}\n--remote-address\n{remote_address}",
   );
-  await expect(
-    drawer.getByLabel("Start adapter command", { exact: true }),
-  ).toHaveAttribute(
+  const startAdapterCommand = drawer.getByLabel("Start adapter command", {
+    exact: true,
+  });
+  await expect(startAdapterCommand).not.toHaveAttribute("title", /\S/);
+  await expect(startAdapterCommand.locator("..")).toHaveAttribute(
     "title",
-    "/opt/operator/tunnel-adapter\nstart\n--interface\n{interface}\n--kind\n{kind}\n--remote-underlay\n{remote_underlay}\n--local-address\n{local_address}/{prefix_len}\n--remote-address\n{remote_address}",
+    "Configure the start adapter command arguments.",
   );
   await expect(drawer.getByLabel("Status adapter command")).toHaveValue(
     "/opt/operator/tunnel-adapter\nstatus\n--interface\n{interface}",
@@ -5395,9 +5397,11 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   await drawer
     .getByLabel("Status adapter command")
     .fill("/opt/operator/tunnel-adapter\nstatus");
-  await expect(drawer.getByLabel("Status adapter command")).toHaveAttribute(
+  const statusAdapterCommand = drawer.getByLabel("Status adapter command");
+  await expect(statusAdapterCommand).not.toHaveAttribute("title", /\S/);
+  await expect(statusAdapterCommand.locator("..")).toHaveAttribute(
     "title",
-    "/opt/operator/tunnel-adapter\nstatus",
+    "Configure the status adapter command arguments.",
   );
   await drawer
     .getByLabel("Restart adapter command")
@@ -6039,9 +6043,12 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(
     inspector.getByRole("button", { name: "Copy", exact: true }),
   ).toHaveAttribute("title", "Copy the one-time private key to the clipboard.");
-  await expect(
-    inspector.getByLabel("Agent identity private key"),
-  ).toHaveAttribute("title", "One-time agent identity private key.");
+  const privateKeyInput = inspector.getByLabel("Agent identity private key");
+  await expect(privateKeyInput).not.toHaveAttribute("title", /\S/);
+  await expect(inspector.locator(".inlineSecret")).toHaveAttribute(
+    "title",
+    "Private key generated for this VPS identity and displayed only once.",
+  );
   await inspector
     .getByLabel("Agent identity display name")
     .fill("edge-tokyo-04");
@@ -6095,12 +6102,15 @@ test("registers VPS identities and revokes current keys from the access panel", 
   await expect(installCommand).toContainText(
     "https://raw.githubusercontent.com/mnihyc/vpsman/main/deploy/install-agent.sh",
   );
-  const installCommandText =
-    (await installCommand.locator("pre code").textContent()) ?? "";
+  const installCommandCode = installCommand.locator("pre code");
+  await expect(installCommandCode).not.toHaveAttribute("title", /\S/);
   await expect(installCommand.locator("pre")).toHaveAttribute(
     "title",
-    installCommandText,
+    "Paste-ready install command containing the one-time private key; copy it only into a trusted shell.",
   );
+  expect(
+    await installCommand.locator("pre").getAttribute("title"),
+  ).not.toContain(generatedPrivateKeyHex);
   await expect(installCommand).toContainText("VPSMAN_AGENT_RELEASE='latest'");
   await expect(installCommand).toContainText("VPSMAN_INSTALL_MODE='root'");
   await expect(installCommand).toContainText(

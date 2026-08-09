@@ -203,3 +203,28 @@ fn network_traffic_import_vnstat_accepts_explicit_hosts_interfaces_and_start() {
         .join()
         .expect("CLI parser test panicked");
 }
+
+#[test]
+fn network_traffic_import_vnstat_allows_interface_discovery() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "network-traffic-import-vnstat",
+                "--clients",
+                "edge-a",
+                "--start",
+                "2024-08-01",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::NetworkTrafficImportVnstat(request) = parsed.command else {
+                panic!("expected network-traffic-import-vnstat command");
+            };
+            assert!(request.interfaces.is_empty());
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}

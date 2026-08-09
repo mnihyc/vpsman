@@ -11,6 +11,14 @@ test("vnStat import accepts retained history older than thirty-five days", () =>
   });
 });
 
+test("vnStat import leaves interfaces empty for agent-side discovery", () => {
+  expect(buildNetworkTrafficImportOperation("", "2020-01-01", 1_722_470_400)).toEqual({
+    type: "network_traffic_import_vnstat",
+    interfaces: [],
+    start_unix: 1_577_836_800,
+  });
+});
+
 test("vnStat import retains interface, date, and past-time validation", () => {
   expect(() => buildNetworkTrafficImportOperation("eth 0", "2020-01-01", 1_722_470_400)).toThrow(
     "Interface names may contain only",

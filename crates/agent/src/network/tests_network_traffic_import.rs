@@ -19,7 +19,7 @@ fn utc_unix(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32
 
 #[test]
 fn vnstat_query_uses_the_supported_iface_flag() {
-    let command = vnstat_query_command("/usr/bin/vnstat", "eth0");
+    let command = vnstat_query_command("/usr/bin/vnstat", Some("eth0"));
     let args = command
         .as_std()
         .get_args()
@@ -28,6 +28,96 @@ fn vnstat_query_uses_the_supported_iface_flag() {
 
     assert_eq!(args, ["--json", "--limit", "0", "--iface", "eth0"]);
     assert!(!args.iter().any(|argument| argument == "--interface"));
+}
+
+#[test]
+fn vnstat_all_interface_query_omits_iface_and_discovery_is_bounded_and_deduplicated() {
+    let command = vnstat_query_command("/usr/bin/vnstat", None);
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(args, ["--json", "--limit", "0"]);
+
+    let payload = serde_json::json!({
+        "jsonversion": 2,
+        "interfaces": [
+            {"name": "ens3"},
+            {"name": "eth0"},
+            {"name": "ens3"}
+        ]
+    });
+    assert_eq!(
+        discover_vnstat_interfaces(&payload).unwrap(),
+        ["ens3".to_string(), "eth0".to_string()]
+    );
+
+    let invalid = serde_json::json!({
+        "jsonversion": 2,
+        "interfaces": [{"name": "../eth0"}]
+    });
+    assert!(discover_vnstat_interfaces(&invalid).is_err());
+}
+
+#[test]
+fn all_interface_snapshot_parses_every_discovered_source_and_bucket() {
+    let start = 1_722_470_400_u64;
+    let payload = serde_json::json!({
+        "jsonversion": 2,
+        "interfaces": [
+            {
+                "name": "eth0",
+                "created": {"timestamp": start},
+                "updated": {"timestamp": start + 600},
+                "traffic": {
+                    "fiveminute": [
+                        {"timestamp": start, "rx": 100, "tx": 50}
+                    ]
+                }
+            },
+            {
+                "name": "ens3",
+                "created": {"timestamp": start + 60},
+                "updated": {"timestamp": start + 660},
+                "traffic": {
+                    "fiveminute": [
+                        {"timestamp": start + 60, "rx": 200, "tx": 75}
+                    ]
+                }
+            }
+        ]
+    });
+
+    let (result_interfaces, sources, buckets) =
+        parse_discovered_vnstat_payload(&payload, start, &utc_calendar_config()).unwrap();
+
+    assert_eq!(result_interfaces, ["ens3".to_string(), "eth0".to_string()]);
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.interface.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["ens3", "eth0"])
+    );
+    assert_eq!(
+        buckets
+            .iter()
+            .map(|bucket| bucket.interface.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["ens3", "eth0"])
+    );
+    assert!(buckets
+        .iter()
+        .any(|bucket| bucket.interface == "eth0" && bucket.rx_bytes == 100));
+    assert!(buckets
+        .iter()
+        .any(|bucket| bucket.interface == "ens3" && bucket.rx_bytes == 200));
+}
+
+#[test]
+fn empty_requested_interfaces_are_valid_for_vnstat_discovery() {
+    assert!(validate_request_at(&[], 60, 180).is_ok());
 }
 
 #[test]
@@ -127,6 +217,7 @@ fn parses_all_vnstat_resolutions_from_one_v2_snapshot() {
         parse_vnstat_payload(&payload, "eth0", 1_722_384_000, &utc_calendar_config()).unwrap();
 
     assert_eq!(source.database_created_unix, Some(1_722_000_000));
+    assert_eq!(source.retained_start_unix, 1_722_000_000);
     assert_eq!(source.source_updated_unix, Some(1_722_474_135));
     assert!(buckets.iter().any(|bucket| bucket.duration_secs == 300));
     assert!(buckets.iter().any(|bucket| bucket.duration_secs == 3_600));
@@ -422,11 +513,43 @@ fn trafficless_does_not_turn_expired_leading_history_into_zeroes() {
         ..VnstatCalendarConfig::default()
     };
 
-    let (_, buckets) = parse_vnstat_payload(&payload, "eth0", database_created, &config).unwrap();
+    let (source, buckets) =
+        parse_vnstat_payload(&payload, "eth0", database_created, &config).unwrap();
 
+    assert_eq!(source.retained_start_unix, first_retained_year);
     assert!(buckets
         .iter()
         .all(|bucket| bucket.start_unix >= first_retained_year));
+}
+
+#[test]
+fn retained_start_skips_an_older_component_separated_by_a_later_gap() {
+    let year_2020 = utc_unix(2020, 1, 1, 0, 0, 0);
+    let year_2022 = utc_unix(2022, 1, 1, 0, 0, 0);
+    let year_2023 = utc_unix(2023, 1, 1, 0, 0, 0);
+    let cutoff = utc_unix(2024, 1, 1, 0, 0, 0);
+    let payload = serde_json::json!({
+        "jsonversion": 2,
+        "interfaces": [{
+            "name": "eth0",
+            "created": {"timestamp": year_2020},
+            "updated": {"timestamp": cutoff},
+            "traffic": {
+                "year": [
+                    {"timestamp": year_2020, "rx": 365, "tx": 100},
+                    {"timestamp": year_2022, "rx": 365, "tx": 100},
+                    {"timestamp": year_2023, "rx": 730, "tx": 200}
+                ]
+            }
+        }]
+    });
+
+    let (source, buckets) =
+        parse_vnstat_payload(&payload, "eth0", year_2020, &utc_calendar_config()).unwrap();
+
+    assert!(buckets.iter().any(|bucket| bucket.start_unix == year_2020));
+    assert!(buckets.iter().any(|bucket| bucket.start_unix == year_2022));
+    assert_eq!(source.retained_start_unix, year_2022);
 }
 
 #[test]

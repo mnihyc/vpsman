@@ -439,8 +439,7 @@ pub(crate) struct NetworkTrafficImportVnstatCommand {
     #[arg(
         long = "interface",
         value_delimiter = ',',
-        required = true,
-        help = "Host interface name; repeat the flag or use a comma-separated list"
+        help = "Host interface name; repeat the flag or use a comma-separated list. Omit to import every interface reported by vnStat"
     )]
     pub(crate) interfaces: Vec<String>,
     #[arg(
@@ -797,7 +796,9 @@ pub(crate) fn network_traffic_import_vnstat(
         "network-traffic-import-vnstat requires --confirmed because it rewrites historical traffic samples"
     );
     normalize_unique_nonempty(&mut request.clients, "--clients")?;
-    normalize_unique_nonempty(&mut request.interfaces, "--interface")?;
+    if !request.interfaces.is_empty() {
+        normalize_unique_nonempty(&mut request.interfaces, "--interface")?;
+    }
     anyhow::ensure!(
         request.interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
         "--interface accepts at most {NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES} values"

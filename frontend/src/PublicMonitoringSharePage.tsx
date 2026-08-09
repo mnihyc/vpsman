@@ -1279,17 +1279,14 @@ function PublicTrafficRow({
           <small className="vpsMonitorRowHeading">
             <strong>Traffic</strong>
           </small>
-          <span className="vpsMonitorRowEvidence">
-            <strong>-</strong>
-          </span>
         </div>
         <span
           aria-label="Traffic progress is unavailable"
           className="vpsMonitorMetricTrack missing"
-          title="No traffic progress can be drawn without current accounting evidence"
         >
           <span />
         </span>
+        <strong className="vpsMonitorTrafficQuota">-</strong>
       </div>
     );
   }
@@ -1306,52 +1303,39 @@ function PublicTrafficRow({
   const resetContext = traffic.configured
     ? traffic.reset_day === -1
       ? null
-      : traffic.cycle_end
-        ? formatTrafficReset(traffic.cycle_end)
-        : null
+      : formatTrafficReset(traffic.cycle_end)
     : null;
-  const trafficUsesSeparatedRows =
-    traffic.configured && (density === "compact" || portSpeed !== undefined);
   const trafficDetail = traffic.configured
     ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
     : "Authoritative traffic accounting is not configured for this VPS.";
-  const trafficRowTitle =
+  const trafficEvidenceTitle =
     quotaState === "unlimited"
       ? `${trafficDetail} Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from an empty track.`
       : trafficDetail;
+  const trafficRowTitle = [
+    trafficEvidenceTitle,
+    cycleSummary ? `Displayed quota use: ${cycleSummary}.` : null,
+    resetContext ? `${resetContext}.` : null,
+    portSpeed
+      ? `${portSpeed} port capacity is a display value only—no shaping or enforcement is implied.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <div
       aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
-      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${trafficUsesSeparatedRows ? " contextual" : ""}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
+      className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
       title={trafficRowTitle}
     >
       <div className="publicMonitoringTrafficHeading">
-        <small
-          className="vpsMonitorRowHeading"
-          title={
-            traffic.configured
-              ? `Traffic accounting${resetContext ? `; ${resetContext}` : ""}`
-              : "Traffic accounting is unconfigured"
-          }
-        >
+        <small className="vpsMonitorRowHeading">
           <strong>Traffic</strong>
           {resetContext ? ` · ${resetContext}` : ""}
         </small>
-        <span className="vpsMonitorRowEvidence">
-          {portSpeed ? (
-            <span
-              className="publicMonitoringPortSpeed"
-              title={`${portSpeed} port capacity; display value only—no shaping or enforcement is implied`}
-            >
-              {portSpeed}
-            </span>
-          ) : null}
-          {cycleSummary ? (
-            <strong>{cycleSummary}</strong>
-          ) : (
-            <strong>Unconfigured</strong>
-          )}
-        </span>
+        {portSpeed ? (
+          <span className="publicMonitoringPortSpeed">{portSpeed}</span>
+        ) : null}
       </div>
       {quotaPercent !== null ? (
         <span
@@ -1380,15 +1364,13 @@ function PublicTrafficRow({
               : "Traffic accounting is unconfigured"
           }
           className="vpsMonitorMetricTrack missing"
-          title={
-            traffic.configured
-              ? "No finite or unlimited traffic quota is available"
-              : "Traffic accounting is unconfigured; this empty track is not zero percent"
-          }
         >
           <span />
         </span>
       )}
+      <strong className="vpsMonitorTrafficQuota">
+        {cycleSummary || "Unconfigured"}
+      </strong>
       {density === "comfortable" ? <small>{trafficDetail}</small> : null}
     </div>
   );
@@ -1410,28 +1392,37 @@ function PublicPingRow({
         aria-label="Primary Ping unconfigured"
         title="No primary Ping target is configured for this VPS; configure and share one to show latency, loss, and history."
       >
-        <Radio aria-hidden="true" size={14} />
-        <small className="vpsMonitorRowHeading">
-          <strong>Ping</strong> · Unconfigured
-        </small>
-        <span>-</span>
+        <span className="publicMonitoringPingHeading">
+          <Radio aria-hidden="true" size={14} />
+          <small className="vpsMonitorRowHeading">
+            <strong>Ping</strong>
+          </small>
+        </span>
         <MiniSparkline label="Primary Ping history" tone="ping" values={[]} />
+        <span className="vpsMonitorPingEvidence single">
+          <strong>Unconfigured</strong>
+        </span>
+        {density === "comfortable" ? (
+          <small aria-hidden="true" className="vpsMonitorPingDetail" />
+        ) : null}
       </div>
     );
   }
-  const detail = [
+  const latency =
     ping.latency_avg_ms === null
       ? "latency unavailable"
-      : `${formatNumber(ping.latency_avg_ms)} ms`,
+      : `${formatNumber(ping.latency_avg_ms)} ms`;
+  const loss =
     ping.loss_ratio === null
       ? "loss unavailable"
-      : `${formatPercent(ping.loss_ratio * 100)} loss`,
-  ].join(" · ");
+      : `${formatPercent(ping.loss_ratio * 100)} loss`;
+  const detail = `${latency} · ${loss}`;
   const problem = publicPingProblem(ping);
   const effectiveStatus = publicPingEffectiveStatus(ping);
   const statusLabel = publicPingStatusLabel(effectiveStatus);
-  const presentedDetail =
-    effectiveStatus === "disabled" ? `Last sample ${detail}` : detail;
+  const presentedLatency =
+    effectiveStatus === "disabled" ? `Last sample ${latency}` : latency;
+  const presentedDetail = `${presentedLatency} · ${loss}`;
   const statusDetail =
     problem ??
     `${statusLabel}${ping.checked_at ? ` · ${formatCompactTime(ping.checked_at)}` : " · not checked"}`;
@@ -1441,17 +1432,29 @@ function PublicPingRow({
       className={`publicMonitoringPing ${safeClassToken(ping.state)} ${safeClassToken(effectiveStatus)}${problem ? " warning" : ""}`}
       title={`${ping.target_name}: ${presentedDetail}; ${statusDetail}`}
     >
-      <Radio aria-hidden="true" size={14} />
-      <small className="vpsMonitorRowHeading">
-        <strong>Ping</strong> · {ping.target_name}
-      </small>
-      <span>{presentedDetail}</span>
+      <span className="publicMonitoringPingHeading">
+        <Radio aria-hidden="true" size={14} />
+        <small className="vpsMonitorRowHeading">
+          <strong>Ping</strong> · {ping.target_name}
+        </small>
+      </span>
       <MiniSparkline
         label={`${ping.target_name} latency history`}
         tone="ping"
         values={historyValues(history, (point) => point.latency_avg_ms)}
       />
-      {density === "comfortable" ? <small>{statusDetail}</small> : null}
+      <span className="vpsMonitorPingEvidence">
+        <strong>{presentedLatency}</strong>
+        <strong>{loss}</strong>
+      </span>
+      {density === "comfortable" ? (
+        <small
+          aria-hidden={problem ? undefined : "true"}
+          className="vpsMonitorPingDetail"
+        >
+          {problem}
+        </small>
+      ) : null}
     </div>
   );
 }

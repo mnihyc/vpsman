@@ -812,6 +812,7 @@ async fn main() -> Result<()> {
         })
         .await?;
     backup_upload_sessions::spawn_backup_upload_session_cleanup();
+    job_traffic_import::spawn_network_traffic_import_finalizer(state.clone());
     job_dispatcher::spawn_job_dispatcher(state.clone());
     network_ospf_controller::spawn_automatic_ospf_controller(state.clone());
     spawn_policy_evaluator(

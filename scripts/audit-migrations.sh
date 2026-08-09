@@ -54,5 +54,5 @@ for file in "${files[@]}"; do
   expected=$((expected + 1))
 done
 
-printf '{"migration_audit":"ok","model":"fresh_database_canonical","migration_count":%d,"latest":"%s","compatibility_notes":"docs/migration-compatibility.md"}\n' \
+printf '{"migration_audit":"ok","model":"fresh_database_canonical","component_scope":"current_repository_components_only","migration_count":%d,"latest":"%s","compatibility_notes":"docs/migration-compatibility.md"}\n' \
   "${#files[@]}" "${files[-1]}"

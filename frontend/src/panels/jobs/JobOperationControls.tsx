@@ -833,10 +833,11 @@ export function JobOperationEditor({
         <div>
           <strong>Import retained vnStat traffic</strong>
           <span>
-            The agent reads vnStat once. The API backfills synthetic minute
-            samples from the UTC start date up to, but not including, each
-            interface&apos;s first live agent counter sample. A rerun replaces
-            prior vnStat-imported samples for those interfaces.
+            The agent reads vnStat once. After its output is stored, the target
+            stays running while the API durably backfills synthetic minute
+            samples up to each interface&apos;s first live counter sample. A
+            restart resumes pending server-side imports. A rerun replaces prior
+            vnStat-imported samples for those interfaces.
           </span>
         </div>
         <label
@@ -866,11 +867,12 @@ export function JobOperationEditor({
           />
         </label>
         <span className="operationHint">
-          There is no fixed lookback limit: choose the earliest date covered by
-          the retained vnStat database. The operation also requires an existing
-          live agent sample after the start. Aggregate bytes are preserved;
-          minute-level distribution is reconstructed from vnStat&apos;s retained
-          resolutions.
+          There is no fixed lookback limit. A selected date earlier than an
+          interface&apos;s vnStat history is clamped independently to that
+          interface&apos;s latest continuous retained coverage. The operation also
+          requires that coverage to reach an existing live agent sample.
+          Aggregate bytes are preserved; minute-level distribution is
+          reconstructed from vnStat&apos;s retained resolutions.
         </span>
       </div>
     );

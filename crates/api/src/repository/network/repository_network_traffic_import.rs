@@ -69,11 +69,19 @@ impl Repository {
         now_unix: u64,
     ) -> Result<NetworkTrafficImportSummary> {
         validate_result_contract(interfaces, start_unix, result, buckets, now_unix)?;
+        let resolved_interfaces = &result.interfaces;
         match self {
             Self::Memory(memory) => {
                 let mut samples = memory.traffic_counter_samples.write().await;
                 let prepared = prepare_imports(
-                    job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &samples,
+                    job_id,
+                    client_id,
+                    resolved_interfaces,
+                    start_unix,
+                    result,
+                    buckets,
+                    now_unix,
+                    &samples,
                 )?;
                 apply_memory_import(&mut samples, client_id, &prepared)?;
                 let epochs = samples
@@ -81,7 +89,7 @@ impl Repository {
                     .filter(|sample| {
                         sample.client_id == client_id
                             && sample.source_kind == "host"
-                            && interfaces.contains(&sample.interface)
+                            && resolved_interfaces.contains(&sample.interface)
                     })
                     .map(|sample| {
                         (
@@ -94,7 +102,7 @@ impl Repository {
 
                 let mut rates = memory.telemetry_network_rates.write().await;
                 for rate in rates.iter_mut().filter(|rate| {
-                    rate.client_id == client_id && interfaces.contains(&rate.interface)
+                    rate.client_id == client_id && resolved_interfaces.contains(&rate.interface)
                 }) {
                     let Ok(observed_at) = chrono::DateTime::parse_from_rfc3339(&rate.bucket_start)
                     else {
@@ -112,12 +120,24 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_traffic_counter_streams(&mut tx, client_id).await?;
-                let existing = load_postgres_import_boundary_samples(
-                    &mut tx, client_id, interfaces, start_unix,
+                let effective_starts =
+                    effective_interface_starts(resolved_interfaces, start_unix, result)?;
+                let existing = load_postgres_import_boundary_samples_for_starts(
+                    &mut tx,
+                    client_id,
+                    resolved_interfaces,
+                    &effective_starts,
                 )
                 .await?;
                 let prepared = prepare_imports(
-                    job_id, client_id, interfaces, start_unix, result, buckets, now_unix, &existing,
+                    job_id,
+                    client_id,
+                    resolved_interfaces,
+                    start_unix,
+                    result,
+                    buckets,
+                    now_unix,
+                    &existing,
                 )?;
 
                 sqlx::query(
@@ -130,7 +150,7 @@ impl Repository {
                     "#,
                 )
                 .bind(client_id)
-                .bind(interfaces)
+                .bind(resolved_interfaces)
                 .execute(&mut *tx)
                 .await?;
                 for item in &prepared {
@@ -154,7 +174,7 @@ impl Repository {
                     "#,
                 )
                 .bind(client_id)
-                .bind(interfaces)
+                .bind(resolved_interfaces)
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
@@ -176,7 +196,7 @@ const POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL: &str = r#"
         boundary.rx_counter_epoch,
         boundary.tx_counter_epoch,
         boundary.sample_source
-    FROM unnest($2::text[]) AS requested(interface)
+    FROM unnest($2::text[], $3::bigint[]) AS requested(interface, start_unix)
     CROSS JOIN LATERAL (
         SELECT sample.*
         FROM traffic_counter_samples sample
@@ -184,7 +204,7 @@ const POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL: &str = r#"
           AND sample.source_kind = 'host'
           AND sample.interface = requested.interface
           AND sample.sample_source NOT LIKE 'vnstat_import:%'
-          AND sample.observed_at < to_timestamp($3::double precision)
+          AND sample.observed_at < to_timestamp(requested.start_unix::double precision)
         ORDER BY sample.observed_at DESC
         LIMIT 1
         FOR UPDATE OF sample
@@ -204,7 +224,7 @@ const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
         boundary.rx_counter_epoch,
         boundary.tx_counter_epoch,
         boundary.sample_source
-    FROM unnest($2::text[]) AS requested(interface)
+    FROM unnest($2::text[], $3::bigint[]) AS requested(interface, start_unix)
     CROSS JOIN LATERAL (
         SELECT sample.*
         FROM traffic_counter_samples sample
@@ -212,7 +232,7 @@ const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
           AND sample.source_kind = 'host'
           AND sample.interface = requested.interface
           AND sample.sample_source NOT LIKE 'vnstat_import:%'
-          AND sample.observed_at >= to_timestamp($3::double precision)
+          AND sample.observed_at >= to_timestamp(requested.start_unix::double precision)
         ORDER BY sample.observed_at ASC
         LIMIT 1
         FOR UPDATE OF sample
@@ -220,6 +240,7 @@ const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
     ORDER BY boundary.interface ASC
 "#;
 
+#[cfg(test)]
 pub(crate) async fn load_postgres_import_boundary_samples(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     client_id: &str,
@@ -228,6 +249,20 @@ pub(crate) async fn load_postgres_import_boundary_samples(
 ) -> Result<Vec<TrafficCounterSampleRecord>> {
     let start_unix = i64::try_from(start_unix)
         .context("network_traffic_import_invalid:start_timestamp_out_of_range")?;
+    let starts = vec![start_unix; interfaces.len()];
+    load_postgres_import_boundary_samples_for_starts(tx, client_id, interfaces, &starts).await
+}
+
+async fn load_postgres_import_boundary_samples_for_starts(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    client_id: &str,
+    interfaces: &[String],
+    effective_starts: &[i64],
+) -> Result<Vec<TrafficCounterSampleRecord>> {
+    anyhow::ensure!(
+        interfaces.len() == effective_starts.len(),
+        "network_traffic_import_invalid:effective_start_count_mismatch"
+    );
     let mut samples = Vec::with_capacity(interfaces.len().saturating_mul(2));
     for query in [
         POSTGRES_IMPORT_PREVIOUS_BOUNDARIES_SQL,
@@ -236,7 +271,7 @@ pub(crate) async fn load_postgres_import_boundary_samples(
         let rows = sqlx::query(query)
             .bind(client_id)
             .bind(interfaces)
-            .bind(start_unix)
+            .bind(effective_starts)
             .fetch_all(&mut **tx)
             .await?;
         samples.extend(
@@ -298,7 +333,7 @@ fn validate_result_contract(
         "agent_result_collection_time_invalid",
     )?;
     invalid_ensure(
-        !interfaces.is_empty() && interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+        interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
         "interface_count_out_of_range",
     )?;
     invalid_ensure(
@@ -311,20 +346,28 @@ fn validate_result_contract(
     invalid_ensure(requested.len() == interfaces.len(), "duplicate_interface")?;
     let result_interfaces = result.interfaces.iter().cloned().collect::<BTreeSet<_>>();
     invalid_ensure(
-        result_interfaces == requested && result.interfaces.len() == interfaces.len(),
-        "agent_result_interface_mismatch",
+        !result.interfaces.is_empty()
+            && result.interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES
+            && result_interfaces.len() == result.interfaces.len(),
+        "agent_result_interface_count_out_of_range",
     )?;
+    if !interfaces.is_empty() {
+        invalid_ensure(
+            result_interfaces == requested && result.interfaces.len() == interfaces.len(),
+            "agent_result_interface_mismatch",
+        )?;
+    }
     let sources = result
         .sources
         .iter()
         .map(|source| source.interface.clone())
         .collect::<BTreeSet<_>>();
     invalid_ensure(
-        sources == requested && result.sources.len() == interfaces.len(),
+        sources == result_interfaces && result.sources.len() == result.interfaces.len(),
         "source_interface_mismatch",
     )?;
     invalid_ensure(
-        buckets.len() <= interfaces.len() * NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
+        buckets.len() <= result.interfaces.len() * NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
         "bucket_count_exceeds_limit",
     )?;
     invalid_ensure(
@@ -334,10 +377,10 @@ fn validate_result_contract(
     invalid_ensure(
         buckets
             .iter()
-            .all(|bucket| requested.contains(&bucket.interface)),
+            .all(|bucket| result_interfaces.contains(&bucket.interface)),
         "bucket_interface_mismatch",
     )?;
-    for interface in interfaces {
+    for interface in &result.interfaces {
         invalid_ensure(
             buckets
                 .iter()
@@ -347,7 +390,53 @@ fn validate_result_contract(
             "interface_bucket_count_exceeds_limit",
         )?;
     }
+    for source in &result.sources {
+        let database_created_unix = source
+            .database_created_unix
+            .context("network_traffic_import_invalid:vnstat_database_created_missing")?;
+        let database_available_unix = ceil_minute(database_created_unix)
+            .context("network_traffic_import_invalid:vnstat_database_created_out_of_range")?;
+        let source_updated_unix = source
+            .source_updated_unix
+            .map(floor_minute)
+            .context("network_traffic_import_invalid:vnstat_source_updated_missing")?;
+        invalid_ensure(
+            source.retained_start_unix.is_multiple_of(60)
+                && source.retained_start_unix >= database_available_unix
+                && source.retained_start_unix < source_updated_unix,
+            "vnstat_retained_start_invalid",
+        )?;
+        let (derived_start_unix, derived_end_unix) =
+            latest_continuous_coverage(buckets, &source.interface)?;
+        invalid_ensure(
+            source.retained_start_unix == derived_start_unix
+                && derived_end_unix <= source_updated_unix,
+            "vnstat_retained_coverage_mismatch",
+        )?;
+    }
     Ok(())
+}
+
+fn effective_interface_starts(
+    interfaces: &[String],
+    requested_start_unix: u64,
+    result: &NetworkTrafficImportResult,
+) -> Result<Vec<i64>> {
+    let source_by_interface = result
+        .sources
+        .iter()
+        .map(|source| (source.interface.as_str(), source))
+        .collect::<HashMap<_, _>>();
+    interfaces
+        .iter()
+        .map(|interface| {
+            let source = source_by_interface
+                .get(interface.as_str())
+                .context("network_traffic_import_invalid:source_missing")?;
+            i64::try_from(requested_start_unix.max(source.retained_start_unix))
+                .context("network_traffic_import_invalid:effective_start_out_of_range")
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -371,6 +460,10 @@ fn prepare_imports(
     let mut prepared = Vec::new();
 
     for interface in interfaces {
+        let source = source_by_interface
+            .get(interface.as_str())
+            .context("network_traffic_import_invalid:source_missing")?;
+        let effective_start_unix = start_unix.max(source.retained_start_unix);
         let first_live_unix = existing
             .iter()
             .filter(|sample| {
@@ -378,14 +471,21 @@ fn prepare_imports(
                     && sample.source_kind == "host"
                     && sample.interface == *interface
                     && !is_vnstat_import_source(&sample.sample_source)
-                    && sample.observed_unix >= i64::try_from(start_unix).unwrap_or(i64::MAX)
+                    && sample.observed_unix
+                        >= i64::try_from(effective_start_unix).unwrap_or(i64::MAX)
             })
             .map(|sample| sample.observed_unix)
             .min()
             .and_then(|value| u64::try_from(value).ok())
             .context("network_traffic_import_invalid:first_live_agent_sample_missing")?;
+        let retained_start_through_live =
+            continuous_coverage_start_through(buckets, interface, first_live_unix)?;
         invalid_ensure(
-            first_live_unix > start_unix && first_live_unix <= now_minute,
+            retained_start_through_live == source.retained_start_unix,
+            "vnstat_retained_coverage_does_not_reach_live_boundary",
+        )?;
+        invalid_ensure(
+            first_live_unix > effective_start_unix && first_live_unix <= now_minute,
             "range_already_covered_by_agent",
         )?;
         invalid_ensure(
@@ -393,15 +493,6 @@ fn prepare_imports(
             "agent_collection_predates_live_boundary",
         )?;
 
-        let source = source_by_interface
-            .get(interface.as_str())
-            .context("network_traffic_import_invalid:source_missing")?;
-        invalid_ensure(
-            source
-                .database_created_unix
-                .is_some_and(|created| created <= start_unix),
-            "vnstat_database_created_after_start",
-        )?;
         invalid_ensure(
             source
                 .source_updated_unix
@@ -410,7 +501,8 @@ fn prepare_imports(
             "vnstat_source_not_updated_through_live_boundary",
         )?;
 
-        let traffic = expand_buckets_to_minutes(buckets, interface, start_unix, first_live_unix)?;
+        let traffic =
+            expand_buckets_to_minutes(buckets, interface, effective_start_unix, first_live_unix)?;
         let imported_rx_bytes = traffic.total_rx_bytes;
         let imported_tx_bytes = traffic.total_tx_bytes;
         let previous = existing
@@ -420,7 +512,8 @@ fn prepare_imports(
                     && sample.source_kind == "host"
                     && sample.interface == *interface
                     && !is_vnstat_import_source(&sample.sample_source)
-                    && sample.observed_unix < i64::try_from(start_unix).unwrap_or(i64::MAX)
+                    && sample.observed_unix
+                        < i64::try_from(effective_start_unix).unwrap_or(i64::MAX)
             })
             .max_by_key(|sample| sample.observed_unix);
         let cumulative_rx = previous.map_or(0, |sample| sample.rx_bytes);
@@ -444,7 +537,7 @@ fn prepare_imports(
         sample_record(
             client_id,
             interface,
-            start_unix - 60,
+            effective_start_unix - 60,
             cumulative_rx,
             cumulative_tx,
             &import_source,
@@ -459,7 +552,7 @@ fn prepare_imports(
         )?;
         prepared.push(PreparedInterfaceImport {
             interface: interface.clone(),
-            start_unix,
+            start_unix: effective_start_unix,
             end_unix: first_live_unix,
             initial_rx_bytes: cumulative_rx,
             initial_tx_bytes: cumulative_tx,
@@ -471,6 +564,63 @@ fn prepare_imports(
         });
     }
     Ok(prepared)
+}
+
+fn latest_continuous_coverage(
+    buckets: &[NetworkTrafficImportBucket],
+    interface: &str,
+) -> Result<(u64, u64)> {
+    merged_coverage_components(buckets, interface)?
+        .into_iter()
+        .max_by_key(|(start_unix, end_unix)| (*end_unix, std::cmp::Reverse(*start_unix)))
+        .context("network_traffic_import_invalid:vnstat_retained_coverage_missing")
+}
+
+fn continuous_coverage_start_through(
+    buckets: &[NetworkTrafficImportBucket],
+    interface: &str,
+    through_unix: u64,
+) -> Result<u64> {
+    merged_coverage_components(buckets, interface)?
+        .into_iter()
+        .find(|(start_unix, end_unix)| *start_unix < through_unix && *end_unix >= through_unix)
+        .map(|(start_unix, _)| start_unix)
+        .context("network_traffic_import_invalid:vnstat_history_does_not_reach_live_boundary")
+}
+
+fn merged_coverage_components(
+    buckets: &[NetworkTrafficImportBucket],
+    interface: &str,
+) -> Result<Vec<(u64, u64)>> {
+    let mut intervals = buckets
+        .iter()
+        .filter(|bucket| bucket.interface == interface)
+        .map(|bucket| {
+            let end_unix = bucket
+                .start_unix
+                .checked_add(u64::from(bucket.duration_secs))
+                .context("network_traffic_import_invalid:bucket_end_overflow")?;
+            invalid_ensure(
+                bucket.start_unix < end_unix
+                    && bucket.start_unix.is_multiple_of(60)
+                    && end_unix.is_multiple_of(60),
+                "bucket_interval_invalid",
+            )?;
+            Ok((bucket.start_unix, end_unix))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    intervals.sort_unstable();
+    let mut components = Vec::<(u64, u64)>::new();
+    for (start_unix, end_unix) in intervals {
+        if let Some(last) = components.last_mut() {
+            if start_unix <= last.1 {
+                last.1 = last.1.max(end_unix);
+                continue;
+            }
+        }
+        components.push((start_unix, end_unix));
+    }
+    Ok(components)
 }
 
 fn expand_buckets_to_minutes(
@@ -1139,6 +1289,10 @@ fn invalid_ensure(condition: bool, code: &str) -> Result<()> {
 
 fn floor_minute(unix: u64) -> u64 {
     unix - unix % 60
+}
+
+fn ceil_minute(unix: u64) -> Option<u64> {
+    unix.checked_add(59).map(floor_minute)
 }
 
 #[cfg(test)]

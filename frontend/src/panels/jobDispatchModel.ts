@@ -248,9 +248,6 @@ export function buildNetworkTrafficImportOperation(
         .filter(Boolean),
     ),
   );
-  if (interfaces.length === 0) {
-    throw new Error("vnStat import needs at least one host interface");
-  }
   if (interfaces.length > 16) {
     throw new Error("vnStat import supports at most 16 host interfaces");
   }

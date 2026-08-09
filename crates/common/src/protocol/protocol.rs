@@ -2696,6 +2696,7 @@ pub struct NetworkTrafficImportBatch {
 pub struct NetworkTrafficImportSource {
     pub interface: String,
     pub database_created_unix: Option<u64>,
+    pub retained_start_unix: u64,
     pub source_updated_unix: Option<u64>,
 }
 

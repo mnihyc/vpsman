@@ -103,11 +103,6 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       ".vpsMonitorTrafficTrack",
     ),
   ).toBeVisible();
-  await expect(
-    cardNamed(privateGrid, "Accumulated archive").locator(
-      ".vpsMonitorTraffic.contextual",
-    ),
-  ).toBeVisible();
   await expectEqualRowHeight(
     cardNamed(privateGrid, "Accumulated archive").locator(".vpsMonitorTraffic"),
     cardNamed(privateGrid, "TX quota · Unlimited").locator(
@@ -118,6 +113,16 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     cardNamed(privateGrid, "Total quota · Monthly").locator(
       ".vpsMonitorTraffic",
     ),
+  );
+  await expectPingLayout(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    "Ping · Review healthy gateway",
+    ["21.5 ms", "0% loss"],
+  );
+  await expectPingLayout(
+    cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+    "Ping",
+    ["Unconfigured"],
   );
   await expectEqualRowHeight(
     cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
@@ -161,6 +166,26 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     cardNamed(privateGrid, "Total quota · Monthly").locator(
       ".vpsMonitorTraffic",
     ),
+  );
+  await expectPingLayout(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    "Ping · Review healthy gateway",
+    ["21.5 ms", "0% loss"],
+  );
+  await expectPingLayout(
+    cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+    "Ping",
+    ["Unconfigured"],
+  );
+  await expectEqualRowHeight(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "RX quota · Annual").locator(".vpsMonitorPing"),
+  );
+  await expectComfortablePingEvidenceSlots(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "RX quota · Annual").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+    "Intermittent packet loss",
   );
   await capture(page, "private-monitor-comfortable.png");
 
@@ -231,11 +256,6 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       ".publicMonitoringTraffic .vpsMonitorMetricTrack",
     ),
   ).toBeVisible();
-  await expect(
-    publicCardNamed(sharedGrid, "Accumulated archive").locator(
-      ".publicMonitoringTraffic.contextual",
-    ),
-  ).toBeVisible();
   await expectEqualRowHeight(
     publicCardNamed(sharedGrid, "Accumulated archive").locator(
       ".publicMonitoringTraffic",
@@ -248,6 +268,20 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
       ".publicMonitoringTraffic",
     ),
+  );
+  await expectPingLayout(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    "Ping · Review healthy gateway",
+    ["21.5 ms", "0.0% loss"],
+  );
+  await expectPingLayout(
+    publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+    "Ping",
+    ["Unconfigured"],
   );
   await expectEqualRowHeight(
     publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
@@ -285,6 +319,48 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
       ".publicMonitoringTraffic",
     ),
+  );
+  await expectPingLayout(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    "Ping · Review healthy gateway",
+    ["21.5 ms", "0.0% loss"],
+  );
+  await expectPingLayout(
+    publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+    "Ping",
+    ["Unconfigured"],
+  );
+  await expectEqualRowHeight(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+  );
+  await expectEqualRowHeight(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "RX quota · Annual").locator(
+      ".publicMonitoringPing",
+    ),
+  );
+  await expectComfortablePingEvidenceSlots(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "RX quota · Annual").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+    "Primary Ping degraded",
   );
   await capture(page, "shared-monitor-billing-visible-comfortable.png");
 
@@ -417,7 +493,9 @@ async function assertPrivateFixtureSemantics(
     unconfigured.locator('[data-fact-kind="billing"] strong'),
   ).toHaveText("-");
   await expect(unconfigured).not.toContainText("N/A");
-  await expect(noPrimary.locator(".vpsMonitorPing")).toContainText("-");
+  await expect(noPrimary.locator(".vpsMonitorPing")).toContainText(
+    "Unconfigured",
+  );
 }
 
 async function assertSharedFixtureSemantics(grid: ReturnType<Page["locator"]>) {
@@ -474,7 +552,9 @@ async function assertSharedFixtureSemantics(grid: ReturnType<Page["locator"]>) {
     /unconfigured/,
   );
   await expect(unconfigured).not.toContainText("N/A");
-  await expect(noPrimary.locator(".publicMonitoringPing")).toContainText("-");
+  await expect(noPrimary.locator(".publicMonitoringPing")).toContainText(
+    "Unconfigured",
+  );
 }
 
 async function capture(page: Page, filename: string) {
@@ -499,6 +579,26 @@ async function expectEqualRowHeight(
     .toBeLessThanOrEqual(1);
 }
 
+async function expectComfortablePingEvidenceSlots(
+  healthy: ReturnType<Page["locator"]>,
+  degraded: ReturnType<Page["locator"]>,
+  unconfigured: ReturnType<Page["locator"]>,
+  problem: string,
+) {
+  const healthySlot = healthy.locator(":scope > .vpsMonitorPingDetail");
+  const degradedSlot = degraded.locator(":scope > .vpsMonitorPingDetail");
+  const unconfiguredSlot = unconfigured.locator(
+    ":scope > .vpsMonitorPingDetail",
+  );
+  await expect(healthySlot).toHaveAttribute("aria-hidden", "true");
+  await expect(healthySlot).toHaveText("");
+  await expect(unconfiguredSlot).toHaveAttribute("aria-hidden", "true");
+  await expect(unconfiguredSlot).toHaveText("");
+  await expect(degradedSlot).not.toHaveAttribute("aria-hidden", "true");
+  await expect(degradedSlot).toHaveText(problem);
+  await expect(degraded).toHaveAttribute("title", new RegExp(problem, "i"));
+}
+
 async function expectHeadingSidePortSpeed(row: ReturnType<Page["locator"]>) {
   await expect
     .poll(async () =>
@@ -510,18 +610,81 @@ async function expectHeadingSidePortSpeed(row: ReturnType<Page["locator"]>) {
           ".publicMonitoringPortSpeed",
         );
         const value = element.querySelector<HTMLElement>(
-          ".vpsMonitorRowEvidence > strong",
+          ".vpsMonitorTrafficQuota",
         );
-        if (!heading || !speed || !value) return false;
+        const track = element.querySelector<HTMLElement>(
+          ".vpsMonitorTrafficTrack, :scope > .vpsMonitorMetricTrack",
+        );
+        if (!heading || !speed || !track || !value) return false;
         const headingBox = heading.getBoundingClientRect();
         const speedBox = speed.getBoundingClientRect();
+        const trackBox = track.getBoundingClientRect();
         const valueBox = value.getBoundingClientRect();
         return (
           Math.abs(
             speedBox.top +
               speedBox.height / 2 -
               (headingBox.top + headingBox.height / 2),
-          ) <= 2 && valueBox.top >= headingBox.bottom
+          ) <= 2 &&
+          trackBox.top >= headingBox.bottom - 1 &&
+          valueBox.top >= trackBox.bottom - 1
+        );
+      }),
+    )
+    .toBe(true);
+}
+
+async function expectPingLayout(
+  row: ReturnType<Page["locator"]>,
+  headingText: string,
+  evidence: string[],
+) {
+  const heading = row.locator(".vpsMonitorRowHeading");
+  const chart = row.locator(
+    ":scope > .vpsMonitorPingVisual, :scope > .vpsMonitorSparkline",
+  );
+  const evidenceValues = row.locator(".vpsMonitorPingEvidence > strong");
+  await expect(heading).toHaveText(headingText);
+  await expect(chart).toBeVisible();
+  await expect(evidenceValues).toHaveText(evidence);
+  const emptyChart = row.locator(".vpsMonitorSparkline.empty");
+  if (await emptyChart.count()) {
+    await expect(emptyChart).not.toHaveAttribute("title", /\S/);
+    await expect(emptyChart).not.toHaveAttribute("role", /\S/);
+  }
+  await expect
+    .poll(() =>
+      row.evaluate((element) => {
+        const headingElement = element.querySelector<HTMLElement>(
+          ".vpsMonitorRowHeading",
+        );
+        const chartElement = element.querySelector<HTMLElement>(
+          ":scope > .vpsMonitorPingVisual, :scope > .vpsMonitorSparkline",
+        );
+        const evidenceElement = element.querySelector<HTMLElement>(
+          ".vpsMonitorPingEvidence",
+        );
+        const evidenceItems = Array.from(
+          element.querySelectorAll<HTMLElement>(
+            ".vpsMonitorPingEvidence > strong",
+          ),
+        );
+        if (!headingElement || !chartElement || !evidenceElement) return false;
+        const headingBox = headingElement.getBoundingClientRect();
+        const chartBox = chartElement.getBoundingClientRect();
+        const evidenceBox = evidenceElement.getBoundingClientRect();
+        const headingStyle = getComputedStyle(headingElement);
+        return (
+          headingStyle.overflow !== "hidden" &&
+          headingStyle.textOverflow !== "ellipsis" &&
+          evidenceItems.every((item) => {
+            const style = getComputedStyle(item);
+            return (
+              style.overflow !== "hidden" && style.textOverflow !== "ellipsis"
+            );
+          }) &&
+          chartBox.top >= headingBox.bottom - 1 &&
+          evidenceBox.top >= chartBox.bottom - 1
         );
       }),
     )

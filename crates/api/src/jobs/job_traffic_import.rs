@@ -1,14 +1,222 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
+    time::Duration,
+};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::Utc;
+use futures_util::{stream, StreamExt};
+use tokio::sync::{Mutex, Notify};
+use tracing::{debug, warn};
 use vpsman_common::{
     CommandOutput, JobCommand, NetworkTrafficImportBatch, NetworkTrafficImportBucket,
     NetworkTrafficImportResult, OutputStream, NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT,
-    NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
+    NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
 };
 
-use crate::state::AppState;
+use crate::{state::AppState, TargetDispatchOutcome};
+
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_INTERVAL_SECS: u64 = 5;
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_BATCH: i64 = 128;
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_IN_FLIGHT: usize = 4;
+const NETWORK_TRAFFIC_IMPORT_FINALIZER_RETRY_AFTER_SECS: u64 = 30;
+
+struct NetworkTrafficImportFinalizerState {
+    notify: Notify,
+    started: AtomicBool,
+    sweep_lock: Mutex<()>,
+}
+
+impl Default for NetworkTrafficImportFinalizerState {
+    fn default() -> Self {
+        Self {
+            notify: Notify::new(),
+            started: AtomicBool::new(false),
+            sweep_lock: Mutex::new(()),
+        }
+    }
+}
+
+static NETWORK_TRAFFIC_IMPORT_FINALIZER_STATE: OnceLock<NetworkTrafficImportFinalizerState> =
+    OnceLock::new();
+
+fn finalizer_state() -> &'static NetworkTrafficImportFinalizerState {
+    NETWORK_TRAFFIC_IMPORT_FINALIZER_STATE.get_or_init(NetworkTrafficImportFinalizerState::default)
+}
+
+pub(crate) fn spawn_network_traffic_import_finalizer(state: AppState) {
+    let finalizer = finalizer_state();
+    if finalizer.started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(
+            NETWORK_TRAFFIC_IMPORT_FINALIZER_INTERVAL_SECS,
+        ));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = finalizer.notify.notified() => {}
+            }
+            if let Err(error) = finalize_pending_network_traffic_imports(&state).await {
+                warn!(%error, "durable vnStat import finalizer sweep failed");
+            }
+        }
+    });
+}
+
+pub(crate) fn wake_network_traffic_import_finalizer(state: AppState) {
+    finalizer_state().notify.notify_one();
+    if !finalizer_state().started.load(Ordering::Acquire) {
+        tokio::spawn(async move {
+            if let Err(error) = finalize_pending_network_traffic_imports(&state).await {
+                warn!(%error, "durable vnStat import finalizer wake failed");
+            }
+        });
+    }
+}
+
+pub(crate) async fn finalize_pending_network_traffic_imports(state: &AppState) -> Result<usize> {
+    let _guard = finalizer_state().sweep_lock.lock().await;
+    let pending = state
+        .repo
+        .list_pending_network_traffic_import_finalizations(NETWORK_TRAFFIC_IMPORT_FINALIZER_BATCH)
+        .await?;
+    let results = stream::iter(pending)
+        .map(|item| async move {
+            let result =
+                finalize_network_traffic_import_target(state, item.job_id, &item.client_id).await;
+            (item, result)
+        })
+        .buffer_unordered(NETWORK_TRAFFIC_IMPORT_FINALIZER_IN_FLIGHT)
+        .collect::<Vec<_>>()
+        .await;
+    let mut finalized = 0_usize;
+    for (item, result) in results {
+        match result {
+            Ok(true) => finalized += 1,
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    job_id = %item.job_id,
+                    client_id = %item.client_id,
+                    "vnStat import finalization failed and remains queued for retry"
+                );
+                if let Err(message_error) = state
+                    .repo
+                    .defer_network_traffic_import_finalization(
+                        item.job_id,
+                        &item.client_id,
+                        "vnStat server import retry pending",
+                        NETWORK_TRAFFIC_IMPORT_FINALIZER_RETRY_AFTER_SECS,
+                    )
+                    .await
+                {
+                    warn!(
+                        %message_error,
+                        job_id = %item.job_id,
+                        client_id = %item.client_id,
+                        "vnStat import retry state could not be recorded"
+                    );
+                }
+            }
+        }
+    }
+    if finalized > 0 {
+        debug!(finalized, "durable vnStat import finalizer sweep completed");
+    }
+    Ok(finalized)
+}
+
+async fn finalize_network_traffic_import_target(
+    state: &AppState,
+    job_id: uuid::Uuid,
+    client_id: &str,
+) -> Result<bool> {
+    let Some(candidate) = state
+        .repo
+        .contiguous_final_job_output_candidate(job_id, client_id)
+        .await?
+    else {
+        return Ok(false);
+    };
+    let received_at = candidate
+        .received_at
+        .clone()
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let mut outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
+    if outcome.status == vpsman_server_core::TARGET_STATUS_COMPLETED {
+        match apply_network_traffic_import_if_ready(
+            state,
+            job_id,
+            client_id,
+            candidate.seq,
+            &candidate.output,
+            &[],
+        )
+        .await?
+        {
+            NetworkTrafficImportApply::Pending => return Ok(false),
+            NetworkTrafficImportApply::Applied(message) => outcome.message = message,
+            NetworkTrafficImportApply::Invalid(message) => {
+                outcome.status = vpsman_server_core::TARGET_STATUS_FAILED.to_string();
+                outcome.exit_code = Some(1);
+                outcome.message = message;
+            }
+            NetworkTrafficImportApply::NotApplicable => {
+                outcome.status = vpsman_server_core::TARGET_STATUS_FAILED.to_string();
+                outcome.exit_code = Some(1);
+                outcome.message = "network_traffic_import_invalid:job_context_invalid".to_string();
+            }
+        }
+    }
+    if !state
+        .repo
+        .update_job_target_result(job_id, client_id, &outcome)
+        .await?
+    {
+        return Ok(false);
+    }
+    let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
+    state
+        .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed)
+        .await?;
+    Ok(true)
+}
+
+pub(crate) fn target_outcome_from_done_output(
+    job_id: uuid::Uuid,
+    output: &CommandOutput,
+    received_at: String,
+) -> TargetDispatchOutcome {
+    let outputs = vec![CommandOutput {
+        job_id,
+        stream: output.stream,
+        data: output.data.clone(),
+        exit_code: output.exit_code,
+        done: output.done,
+    }];
+    let final_output = outputs.last();
+    let (status, exit_code) = crate::routes_jobs::target_status_from_final_output(final_output);
+    let message =
+        crate::routes_jobs::target_message_for_status(&outputs, status, status, final_output);
+    TargetDispatchOutcome {
+        status: status.to_string(),
+        exit_code,
+        #[cfg(test)]
+        command_version: None,
+        accepted: true,
+        message,
+        received_at: Some(received_at),
+        outputs,
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum NetworkTrafficImportApply {
@@ -58,9 +266,16 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
             "network_traffic_import_invalid:agent_result_type_invalid".to_string(),
         ));
     }
-    let max_buckets = interfaces
-        .len()
-        .saturating_mul(NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE);
+    let resolved_interface_count = result.interfaces.len();
+    if resolved_interface_count == 0
+        || resolved_interface_count > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES
+    {
+        return Ok(NetworkTrafficImportApply::Invalid(
+            "network_traffic_import_invalid:agent_result_interface_count_out_of_range".to_string(),
+        ));
+    }
+    let max_buckets =
+        resolved_interface_count.saturating_mul(NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE);
     let max_batches = max_buckets.div_ceil(NETWORK_TRAFFIC_IMPORT_BUCKETS_PER_OUTPUT);
     if usize::try_from(result.batch_count).map_or(true, |count| count > max_batches)
         || usize::try_from(result.bucket_count).map_or(true, |count| count > max_buckets)
@@ -82,12 +297,22 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
 
     let mut output_by_seq = BTreeMap::<i32, CommandOutput>::new();
     for view in state.repo.list_job_outputs(job_id).await? {
-        if view.client_id != client_id || view.done || view.stream != "status" {
+        if view.client_id != client_id || view.seq >= final_seq {
             continue;
         }
-        let data = BASE64
-            .decode(&view.data_base64)
-            .context("stored network traffic import output is not valid base64")?;
+        if view.done || view.stream != "status" {
+            return Ok(NetworkTrafficImportApply::Invalid(
+                "network_traffic_import_invalid:batch_output_invalid".to_string(),
+            ));
+        }
+        let data = match BASE64.decode(&view.data_base64) {
+            Ok(data) => data,
+            Err(error) => {
+                return Ok(NetworkTrafficImportApply::Invalid(format!(
+                    "network_traffic_import_invalid:batch_output_base64_invalid:{error}"
+                )));
+            }
+        };
         output_by_seq.insert(
             view.seq,
             CommandOutput {
@@ -100,8 +325,13 @@ pub(crate) async fn apply_network_traffic_import_if_ready(
         );
     }
     for (seq, output) in inline_outputs {
-        if *seq >= final_seq || output.done || output.stream != OutputStream::Status {
+        if *seq >= final_seq {
             continue;
+        }
+        if output.done || output.stream != OutputStream::Status {
+            return Ok(NetworkTrafficImportApply::Invalid(
+                "network_traffic_import_invalid:batch_output_invalid".to_string(),
+            ));
         }
         match output_by_seq.get(seq) {
             Some(existing) if !command_output_matches(existing, output) => {

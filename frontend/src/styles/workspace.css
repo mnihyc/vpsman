@@ -2546,8 +2546,7 @@ span.vpsMonitorSparkline.empty {
   padding: 5px 0 0;
 }
 
-.vpsMonitorTraffic > span:first-child,
-.vpsMonitorPing > span:first-child {
+.vpsMonitorTrafficHeading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -2571,18 +2570,6 @@ span.vpsMonitorSparkline.empty {
   font-weight: 700;
 }
 
-.vpsMonitorRowEvidence {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  min-width: 0;
-}
-
-.vpsMonitorRowEvidence > strong {
-  min-width: 0;
-}
-
 .vpsMonitorTraffic strong,
 .vpsMonitorPing strong {
   min-width: 0;
@@ -2591,6 +2578,19 @@ span.vpsMonitorSparkline.empty {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.vpsMonitorTrafficQuota {
+  display: block;
+  overflow: visible !important;
+  color: var(--text) !important;
+  font-size: 11px !important;
+  font-weight: 700;
+  line-height: 1.1;
+  text-align: right;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
 }
 
 .vpsMonitorTrafficTrack {
@@ -2671,6 +2671,61 @@ span.vpsMonitorSparkline.empty {
   height: 10px;
 }
 
+.vpsMonitorPing > .vpsMonitorRowHeading,
+.publicMonitoringPing .vpsMonitorRowHeading {
+  overflow: visible;
+  line-height: 1.2;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorPingEvidence {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vpsMonitorPingEvidence.single {
+  justify-content: flex-end;
+}
+
+.vpsMonitorPingEvidence > strong {
+  min-width: 0;
+  overflow: visible;
+  color: var(--text) !important;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorPingEvidence > strong:last-child {
+  text-align: right;
+}
+
+.vpsMonitorPingDetail {
+  min-height: 12px;
+  overflow: visible !important;
+  line-height: 1.2;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere;
+}
+
+.vpsMonitorCard.comfortable .vpsMonitorPing:not(.failed):not(.down):not(.error),
+.publicMonitoringCard.comfortable
+  .publicMonitoringPing:not(.warning):not(.failed):not(.down):not(.error) {
+  border: 1px solid transparent;
+  border-top-color: var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px;
+}
+
 .vpsMonitorPing.ok .vpsMonitorSparkline,
 .vpsMonitorPing.up .vpsMonitorSparkline {
   color: var(--success);
@@ -2703,29 +2758,6 @@ span.vpsMonitorSparkline.empty {
   padding: 6px 0 0;
 }
 
-.vpsMonitorTraffic.contextual > span:first-child {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px;
-}
-
-.vpsMonitorTraffic.contextual .vpsMonitorRowEvidence {
-  display: contents;
-}
-
-.vpsMonitorTraffic.contextual
-  .vpsMonitorRowEvidence
-  > .publicMonitoringPortSpeed {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.vpsMonitorTraffic.contextual .vpsMonitorRowEvidence > strong {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  text-align: right;
-}
-
 .vpsMonitorCard.compact .vpsMonitorTraffic.warning,
 .vpsMonitorCard.compact .vpsMonitorTraffic.unconfigured,
 .vpsMonitorCard.compact .vpsMonitorTraffic.exceeded,
@@ -2749,7 +2781,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorCard.compact .vpsMonitorTraffic > small,
-.vpsMonitorCard.compact .vpsMonitorPing > small {
+.vpsMonitorCard.compact .vpsMonitorPing > small:not(.vpsMonitorRowHeading) {
   display: none;
 }
 
@@ -3095,52 +3127,28 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringTrafficHeading > .vpsMonitorRowHeading,
-.publicMonitoringPing > .vpsMonitorRowHeading {
+.publicMonitoringPingHeading > .vpsMonitorRowHeading {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   color: var(--muted);
   font-size: 10px;
   line-height: 1.2;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.publicMonitoringTrafficHeading > .vpsMonitorRowHeading {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .publicMonitoringTrafficHeading > .vpsMonitorRowHeading > strong,
-.publicMonitoringPing > .vpsMonitorRowHeading > strong {
+.publicMonitoringPingHeading > .vpsMonitorRowHeading > strong {
   color: var(--text);
   font-size: inherit;
   font-weight: 700;
-}
-
-.publicMonitoringTrafficHeading > .vpsMonitorRowEvidence {
-  flex: 1 1 auto;
-}
-
-.publicMonitoringTrafficHeading > .vpsMonitorRowEvidence > strong {
-  font-size: 11px;
-}
-
-.publicMonitoringTraffic.contextual .publicMonitoringTrafficHeading {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 2px;
-}
-
-.publicMonitoringTraffic.contextual .vpsMonitorRowEvidence {
-  display: contents;
-}
-
-.publicMonitoringTraffic.contextual
-  .vpsMonitorRowEvidence
-  > .publicMonitoringPortSpeed {
-  grid-column: 2;
-  grid-row: 1;
-}
-
-.publicMonitoringTraffic.contextual .vpsMonitorRowEvidence > strong {
-  grid-column: 1 / -1;
-  grid-row: 2;
-  text-align: right;
 }
 
 .publicMonitoringPortSpeed {
@@ -3204,15 +3212,24 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringPing {
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: center;
   gap: 3px 5px;
   padding-top: 6px;
 }
 
-.publicMonitoringPing > .vpsMonitorSparkline,
-.publicMonitoringPing > small:not(.vpsMonitorRowHeading) {
-  grid-column: 1 / -1;
+.publicMonitoringPing > .publicMonitoringPingHeading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.publicMonitoringPing > .publicMonitoringPingHeading > svg {
+  flex: 0 0 auto;
 }
 
 .publicMonitoringPing > .vpsMonitorSparkline {

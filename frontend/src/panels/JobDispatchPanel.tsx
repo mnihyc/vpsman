@@ -2597,13 +2597,16 @@ function operationReviewItems(
     ];
   }
   if (operation.type === "network_traffic_import_vnstat") {
-    const interfaces = operation.interfaces.join(", ");
+    const interfaces =
+      operation.interfaces.length > 0
+        ? operation.interfaces.join(", ")
+        : "All interfaces reported by vnStat";
     const start = new Date(operation.start_unix * 1_000)
       .toISOString()
       .replace(".000Z", "Z");
     return [
-      { label: "Host interfaces", title: interfaces, value: interfaces },
-      { label: "Start", title: start, value: start },
+      { label: "Host interfaces", value: interfaces },
+      { label: "Start", value: start },
       {
         label: "End",
         value: "First retained live agent counter, independently per interface",

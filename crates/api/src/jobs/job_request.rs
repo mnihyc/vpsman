@@ -397,7 +397,7 @@ fn validate_network_traffic_import_vnstat(
     interfaces: &[String],
     start_unix: u64,
 ) -> Result<(), ApiError> {
-    if interfaces.is_empty() || interfaces.len() > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
+    if interfaces.len() > NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES {
         return Err(ApiError::bad_request(
             "network_traffic_import_interface_count_out_of_range",
         ));
@@ -1082,6 +1082,11 @@ mod network_traffic_import_tests {
     #[test]
     fn accepts_an_import_start_older_than_thirty_five_days() {
         assert!(validate_network_traffic_import_vnstat(&["eth0".to_string()], 60).is_ok());
+    }
+
+    #[test]
+    fn accepts_an_empty_interface_list_for_agent_discovery() {
+        assert!(validate_network_traffic_import_vnstat(&[], 60).is_ok());
     }
 
     #[test]

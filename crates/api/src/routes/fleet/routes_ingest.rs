@@ -22,7 +22,7 @@ use vpsman_server_core::{
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     error::ApiError,
-    job_traffic_import::{apply_network_traffic_import_if_ready, NetworkTrafficImportApply},
+    job_traffic_import::{target_outcome_from_done_output, wake_network_traffic_import_finalizer},
     model::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },
@@ -306,18 +306,50 @@ pub(crate) async fn ingest_command_output(
         }
     }
     let received_at = command_output_received_at(event.received_unix);
-    if event.output.done {
-        let mut outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
-        apply_network_traffic_import_outcome(
-            &state,
-            event.job_id,
-            &event.client_id,
-            event.seq,
-            &event.output,
-            &[],
-            &mut outcome,
-        )
-        .await?;
+    if event.output.done && job.command_type == "network_traffic_import_vnstat" {
+        let write_result = match state
+            .repo
+            .record_active_job_output_chunk_checked_with_config(
+                event.job_id,
+                &event.client_id,
+                event.seq,
+                &event.output,
+                Some(received_at.clone()),
+                persist_config,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(error) if error.to_string().contains("job_target_not_active") => {
+                return Err(ApiError::conflict("job_target_not_active"));
+            }
+            Err(error) if error.to_string().contains("job_target_not_found") => {
+                return Err(ApiError::not_found("job_target_not_found"));
+            }
+            Err(error) => return Err(ApiError::from(error)),
+        };
+        if write_result == JobOutputWriteResult::DuplicateConflict {
+            return Err(ApiError::conflict("job_output_sequence_conflict"));
+        }
+        if network_traffic_import_output_advances_finalization(write_result) {
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id: event.job_id,
+                client_id: event.client_id.clone(),
+                seq: event.seq,
+                done: true,
+            });
+            state
+                .repo
+                .mark_job_target_running(
+                    event.job_id,
+                    &event.client_id,
+                    "vnStat history collected; server import pending",
+                )
+                .await?;
+            wake_network_traffic_import_finalizer(state.clone());
+        }
+    } else if event.output.done {
+        let outcome = target_outcome_from_done_output(event.job_id, &event.output, received_at);
         let record_result = match state
             .repo
             .record_active_final_job_output_and_target_result_with_config(
@@ -430,25 +462,36 @@ pub(crate) async fn ingest_command_output(
         if write_result == JobOutputWriteResult::DuplicateConflict {
             return Err(ApiError::conflict("job_output_sequence_conflict"));
         }
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id: event.job_id,
-            client_id: event.client_id.clone(),
-            seq: event.seq,
-            done: event.output.done,
-        });
-        let message = status_output_message(&event.output)
-            .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
-        state
-            .repo
-            .mark_job_target_running(event.job_id, &event.client_id, &message)
+        let is_network_traffic_import = job.command_type == "network_traffic_import_vnstat";
+        if !is_network_traffic_import
+            || network_traffic_import_output_advances_finalization(write_result)
+        {
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id: event.job_id,
+                client_id: event.client_id.clone(),
+                seq: event.seq,
+                done: event.output.done,
+            });
+            let message = status_output_message(&event.output)
+                .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
+            state
+                .repo
+                .mark_job_target_running(event.job_id, &event.client_id, &message)
+                .await?;
+        }
+        if is_network_traffic_import {
+            if network_traffic_import_output_advances_finalization(write_result) {
+                wake_network_traffic_import_finalizer(state.clone());
+            }
+        } else {
+            finalize_contiguous_final_job_output_if_ready(
+                &state,
+                event.job_id,
+                &event.client_id,
+                persist_config,
+            )
             .await?;
-        finalize_contiguous_final_job_output_if_ready(
-            &state,
-            event.job_id,
-            &event.client_id,
-            persist_config,
-        )
-        .await?;
+        }
     }
     if event.output.stream == OutputStream::Status && is_terminal_command_type(&job.command_type) {
         state
@@ -460,6 +503,10 @@ pub(crate) async fn ingest_command_output(
         accepted: true,
         message: "command output recorded".to_string(),
     }))
+}
+
+fn network_traffic_import_output_advances_finalization(write_result: JobOutputWriteResult) -> bool {
+    write_result == JobOutputWriteResult::Inserted
 }
 
 async fn finalize_contiguous_final_job_output_if_ready(
@@ -479,17 +526,7 @@ async fn finalize_contiguous_final_job_output_if_ready(
         .received_at
         .clone()
         .unwrap_or_else(|| Utc::now().to_rfc3339());
-    let mut outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
-    apply_network_traffic_import_outcome(
-        state,
-        job_id,
-        client_id,
-        candidate.seq,
-        &candidate.output,
-        &[],
-        &mut outcome,
-    )
-    .await?;
+    let outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
     let record_result = match state
         .repo
         .record_active_final_job_output_and_target_result_with_config(
@@ -558,46 +595,6 @@ async fn finalize_contiguous_final_job_output_if_ready(
                     "backup artifact auto-record failed after deferred command output finalization"
                 );
             }
-        }
-    }
-    Ok(())
-}
-
-async fn apply_network_traffic_import_outcome(
-    state: &AppState,
-    job_id: uuid::Uuid,
-    client_id: &str,
-    final_seq: i32,
-    final_output: &CommandOutput,
-    inline_outputs: &[(i32, CommandOutput)],
-    outcome: &mut TargetDispatchOutcome,
-) -> Result<(), ApiError> {
-    if outcome.status != TARGET_STATUS_COMPLETED {
-        return Ok(());
-    }
-    let applied = apply_network_traffic_import_if_ready(
-        state,
-        job_id,
-        client_id,
-        final_seq,
-        final_output,
-        inline_outputs,
-    )
-    .await
-    .map_err(|error| {
-        ApiError::internal(
-            "network_traffic_import_failed",
-            "The vnStat traffic history could not be imported.",
-            error,
-        )
-    })?;
-    match applied {
-        NetworkTrafficImportApply::NotApplicable | NetworkTrafficImportApply::Pending => {}
-        NetworkTrafficImportApply::Applied(message) => outcome.message = message,
-        NetworkTrafficImportApply::Invalid(message) => {
-            outcome.status = TARGET_STATUS_FAILED.to_string();
-            outcome.exit_code = Some(1);
-            outcome.message = message;
         }
     }
     Ok(())
@@ -821,34 +818,6 @@ async fn try_auto_record_backup_artifact_for_job_target(
     .await
     .map_err(ApiError::from)?;
     Ok(())
-}
-
-fn target_outcome_from_done_output(
-    job_id: uuid::Uuid,
-    output: &CommandOutput,
-    received_at: String,
-) -> TargetDispatchOutcome {
-    let outputs = vec![CommandOutput {
-        job_id,
-        stream: output.stream,
-        data: output.data.clone(),
-        exit_code: output.exit_code,
-        done: output.done,
-    }];
-    let final_output = outputs.last();
-    let (status, exit_code) = crate::routes_jobs::target_status_from_final_output(final_output);
-    let message =
-        crate::routes_jobs::target_message_for_status(&outputs, status, status, final_output);
-    TargetDispatchOutcome {
-        status: status.to_string(),
-        exit_code,
-        #[cfg(test)]
-        command_version: None,
-        accepted: true,
-        message,
-        received_at: Some(received_at),
-        outputs,
-    }
 }
 
 fn command_output_received_at(received_unix: Option<u64>) -> String {

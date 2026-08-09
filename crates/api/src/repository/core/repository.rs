@@ -103,6 +103,7 @@ pub(crate) struct MemoryState {
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,
     pub(crate) job_outputs: Arc<RwLock<Vec<JobOutputView>>>,
+    pub(crate) network_traffic_import_retry_not_before: Arc<RwLock<HashMap<(Uuid, String), u64>>>,
     pub(crate) capability_degraded_job_targets: Arc<RwLock<CapabilityDegradedJobTargets>>,
     pub(crate) server_artifacts: Arc<RwLock<Vec<ServerArtifactCleanupCandidate>>>,
     pub(crate) terminal_sessions: Arc<RwLock<Vec<TerminalSessionView>>>,

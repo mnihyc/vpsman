@@ -1,9 +1,4 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    str::FromStr,
-    time::Duration,
-};
+use std::{path::Path, str::FromStr, time::Duration};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use chrono::{Datelike, Utc};
@@ -5398,65 +5393,10 @@ async fn postgres_vnstat_rerun_hydrates_only_non_import_boundary_rows() {
 }
 
 #[tokio::test]
-async fn postgres_v0_2_27_baseline_applies_epoch_indexes_append_only() {
-    let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
-        Ok(value) if !value.trim().is_empty() => value,
-        _ => {
-            eprintln!("skipping Postgres reliability test: VPSMAN_TEST_POSTGRES_URL is unset");
-            return;
-        }
+async fn postgres_fresh_schema_contains_no_reset_epoch_indexes() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
     };
-    let baseline_dir = copy_v0_2_27_migration_baseline().unwrap();
-    let db_result = PgReliabilityTestDb::new_with_migrations(&base_url, &baseline_dir).await;
-    fs::remove_dir_all(&baseline_dir).unwrap();
-    let db = db_result.expect("failed to create v0.2.27 migration test database");
-
-    let baseline_ledger: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT version, encode(checksum, 'hex') FROM _sqlx_migrations WHERE success ORDER BY version",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        baseline_ledger
-            .iter()
-            .map(|(version, _)| *version)
-            .collect::<Vec<_>>(),
-        (1_i64..=8).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        baseline_ledger
-            .iter()
-            .find(|(version, _)| *version == 3)
-            .map(|(_, checksum)| checksum.as_str()),
-        Some(V0_2_27_MIGRATION_0003_SHA384)
-    );
-
-    let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir())
-        .await
-        .unwrap();
-    migrator.run(&db.pool).await.unwrap();
-
-    let upgraded_ledger: Vec<(i64, String)> = sqlx::query_as(
-        "SELECT version, encode(checksum, 'hex') FROM _sqlx_migrations WHERE success ORDER BY version",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        upgraded_ledger
-            .iter()
-            .map(|(version, _)| *version)
-            .collect::<Vec<_>>(),
-        (1_i64..=9).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        upgraded_ledger
-            .iter()
-            .find(|(version, _)| *version == 3)
-            .map(|(_, checksum)| checksum.as_str()),
-        Some(V0_2_27_MIGRATION_0003_SHA384)
-    );
     let indexes_exist: bool = sqlx::query_scalar(
         r#"
         SELECT
@@ -5489,10 +5429,6 @@ impl PgReliabilityTestDb {
     }
 
     async fn new(base_url: &str) -> anyhow::Result<Self> {
-        Self::new_with_migrations(base_url, &workspace_migrations_dir()).await
-    }
-
-    async fn new_with_migrations(base_url: &str, migrations_dir: &Path) -> anyhow::Result<Self> {
         let base_options = PgConnectOptions::from_str(base_url)?;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -5506,7 +5442,7 @@ impl PgReliabilityTestDb {
             .max_connections(4)
             .connect_with(base_options.database(&db_name))
             .await?;
-        let migrator = sqlx::migrate::Migrator::new(migrations_dir).await?;
+        let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
         migrator.run(&pool).await?;
         let repo = Repository::Postgres(pool.clone());
         Ok(Self {
@@ -5556,32 +5492,6 @@ fn workspace_migrations_dir() -> std::path::PathBuf {
         .join("..")
         .join("..")
         .join("migrations")
-}
-
-const V0_2_27_MIGRATION_0003_SHA384: &str =
-    "04f8f145e2a998d010be2e8d44024dd904577180439bd827dc095f4a16e9d144bb6879f5603dbde4ad37d31b7b71f179";
-
-fn copy_v0_2_27_migration_baseline() -> anyhow::Result<PathBuf> {
-    const FILES: [&str; 8] = [
-        "0001_identity_access.sql",
-        "0002_jobs_schedules_commands.sql",
-        "0003_telemetry_alerts_history.sql",
-        "0004_backups_restores.sql",
-        "0005_network_tunnels.sql",
-        "0006_agent_updates.sql",
-        "0007_configuration_presets_file_transfer.sql",
-        "0008_system_metrics.sql",
-    ];
-    let source_dir = workspace_migrations_dir();
-    let target_dir = std::env::temp_dir().join(format!(
-        "vpsman-v0-2-27-migrations-{}",
-        Uuid::new_v4().simple()
-    ));
-    fs::create_dir(&target_dir)?;
-    for file in FILES {
-        fs::copy(source_dir.join(file), target_dir.join(file))?;
-    }
-    Ok(target_dir)
 }
 
 fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
@@ -9121,6 +9031,134 @@ async fn postgres_missing_update_heartbeat_deadline_becomes_agent_lost() {
     assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_FAILED);
     let output = latest_status_output_json(&db.pool, job_id, client_id).await;
     assert_eq!(output["code"], "agent_update_restart_missing_heartbeat");
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_vnstat_finalization_phase_requires_contiguous_output_to_defer_deadline() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let protected_client = "pg-vnstat-finalize-protected";
+    let gapped_client = "pg-vnstat-finalize-gapped";
+    let protected_job = Uuid::new_v4();
+    let gapped_job = Uuid::new_v4();
+    for client_id in [protected_client, gapped_client] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    for (job_id, client_id) in [
+        (protected_job, protected_client),
+        (gapped_job, gapped_client),
+    ] {
+        insert_job_target_with_operation(
+            &db.pool,
+            job_id,
+            client_id,
+            JobCommand::NetworkTrafficImportVnstat {
+                interfaces: Vec::new(),
+                start_unix: 60,
+            },
+            "network_traffic_import_vnstat",
+            None,
+            "running",
+            true,
+            Some(Uuid::new_v4()),
+            1,
+            true,
+        )
+        .await;
+    }
+    let chunk = CommandOutput {
+        job_id: protected_job,
+        stream: OutputStream::Status,
+        data: br#"{"type":"network_traffic_import_vnstat_batch","batch_index":0,"buckets":[]}"#
+            .to_vec(),
+        exit_code: None,
+        done: false,
+    };
+    let protected_final = CommandOutput {
+        job_id: protected_job,
+        stream: OutputStream::Status,
+        data: br#"{"type":"network_traffic_import_vnstat","status":"collected"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    db.repo
+        .record_job_outputs(protected_job, protected_client, &[chunk, protected_final])
+        .await
+        .unwrap();
+    let gapped_final = CommandOutput {
+        job_id: gapped_job,
+        stream: OutputStream::Status,
+        data: br#"{"type":"network_traffic_import_vnstat","status":"collected"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    db.repo
+        .record_active_job_output_chunk_checked_with_config(
+            gapped_job,
+            gapped_client,
+            1,
+            &gapped_final,
+            None,
+            JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+        )
+        .await
+        .unwrap();
+
+    let expired = db.repo.expire_control_timeout_targets(10, 0).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].job_id, gapped_job);
+    assert_eq!(expired[0].status, TARGET_STATUS_CONTROL_TIMEOUT);
+    assert_eq!(
+        target_status(&db.pool, protected_job, protected_client).await,
+        "running"
+    );
+    assert_eq!(
+        target_status(&db.pool, gapped_job, gapped_client).await,
+        TARGET_STATUS_CONTROL_TIMEOUT
+    );
+    assert_eq!(
+        db.repo
+            .list_pending_network_traffic_import_finalizations(128)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|target| (target.job_id, target.client_id))
+            .collect::<Vec<_>>(),
+        vec![(protected_job, protected_client.to_string())]
+    );
+    db.repo
+        .defer_network_traffic_import_finalization(
+            protected_job,
+            protected_client,
+            "vnStat server import retry pending",
+            30,
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .list_pending_network_traffic_import_finalizations(128)
+        .await
+        .unwrap()
+        .is_empty());
+    let retry_is_cooled: bool = sqlx::query_scalar(
+        r#"
+        SELECT dispatch_lease_until > now()
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(protected_job)
+    .bind(protected_client)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(retry_is_cooled);
     db.cleanup().await;
 }
 

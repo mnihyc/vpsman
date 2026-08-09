@@ -17,6 +17,8 @@ use crate::{
 };
 
 const VNSTAT_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+const VNSTAT_ALL_INTERFACES_OUTPUT_LIMIT_BYTES: usize =
+    VNSTAT_OUTPUT_LIMIT_BYTES * NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES;
 const VNSTAT_CONFIG_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 const VNSTAT_STATUS_OUTPUT_LIMIT_BYTES: usize = 30 * 1024;
 const VNSTAT_COMMAND_TIMEOUT_SECS: u64 = 30;
@@ -131,31 +133,30 @@ async fn collect_vnstat_history(
     );
     let mut buckets = Vec::new();
     let mut sources = Vec::new();
-
-    for interface in input.interfaces {
+    let resolved_interfaces = if input.interfaces.is_empty() {
         input.cancel_token.check("network_traffic_import_vnstat")?;
-        let payload = run_vnstat_query(executable, interface, input.cancel_token.clone()).await?;
-        let (source, mut interface_buckets) =
-            parse_vnstat_payload(&payload, interface, input.start_unix, &calendar_config)?;
-        anyhow::ensure!(
-            interface_buckets.len() <= NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
-            "vnstat history for {interface} exceeds the import bucket limit"
-        );
-        anyhow::ensure!(
-            source
-                .database_created_unix
-                .is_some_and(|created| created <= input.start_unix),
-            "vnstat database for {interface} was created after the requested start"
-        );
-        anyhow::ensure!(
-            source
-                .source_updated_unix
-                .is_some_and(|updated| updated > input.start_unix),
-            "vnstat database for {interface} has no updates after the requested start"
-        );
-        buckets.append(&mut interface_buckets);
-        sources.push(source);
-    }
+        let payload = run_vnstat_query(executable, None, input.cancel_token.clone()).await?;
+        let (interfaces, discovered_sources, discovered_buckets) =
+            parse_discovered_vnstat_payload(&payload, input.start_unix, &calendar_config)?;
+        sources = discovered_sources;
+        buckets = discovered_buckets;
+        interfaces
+    } else {
+        for interface in input.interfaces {
+            input.cancel_token.check("network_traffic_import_vnstat")?;
+            let payload =
+                run_vnstat_query(executable, Some(interface), input.cancel_token.clone()).await?;
+            append_parsed_interface(
+                &payload,
+                interface,
+                input.start_unix,
+                &calendar_config,
+                &mut buckets,
+                &mut sources,
+            )?;
+        }
+        input.interfaces.to_vec()
+    };
 
     buckets.sort_by(|left, right| {
         left.interface
@@ -207,7 +208,7 @@ async fn collect_vnstat_history(
         status: "collected".to_string(),
         requested_start_unix: input.start_unix,
         collected_until_unix,
-        interfaces: input.interfaces.to_vec(),
+        interfaces: resolved_interfaces,
         sources,
         batch_count,
         bucket_count,
@@ -248,7 +249,7 @@ async fn emit_streamed_output(
 fn validate_request_at(interfaces: &[String], start_unix: u64, now_unix: u64) -> Result<()> {
     let current_minute = floor_minute(now_unix);
     anyhow::ensure!(
-        !interfaces.is_empty() && interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+        interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
         "network traffic import interface count is out of range"
     );
     let mut normalized = interfaces
@@ -286,6 +287,85 @@ fn valid_interface_name(interface: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
 }
 
+fn discover_vnstat_interfaces(payload: &Value) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        json_version_is_two(payload),
+        "vnstat JSON version 2 is required"
+    );
+    let entries = payload
+        .get("interfaces")
+        .and_then(Value::as_array)
+        .context("vnstat JSON is missing interfaces")?;
+    let mut interfaces = BTreeSet::new();
+    for entry in entries {
+        let interface = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .context("vnstat JSON interface is missing its name")?;
+        anyhow::ensure!(
+            valid_interface_name(interface),
+            "vnstat JSON contains an invalid interface name"
+        );
+        interfaces.insert(interface.to_string());
+    }
+    anyhow::ensure!(
+        !interfaces.is_empty() && interfaces.len() <= NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
+        "vnstat discovered interface count is out of range"
+    );
+    Ok(interfaces.into_iter().collect())
+}
+
+fn parse_discovered_vnstat_payload(
+    payload: &Value,
+    requested_start_unix: u64,
+    calendar_config: &VnstatCalendarConfig,
+) -> Result<(
+    Vec<String>,
+    Vec<NetworkTrafficImportSource>,
+    Vec<NetworkTrafficImportBucket>,
+)> {
+    let interfaces = discover_vnstat_interfaces(payload)?;
+    let mut sources = Vec::with_capacity(interfaces.len());
+    let mut buckets = Vec::new();
+    for interface in &interfaces {
+        append_parsed_interface(
+            payload,
+            interface,
+            requested_start_unix,
+            calendar_config,
+            &mut buckets,
+            &mut sources,
+        )?;
+    }
+    Ok((interfaces, sources, buckets))
+}
+
+fn append_parsed_interface(
+    payload: &Value,
+    interface: &str,
+    requested_start_unix: u64,
+    calendar_config: &VnstatCalendarConfig,
+    buckets: &mut Vec<NetworkTrafficImportBucket>,
+    sources: &mut Vec<NetworkTrafficImportSource>,
+) -> Result<()> {
+    let (source, mut interface_buckets) =
+        parse_vnstat_payload(payload, interface, requested_start_unix, calendar_config)?;
+    anyhow::ensure!(
+        interface_buckets.len() <= NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
+        "vnstat history for {interface} exceeds the import bucket limit"
+    );
+    let effective_start_unix = requested_start_unix.max(source.retained_start_unix);
+    anyhow::ensure!(
+        source
+            .source_updated_unix
+            .is_some_and(|updated| floor_minute(updated) > effective_start_unix),
+        "vnstat database for {interface} has no updates after the effective start"
+    );
+    buckets.append(&mut interface_buckets);
+    sources.push(source);
+    Ok(())
+}
+
 fn vnstat_executable() -> Result<&'static str> {
     VNSTAT_EXECUTABLE_CANDIDATES
         .iter()
@@ -296,12 +376,16 @@ fn vnstat_executable() -> Result<&'static str> {
 
 async fn run_vnstat_query(
     executable: &str,
-    interface: &str,
+    interface: Option<&str>,
     cancel_token: CommandCancelToken,
 ) -> Result<Value> {
     let command = vnstat_query_command(executable, interface);
-    let output =
-        run_vnstat_command(command, "query", VNSTAT_OUTPUT_LIMIT_BYTES, cancel_token).await?;
+    let output_limit = if interface.is_some() {
+        VNSTAT_OUTPUT_LIMIT_BYTES
+    } else {
+        VNSTAT_ALL_INTERFACES_OUTPUT_LIMIT_BYTES
+    };
+    let output = run_vnstat_command(command, "query", output_limit, cancel_token).await?;
     serde_json::from_slice(&output).context("vnstat returned invalid JSON")
 }
 
@@ -356,15 +440,13 @@ async fn run_vnstat_command(
     }
 }
 
-fn vnstat_query_command(executable: &str, interface: &str) -> Command {
+fn vnstat_query_command(executable: &str, interface: Option<&str>) -> Command {
     let mut command = Command::new(executable);
-    command
-        .arg("--json")
-        .arg("--limit")
-        .arg("0")
-        .arg("--iface")
-        .arg(interface)
-        .stdin(Stdio::null());
+    command.arg("--json").arg("--limit").arg("0");
+    if let Some(interface) = interface {
+        command.arg("--iface").arg(interface);
+    }
+    command.stdin(Stdio::null());
     command
 }
 
@@ -454,9 +536,10 @@ fn parse_vnstat_payload(
     let source_updated_unix = nested_timestamp(interface_payload, "updated")
         .context("vnstat JSON is missing the interface update timestamp")?;
     let source_cutoff_unix = floor_minute(source_updated_unix);
+    let effective_start_unix = requested_start_unix.max(database_available_unix);
     anyhow::ensure!(
-        source_cutoff_unix > requested_start_unix,
-        "vnstat database has no completed minute after the requested start"
+        source_cutoff_unix > effective_start_unix,
+        "vnstat database has no completed minute after the effective start"
     );
 
     let mut buckets = Vec::new();
@@ -521,15 +604,60 @@ fn parse_vnstat_payload(
         )?;
     }
     dedupe_equivalent_resolution_buckets(&mut buckets)?;
+    let retained_start_unix = latest_continuous_coverage(&buckets, interface)?.0;
 
     Ok((
         NetworkTrafficImportSource {
             interface: interface.to_string(),
             database_created_unix: Some(database_created_unix),
+            retained_start_unix,
             source_updated_unix: Some(source_updated_unix),
         },
         buckets,
     ))
+}
+
+fn latest_continuous_coverage(
+    buckets: &[NetworkTrafficImportBucket],
+    interface: &str,
+) -> Result<(u64, u64)> {
+    let mut intervals = buckets
+        .iter()
+        .filter(|bucket| bucket.interface == interface)
+        .map(|bucket| {
+            let end_unix = bucket
+                .start_unix
+                .checked_add(u64::from(bucket.duration_secs))
+                .context("vnstat traffic interval end is too large")?;
+            anyhow::ensure!(
+                bucket.start_unix < end_unix
+                    && bucket.start_unix.is_multiple_of(60)
+                    && end_unix.is_multiple_of(60),
+                "vnstat traffic interval is not minute aligned"
+            );
+            Ok((bucket.start_unix, end_unix))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !intervals.is_empty(),
+        "vnstat database for {interface} has no retained traffic coverage"
+    );
+    intervals.sort_unstable();
+
+    let mut components = Vec::<(u64, u64)>::new();
+    for (start_unix, end_unix) in intervals {
+        if let Some(last) = components.last_mut() {
+            if start_unix <= last.1 {
+                last.1 = last.1.max(end_unix);
+                continue;
+            }
+        }
+        components.push((start_unix, end_unix));
+    }
+    components
+        .into_iter()
+        .max_by_key(|(start_unix, end_unix)| (*end_unix, std::cmp::Reverse(*start_unix)))
+        .context("vnstat retained traffic coverage is empty")
 }
 
 fn dedupe_equivalent_resolution_buckets(

@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn duplicate_vnstat_output_does_not_clear_retry_cooldown_or_wake_finalization() {
+    assert!(network_traffic_import_output_advances_finalization(
+        JobOutputWriteResult::Inserted
+    ));
+    assert!(!network_traffic_import_output_advances_finalization(
+        JobOutputWriteResult::DuplicateIdentical
+    ));
+    assert!(!network_traffic_import_output_advances_finalization(
+        JobOutputWriteResult::DuplicateConflict
+    ));
+}
+
+#[test]
 fn agent_metric_validation_distinguishes_unknown_zero_and_invalid_swap() {
     let metrics = |swap_total_bytes, swap_available_bytes| vpsman_common::AgentMetrics {
         observed_unix: 1,

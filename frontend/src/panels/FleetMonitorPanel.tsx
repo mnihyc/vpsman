@@ -1023,24 +1023,20 @@ export function VpsMonitorCard({
         : trafficConfigured && traffic
           ? formatTrafficUsage(traffic)
           : "Unconfigured";
-  const pingEvidenceLabel =
+  const pingEvidenceParts =
     monitoringState === "loading"
-      ? "Loading…"
+      ? ["Loading…"]
       : monitoringState === "unavailable"
-        ? "Unavailable"
-        : formatPrimaryPing(primaryPing);
+        ? ["Unavailable"]
+        : formatPrimaryPingEvidence(primaryPing);
+  const pingEvidenceLabel = pingEvidenceParts.join(" · ");
   const trafficReset =
     trafficConfigured && traffic
       ? traffic.reset_day === -1
         ? null
         : formatTrafficReset(traffic.cycle_end)
       : null;
-  const trafficHeadingContext = density === "compact" ? trafficReset : null;
-  const trafficUsesSeparatedRows =
-    trafficConfigured &&
-    traffic !== undefined &&
-    (density === "compact" || portSpeed !== undefined);
-  const trafficHeading = `Traffic${trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}`;
+  const trafficHeadingContext = trafficReset;
   const trafficDetail =
     trafficConfigured && traffic
       ? (trafficProblem ??
@@ -1048,7 +1044,7 @@ export function VpsMonitorCard({
           ? null
           : formatTrafficReset(traffic.cycle_end)))
       : null;
-  const trafficRowTitle =
+  const trafficEvidenceTitle =
     monitoringState === "loading"
       ? "Reading traffic configuration and current accounting evidence."
       : monitoringState === "unavailable"
@@ -1058,11 +1054,25 @@ export function VpsMonitorCard({
           : trafficConfigured && traffic
             ? formatTrafficTitle(traffic)
             : "Traffic accounting rules and reset cycle are not configured.";
+  const trafficRowTitle = [
+    trafficEvidenceTitle,
+    trafficConfigured ? `Displayed quota use: ${trafficEvidenceLabel}.` : null,
+    portSpeed
+      ? `${portSpeed.display} port capacity is a display value only—no shaping or enforcement is implied.`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   const pingHeadingContext = primaryPing?.target_name ?? null;
   const pingHeading = `Ping${pingHeadingContext ? ` · ${pingHeadingContext}` : ""}`;
-  const pingRowTitle = primaryPing
-    ? `${pingHeading}. ${pingEvidenceLabel}.${pingProblem ? ` ${pingProblem}.` : ""}${primaryPing.checked_at ? ` Checked ${formatTime(primaryPing.checked_at)}.` : ""}`
-    : "No primary Ping target is configured for this VPS.";
+  const pingRowTitle =
+    monitoringState === "loading"
+      ? "Reading the primary Ping target and its latest evidence."
+      : monitoringState === "unavailable"
+        ? "Primary Ping evidence is unavailable."
+        : primaryPing
+          ? `${pingHeading}. ${pingEvidenceLabel}.${pingProblem ? ` ${pingProblem}.` : ""}${primaryPing.checked_at ? ` Checked ${formatTime(primaryPing.checked_at)}.` : ""}`
+          : "No primary Ping target is configured for this VPS.";
 
   const cardHeader = (
     <>
@@ -1255,32 +1265,19 @@ export function VpsMonitorCard({
         </span>
       </div>
       <div
-        className={`vpsMonitorTraffic${trafficUsesSeparatedRows ? " contextual" : ""}${trafficUnconfigured ? " unconfigured" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
+        className={`vpsMonitorTraffic${trafficUnconfigured ? " unconfigured" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
         title={trafficRowTitle}
       >
-        <span>
-          <small
-            className="vpsMonitorRowHeading"
-            title={
-              portSpeed
-                ? `${trafficHeading}; ${portSpeed.display} port capacity is a display value only—no shaping or enforcement is implied`
-                : undefined
-            }
-          >
+        <span className="vpsMonitorTrafficHeading">
+          <small className="vpsMonitorRowHeading">
             <strong>Traffic</strong>
             {trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}
           </small>
-          <span className="vpsMonitorRowEvidence">
-            {portSpeed ? (
-              <span
-                className="publicMonitoringPortSpeed"
-                title={`${portSpeed.display} port capacity; display value only—no shaping or enforcement is implied`}
-              >
-                {portSpeed.display}
-              </span>
-            ) : null}
-            <strong>{trafficEvidenceLabel}</strong>
-          </span>
+          {portSpeed ? (
+            <span className="publicMonitoringPortSpeed">
+              {portSpeed.display}
+            </span>
+          ) : null}
         </span>
         <span
           aria-label={
@@ -1307,6 +1304,9 @@ export function VpsMonitorCard({
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
         </span>
+        <strong className="vpsMonitorTrafficQuota">
+          {trafficEvidenceLabel}
+        </strong>
         {density === "comfortable" && trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
@@ -1321,13 +1321,10 @@ export function VpsMonitorCard({
         className={`vpsMonitorPing ${pingWarning >= 2 ? "failed" : pingWarning > 0 ? "stale" : (primaryPing?.state ?? "unconfigured")}`}
         title={pingRowTitle}
       >
-        <span>
-          <small className="vpsMonitorRowHeading">
-            <strong>Ping</strong>
-            {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
-          </small>
-          <strong>{pingEvidenceLabel}</strong>
-        </span>
+        <small className="vpsMonitorRowHeading">
+          <strong>Ping</strong>
+          {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
+        </small>
         <span className="vpsMonitorPingVisual" aria-hidden="true">
           <MiniSparkline
             label="Primary Ping history"
@@ -1335,8 +1332,18 @@ export function VpsMonitorCard({
             values={pingHistory}
           />
         </span>
-        {density === "comfortable" && pingProblem ? (
-          <small className={pingWarning > 0 ? "exceptionEvidence" : undefined}>
+        <span
+          className={`vpsMonitorPingEvidence${pingEvidenceParts.length === 1 ? " single" : ""}`}
+        >
+          {pingEvidenceParts.map((part, index) => (
+            <strong key={`${part}-${index}`}>{part}</strong>
+          ))}
+        </span>
+        {density === "comfortable" ? (
+          <small
+            aria-hidden={pingProblem ? undefined : "true"}
+            className={`vpsMonitorPingDetail${pingWarning > 0 ? " exceptionEvidence" : ""}`}
+          >
             {pingProblem}
           </small>
         ) : null}
@@ -1516,14 +1523,7 @@ export function MiniSparkline({
     (value): value is number => value !== null && Number.isFinite(value),
   );
   if (finite.length < 2) {
-    return (
-      <span
-        aria-label={`${label} is unavailable`}
-        className="vpsMonitorSparkline empty"
-        role="img"
-        title={`${label} needs at least two recent samples`}
-      />
-    );
+    return <span aria-hidden="true" className="vpsMonitorSparkline empty" />;
   }
   const maximum = Math.max(...finite, 1);
   const denominator = Math.max(1, values.length - 1);
@@ -1541,14 +1541,7 @@ export function MiniSparkline({
   });
   if (current.length > 1) segments.push(current.join(" "));
   if (segments.length === 0) {
-    return (
-      <span
-        aria-label={`${label} is unavailable`}
-        className="vpsMonitorSparkline empty"
-        role="img"
-        title={`${label} has no continuous pair of recent samples`}
-      />
-    );
+    return <span aria-hidden="true" className="vpsMonitorSparkline empty" />;
   }
   return (
     <svg
@@ -2551,11 +2544,11 @@ export function formatTrafficReset(cycleEnd: string | null | undefined) {
   return days <= 1 ? "Resets within 1 day" : `Resets in ${days} days`;
 }
 
-function formatPrimaryPing(ping: CurrentPingView | null) {
-  if (!ping) return "-";
-  if (!ping.enabled || ping.state === "disabled") return "Disabled";
+function formatPrimaryPingEvidence(ping: CurrentPingView | null): string[] {
+  if (!ping) return ["Unconfigured"];
+  if (!ping.enabled || ping.state === "disabled") return ["Disabled"];
   if (ping.state === "pending" || ping.checked_at === null)
-    return "Waiting for first result";
+    return ["Waiting for first result"];
   const latency =
     ping.latency_avg_ms === null
       ? "Latency unavailable"
@@ -2564,7 +2557,7 @@ function formatPrimaryPing(ping: CurrentPingView | null) {
     ping.loss_ratio === null
       ? "loss unavailable"
       : `${(ping.loss_ratio * 100).toFixed(ping.loss_ratio > 0 && ping.loss_ratio < 0.01 ? 1 : 0)}% loss`;
-  return `${latency} · ${loss}`;
+  return [latency, loss];
 }
 
 function formatLoad(value: number | null) {

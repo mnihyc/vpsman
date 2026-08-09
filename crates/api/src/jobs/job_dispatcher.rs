@@ -20,7 +20,7 @@ use vpsman_server_core::{
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     internal_operator::{server_issued_job_actor, system_operator},
-    job_traffic_import::{apply_network_traffic_import_if_ready, NetworkTrafficImportApply},
+    job_traffic_import::wake_network_traffic_import_finalizer,
     model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
@@ -450,7 +450,7 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
 async fn finish_claimed_target(
     state: &AppState,
     claimed: &ClaimedJobTarget,
-    mut outcome: TargetDispatchOutcome,
+    outcome: TargetDispatchOutcome,
 ) -> Result<()> {
     let write_results = state
         .repo
@@ -484,35 +484,24 @@ async fn finish_claimed_target(
             JobCommand::NetworkTrafficImportVnstat { .. }
         )
     {
-        let Some(candidate) = state
+        state
             .repo
-            .contiguous_final_job_output_candidate(claimed.job_id, &claimed.client_id)
-            .await?
-        else {
-            // Gateway output posts are sequenced independently from the synchronous dispatch
-            // response. Leave the target active until the missing chunks arrive and the ingest
-            // path can finalize the contiguous stream.
-            return Ok(());
-        };
-        match apply_network_traffic_import_if_ready(
-            state,
-            claimed.job_id,
-            &claimed.client_id,
-            candidate.seq,
-            &candidate.output,
-            &[],
-        )
-        .await?
-        {
-            NetworkTrafficImportApply::NotApplicable => {}
-            NetworkTrafficImportApply::Pending => return Ok(()),
-            NetworkTrafficImportApply::Applied(message) => outcome.message = message,
-            NetworkTrafficImportApply::Invalid(message) => {
-                outcome.status = TARGET_STATUS_FAILED.to_string();
-                outcome.exit_code = Some(1);
-                outcome.message = message;
-            }
+            .mark_job_target_running(
+                claimed.job_id,
+                &claimed.client_id,
+                "vnStat history collected; server import pending",
+            )
+            .await?;
+        if let Some((seq, output)) = outcome.outputs.iter().enumerate().next_back() {
+            state.publish(WsEvent::JobOutputRecorded {
+                job_id: claimed.job_id,
+                client_id: claimed.client_id.clone(),
+                seq: seq as i32,
+                done: output.done,
+            });
         }
+        wake_network_traffic_import_finalizer(state.clone());
+        return Ok(());
     }
     let target_terminalized = state
         .repo

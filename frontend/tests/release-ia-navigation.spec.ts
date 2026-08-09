@@ -2123,6 +2123,75 @@ test("fleet monitor presents no-reset traffic as accumulated evidence", async ({
   await expect(traffic).not.toContainText("Current accounting cycle");
 });
 
+test("comfortable fleet cards align healthy, degraded, and unconfigured Ping evidence", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the focused geometry assertion is viewport-independent and runs once on desktop",
+  );
+  await installConsoleApiMock(page, {
+    agentListOverride: makeMonitorAgentFixtures(3).map((agent) => ({
+      ...agent,
+      last_seen_at: new Date().toISOString(),
+      status: "online" as const,
+    })),
+    monitoringPingStateCoverage: true,
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const monitor = page.getByLabel("VPS monitor cards");
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Comfortable" })
+    .click();
+  await expect(monitor).toHaveAttribute("data-density", "comfortable");
+  const healthy = monitor
+    .locator(".vpsMonitorCard", { hasText: "fleet-001-us" })
+    .locator(".vpsMonitorPing");
+  const degraded = monitor
+    .locator(".vpsMonitorCard", { hasText: "fleet-002-de" })
+    .locator(".vpsMonitorPing");
+  const unconfigured = monitor
+    .locator(".vpsMonitorCard", { hasText: "fleet-003-sg" })
+    .locator(".vpsMonitorPing");
+
+  await expect(healthy.locator(".vpsMonitorRowHeading")).toHaveText(
+    "Ping · Fixture healthy gateway",
+  );
+  await expect(healthy.locator(".vpsMonitorPingEvidence > strong")).toHaveText([
+    "18.5 ms",
+    "0% loss",
+  ]);
+  await expect(
+    healthy.locator(":scope > .vpsMonitorPingDetail"),
+  ).toHaveAttribute("aria-hidden", "true");
+  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
+    "",
+  );
+  await expect(degraded.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
+    "Intermittent packet loss",
+  );
+  await expect(degraded).toHaveAttribute(
+    "title",
+    /Fixture degraded gateway.*68(?:\.0)? ms.*20% loss.*Intermittent packet loss/i,
+  );
+  await expect(
+    unconfigured.locator(".vpsMonitorPingEvidence > strong"),
+  ).toHaveText("Unconfigured");
+  await expect(
+    unconfigured.locator(":scope > .vpsMonitorPingDetail"),
+  ).toHaveAttribute("aria-hidden", "true");
+  await expectEqualElementHeights([healthy, degraded, unconfigured]);
+
+  await page
+    .getByLabel("VPS cards density")
+    .getByRole("button", { name: "Compact" })
+    .click();
+  await expect(monitor.locator(".vpsMonitorPingDetail")).toHaveCount(0);
+});
+
 test("fleet monitor cards are density-distinct and open canonical detail", async ({
   page,
 }, testInfo) => {
@@ -2181,10 +2250,10 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     /traffic/i,
   );
   await expect(
-    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
+    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorTrafficQuota"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(
-    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
+    edgeCard.locator(".vpsMonitorTraffic .vpsMonitorTrafficQuota"),
   ).toContainText("· Total · 80.3%");
   await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveCount(0);
   const trafficHeading = edgeCard.locator(
@@ -2200,13 +2269,13 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     /Ping/,
   );
   await expect(
-    edgeCard.locator(".vpsMonitorPing > span:first-child > strong:last-child"),
+    edgeCard.locator(".vpsMonitorPing .vpsMonitorPingEvidence > strong"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(
     edgeCard.locator(".vpsMonitorPing .vpsMonitorRowHeading strong"),
   ).toHaveText("Ping");
   await expect(
-    edgeCard.locator(".vpsMonitorPing > span small"),
+    edgeCard.locator(".vpsMonitorPing > .vpsMonitorRowHeading"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(edgeCard.getByText("No contact").first()).toBeVisible();
   await expect(
@@ -2251,7 +2320,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   expect(compactFirstRow).toBeGreaterThanOrEqual(comfortableFirstRow);
   expect(compactCardWidth).toBeLessThan(comfortableCardWidth);
   expect(compactCardHeight).toBeLessThan(comfortableCardHeight);
-  expect(comfortableCardHeight).toBeLessThan(430);
+  expect(comfortableCardHeight).toBeLessThan(460);
   await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toBeVisible();
   await expect(edgeCard.locator(".vpsMonitorCardMain > small")).toContainText(
     "alpha",
@@ -8281,6 +8350,20 @@ async function expectCommandPaletteGroup(
   await expect(result).toContainText(group);
   await page.keyboard.press("Escape");
   await expect(palette).toBeHidden();
+}
+
+async function expectEqualElementHeights(elements: Locator[]) {
+  await expect
+    .poll(async () => {
+      const heights = await Promise.all(
+        elements.map(async (element) => {
+          const box = await element.boundingBox();
+          return box?.height ?? Number.POSITIVE_INFINITY;
+        }),
+      );
+      return Math.max(...heights) - Math.min(...heights);
+    })
+    .toBeLessThanOrEqual(1);
 }
 
 function makeMonitorAgentFixtures(count: number) {

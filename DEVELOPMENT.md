@@ -81,8 +81,8 @@ Every update must keep these boundaries explicit:
 
 ### Database migrations
 
-- The current migrations are a canonical fresh-database model, not an in-place
-  upgrade path from an earlier schema.
+- The current migrations are a canonical fresh-database model for the current
+  repository components, not an in-place upgrade path from an earlier schema.
 - Use the canonical `visible_clients` view for live operator workflows and
   assignments. Use the base `clients` table only when identity lifecycle or
   historical evidence must include tombstoned VPSs; do not hide deleted VPSs by
@@ -101,8 +101,9 @@ Every update must keep these boundaries explicit:
   the same change.
 - Never edit `_sqlx_migrations`, replace checksums in an existing database, or
   mark an unapplied migration as applied.
-- When a deployed schema becomes a compatibility boundary, document and pin it
-  from that release onward; later compatible changes must be append-only.
+- Do not infer a schema compatibility boundary from a release tag or construct
+  a historical baseline by copying the current canonical migration files.
+  Retained data crossing baselines requires a separately reviewed export/import.
 - Add the compatibility note and run `bash scripts/audit-migrations.sh`.
 
 ### Adding an audit event

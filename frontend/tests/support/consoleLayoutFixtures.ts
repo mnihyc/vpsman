@@ -2950,8 +2950,18 @@ const networkJobOutputs = {
         success: true,
         throughput_intervals: [
           { bytes: 1310720, end_ms: 1000, start_ms: 0, throughput_mbps: 10.49 },
-          { bytes: 1441792, end_ms: 2000, start_ms: 1000, throughput_mbps: 11.53 },
-          { bytes: 1441792, end_ms: 3000, start_ms: 2000, throughput_mbps: 11.53 },
+          {
+            bytes: 1441792,
+            end_ms: 2000,
+            start_ms: 1000,
+            throughput_mbps: 11.53,
+          },
+          {
+            bytes: 1441792,
+            end_ms: 3000,
+            start_ms: 2000,
+            throughput_mbps: 11.53,
+          },
         ],
         throughput_max_mbps: 11.53,
         throughput_min_mbps: 10.49,
@@ -2988,8 +2998,18 @@ const networkJobOutputs = {
         success: true,
         throughput_intervals: [
           { bytes: 1310720, end_ms: 1000, start_ms: 0, throughput_mbps: 10.49 },
-          { bytes: 1441792, end_ms: 2000, start_ms: 1000, throughput_mbps: 11.53 },
-          { bytes: 1441792, end_ms: 3000, start_ms: 2000, throughput_mbps: 11.53 },
+          {
+            bytes: 1441792,
+            end_ms: 2000,
+            start_ms: 1000,
+            throughput_mbps: 11.53,
+          },
+          {
+            bytes: 1441792,
+            end_ms: 3000,
+            start_ms: 2000,
+            throughput_mbps: 11.53,
+          },
         ],
         throughput_max_mbps: 11.53,
         throughput_min_mbps: 10.49,
@@ -3538,6 +3558,7 @@ export async function installConsoleApiMock(
     jobTargetDelayMs?: number;
     monitoringCardsDelayMs?: number;
     monitoringNetworkRateExpectedOverride?: boolean;
+    monitoringPingStateCoverage?: boolean;
     networkSpeedSecondDispatchFailure?: boolean;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
@@ -3619,6 +3640,7 @@ export async function installConsoleApiMock(
       jobTargetDelayMsFixture,
       monitoringCardsDelayMsFixture,
       monitoringNetworkRateExpectedOverrideFixture,
+      monitoringPingStateCoverageFixture,
       networkSpeedSecondDispatchFailureFixture,
       jobOutputsFixture,
       jobsFixture,
@@ -3657,10 +3679,7 @@ export async function installConsoleApiMock(
       webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
-      const vpsRulesEffectiveGateResolvers = new Map<
-        string,
-        () => void
-      >();
+      const vpsRulesEffectiveGateResolvers = new Map<string, () => void>();
       const vpsRulesEffectiveGates = new Map(
         vpsRulesEffectiveGatedClientIdsFixture.map((clientId) => [
           clientId,
@@ -4744,8 +4763,7 @@ export async function installConsoleApiMock(
         const targets = resolveBulkTargets(body);
         const changes = targets.flatMap((target) =>
           keys.map((key) => {
-            const after =
-              operation === "unset" ? null : (values[key] ?? "14");
+            const after = operation === "unset" ? null : (values[key] ?? "14");
             const before =
               vpsRuleValuesFixture.find(
                 (row) => row.client_id === target.id && row.key === key,
@@ -5266,9 +5284,7 @@ export async function installConsoleApiMock(
               loadSnapshotSource(
                 "/api/v1/fleet-alert-notification-channels?limit=200",
               ),
-              loadSnapshotSource(
-                "/api/v1/fleet-alert-notifications?limit=200",
-              ),
+              loadSnapshotSource("/api/v1/fleet-alert-notifications?limit=200"),
               loadSnapshotSource("/api/v1/webhook-rules?limit=200"),
               loadSnapshotSource("/api/v1/webhook-deliveries?limit=200"),
             ]);
@@ -5362,9 +5378,7 @@ export async function installConsoleApiMock(
           const delayMs =
             vpsRulesEffectiveDelayMsByClientFixture[clientId] ?? 0;
           if (delayMs > 0) {
-            await new Promise((resolve) =>
-              window.setTimeout(resolve, delayMs),
-            );
+            await new Promise((resolve) => window.setTimeout(resolve, delayMs));
           }
           if (vpsRulesEffectiveFailureClientIdsFixture.includes(clientId)) {
             return jsonResponse(
@@ -5487,7 +5501,7 @@ export async function installConsoleApiMock(
               )
             ] ?? 1;
           monitoringCardsRequestCount += 1;
-          const items = visibleAgents().map((client) => ({
+          const items = visibleAgents().map((client, clientIndex) => ({
             billing:
               client.id === "agent-sfo-01"
                 ? {
@@ -5558,8 +5572,60 @@ export async function installConsoleApiMock(
               client.id === "agent-sfo-01"
                 ? { bps: 1_500_000_000, display: "1.5 Gbps" }
                 : null,
-            primary_ping: null,
-            primary_ping_history: [],
+            primary_ping:
+              monitoringPingStateCoverageFixture && clientIndex < 2
+                ? {
+                    checked_at: new Date().toISOString(),
+                    enabled: true,
+                    generation: 1,
+                    latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
+                    loss_ratio: clientIndex === 0 ? 0 : 0.2,
+                    reason:
+                      clientIndex === 0 ? null : "Intermittent packet loss",
+                    state: clientIndex === 0 ? "ok" : "degraded",
+                    status: clientIndex === 0 ? "ok" : "degraded",
+                    target_id:
+                      clientIndex === 0
+                        ? "61000000-0000-4000-8000-000000000001"
+                        : "61000000-0000-4000-8000-000000000002",
+                    target_name:
+                      clientIndex === 0
+                        ? "Fixture healthy gateway"
+                        : "Fixture degraded gateway",
+                  }
+                : null,
+            primary_ping_history:
+              monitoringPingStateCoverageFixture && clientIndex < 2
+                ? [
+                    {
+                      bucket_secs: 60,
+                      bucket_start: new Date().toISOString(),
+                      client_id: client.id,
+                      generation: 1,
+                      is_primary: true,
+                      latency_avg_ms: clientIndex === 0 ? 18.5 : 68,
+                      latency_max_ms: clientIndex === 0 ? 19 : 70,
+                      latency_min_ms: clientIndex === 0 ? 18 : 66,
+                      latest_checked_at: new Date().toISOString(),
+                      latest_reason:
+                        clientIndex === 0 ? null : "Intermittent packet loss",
+                      latest_status: clientIndex === 0 ? "ok" : "degraded",
+                      loss_ratio_avg: clientIndex === 0 ? 0 : 0.2,
+                      loss_ratio_max: clientIndex === 0 ? 0 : 0.2,
+                      sample_count: 3,
+                      success_count: clientIndex === 0 ? 3 : 2,
+                      target_id:
+                        clientIndex === 0
+                          ? "61000000-0000-4000-8000-000000000001"
+                          : "61000000-0000-4000-8000-000000000002",
+                      target_name:
+                        clientIndex === 0
+                          ? "Fixture healthy gateway"
+                          : "Fixture degraded gateway",
+                      updated_at: new Date().toISOString(),
+                    },
+                  ]
+                : [],
             resource_history: [],
             resources:
               client.id === "agent-sfo-01"
@@ -7633,9 +7699,7 @@ export async function installConsoleApiMock(
               {
                 terminal_seq: 2,
                 job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
-                data_base64: btoa(
-                  `prompt$ ${String.fromCharCode(0xe2)}`,
-                ),
+                data_base64: btoa(`prompt$ ${String.fromCharCode(0xe2)}`),
                 size_bytes: 9,
                 sha256_hex: "9".repeat(64),
                 created_at: "2026-05-31T10:12:00Z",
@@ -7643,9 +7707,7 @@ export async function installConsoleApiMock(
               {
                 terminal_seq: 3,
                 job_id: "61616161-aaaa-4bbb-8ccc-dddddddddddd",
-                data_base64: btoa(
-                  `${String.fromCharCode(0x82, 0xac)} ready\n`,
-                ),
+                data_base64: btoa(`${String.fromCharCode(0x82, 0xac)} ready\n`),
                 size_bytes: 9,
                 sha256_hex: "a".repeat(64),
                 created_at: "2026-05-31T10:12:01Z",
@@ -9325,8 +9387,10 @@ export async function installConsoleApiMock(
             ).operation;
             const plan = operation?.plan;
             const serverSide = operation?.server_side ?? "right";
-            const leftClientId = plan?.left_client_id ?? targets[0]?.id ?? "left";
-            const rightClientId = plan?.right_client_id ?? targets[1]?.id ?? "right";
+            const leftClientId =
+              plan?.left_client_id ?? targets[0]?.id ?? "left";
+            const rightClientId =
+              plan?.right_client_id ?? targets[1]?.id ?? "right";
             const senderClientId =
               serverSide === "right" ? leftClientId : rightClientId;
             const receiverClientId =
@@ -9344,8 +9408,14 @@ export async function installConsoleApiMock(
               start_ms: number;
               throughput_mbps: number;
             }> = [];
-            for (let index = 0; index < Math.min(30, durationSecs); index += 1) {
-              const throughputMbps = configuredMbps * (index % 3 === 1 ? 0.94 : index % 3 === 2 ? 1.03 : 1);
+            for (
+              let index = 0;
+              index < Math.min(30, durationSecs);
+              index += 1
+            ) {
+              const throughputMbps =
+                configuredMbps *
+                (index % 3 === 1 ? 0.94 : index % 3 === 2 ? 1.03 : 1);
               const availableBytes = Math.max(
                 0,
                 maxBytes > 0 ? maxBytes - totalBytes : Number.MAX_SAFE_INTEGER,
@@ -9363,7 +9433,10 @@ export async function installConsoleApiMock(
                 throughput_mbps: (bytes * 8) / 1_000_000,
               });
             }
-            const measuredDurationSecs = Math.max(1, throughputIntervals.length);
+            const measuredDurationSecs = Math.max(
+              1,
+              throughputIntervals.length,
+            );
             const throughputAverage =
               (totalBytes * 8) / measuredDurationSecs / 1_000_000;
             const intervalRates = throughputIntervals.map(
@@ -9533,15 +9606,11 @@ export async function installConsoleApiMock(
                 terminal_seq: 1,
               },
               {
-                data_base64: btoa(
-                  `prompt$ ${String.fromCharCode(0xe2)}`,
-                ),
+                data_base64: btoa(`prompt$ ${String.fromCharCode(0xe2)}`),
                 terminal_seq: 2,
               },
               {
-                data_base64: btoa(
-                  `${String.fromCharCode(0x82, 0xac)} ready\n`,
-                ),
+                data_base64: btoa(`${String.fromCharCode(0x82, 0xac)} ready\n`),
                 terminal_seq: 3,
               },
             ];
@@ -9564,7 +9633,9 @@ export async function installConsoleApiMock(
           const terminalTestWindow = window as typeof window & {
             __vpsmanRejectNextTerminalControl?: string | null;
           };
-          if (terminalTestWindow.__vpsmanRejectNextTerminalControl === frame.type) {
+          if (
+            terminalTestWindow.__vpsmanRejectNextTerminalControl === frame.type
+          ) {
             terminalTestWindow.__vpsmanRejectNextTerminalControl = null;
             dispatch({
               type: "error",
@@ -9800,6 +9871,8 @@ export async function installConsoleApiMock(
       monitoringCardsDelayMsFixture: options.monitoringCardsDelayMs ?? 0,
       monitoringNetworkRateExpectedOverrideFixture:
         options.monitoringNetworkRateExpectedOverride,
+      monitoringPingStateCoverageFixture:
+        options.monitoringPingStateCoverage ?? false,
       networkSpeedSecondDispatchFailureFixture:
         options.networkSpeedSecondDispatchFailure ?? false,
       jobOutputsFixture: networkJobOutputs,

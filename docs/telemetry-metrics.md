@@ -189,7 +189,10 @@ traffic telemetry always uses the managed interface's live kernel counters.
 
 For a host interface whose agent started after the current traffic cycle, an
 operator may dispatch `network_traffic_import_vnstat` once. The command accepts
-one or more host interface names and a UTC-minute-aligned start. The API derives
+an optional list of host interface names and a UTC-minute-aligned start. An
+empty list asks the agent to read one all-interface vnStat JSON snapshot and
+import every valid interface it reports; an explicit list remains exact and is
+queried with vnStat's canonical `--iface` option. The API derives
 the end independently for each interface from its first retained live agent
 sample; an operator-supplied end could create a gap or overlap and is therefore
 not part of the command.
@@ -200,8 +203,13 @@ calendar configuration once per import, so `MonthRotate`,
 `MonthRotateAffectsYears`, local-versus-UTC storage, and sparse trafficless
 periods are interpreted consistently with the source database. Monthly and
 yearly rows use their natural calendar boundaries rather than the next retained
-row, and the first partial period begins at the database's first complete
-minute while preserving its full byte total. Old history therefore remains
+row. The agent merges the emitted bucket intervals and reports the start of the
+latest continuous retained component for each interface. The API validates that
+component through the first live sample and starts at the later of its start and
+the operator's requested minute. This skips expired leading history and any
+older component separated by a retention gap without inventing traffic. The
+requested start remains present in the job operation and agent result for audit.
+Old history therefore remains
 usable after daily rows expire without stretching a sparse row across a missing
 period. If rotated month periods do not also rotate year periods, the single
 monthly row that crosses a year boundary is omitted when aligned year rows
@@ -214,12 +222,16 @@ host-interface samples before the first live sample. The synthetic to live
 transition is an intentional counter epoch boundary: no bridge delta is counted
 and it is not reported as a counter reset.
 
-The import requires complete retained coverage of the requested range and a
-live agent sample that establishes its end. Rerunning it replaces only prior
-`vnstat_import:*` samples for the selected interfaces. Normal agent collection
-continues unchanged afterward; vnStat is not polled periodically by vpsman.
-There is no fixed import lookback: the earliest accepted start is the earliest
-UTC minute fully covered by the retained vnStat database. Long ranges are
+Collection and server-side backfill are asynchronous and durable. After the
+agent's output is persisted, the target remains running while the API imports
+it; an API restart discovers that output and resumes finalization. The import
+requires continuous retained coverage through a live agent sample that
+establishes its end. Rerunning it replaces only prior `vnstat_import:*` samples
+for the selected interfaces. Normal agent collection continues unchanged
+afterward; vnStat is not polled periodically by vpsman. There is no fixed import
+lookback: a requested date may precede retained history, and each interface is
+clamped independently to the start of its latest continuous retained coverage.
+Long ranges are
 expanded and inserted in bounded batches rather than allocating the complete
 minute span in memory.
 

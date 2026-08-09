@@ -34,7 +34,7 @@ const INVALID_JOB_OPERATION_RETRY_MARKER: &str = "invalid_job_operation:";
 use crate::model::*;
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::Repository;
-use crate::repository_job_outputs::append_lock_keys;
+use crate::repository_job_outputs::{append_lock_keys, job_output_sequence_contiguous_in_views};
 use crate::repository_key_lifecycle::{
     lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
     require_visible_postgres_clients_in_tx,
@@ -4753,27 +4753,37 @@ impl Repository {
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
-                if let Some(job) = memory
-                    .jobs
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|job| job.id == job_id)
-                {
-                    job.status = "running".to_string();
-                }
-                if let Some(target) = memory
-                    .job_targets
-                    .write()
-                    .await
-                    .iter_mut()
-                    .find(|target| target.job_id == job_id && target.client_id == client_id)
-                {
+                let target_updated = if let Some(target) =
+                    memory.job_targets.write().await.iter_mut().find(|target| {
+                        target.job_id == job_id
+                            && target.client_id == client_id
+                            && target.completed_at.is_none()
+                            && target_status_is_active(&target.status)
+                    }) {
                     target.status = TARGET_STATUS_RUNNING.to_string();
                     target.message = Some(message.to_string());
                     target
                         .started_at
                         .get_or_insert_with(|| unix_now().to_string());
+                    true
+                } else {
+                    false
+                };
+                if target_updated {
+                    memory
+                        .network_traffic_import_retry_not_before
+                        .write()
+                        .await
+                        .remove(&(job_id, client_id.to_string()));
+                    if let Some(job) = memory
+                        .jobs
+                        .write()
+                        .await
+                        .iter_mut()
+                        .find(|job| job.id == job_id && job.completed_at.is_none())
+                    {
+                        job.status = "running".to_string();
+                    }
                 }
             }
             Self::Postgres(pool) => {
@@ -5082,6 +5092,25 @@ impl Repository {
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let operations = memory.job_operations.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
+                let stored_outputs = memory.job_outputs.read().await;
+                let awaiting_network_traffic_import = stored_outputs
+                    .iter()
+                    .filter(|output| {
+                        output.done
+                            && matches!(
+                                operations.get(&output.job_id),
+                                Some(JobCommand::NetworkTrafficImportVnstat { .. })
+                            )
+                            && job_output_sequence_contiguous_in_views(
+                                &stored_outputs,
+                                output.job_id,
+                                &output.client_id,
+                                output.seq,
+                            )
+                    })
+                    .map(|output| (output.job_id, output.client_id.clone()))
+                    .collect::<HashSet<_>>();
+                drop(stored_outputs);
                 let mut expired = Vec::new();
                 let mut synthetic_outputs = Vec::new();
                 let mut deadline_audit_evidence = Vec::new();
@@ -5094,6 +5123,8 @@ impl Repository {
                                 target.status.as_str(),
                                 TARGET_STATUS_DISPATCHING | TARGET_STATUS_RUNNING
                             )
+                            && !awaiting_network_traffic_import
+                                .contains(&(target.job_id, target.client_id.clone()))
                     })
                     .take(limit.clamp(1, 500) as usize)
                 {
@@ -5300,6 +5331,24 @@ impl Repository {
                     WHERE target.completed_at IS NULL
                       AND target.status IN ('dispatching', 'running')
                       AND NOT (
+                        job.command_type = 'network_traffic_import_vnstat'
+                        AND EXISTS (
+                          SELECT 1
+                          FROM job_outputs final_output
+                          WHERE final_output.job_id = target.job_id
+                            AND final_output.client_id = target.client_id
+                            AND final_output.done = TRUE
+                            AND final_output.seq >= 0
+                            AND (
+                              SELECT COUNT(DISTINCT chunk.seq)
+                              FROM job_outputs chunk
+                              WHERE chunk.job_id = final_output.job_id
+                                AND chunk.client_id = final_output.client_id
+                                AND chunk.seq BETWEEN 0 AND final_output.seq
+                            ) = final_output.seq::bigint + 1
+                        )
+                      )
+                      AND NOT (
                         COALESCE(target.last_dispatch_error LIKE ($3 || '%'), false)
                         AND COALESCE(target.dispatch_lease_until > now(), false)
                       )
@@ -5428,6 +5477,24 @@ impl Repository {
                           AND job.id = target.job_id
                           AND target.completed_at IS NULL
                           AND target.status IN ('dispatching', 'running')
+                          AND NOT (
+                            job.command_type = 'network_traffic_import_vnstat'
+                            AND EXISTS (
+                              SELECT 1
+                              FROM job_outputs final_output
+                              WHERE final_output.job_id = target.job_id
+                                AND final_output.client_id = target.client_id
+                                AND final_output.done = TRUE
+                                AND final_output.seq >= 0
+                                AND (
+                                  SELECT COUNT(DISTINCT chunk.seq)
+                                  FROM job_outputs chunk
+                                  WHERE chunk.job_id = final_output.job_id
+                                    AND chunk.client_id = final_output.client_id
+                                    AND chunk.seq BETWEEN 0 AND final_output.seq
+                                ) = final_output.seq::bigint + 1
+                            )
+                          )
                           AND target.deadline_at IS NOT NULL
                           AND target.deadline_at <= now()
                           AND target.started_at IS NOT NULL
@@ -5955,6 +6022,11 @@ impl Repository {
                     }
                 }
                 if updated {
+                    memory
+                        .network_traffic_import_retry_not_before
+                        .write()
+                        .await
+                        .remove(&(job_id, client_id.to_string()));
                     let command_hash = memory
                         .jobs
                         .read()
