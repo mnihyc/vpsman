@@ -2123,7 +2123,7 @@ test("fleet monitor presents no-reset traffic as accumulated evidence", async ({
   await expect(traffic).not.toContainText("Current accounting cycle");
 });
 
-test("comfortable fleet cards align healthy, degraded, and unconfigured Ping evidence", async ({
+test("comfortable fleet cards align configured Ping and collapse unconfigured evidence", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -2164,11 +2164,8 @@ test("comfortable fleet cards align healthy, degraded, and unconfigured Ping evi
     "18.5 ms",
     "0% loss",
   ]);
-  await expect(
-    healthy.locator(":scope > .vpsMonitorPingDetail"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
-    "",
+  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveCount(
+    0,
   );
   await expect(degraded.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
     "Intermittent packet loss",
@@ -2178,12 +2175,15 @@ test("comfortable fleet cards align healthy, degraded, and unconfigured Ping evi
     /Fixture degraded gateway.*68(?:\.0)? ms.*20% loss.*Intermittent packet loss/i,
   );
   await expect(
-    unconfigured.locator(".vpsMonitorPingEvidence > strong"),
+    unconfigured.locator(
+      ".vpsMonitorPingHeading > .vpsMonitorPingEvidence > strong",
+    ),
   ).toHaveText("Unconfigured");
   await expect(
     unconfigured.locator(":scope > .vpsMonitorPingDetail"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await expectEqualElementHeights([healthy, degraded, unconfigured]);
+  ).toHaveCount(0);
+  await expectShorterElement(healthy, degraded);
+  await expectShorterElement(unconfigured, healthy);
 
   await page
     .getByLabel("VPS cards density")
@@ -2275,7 +2275,7 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
     edgeCard.locator(".vpsMonitorPing .vpsMonitorRowHeading strong"),
   ).toHaveText("Ping");
   await expect(
-    edgeCard.locator(".vpsMonitorPing > .vpsMonitorRowHeading"),
+    edgeCard.locator(".vpsMonitorPingHeading > .vpsMonitorRowHeading"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(edgeCard.getByText("No contact").first()).toBeVisible();
   await expect(
@@ -2337,11 +2337,11 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(edgeCard).toContainText("1m load");
   await expect(edgeCard).not.toContainText(/No (recent|continuous) history/);
   await expect(edgeCard.locator(".comfortableSummary")).toHaveCount(1);
-  await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toContainText(
-    /↓ .+ · ↑ /,
-  );
   await expect(
-    edgeCard.locator(".vpsMonitorTraffic > small"),
+    edgeCard.locator(".vpsMonitorTrafficEvidenceRow > small"),
+  ).toContainText(/↓ .+ · ↑ /);
+  await expect(
+    edgeCard.locator(".vpsMonitorTrafficEvidenceRow > small"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(edgeCard.locator("button, a, summary, details")).toHaveCount(0);
   for (const index of [0, 1, 2]) {
@@ -2490,9 +2490,19 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
   await expect(page).toHaveURL(/#\/fleet\/instance-detail\//);
   await page.goBack();
   await expect(monitor).toHaveAttribute("data-density", "compact");
+  // Ready-state unconfigured Traffic and Ping rows intentionally collapse their
+  // empty evidence lines; preserve the same scroll neighborhood across remount.
   await expect
-    .poll(() => content.evaluate((element) => element.scrollTop))
-    .toBeGreaterThanOrEqual(savedScrollTop - 2);
+    .poll(() =>
+      content.evaluate((element, priorScrollTop) => {
+        const restoredScrollTop = Math.min(
+          priorScrollTop,
+          element.scrollHeight - element.clientHeight,
+        );
+        return Math.abs(element.scrollTop - restoredScrollTop);
+      }, savedScrollTop),
+    )
+    .toBeLessThanOrEqual(40);
 });
 
 test("steady-state fleet polling uses one live snapshot without reloading operational tables", async ({
@@ -8352,18 +8362,15 @@ async function expectCommandPaletteGroup(
   await expect(palette).toBeHidden();
 }
 
-async function expectEqualElementHeights(elements: Locator[]) {
+async function expectShorterElement(shorter: Locator, taller: Locator) {
   await expect
     .poll(async () => {
-      const heights = await Promise.all(
-        elements.map(async (element) => {
-          const box = await element.boundingBox();
-          return box?.height ?? Number.POSITIVE_INFINITY;
-        }),
-      );
-      return Math.max(...heights) - Math.min(...heights);
+      const shorterBox = await shorter.boundingBox();
+      const tallerBox = await taller.boundingBox();
+      if (!shorterBox || !tallerBox) return Number.NEGATIVE_INFINITY;
+      return tallerBox.height - shorterBox.height;
     })
-    .toBeLessThanOrEqual(1);
+    .toBeGreaterThanOrEqual(8);
 }
 
 function makeMonitorAgentFixtures(count: number) {

@@ -1037,13 +1037,12 @@ export function VpsMonitorCard({
         : formatTrafficReset(traffic.cycle_end)
       : null;
   const trafficHeadingContext = trafficReset;
-  const trafficDetail =
-    trafficConfigured && traffic
-      ? (trafficProblem ??
-        (traffic.reset_day === -1
-          ? null
-          : formatTrafficReset(traffic.cycle_end)))
-      : null;
+  const trafficEvidenceInHeading =
+    trafficHeadingContext === null && portSpeed === null;
+  const trafficEvidenceOnDiagnosticRow =
+    density === "comfortable" && trafficConfigured && Boolean(traffic);
+  const trafficEvidenceInHeadingOnly =
+    trafficEvidenceInHeading && !trafficEvidenceOnDiagnosticRow;
   const trafficEvidenceTitle =
     monitoringState === "loading"
       ? "Reading traffic configuration and current accounting evidence."
@@ -1064,6 +1063,8 @@ export function VpsMonitorCard({
     .filter(Boolean)
     .join(" ");
   const pingHeadingContext = primaryPing?.target_name ?? null;
+  const pingEvidenceInHeading =
+    monitoringState === "ready" && primaryPing === null;
   const pingHeading = `Ping${pingHeadingContext ? ` · ${pingHeadingContext}` : ""}`;
   const pingRowTitle =
     monitoringState === "loading"
@@ -1277,6 +1278,10 @@ export function VpsMonitorCard({
             <span className="publicMonitoringPortSpeed">
               {portSpeed.display}
             </span>
+          ) : trafficEvidenceInHeadingOnly ? (
+            <strong className="vpsMonitorTrafficQuota">
+              {trafficEvidenceLabel}
+            </strong>
           ) : null}
         </span>
         <span
@@ -1304,44 +1309,60 @@ export function VpsMonitorCard({
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
         </span>
-        <strong className="vpsMonitorTrafficQuota">
-          {trafficEvidenceLabel}
-        </strong>
-        {density === "comfortable" && trafficConfigured && traffic ? (
-          <small
-            className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
-          >
-            ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
-            {formatBytes(traffic.diagnostic_tx_bytes)}
-            {trafficDetail ? ` · ${trafficDetail}` : ""}
-          </small>
+        {trafficEvidenceOnDiagnosticRow && traffic ? (
+          <div className="vpsMonitorTrafficEvidenceRow">
+            <small>
+              ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
+              {formatBytes(traffic.diagnostic_tx_bytes)}
+            </small>
+            <strong className="vpsMonitorTrafficQuota">
+              {trafficEvidenceLabel}
+            </strong>
+          </div>
+        ) : trafficEvidenceInHeadingOnly ? null : (
+          <strong className="vpsMonitorTrafficQuota">
+            {trafficEvidenceLabel}
+          </strong>
+        )}
+        {density === "comfortable" && trafficProblem ? (
+          <small className="exceptionEvidence">{trafficProblem}</small>
         ) : null}
       </div>
       <div
         className={`vpsMonitorPing ${pingWarning >= 2 ? "failed" : pingWarning > 0 ? "stale" : (primaryPing?.state ?? "unconfigured")}`}
         title={pingRowTitle}
       >
-        <small className="vpsMonitorRowHeading">
-          <strong>Ping</strong>
-          {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
-        </small>
-        <span className="vpsMonitorPingVisual" aria-hidden="true">
-          <MiniSparkline
-            label="Primary Ping history"
-            tone="ping"
-            values={pingHistory}
-          />
+        <span className="vpsMonitorPingHeading">
+          <small className="vpsMonitorRowHeading">
+            <strong>Ping</strong>
+            {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
+          </small>
+          {pingEvidenceInHeading ? (
+            <span className="vpsMonitorPingEvidence single">
+              <strong>{pingEvidenceLabel}</strong>
+            </span>
+          ) : null}
         </span>
-        <span
-          className={`vpsMonitorPingEvidence${pingEvidenceParts.length === 1 ? " single" : ""}`}
-        >
-          {pingEvidenceParts.map((part, index) => (
-            <strong key={`${part}-${index}`}>{part}</strong>
-          ))}
-        </span>
-        {density === "comfortable" ? (
+        {pingEvidenceInHeading ? null : (
+          <span className="vpsMonitorPingVisual" aria-hidden="true">
+            <MiniSparkline
+              label="Primary Ping history"
+              tone="ping"
+              values={pingHistory}
+            />
+          </span>
+        )}
+        {pingEvidenceInHeading ? null : (
+          <span
+            className={`vpsMonitorPingEvidence${pingEvidenceParts.length === 1 ? " single" : ""}`}
+          >
+            {pingEvidenceParts.map((part, index) => (
+              <strong key={`${part}-${index}`}>{part}</strong>
+            ))}
+          </span>
+        )}
+        {density === "comfortable" && pingProblem ? (
           <small
-            aria-hidden={pingProblem ? undefined : "true"}
             className={`vpsMonitorPingDetail${pingWarning > 0 ? " exceptionEvidence" : ""}`}
           >
             {pingProblem}

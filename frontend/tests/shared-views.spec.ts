@@ -425,6 +425,7 @@ test("compact public cards preserve long Ping targets and evidence at minimum wi
         const headingBox = headingElement.getBoundingClientRect();
         const chartBox = chartElement.getBoundingClientRect();
         const evidenceBox = evidenceElement.getBoundingClientRect();
+        const lastEvidenceBox = evidenceItems.at(-1)?.getBoundingClientRect();
         return (
           headingStyle.overflow !== "hidden" &&
           headingStyle.textOverflow !== "ellipsis" &&
@@ -439,8 +440,12 @@ test("compact public cards preserve long Ping targets and evidence at minimum wi
               item.scrollHeight <= item.clientHeight + 1
             );
           }) &&
+          getComputedStyle(evidenceElement).justifyContent === "flex-end" &&
+          Math.abs((lastEvidenceBox?.right ?? 0) - evidenceBox.right) <= 1 &&
           chartBox.top >= headingBox.bottom - 1 &&
-          evidenceBox.top >= chartBox.bottom - 1 &&
+          evidenceBox.top >= chartBox.top - 1 &&
+          evidenceBox.top - chartBox.bottom >= -5 &&
+          evidenceBox.top - chartBox.bottom <= -1 &&
           element.getBoundingClientRect().right <= window.innerWidth + 1
         );
       }),
@@ -448,13 +453,14 @@ test("compact public cards preserve long Ping targets and evidence at minimum wi
     .toBe(true);
 });
 
-test("comfortable shared cards align healthy, degraded, and unconfigured Ping evidence", async ({
+test("comfortable shared cards align configured Ping and collapse unconfigured evidence", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "the focused geometry assertion is viewport-independent and runs once on desktop",
   );
+  await page.setViewportSize({ width: 390, height: 844 });
   await installPublicMonitoringApiMock(page, {
     cardCount: 3,
     pingStateCoverage: true,
@@ -465,9 +471,10 @@ test("comfortable shared cards align healthy, degraded, and unconfigured Ping ev
     .getByRole("button", { name: "Comfortable" })
     .click();
 
-  const healthy = page
-    .getByRole("link", { name: /Shared edge .* shared monitoring card/ })
-    .locator(".publicMonitoringPing");
+  const healthyCard = page.getByRole("link", {
+    name: /Shared edge .* shared monitoring card/,
+  });
+  const healthy = healthyCard.locator(".publicMonitoringPing");
   const degraded = page
     .getByRole("link", { name: /Frankfurt build .* shared monitoring card/ })
     .locator(".publicMonitoringPing");
@@ -478,11 +485,8 @@ test("comfortable shared cards align healthy, degraded, and unconfigured Ping ev
   await expect(healthy.locator(".vpsMonitorRowHeading")).toHaveText(
     "Ping · Customer gateway",
   );
-  await expect(
-    healthy.locator(":scope > .vpsMonitorPingDetail"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
-    "",
+  await expect(healthy.locator(":scope > .vpsMonitorPingDetail")).toHaveCount(
+    0,
   );
   await expect(degraded.locator(":scope > .vpsMonitorPingDetail")).toHaveText(
     "Primary Ping degraded",
@@ -492,12 +496,40 @@ test("comfortable shared cards align healthy, degraded, and unconfigured Ping ev
     /Fixture degraded gateway.*24\.5 ms.*20\.0% loss.*Primary Ping degraded/i,
   );
   await expect(
-    unconfigured.locator(".vpsMonitorPingEvidence > strong"),
+    unconfigured.locator(
+      ".publicMonitoringPingHeading > .vpsMonitorPingEvidence > strong",
+    ),
   ).toHaveText("Unconfigured");
   await expect(
     unconfigured.locator(":scope > .vpsMonitorPingDetail"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await expectEqualPublicPingHeights([healthy, degraded, unconfigured]);
+  ).toHaveCount(0);
+  await expectPublicPingShorter(healthy, degraded);
+  await expectPublicPingShorter(unconfigured, healthy);
+  await expect
+    .poll(() =>
+      healthyCard
+        .locator(".vpsMonitorTrafficEvidenceRow")
+        .evaluate((element) => {
+          const observed = element.querySelector<HTMLElement>(":scope > small");
+          const quota = element.querySelector<HTMLElement>(
+            ":scope > .vpsMonitorTrafficQuota",
+          );
+          if (!observed || !quota) return false;
+          const observedBox = observed.getBoundingClientRect();
+          const quotaBox = quota.getBoundingClientRect();
+          return (
+            observed.scrollWidth <= observed.clientWidth + 1 &&
+            quota.scrollWidth <= quota.clientWidth + 1 &&
+            Math.abs(
+              observedBox.top +
+                observedBox.height / 2 -
+                (quotaBox.top + quotaBox.height / 2),
+            ) <= 2 &&
+            element.scrollWidth <= element.clientWidth + 1
+          );
+        }),
+    )
+    .toBe(true);
 
   await page
     .getByLabel("Shared view density")
@@ -629,16 +661,12 @@ test("public monitoring keeps grid and detail history state without exposing hid
   const isMobile = (page.viewportSize()?.width ?? 1_000) < 500;
   expect(await columnCount()).toBe(isMobile ? 1 : 5);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
-  await expect(publicTraffic.locator(":scope > small")).not.toHaveAttribute(
-    "title",
-    /\S/,
-  );
   await expect(
-    publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
+    publicTraffic.locator(".vpsMonitorTrafficEvidenceRow > small"),
   ).not.toHaveAttribute("title", /\S/);
   await expect(
     publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
-  ).toContainText("Reachable");
+  ).toHaveCount(0);
   const comfortableHeight = await card.evaluate(
     (node) => node.getBoundingClientRect().height,
   );
@@ -1066,9 +1094,9 @@ test("public monitoring identifies the most-used finite directional traffic quot
     card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
   ).not.toContainText(/observed/i);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
-  await expect(card.locator(".publicMonitoringTraffic > small")).toContainText(
-    "RX 2.0 KiB · TX 1000 B",
-  );
+  await expect(
+    card.locator(".publicMonitoringTraffic .vpsMonitorTrafficEvidenceRow"),
+  ).toContainText("RX 2.0 KiB · TX 1000 B");
   await card.click();
 
   const cycle = page.locator(".publicMonitoringTrafficCycle");
@@ -1099,7 +1127,7 @@ test("public monitoring uses counted directional traffic for an unlimited summar
     "1000 B / Unlimited · TX",
   );
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
-  await expect(traffic.locator(":scope > small")).toContainText(
+  await expect(traffic.locator(".vpsMonitorTrafficEvidenceRow")).toContainText(
     "RX 2.0 KiB · TX 1000 B",
   );
 
@@ -1552,20 +1580,18 @@ async function installSharedViewApiMock(page: Page) {
   );
 }
 
-async function expectEqualPublicPingHeights(
-  elements: ReturnType<Page["locator"]>[],
+async function expectPublicPingShorter(
+  shorter: ReturnType<Page["locator"]>,
+  taller: ReturnType<Page["locator"]>,
 ) {
   await expect
     .poll(async () => {
-      const heights = await Promise.all(
-        elements.map(async (element) => {
-          const box = await element.boundingBox();
-          return box?.height ?? Number.POSITIVE_INFINITY;
-        }),
-      );
-      return Math.max(...heights) - Math.min(...heights);
+      const shorterBox = await shorter.boundingBox();
+      const tallerBox = await taller.boundingBox();
+      if (!shorterBox || !tallerBox) return Number.NEGATIVE_INFINITY;
+      return tallerBox.height - shorterBox.height;
     })
-    .toBeLessThanOrEqual(1);
+    .toBeGreaterThanOrEqual(8);
 }
 
 async function installPublicMonitoringApiMock(

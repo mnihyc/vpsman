@@ -2546,12 +2546,18 @@ span.vpsMonitorSparkline.empty {
   padding: 5px 0 0;
 }
 
-.vpsMonitorTrafficHeading {
+.vpsMonitorTrafficHeading,
+.vpsMonitorPingHeading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
+}
+
+.vpsMonitorTrafficHeading > .vpsMonitorTrafficQuota,
+.publicMonitoringTrafficHeading > .vpsMonitorTrafficQuota {
+  flex: 0 1 auto;
 }
 
 .vpsMonitorTraffic small,
@@ -2591,6 +2597,23 @@ span.vpsMonitorSparkline.empty {
   text-overflow: clip !important;
   white-space: normal !important;
   overflow-wrap: anywhere;
+}
+
+.vpsMonitorTrafficEvidenceRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vpsMonitorTrafficEvidenceRow > small {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.vpsMonitorTrafficEvidenceRow > .vpsMonitorTrafficQuota {
+  flex: 0 1 auto;
 }
 
 .vpsMonitorTrafficTrack {
@@ -2671,7 +2694,7 @@ span.vpsMonitorSparkline.empty {
   height: 10px;
 }
 
-.vpsMonitorPing > .vpsMonitorRowHeading,
+.vpsMonitorPingHeading > .vpsMonitorRowHeading,
 .publicMonitoringPing .vpsMonitorRowHeading {
   overflow: visible;
   line-height: 1.2;
@@ -2683,7 +2706,7 @@ span.vpsMonitorSparkline.empty {
 .vpsMonitorPingEvidence {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 8px;
   min-width: 0;
 }
@@ -2702,28 +2725,20 @@ span.vpsMonitorSparkline.empty {
   text-overflow: clip;
   white-space: normal;
   overflow-wrap: anywhere;
-}
-
-.vpsMonitorPingEvidence > strong:last-child {
   text-align: right;
 }
 
+.vpsMonitorPingVisual + .vpsMonitorPingEvidence,
+.publicMonitoringPing > .vpsMonitorSparkline + .vpsMonitorPingEvidence {
+  margin-top: -6px;
+}
+
 .vpsMonitorPingDetail {
-  min-height: 12px;
   overflow: visible !important;
   line-height: 1.2;
   text-overflow: clip !important;
   white-space: normal !important;
   overflow-wrap: anywhere;
-}
-
-.vpsMonitorCard.comfortable .vpsMonitorPing:not(.failed):not(.down):not(.error),
-.publicMonitoringCard.comfortable
-  .publicMonitoringPing:not(.warning):not(.failed):not(.down):not(.error) {
-  border: 1px solid transparent;
-  border-top-color: var(--border-subtle);
-  border-radius: 8px;
-  padding: 8px;
 }
 
 .vpsMonitorPing.ok .vpsMonitorSparkline,
@@ -3226,6 +3241,10 @@ span.vpsMonitorSparkline.empty {
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
+}
+
+.publicMonitoringPingHeading > .vpsMonitorPingEvidence {
+  margin-left: auto;
 }
 
 .publicMonitoringPing > .publicMonitoringPingHeading > svg {

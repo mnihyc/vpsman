@@ -1279,6 +1279,7 @@ function PublicTrafficRow({
           <small className="vpsMonitorRowHeading">
             <strong>Traffic</strong>
           </small>
+          <strong className="vpsMonitorTrafficQuota">-</strong>
         </div>
         <span
           aria-label="Traffic progress is unavailable"
@@ -1286,7 +1287,6 @@ function PublicTrafficRow({
         >
           <span />
         </span>
-        <strong className="vpsMonitorTrafficQuota">-</strong>
       </div>
     );
   }
@@ -1305,8 +1305,16 @@ function PublicTrafficRow({
       ? null
       : formatTrafficReset(traffic.cycle_end)
     : null;
+  const trafficEvidenceInHeading = resetContext === null && !portSpeed;
+  const trafficEvidenceOnDiagnosticRow =
+    density === "comfortable" && traffic.configured;
+  const trafficEvidenceInHeadingOnly =
+    trafficEvidenceInHeading && !trafficEvidenceOnDiagnosticRow;
+  const trafficObservedDetail = traffic.configured
+    ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}`
+    : null;
   const trafficDetail = traffic.configured
-    ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
+    ? `${trafficObservedDetail}${problem ? ` · ${problem}` : traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
     : "Authoritative traffic accounting is not configured for this VPS.";
   const trafficEvidenceTitle =
     quotaState === "unlimited"
@@ -1335,6 +1343,10 @@ function PublicTrafficRow({
         </small>
         {portSpeed ? (
           <span className="publicMonitoringPortSpeed">{portSpeed}</span>
+        ) : trafficEvidenceInHeadingOnly ? (
+          <strong className="vpsMonitorTrafficQuota">
+            {cycleSummary || "Unconfigured"}
+          </strong>
         ) : null}
       </div>
       {quotaPercent !== null ? (
@@ -1368,10 +1380,23 @@ function PublicTrafficRow({
           <span />
         </span>
       )}
-      <strong className="vpsMonitorTrafficQuota">
-        {cycleSummary || "Unconfigured"}
-      </strong>
-      {density === "comfortable" ? <small>{trafficDetail}</small> : null}
+      {trafficEvidenceOnDiagnosticRow && trafficObservedDetail ? (
+        <div className="vpsMonitorTrafficEvidenceRow">
+          <small>{trafficObservedDetail}</small>
+          <strong className="vpsMonitorTrafficQuota">
+            {cycleSummary || "Unconfigured"}
+          </strong>
+        </div>
+      ) : trafficEvidenceInHeadingOnly ? null : (
+        <strong className="vpsMonitorTrafficQuota">
+          {cycleSummary || "Unconfigured"}
+        </strong>
+      )}
+      {density === "comfortable" && problem ? (
+        <small>{problem}</small>
+      ) : density === "comfortable" && !traffic.configured ? (
+        <small>{trafficDetail}</small>
+      ) : null}
     </div>
   );
 }
@@ -1397,14 +1422,10 @@ function PublicPingRow({
           <small className="vpsMonitorRowHeading">
             <strong>Ping</strong>
           </small>
+          <span className="vpsMonitorPingEvidence single">
+            <strong>Unconfigured</strong>
+          </span>
         </span>
-        <MiniSparkline label="Primary Ping history" tone="ping" values={[]} />
-        <span className="vpsMonitorPingEvidence single">
-          <strong>Unconfigured</strong>
-        </span>
-        {density === "comfortable" ? (
-          <small aria-hidden="true" className="vpsMonitorPingDetail" />
-        ) : null}
       </div>
     );
   }
@@ -1447,13 +1468,8 @@ function PublicPingRow({
         <strong>{presentedLatency}</strong>
         <strong>{loss}</strong>
       </span>
-      {density === "comfortable" ? (
-        <small
-          aria-hidden={problem ? undefined : "true"}
-          className="vpsMonitorPingDetail"
-        >
-          {problem}
-        </small>
+      {density === "comfortable" && problem ? (
+        <small className="vpsMonitorPingDetail">{problem}</small>
       ) : null}
     </div>
   );
