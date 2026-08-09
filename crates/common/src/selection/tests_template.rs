@@ -43,3 +43,32 @@ fn malformed_blocks_and_conditions_are_rejected() {
     assert!(validate_template("[if alert.open]x").is_err());
     assert!(validate_template("{matched_vps.filter()}").is_err());
 }
+
+#[test]
+fn comments_can_hold_selectable_examples_without_rendering_or_references() {
+    let template = concat!(
+        "{#\n",
+        "Alert: [{alert.severity}] {alert.title} on {vps.display_name}\n",
+        "Threshold: {traffic.cycle_percent}% for [if alert.open]{policy.name}[endif]\n",
+        "#}\n",
+        "{rule.name}: {event.kind}",
+    );
+
+    assert_eq!(
+        render_template(template, &context()).unwrap(),
+        "edge-alert: alert.open"
+    );
+    assert_eq!(
+        template_referenced_paths(template).unwrap(),
+        BTreeSet::from(["event.kind".to_string(), "rule.name".to_string()])
+    );
+}
+
+#[test]
+fn multiline_comments_preserve_surrounding_text_and_unmatched_comments_fail() {
+    assert_eq!(
+        render_template("before\n{#\noperator note\n#}\nafter", &context()).unwrap(),
+        "before\nafter"
+    );
+    assert!(validate_template("before\n{#\nunfinished").is_err());
+}

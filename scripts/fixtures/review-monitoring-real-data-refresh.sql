@@ -28,6 +28,7 @@ WITH review_cases (
 ) AS (
     VALUES
         ('review-total-monthly', 0.12::double precision, 4, 720000::bigint, true, 'healthy'),
+        ('review-traffic-exceeded', 0.28::double precision, 4, 950400::bigint, true, 'healthy'),
         ('review-rx-yearly', 0.18::double precision, 8, 1728000::bigint, true, 'degraded'),
         ('review-tx-unlimited', 0.08::double precision, 2, 345600::bigint, true, 'none'),
         ('review-no-reset', 0.22::double precision, 16, 2592000::bigint, true, 'none'),
@@ -145,6 +146,7 @@ WITH review_cases (
 ) AS (
     VALUES
         ('review-total-monthly', 0.12::double precision, 4),
+        ('review-traffic-exceeded', 0.28::double precision, 4),
         ('review-rx-yearly', 0.18::double precision, 8),
         ('review-tx-unlimited', 0.08::double precision, 2),
         ('review-no-reset', 0.22::double precision, 16),
@@ -253,6 +255,7 @@ FROM points;
 WITH rate_cases (client_id, rx_delta, tx_delta) AS (
     VALUES
         ('review-total-monthly', 150000000::bigint, 60000000::bigint),
+        ('review-traffic-exceeded', 110000000::bigint, 85000000::bigint),
         ('review-rx-yearly', 90000000::bigint, 45000000::bigint),
         ('review-tx-unlimited', 55000000::bigint, 140000000::bigint),
         ('review-no-reset', 210000000::bigint, 100000000::bigint),
@@ -316,6 +319,16 @@ VALUES
         'review-total-monthly', 'host', 'eth0',
         date_trunc('minute', now()),
         30000000000, 15000000000, 0, 0, 'agent'
+    ),
+    (
+        'review-traffic-exceeded', 'host', 'eth0',
+        date_trunc('minute', now()) - interval '20 minutes',
+        1000000000, 1000000000, 0, 0, 'agent'
+    ),
+    (
+        'review-traffic-exceeded', 'host', 'eth0',
+        date_trunc('minute', now()),
+        8000000000, 6000000000, 0, 0, 'agent'
     ),
     (
         'review-rx-yearly', 'host', 'eth0',
@@ -392,6 +405,15 @@ WITH ping_cases (
             'review-total-monthly',
             '20000000-0000-4000-8000-000000000001'::uuid,
             18.5::double precision,
+            10,
+            0.0::double precision,
+            'ok',
+            NULL::text
+        ),
+        (
+            'review-traffic-exceeded',
+            '20000000-0000-4000-8000-000000000001'::uuid,
+            22.0::double precision,
             10,
             0.0::double precision,
             'ok',

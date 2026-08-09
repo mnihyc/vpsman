@@ -20,7 +20,11 @@ import { formatTime, shortHash, shortId } from "../../utils";
 
 type ArtifactCleanupDomain = "job_output" | "file_transfer" | "backup_artifact";
 type CleanupArtifactState =
-  "active" | "delete_failed" | "deleting" | "creating" | "any";
+  | "active"
+  | "delete_failed"
+  | "deleting"
+  | "creating"
+  | "any";
 
 const artifactCleanupDomainOptions: Array<{
   description: string;
@@ -355,7 +359,9 @@ export function ServerJobsPanel({
               <button
                 className="secondaryAction"
                 data-tooltip-disabled-reason={
-                  loading ? "Artifact cleanup data is already refreshing." : undefined
+                  loading
+                    ? "Artifact cleanup data is already refreshing."
+                    : undefined
                 }
                 disabled={loading}
                 onClick={onRefresh}
@@ -470,12 +476,14 @@ export function ServerJobsPanel({
             </div>
             <details className="cleanupAdvanced">
               <summary>Advanced expression</summary>
-              <label className="artifactCleanupExpression">
+              <label
+                className="artifactCleanupExpression"
+                title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
+              >
                 <span>Additional filter expression</span>
                 <textarea
                   aria-label="Expression"
                   rows={3}
-                  title="Advanced expression filters artifacts inside the selected artifact types. It is combined with the common criteria above."
                   value={advancedExpression}
                   onChange={(event) => {
                     invalidateReviewGeneration();
@@ -715,7 +723,9 @@ export function ServerJobsPanel({
                 value: preview ? (
                   shortHash(preview.preview_hash)
                 ) : (
-                  <span data-tooltip-empty-reason="Run Preview to create the cleanup snapshot hash.">-</span>
+                  <span data-tooltip-empty-reason="Run Preview to create the cleanup snapshot hash.">
+                    -
+                  </span>
                 ),
               },
               {
@@ -830,14 +840,20 @@ export function ServerJobsPanel({
                 value: cancelJobSnapshot ? (
                   shortId(cancelJobSnapshot.id)
                 ) : (
-                  <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">-</span>
+                  <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">
+                    -
+                  </span>
                 ),
               },
               {
                 label: "Type",
-                value: cancelJobSnapshot
-                  ? displayToken(cancelJobSnapshot.job_type)
-                  : <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">-</span>,
+                value: cancelJobSnapshot ? (
+                  displayToken(cancelJobSnapshot.job_type)
+                ) : (
+                  <span data-tooltip-empty-reason="No maintenance job cancellation review is active.">
+                    -
+                  </span>
+                ),
               },
               {
                 label: "Matched",

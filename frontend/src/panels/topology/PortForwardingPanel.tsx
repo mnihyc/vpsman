@@ -840,21 +840,21 @@ export function PortForwardingPanel({
               Removal pending until the agent confirms the owned table no longer
               contains this rule.
             </span>
-            <label className="forgetReasonField">
+            <label
+              className="forgetReasonField"
+              title="Audit reason for removing a rule whose VPS can no longer confirm runtime cleanup."
+            >
               <span className="srOnly">Forget reason</span>
               <input
+                data-tooltip-disabled-reason={
+                  pending
+                    ? "Wait for the current port-forward operation to finish."
+                    : forgetBoundary
+                }
                 disabled={!canForget || pending}
                 maxLength={512}
                 onChange={(event) => setForgetReason(event.target.value)}
                 placeholder="Decommission reason"
-                title={
-                  pending
-                    ? "Wait for the current port-forward operation to finish"
-                    : !canForget
-                      ? forgetBoundary
-                      : forgetReason ||
-                        "Record why a permanently unreachable or decommissioned VPS is being forgotten"
-                }
                 value={forgetReason}
               />
             </label>
@@ -954,7 +954,11 @@ export function PortForwardingPanel({
           </div>
         </div>
         {corruptRules.length > 0 && (
-          <div className="portForwardRemovalNotice" role="alert">
+          <div
+            className="portForwardRemovalNotice"
+            role="alert"
+            title="A stored rule that cannot be parsed must be removed and recreated before it can return to normal lifecycle management."
+          >
             <ShieldAlert size={17} />
             <div>
               <strong>
@@ -963,11 +967,7 @@ export function PortForwardingPanel({
               </strong>
               {corruptRules.map((rule) => (
                 <div key={rule.id}>
-                  <span
-                    data-tooltip-sensitive="true"
-                    data-value-tooltip-skip="true"
-                    title="The persisted rule configuration error is shown here; its exact content is excluded from tooltips."
-                  >
+                  <span>
                     {rule.name} ·{" "}
                     {agentById.get(rule.client_id)?.display_name ||
                       rule.client_id}{" "}
@@ -1141,7 +1141,6 @@ export function PortForwardingPanel({
                 { label: "Revision", value: String(corruptDelete.revision) },
                 {
                   label: "Configuration error",
-                  sensitive: true,
                   value: corruptDelete.configuration_error,
                 },
               ]
@@ -1315,9 +1314,10 @@ const PortForwardEditor = forwardRef<
             value={draft.clientId}
           />
         </label>
-        <label>
+        <label title="Operator-facing name used to identify this desired port-forward rule.">
           <span>Name</span>
           <input
+            data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing the rule name."
             disabled={pending}
             maxLength={128}
             onChange={(event) =>
@@ -1325,11 +1325,6 @@ const PortForwardEditor = forwardRef<
             }
             placeholder="Public web"
             required
-            title={
-              pending
-                ? "Wait for the current port-forward operation to finish before editing the rule name"
-                : draft.name || "Operator-facing port-forward rule name"
-            }
             value={draft.name}
           />
         </label>
@@ -1355,48 +1350,39 @@ const PortForwardEditor = forwardRef<
             ))}
           </div>
         </fieldset>
-        <label>
+        <label title="Local listener ports matched by this rule; enter a port, range, or comma-separated mappings.">
           <span>Incoming ports</span>
           <input
+            data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing incoming ports."
             disabled={pending}
             onChange={(event) =>
               onChange({ ...draft, incoming: event.target.value })
             }
             placeholder="80,443,10000-10010"
             required
-            title={
-              pending
-                ? "Wait for the current port-forward operation to finish before editing incoming ports"
-                : draft.incoming ||
-                  "Incoming port, range, or comma-separated mappings"
-            }
             value={draft.incoming}
           />
           <small>PORT or START-END, comma separated</small>
         </label>
-        <label>
+        <label title="Destination ports paired with the incoming mappings; one port may serve every incoming port.">
           <span>Target ports</span>
           <input
+            data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing target ports."
             disabled={pending}
             onChange={(event) =>
               onChange({ ...draft, target: event.target.value })
             }
             placeholder="8080 or 8080,20000-20010"
             required
-            title={
-              pending
-                ? "Wait for the current port-forward operation to finish before editing target ports"
-                : draft.target ||
-                  "One target port for all incoming ports, or corresponding mappings"
-            }
             value={draft.target}
           />
           <small>One port for all, or corresponding items</small>
         </label>
         <div className="targetAddressField">
-          <label>
+          <label title="Literal destination address, or a hostname resolved to one address during review.">
             <span>Target IP or hostname</span>
             <input
+              data-tooltip-disabled-reason="Wait for the current port-forward operation to finish before editing the target address."
               disabled={pending}
               onChange={(event) => {
                 const value = event.target.value;
@@ -1411,12 +1397,6 @@ const PortForwardEditor = forwardRef<
               }}
               placeholder="192.0.2.40 or app.internal"
               required
-              title={
-                pending
-                  ? "Wait for the current port-forward operation to finish before editing the target address"
-                  : draft.targetInput ||
-                    "Literal target IP or hostname resolved to one reviewed address"
-              }
               value={draft.targetInput}
             />
           </label>
@@ -1506,17 +1486,24 @@ const PortForwardEditor = forwardRef<
             </button>
           </div>
         </fieldset>
-        <label className="compactCheckbox portForwardEnabled">
+        <label
+          className="compactCheckbox portForwardEnabled"
+          title={
+            pending
+              ? "Wait for the current port-forward operation to finish before changing enabled state"
+              : "Enable this desired port-forward rule after the reviewed apply"
+          }
+        >
           <input
             checked={draft.enabled}
+            data-tooltip-disabled-reason={
+              pending
+                ? "Wait for the current port-forward operation to finish before changing enabled state"
+                : undefined
+            }
             disabled={pending}
             onChange={(event) =>
               onChange({ ...draft, enabled: event.target.checked })
-            }
-            title={
-              pending
-                ? "Wait for the current port-forward operation to finish before changing enabled state"
-                : "Enable this desired port-forward rule after the reviewed apply"
             }
             type="checkbox"
           />
@@ -1535,13 +1522,7 @@ const PortForwardEditor = forwardRef<
           ) : mappingPreview.error ? (
             <>
               <ShieldAlert size={16} />
-              <span
-                data-tooltip-sensitive="true"
-                data-value-tooltip-skip="true"
-                title="The port-mapping validation error is shown here; its exact content is excluded from tooltips."
-              >
-                {mappingPreview.error}
-              </span>
+              <span title={mappingPreview.error}>{mappingPreview.error}</span>
             </>
           ) : (
             <>
@@ -1602,12 +1583,9 @@ function Metric({
   value: string | number;
 }) {
   return (
-    <span
-      className={tone === "warning" ? "hasAttention" : ""}
-      title={`${label}: ${value}`}
-    >
-      <small title={label}>{label}</small>
-      <strong title={`${label}: ${value}`}>{value}</strong>
+    <span className={tone === "warning" ? "hasAttention" : ""}>
+      <small>{label}</small>
+      <strong>{value}</strong>
     </span>
   );
 }
@@ -1626,12 +1604,11 @@ function Detail({
   value: string;
 }) {
   return (
-    <div
-      className={tone === "warning" ? "hasAttention" : ""}
-      title={`${label}: ${title ?? value}`}
-    >
-      <dt title={label}>{label}</dt>
-      <dd title={title ?? value}>{display ?? value}</dd>
+    <div className={tone === "warning" ? "hasAttention" : ""}>
+      <dt>{label}</dt>
+      <dd title={title ?? (display !== undefined ? value : undefined)}>
+        {display ?? value}
+      </dd>
     </div>
   );
 }

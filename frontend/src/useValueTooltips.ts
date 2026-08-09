@@ -1,46 +1,15 @@
 import { useEffect } from "react";
 
-const SENSITIVE_FIELD_PATTERN =
-  /password|passphrase|secret|token|private|credential|verifier|salt|api[-_ ]?key|\botp\b|totp|one[-_ ]?time|authenticator|verification code|setup key|enrollment key|\brecovery\b/i;
-const PROTECTED_TOOLTIP_DESCENDANT_SELECTOR =
-  "pre, code, .srOnly, .visuallyHidden, [aria-hidden='true'], [data-value-tooltip-skip='true'], [data-tooltip-sensitive='true']";
-const UNSAFE_ARIA_LABEL_PATTERN = /\b(?:https?|wss?):\/\//i;
+const SKIPPED_TOOLTIP_ELEMENT_SELECTOR =
+  "[data-value-tooltip-skip='true'], [data-tooltip-sensitive='true']";
+const NON_VISIBLE_TOOLTIP_DESCENDANT_SELECTOR =
+  ".srOnly, .visuallyHidden, [aria-hidden='true']";
 const generatedTooltipTitles = new WeakMap<HTMLElement, string>();
 const pendingGeneratedTitleMutations = new WeakMap<HTMLElement, number>();
 
 const SEMANTIC_TOOLTIP_SELECTOR = [
-  "input:not([type='hidden'])",
-  "textarea",
-  "select",
-  "button",
-  "a[href]",
-  "[role='button']",
-  "[role='link']",
-  "[role='tab']",
-  "[role='menuitem']",
-  "label",
-  "legend",
-  "summary",
-  "dt",
-  "dd",
-  "th",
-  "td",
-  "[role='cell']",
-  "[role='columnheader']",
-  ".metric",
-  ".metricCard",
-  ".consoleStatusBadge",
-  ".status",
-  ".statusPill",
-  ".gridCounts > *",
-  ".gridPageLabel",
-  ".consoleInlineDetailGrid > span",
-  ".vpsFactRow",
-  ".vpsResourceFact",
-  ".topologyMetric",
-  ".timeSeriesCoverage",
-  ".timeSeriesLegendActions > span",
-  "[aria-label]:not(svg):not([aria-hidden='true'])",
+  "[data-tooltip-disabled-reason]",
+  "[data-tooltip-empty-reason]",
 ].join(",");
 
 const TRUNCATED_TEXT_SELECTOR = [
@@ -67,6 +36,7 @@ const TRUNCATED_TEXT_SELECTOR = [
   ".commandPaletteResultText strong",
   ".compactSelectorText",
   ".compactTopologyNote span",
+  ".confirmationPromptBody dd",
   ".copyHashButton span",
   ".dashboardAlertText small",
   ".dashboardAlertText strong",
@@ -164,6 +134,7 @@ const TRUNCATED_TEXT_SELECTOR = [
   ".vpsMonitorTags span",
   ".vpsRulesPreviewFinalAction small",
   ".vpsRulesPreviewFinalAction strong",
+  ".truncateValue",
 ].join(",");
 
 export function useValueTooltips() {
@@ -213,7 +184,6 @@ export function useValueTooltips() {
         target instanceof HTMLSelectElement
       ) {
         clearGeneratedTitle(target);
-        updateSemanticTitle(target);
         queueElementAndAncestors(target.parentElement);
         scheduleRefresh();
       }
@@ -235,10 +205,7 @@ export function useValueTooltips() {
           return;
         }
 
-        if (
-          record.type === "attributes" &&
-          record.attributeName === "title"
-        ) {
+        if (record.type === "attributes" && record.attributeName === "title") {
           if (consumeGeneratedTitleMutation(target)) return;
           releaseGeneratedTitleOwnership(target);
           pendingElements.add(target);
@@ -265,30 +232,25 @@ export function useValueTooltips() {
       scheduleRefresh();
     };
     const observer = new MutationObserver(handleMutations);
+    const handleResize = () => {
+      queueSubtree(document.body);
+      scheduleRefresh();
+    };
     updateTooltipSubtree(document.body);
     document.addEventListener("input", handleControlChange, true);
     document.addEventListener("change", handleControlChange, true);
+    window.addEventListener("resize", handleResize);
     observer.observe(document.body, {
       attributeFilter: [
-        "aria-disabled",
         "aria-hidden",
-        "aria-label",
-        "autocomplete",
-        "checked",
         "class",
         "data-tooltip-disabled-reason",
         "data-tooltip-empty-reason",
-        "data-tooltip-label",
         "data-tooltip-sensitive",
         "data-value-tooltip-skip",
         "disabled",
-        "id",
-        "name",
-        "placeholder",
-        "selected",
+        "style",
         "title",
-        "type",
-        "value",
       ],
       attributes: true,
       characterData: true,
@@ -298,6 +260,7 @@ export function useValueTooltips() {
     return () => {
       document.removeEventListener("input", handleControlChange, true);
       document.removeEventListener("change", handleControlChange, true);
+      window.removeEventListener("resize", handleResize);
       if (scheduledRefresh !== null) {
         window.cancelAnimationFrame(scheduledRefresh);
       }
@@ -333,150 +296,17 @@ function updateSemanticTitle(element: HTMLElement) {
   }
   if (hasAuthoredTitle(element)) return;
 
-  if (
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element instanceof HTMLSelectElement
-  ) {
-    updateControlTitle(element);
+  const disabledReason = element.dataset.tooltipDisabledReason?.trim();
+  if (disabledReason) {
+    setGeneratedTitle(element, disabledReason);
     return;
   }
-
-  const text = safeElementText(element);
-  const label = semanticLabel(element, text);
-  const unavailable =
-    element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true";
-  if (unavailable) {
-    setGeneratedTitle(
-      element,
-      element.dataset.tooltipDisabledReason ??
-        `${label || "This control"} is unavailable in the current state.`,
-    );
+  const emptyReason = element.dataset.tooltipEmptyReason?.trim();
+  if (emptyReason) {
+    setGeneratedTitle(element, emptyReason);
     return;
   }
-  if (text === "-") {
-    setGeneratedTitle(
-      element,
-      element.dataset.tooltipEmptyReason ?? emptyValueTitle(element),
-    );
-    return;
-  }
-
-  const ariaLabel = safeAuthoredAriaLabel(element);
-  if (element.matches("button, [role='button'], [role='tab'], [role='menuitem']")) {
-    setGeneratedTitle(element, label ? `Activate ${label}.` : null);
-    return;
-  }
-  if (element.matches("a[href], [role='link']")) {
-    setGeneratedTitle(element, label ? `Open ${label}.` : null);
-    return;
-  }
-  if (element.matches("summary")) {
-    setGeneratedTitle(element, label ? `Expand or collapse ${label}.` : null);
-    return;
-  }
-  if (element.matches("label")) {
-    setGeneratedTitle(element, label ? `${label} field.` : null);
-    return;
-  }
-  if (element.matches("legend")) {
-    setGeneratedTitle(element, label ? `${label} field group.` : null);
-    return;
-  }
-  if (element.matches("th, [role='columnheader']")) {
-    setGeneratedTitle(element, label ? `${label} column.` : null);
-    return;
-  }
-  if (element.matches("td, [role='cell']")) {
-    setGeneratedTitle(element, tableCellTitle(element, text));
-    return;
-  }
-  if (element.matches("dt")) {
-    const value = safeElementText(element.nextElementSibling);
-    setGeneratedTitle(element, label ? `${label}: ${value || "no available value"}.` : null);
-    return;
-  }
-  if (element.matches("dd")) {
-    setGeneratedTitle(element, descriptionValueTitle(element, text));
-    return;
-  }
-  if (element.matches(".consoleStatusBadge, .status, .statusPill")) {
-    setGeneratedTitle(element, text ? `Status: ${text}.` : null);
-    return;
-  }
-  if (element.matches(".gridCounts > *, .gridPageLabel")) {
-    setGeneratedTitle(element, text ? `Grid summary: ${text}.` : null);
-    return;
-  }
-  if (
-    element.matches(
-      ".metric, .metricCard, .consoleInlineDetailGrid > span, .vpsFactRow, .vpsResourceFact, .topologyMetric, .timeSeriesCoverage, .timeSeriesLegendActions > span",
-    )
-  ) {
-    setGeneratedTitle(element, text ? `Current value: ${text}.` : ariaLabel || null);
-    return;
-  }
-  setGeneratedTitle(element, ariaLabel || null);
-}
-
-function updateControlTitle(
-  element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
-) {
-  if (isSensitiveControl(element)) {
-    clearGeneratedTitle(element);
-    return;
-  }
-  const label = controlLabel(element);
-  if (element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true") {
-    setGeneratedTitle(
-      element,
-      element.dataset.tooltipDisabledReason ??
-        `${label || "This field"} is unavailable in the current state.`,
-    );
-    return;
-  }
-  if (element instanceof HTMLSelectElement) {
-    const selected = safeElementText(element.selectedOptions[0] ?? null);
-    setGeneratedTitle(
-      element,
-      selected === "-"
-        ? element.dataset.tooltipEmptyReason ??
-            `${label || "This field"} has no available value.`
-        : selected
-          ? `${label || "Selected value"}: ${selected}.`
-          : `${label || "This field"} has no selected value.`,
-    );
-    return;
-  }
-  if (element instanceof HTMLTextAreaElement) {
-    setGeneratedTitle(
-      element,
-      `${label || "Multiline field"}; current multiline content is excluded from tooltips.`,
-    );
-    return;
-  }
-  if (element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)) {
-    setGeneratedTitle(
-      element,
-      `${label || "This option"}: ${element.checked ? "selected" : "not selected"}.`,
-    );
-    return;
-  }
-  const value = element.value.trim();
-  const placeholder = element.placeholder.trim();
-  setGeneratedTitle(
-    element,
-    value === "-"
-      ? element.dataset.tooltipEmptyReason ??
-          `${label || "This field"} has no available value.`
-      : value
-        ? `${label || "Current value"}: ${value}.`
-        : placeholder
-          ? `${label ? `${label} accepted format` : "Accepted format"}: ${placeholder}.`
-          : label
-            ? `${label} field.`
-            : null,
-  );
+  clearGeneratedTitle(element);
 }
 
 function updateTruncatedTextTitle(element: HTMLElement) {
@@ -485,24 +315,47 @@ function updateTruncatedTextTitle(element: HTMLElement) {
     return;
   }
   if (hasAuthoredTitle(element)) return;
+  if (!isVisiblyShortened(element)) {
+    clearGeneratedTitle(element);
+    return;
+  }
   const text = safeElementText(element);
-  setGeneratedTitle(
-    element,
-    text === "-"
-      ? element.dataset.tooltipEmptyReason ?? emptyValueTitle(element)
-      : text || null,
-  );
+  setGeneratedTitle(element, text || null);
 }
 
 function shouldSkipElement(element: HTMLElement) {
-  return Boolean(element.closest(PROTECTED_TOOLTIP_DESCENDANT_SELECTOR));
+  return Boolean(element.closest(SKIPPED_TOOLTIP_ELEMENT_SELECTOR));
+}
+
+function isVisiblyShortened(element: HTMLElement) {
+  const style = window.getComputedStyle(element);
+  if (
+    style.display === "none" ||
+    style.visibility === "hidden" ||
+    element.clientWidth === 0 ||
+    element.clientHeight === 0
+  ) {
+    return false;
+  }
+  const horizontalOverflow = element.scrollWidth > element.clientWidth + 1;
+  const verticalOverflow = element.scrollHeight > element.clientHeight + 1;
+  const lineClamp = Number.parseInt(style.webkitLineClamp, 10);
+  return (
+    (style.textOverflow === "ellipsis" && horizontalOverflow) ||
+    (Number.isFinite(lineClamp) && lineClamp > 0 && verticalOverflow)
+  );
 }
 
 function safeElementText(element: Element | null): string {
   if (!(element instanceof HTMLElement)) return "";
-  if (element.matches(PROTECTED_TOOLTIP_DESCENDANT_SELECTOR)) return "";
+  if (
+    element.matches(SKIPPED_TOOLTIP_ELEMENT_SELECTOR) ||
+    element.matches(NON_VISIBLE_TOOLTIP_DESCENDANT_SELECTOR)
+  ) {
+    return "";
+  }
   const text = sanitizedDescendantText(element);
-  return text || safeAuthoredAriaLabel(element);
+  return text;
 }
 
 function sanitizedDescendantText(
@@ -514,8 +367,9 @@ function sanitizedDescendantText(
     if (
       node === excludedElement ||
       (node !== element &&
-      node instanceof Element &&
-      node.matches(PROTECTED_TOOLTIP_DESCENDANT_SELECTOR))
+        node instanceof Element &&
+        (node.matches(SKIPPED_TOOLTIP_ELEMENT_SELECTOR) ||
+          node.matches(NON_VISIBLE_TOOLTIP_DESCENDANT_SELECTOR)))
     ) {
       return;
     }
@@ -529,110 +383,8 @@ function sanitizedDescendantText(
   return normalizeText(text.join(" "));
 }
 
-function safeAuthoredAriaLabel(element: HTMLElement) {
-  return safeTooltipLabel(element.getAttribute("aria-label"));
-}
-
-function safeTooltipLabel(value: string | null | undefined) {
-  const label = normalizeText(value ?? "");
-  if (
-    !label ||
-    SENSITIVE_FIELD_PATTERN.test(label) ||
-    UNSAFE_ARIA_LABEL_PATTERN.test(label)
-  ) {
-    return "";
-  }
-  return label;
-}
-
 function normalizeText(value: string) {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function semanticLabel(element: HTMLElement, text: string) {
-  const nestedControl = element.matches("label")
-    ? element.querySelector<HTMLElement>(
-        "input[aria-label], textarea[aria-label], select[aria-label]",
-      )
-    : null;
-  const nestedControlLabel = nestedControl
-    ? safeAuthoredAriaLabel(nestedControl)
-    : "";
-  return normalizeText(
-    safeTooltipLabel(element.dataset.tooltipLabel) ||
-      (safeAuthoredAriaLabel(element) || nestedControlLabel || text),
-  );
-}
-
-function controlLabel(
-  element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
-) {
-  const dataLabel = safeTooltipLabel(element.dataset.tooltipLabel);
-  if (dataLabel) return dataLabel;
-  const ariaLabel = safeAuthoredAriaLabel(element);
-  if (ariaLabel) return ariaLabel;
-  if (element.id) {
-    const explicitLabel = document.querySelector<HTMLLabelElement>(
-      `label[for="${CSS.escape(element.id)}"]`,
-    );
-    const text = safeElementText(explicitLabel);
-    if (text) return text;
-  }
-  const wrappingLabel = element.closest<HTMLLabelElement>("label");
-  if (!wrappingLabel) return "";
-  return (
-    sanitizedDescendantText(wrappingLabel, element) ||
-    safeAuthoredAriaLabel(wrappingLabel)
-  );
-}
-
-function emptyValueTitle(element: HTMLElement) {
-  const context = nearestValueLabel(element);
-  return `${context || "This value"} has no available value.`;
-}
-
-function nearestValueLabel(element: HTMLElement): string {
-  const explicit =
-    safeTooltipLabel(element.dataset.tooltipLabel) ||
-    safeAuthoredAriaLabel(element);
-  if (explicit && explicit !== "-") return explicit;
-  if (element.matches("dd")) {
-    const term = safeElementText(element.previousElementSibling);
-    if (term) return term;
-  }
-  const parent = element.parentElement;
-  if (parent) {
-    const candidate = parent.querySelector<HTMLElement>(
-      ":scope > small:first-child, :scope > span:first-child, :scope > b:first-child, :scope > strong:first-child, :scope > dt:first-child",
-    );
-    const text = safeElementText(candidate);
-    if (text && text !== "-") return text;
-  }
-  const header = tableCellHeader(element);
-  return header || "This value";
-}
-
-function descriptionValueTitle(element: HTMLElement, text: string) {
-  const label = safeElementText(element.previousElementSibling);
-  if (text === "-") return `${label || "This field"} has no available value.`;
-  return label && text ? `${label}: ${text}.` : text || null;
-}
-
-function tableCellTitle(element: HTMLElement, text: string) {
-  const header = tableCellHeader(element);
-  if (text === "-") return `${header || "This field"} has no available value.`;
-  return header && text ? `${header}: ${text}.` : text || null;
-}
-
-function tableCellHeader(element: HTMLElement): string {
-  const cell = element.closest<HTMLElement>("td, [role='cell']") ?? element;
-  const row = cell.parentElement;
-  const cells = row ? Array.from(row.children) : [];
-  const index = cells.indexOf(cell);
-  if (index < 0) return "";
-  const table = cell.closest("table, [role='grid']");
-  const headers = table?.querySelectorAll<HTMLElement>("th, [role='columnheader']");
-  return safeElementText(headers?.[index] ?? null);
 }
 
 function setGeneratedTitle(element: HTMLElement, title: string | null) {
@@ -642,7 +394,7 @@ function setGeneratedTitle(element: HTMLElement, title: string | null) {
     return;
   }
   if (hasAuthoredTitle(element)) return;
-  const nextTitle = normalized === "-" ? emptyValueTitle(element) : normalized;
+  const nextTitle = normalized;
   if (
     generatedTooltipTitles.get(element) === nextTitle &&
     element.getAttribute("title") === nextTitle &&
@@ -684,7 +436,9 @@ function hasOwnedGeneratedTitle(element: HTMLElement) {
 }
 
 function hasAuthoredTitle(element: HTMLElement) {
-  return Boolean(element.getAttribute("title")) && !hasOwnedGeneratedTitle(element);
+  return (
+    Boolean(element.getAttribute("title")) && !hasOwnedGeneratedTitle(element)
+  );
 }
 
 function releaseGeneratedTitleOwnership(element: HTMLElement) {
@@ -711,23 +465,4 @@ function consumeGeneratedTitleMutation(element: HTMLElement) {
     pendingGeneratedTitleMutations.set(element, pending - 1);
   }
   return true;
-}
-
-function isSensitiveControl(
-  element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
-) {
-  if (element instanceof HTMLInputElement && element.type === "password") {
-    return true;
-  }
-  const descriptor = [
-    element.name,
-    element.id,
-    element.autocomplete,
-    element.getAttribute("aria-label"),
-    element instanceof HTMLSelectElement ? "" : element.placeholder,
-    element.closest("label")?.textContent,
-  ]
-    .filter(Boolean)
-    .join(" ");
-  return SENSITIVE_FIELD_PATTERN.test(descriptor);
 }

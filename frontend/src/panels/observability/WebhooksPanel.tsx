@@ -317,14 +317,13 @@ function MetricTile({
   value: string;
 }) {
   return (
-    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
-      <span title={label}>{label}</span>
-      <strong title={`${label}: ${value}`}>{value}</strong>
-      <small title={detail}>{detail}</small>
+    <div className="metricCard">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
       <button
         className="linkButton metricCardAction"
         onClick={onAction}
-        title={`${actionLabel} for ${label.toLocaleLowerCase()}`}
         type="button"
       >
         {actionLabel}

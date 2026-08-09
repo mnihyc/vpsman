@@ -147,6 +147,20 @@ fn parse_nodes(
             nodes.push(Node::Text(remainder[..offset].to_string()));
             *cursor += offset;
         }
+        if input[*cursor..].starts_with("{#") {
+            let comment_start = *cursor;
+            let Some(end) = input[*cursor + 2..].find("#}") else {
+                return Err(TemplateError::single("unmatched comment"));
+            };
+            let comment_end = *cursor + end + 4;
+            if let Some(next_cursor) = standalone_comment_end(input, comment_start, comment_end) {
+                remove_comment_line_indentation(&mut nodes, input, comment_start);
+                *cursor = next_cursor;
+            } else {
+                *cursor = comment_end;
+            }
+            continue;
+        }
         if input[*cursor..].starts_with('{') {
             if let Some(end) = input[*cursor + 1..].find('}') {
                 let raw = input[*cursor + 1..*cursor + 1 + end].trim();
@@ -244,6 +258,41 @@ fn parse_nodes(
         *cursor += tag_len;
     }
     Ok((nodes, None))
+}
+
+fn standalone_comment_end(input: &str, comment_start: usize, comment_end: usize) -> Option<usize> {
+    let line_start = input[..comment_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    if !input[line_start..comment_start].trim().is_empty() {
+        return None;
+    }
+    let remaining = &input[comment_end..];
+    let line_end_offset = remaining.find('\n').unwrap_or(remaining.len());
+    if !remaining[..line_end_offset].trim().is_empty() {
+        return None;
+    }
+    Some(if line_end_offset < remaining.len() {
+        comment_end + line_end_offset + 1
+    } else {
+        input.len()
+    })
+}
+
+fn remove_comment_line_indentation(nodes: &mut [Node], input: &str, comment_start: usize) {
+    let line_start = input[..comment_start]
+        .rfind('\n')
+        .map_or(0, |offset| offset + 1);
+    let indentation = &input[line_start..comment_start];
+    if indentation.is_empty() {
+        return;
+    }
+    let Some(Node::Text(text)) = nodes.last_mut() else {
+        return;
+    };
+    if text.ends_with(indentation) {
+        text.truncate(text.len() - indentation.len());
+    }
 }
 
 fn parse_end_tag(tag: &str) -> Option<EndTag> {

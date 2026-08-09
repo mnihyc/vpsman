@@ -3,19 +3,16 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { openConsoleSubpage } from "./support/consoleNavigation";
 
-const captureEnabled =
-  process.env.VPSMAN_MONITORING_REAL_DATA_CAPTURE === "1";
+const captureEnabled = process.env.VPSMAN_MONITORING_REAL_DATA_CAPTURE === "1";
 const outputDir = process.env.VPSMAN_MONITORING_REAL_DATA_OUTPUT ?? "";
-const operatorUsername =
-  process.env.VPSMAN_MONITORING_REAL_DATA_USERNAME ?? "";
-const operatorPassword =
-  process.env.VPSMAN_MONITORING_REAL_DATA_PASSWORD ?? "";
+const operatorUsername = process.env.VPSMAN_MONITORING_REAL_DATA_USERNAME ?? "";
+const operatorPassword = process.env.VPSMAN_MONITORING_REAL_DATA_PASSWORD ?? "";
 const visibleShareFragment =
   process.env.VPSMAN_MONITORING_VISIBLE_SHARE_FRAGMENT ?? "";
 const hiddenShareFragment =
   process.env.VPSMAN_MONITORING_HIDDEN_SHARE_FRAGMENT ?? "";
 const expectedClients = Number(
-  process.env.VPSMAN_MONITORING_EXPECTED_CLIENTS ?? "7",
+  process.env.VPSMAN_MONITORING_EXPECTED_CLIENTS ?? "8",
 );
 
 test.skip(
@@ -30,9 +27,13 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   expect(outputDir).not.toBe("");
   expect(operatorUsername).not.toBe("");
   expect(operatorPassword).not.toBe("");
-  expect(visibleShareFragment).toMatch(/^#\/share\/[0-9a-f-]{36}\/[0-9a-f]{64}$/);
-  expect(hiddenShareFragment).toMatch(/^#\/share\/[0-9a-f-]{36}\/[0-9a-f]{64}$/);
-  expect(expectedClients).toBe(7);
+  expect(visibleShareFragment).toMatch(
+    /^#\/share\/[0-9a-f-]{36}\/[0-9a-f]{64}$/,
+  );
+  expect(hiddenShareFragment).toMatch(
+    /^#\/share\/[0-9a-f-]{36}\/[0-9a-f]{64}$/,
+  );
+  expect(expectedClients).toBe(8);
   mkdirSync(outputDir, { recursive: true });
 
   const pageErrors: string[] = [];
@@ -75,6 +76,23 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   const privateDensity = page.getByLabel("VPS cards density");
   await privateDensity.getByRole("button", { name: "Compact" }).click();
   await expect(privateGrid).toHaveAttribute("data-density", "compact");
+  const privateUnconfigured = cardNamed(privateGrid, "Unconfigured traffic");
+  await expect(privateUnconfigured.locator(".vpsMonitorTraffic")).toHaveClass(
+    /unconfigured/,
+  );
+  await expect(
+    privateUnconfigured.locator(".vpsMonitorTrafficTrack.missing"),
+  ).toBeVisible();
+  await expect(
+    cardNamed(privateGrid, "RX quota · Annual").getByText(
+      "Intermittent packet loss",
+      { exact: true },
+    ),
+  ).toHaveCount(0);
+  await expectEqualCompactPingHeight(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
+    cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
+  );
   await capture(page, "private-monitor-compact.png");
 
   await page.setViewportSize({ width: 1440, height: 1600 });
@@ -95,6 +113,12 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       "Needs attention",
     ),
   ).toHaveCount(0);
+  await expect(
+    cardNamed(privateGrid, "RX quota · Annual").getByText(
+      "Intermittent packet loss",
+      { exact: true },
+    ),
+  ).toBeVisible();
   await capture(page, "private-monitor-comfortable.png");
 
   await page.setViewportSize({ width: 1440, height: 1200 });
@@ -115,22 +139,47 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await assertSharedFixtureSemantics(sharedGrid);
   await expect(
     page.getByRole("combobox", { name: "Filter shared VPSs by status" }),
-  ).toHaveAttribute("title", /All statuses/);
+  ).not.toHaveAttribute("title", /.+/);
   const visibleShareSecret = visibleShareFragment.split("/").at(-1) ?? "";
   expect(visibleShareSecret).not.toBe("");
   expect(
-    await page.locator("[title]").evaluateAll(
-      (elements, secret) =>
-        elements.some((element) =>
-          (element.getAttribute("title") ?? "").includes(secret),
-        ),
-      visibleShareSecret,
-    ),
+    await page
+      .locator("[title]")
+      .evaluateAll(
+        (elements, secret) =>
+          elements.some((element) =>
+            (element.getAttribute("title") ?? "").includes(secret),
+          ),
+        visibleShareSecret,
+      ),
   ).toBe(false);
 
   const sharedDensity = page.getByLabel("Shared view density");
   await sharedDensity.getByRole("button", { name: "Compact" }).click();
   await expect(sharedGrid).toHaveAttribute("data-density", "compact");
+  const sharedUnconfigured = publicCardNamed(
+    sharedGrid,
+    "Unconfigured traffic",
+  );
+  await expect(
+    sharedUnconfigured.locator(".publicMonitoringTraffic.unconfigured"),
+  ).toBeVisible();
+  await expect(
+    sharedUnconfigured.locator(".vpsMonitorMetricTrack.missing"),
+  ).toBeVisible();
+  const sharedRxPingDiagnostic = publicCardNamed(
+    sharedGrid,
+    "RX quota · Annual",
+  ).locator(".publicMonitoringPing > small:not(.vpsMonitorRowHeading)");
+  await expect(sharedRxPingDiagnostic).toHaveCount(0);
+  await expectEqualCompactPingHeight(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".publicMonitoringPing",
+    ),
+    publicCardNamed(sharedGrid, "No primary Ping").locator(
+      ".publicMonitoringPing",
+    ),
+  );
   await capture(page, "shared-monitor-billing-visible-compact.png");
 
   await sharedDensity.getByRole("button", { name: "Comfortable" }).click();
@@ -145,6 +194,8 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       "Needs attention",
     ),
   ).toHaveCount(0);
+  await expect(sharedRxPingDiagnostic).toHaveText("Primary Ping degraded");
+  await expect(sharedRxPingDiagnostic).toBeVisible();
   await capture(page, "shared-monitor-billing-visible-comfortable.png");
 
   const detailCard = page.getByRole("link", {
@@ -159,7 +210,9 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await expect(detail.getByLabel("Current shared VPS evidence")).toContainText(
     "29.90 ¥/m",
   );
-  await expect(detail.getByRole("region", { name: "Traffic volume chart" })).toBeVisible();
+  await expect(
+    detail.getByRole("region", { name: "Traffic volume chart" }),
+  ).toBeVisible();
   await capture(page, "shared-monitor-billing-visible-detail.png");
 
   await page.goto(`/${hiddenShareFragment}`, {
@@ -176,7 +229,9 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     expectedClients,
     { timeout: 30_000 },
   );
-  await expect(hiddenSharedGrid.locator('[data-fact-kind="billing"]')).toHaveCount(0);
+  await expect(
+    hiddenSharedGrid.locator('[data-fact-kind="billing"]'),
+  ).toHaveCount(0);
   await page
     .getByLabel("Shared view density")
     .getByRole("button", { name: "Compact" })
@@ -187,8 +242,12 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   expect([...realApiRequests]).toEqual(
     expect.arrayContaining([
       "/api/v1/monitoring/cards",
-      expect.stringMatching(/^\/api\/v1\/public\/monitoring-shares\/[0-9a-f-]+\/bootstrap$/),
-      expect.stringMatching(/^\/api\/v1\/public\/monitoring-shares\/[0-9a-f-]+\/data$/),
+      expect.stringMatching(
+        /^\/api\/v1\/public\/monitoring-shares\/[0-9a-f-]+\/bootstrap$/,
+      ),
+      expect.stringMatching(
+        /^\/api\/v1\/public\/monitoring-shares\/[0-9a-f-]+\/data$/,
+      ),
     ]),
   );
   expect(serverErrors).toEqual([]);
@@ -198,7 +257,9 @@ test("captures private and shared monitoring from the isolated real stack", asyn
 async function authenticate(page: Page) {
   const consoleShell = page.locator(".shell");
   const signIn = page.getByRole("heading", { exact: true, name: "Sign in" });
-  await expect(consoleShell.or(signIn).first()).toBeVisible({ timeout: 30_000 });
+  await expect(consoleShell.or(signIn).first()).toBeVisible({
+    timeout: 30_000,
+  });
   if (await consoleShell.isVisible()) return;
 
   await page.getByLabel("Username").fill(operatorUsername);
@@ -219,6 +280,7 @@ async function assertPrivateFixtureSemantics(
   grid: ReturnType<Page["locator"]>,
 ) {
   const total = cardNamed(grid, "Total quota · Monthly");
+  const exceeded = cardNamed(grid, "Traffic quota exceeded");
   const rx = cardNamed(grid, "RX quota · Annual");
   const tx = cardNamed(grid, "TX quota · Unlimited");
   const noReset = cardNamed(grid, "Accumulated archive");
@@ -226,13 +288,23 @@ async function assertPrivateFixtureSemantics(
   const unconfigured = cardNamed(grid, "Unconfigured traffic");
   const noPrimary = cardNamed(grid, "No primary Ping");
 
-  for (const card of [total, rx, tx, noReset, emptyRates, unconfigured, noPrimary]) {
+  for (const card of [
+    total,
+    exceeded,
+    rx,
+    tx,
+    noReset,
+    emptyRates,
+    unconfigured,
+    noPrimary,
+  ]) {
     await expect(card).toBeVisible();
   }
   await expect(total.locator(".vpsMonitorTraffic")).toContainText("· Total ·");
   await expect(total.locator('[data-fact-kind="billing"]')).toContainText(
     "Renews day 14",
   );
+  await expectExceededTraffic(exceeded.locator(".vpsMonitorTraffic"));
   await expect(rx.locator(".vpsMonitorTraffic")).toContainText("· RX ·");
   await expect(rx.locator('[data-fact-kind="billing"]')).toContainText(
     "Renews 06-15",
@@ -241,19 +313,26 @@ async function assertPrivateFixtureSemantics(
     "/ Unlimited · TX",
   );
   await expect(tx.locator(".unlimitedTrafficTrack")).toBeVisible();
-  await expect(noReset.locator(".vpsMonitorTraffic")).toContainText("No reset");
   await expect(
-    emptyRates.locator(".vpsMonitorFlowFacts strong"),
-  ).toHaveText(["-", "-"]);
-  await expect(unconfigured.locator('[data-fact-kind="billing"] strong')).toHaveText("-");
+    noReset.locator(".vpsMonitorTraffic .vpsMonitorRowHeading"),
+  ).toHaveText("Traffic");
+  await expect(noReset.locator(".vpsMonitorTraffic")).not.toContainText(
+    "No reset",
+  );
+  await expect(emptyRates.locator(".vpsMonitorFlowFacts strong")).toHaveText([
+    "-",
+    "-",
+  ]);
+  await expect(
+    unconfigured.locator('[data-fact-kind="billing"] strong'),
+  ).toHaveText("-");
   await expect(unconfigured).not.toContainText("N/A");
   await expect(noPrimary.locator(".vpsMonitorPing")).toContainText("-");
 }
 
-async function assertSharedFixtureSemantics(
-  grid: ReturnType<Page["locator"]>,
-) {
+async function assertSharedFixtureSemantics(grid: ReturnType<Page["locator"]>) {
   const total = publicCardNamed(grid, "Total quota · Monthly");
+  const exceeded = publicCardNamed(grid, "Traffic quota exceeded");
   const rx = publicCardNamed(grid, "RX quota · Annual");
   const tx = publicCardNamed(grid, "TX quota · Unlimited");
   const noReset = publicCardNamed(grid, "Accumulated archive");
@@ -261,7 +340,16 @@ async function assertSharedFixtureSemantics(
   const unconfigured = publicCardNamed(grid, "Unconfigured traffic");
   const noPrimary = publicCardNamed(grid, "No primary Ping");
 
-  for (const card of [total, rx, tx, noReset, emptyRates, unconfigured, noPrimary]) {
+  for (const card of [
+    total,
+    exceeded,
+    rx,
+    tx,
+    noReset,
+    emptyRates,
+    unconfigured,
+    noPrimary,
+  ]) {
     await expect(card).toBeVisible();
   }
   await expect(total.locator(".publicMonitoringTraffic")).toContainText(
@@ -270,6 +358,7 @@ async function assertSharedFixtureSemantics(
   await expect(total.locator('[data-fact-kind="billing"]')).toContainText(
     "Renews day 14",
   );
+  await expectExceededTraffic(exceeded.locator(".publicMonitoringTraffic"));
   await expect(rx.locator(".publicMonitoringTraffic")).toContainText("· RX ·");
   await expect(rx.locator('[data-fact-kind="billing"]')).toContainText(
     "Renews 06-15",
@@ -278,13 +367,19 @@ async function assertSharedFixtureSemantics(
     "/ Unlimited · TX",
   );
   await expect(tx.locator(".unlimitedTrafficTrack")).toBeVisible();
-  await expect(noReset.locator(".publicMonitoringTraffic")).toContainText(
+  await expect(
+    noReset.locator(".publicMonitoringTraffic .vpsMonitorRowHeading"),
+  ).toHaveText("Traffic");
+  await expect(noReset.locator(".publicMonitoringTraffic")).not.toContainText(
     "No reset",
   );
+  await expect(emptyRates.locator(".vpsMonitorFlowFacts strong")).toHaveText([
+    "-",
+    "-",
+  ]);
   await expect(
-    emptyRates.locator(".vpsMonitorFlowFacts strong"),
-  ).toHaveText(["-", "-"]);
-  await expect(unconfigured.locator('[data-fact-kind="billing"] strong')).toHaveText("-");
+    unconfigured.locator('[data-fact-kind="billing"] strong'),
+  ).toHaveText("-");
   await expect(unconfigured.locator(".publicMonitoringTraffic")).toHaveClass(
     /unconfigured/,
   );
@@ -298,4 +393,36 @@ async function capture(page: Page, filename: string) {
     fullPage: true,
     path: join(outputDir, filename),
   });
+}
+
+async function expectEqualCompactPingHeight(
+  configured: ReturnType<Page["locator"]>,
+  unconfigured: ReturnType<Page["locator"]>,
+) {
+  await expect
+    .poll(async () => {
+      const configuredBox = await configured.boundingBox();
+      const unconfiguredBox = await unconfigured.boundingBox();
+      if (!configuredBox || !unconfiguredBox) return Number.POSITIVE_INFINITY;
+      return Math.abs(configuredBox.height - unconfiguredBox.height);
+    })
+    .toBeLessThanOrEqual(1);
+}
+
+async function expectExceededTraffic(traffic: ReturnType<Page["locator"]>) {
+  await expect(traffic).toHaveClass(/(?:exceeded|overQuota)/);
+  await expect(traffic).toContainText(/120(?:\.0)?%/);
+  const meter = traffic.getByRole("meter");
+  await expect(meter).toHaveAttribute("aria-valuenow", "100");
+  await expect(meter).toHaveAttribute(
+    "aria-valuetext",
+    /120(?:\.0)?(?: percent|%)/,
+  );
+  const fill = meter.locator(":scope > span");
+  await expect(fill).toBeVisible();
+  await expect
+    .poll(() =>
+      fill.evaluate((element) => getComputedStyle(element).backgroundColor),
+    )
+    .toBe("rgb(249, 171, 0)");
 }

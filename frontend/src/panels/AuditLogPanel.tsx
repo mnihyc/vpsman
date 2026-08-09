@@ -654,7 +654,7 @@ export function AuditLogPanel({
           <div className="auditEventSummary" aria-label="Audit event summary">
             <div
               className="auditEventMetric"
-              title={`Visible audit events: ${hasAuditFilters ? `${filteredAudits.length} of ${auditsTruncated ? "at least " : ""}${audits.length}` : `${auditsTruncated ? "at least " : ""}${audits.length}`}.`}
+              title="Count after applying the current audit filters; an API result limit keeps a truncated total as a lower bound."
             >
               <span>Visible events</span>
               <strong>
@@ -688,7 +688,7 @@ export function AuditLogPanel({
             </div>
             <div
               className="auditEventMetric"
-              title={`${relatedAuditCount} visible audit events link to job, terminal, session, or schedule evidence.`}
+              title="Links are derived from audit metadata and open the corresponding job, terminal, session, or schedule evidence."
             >
               <span>Related evidence</span>
               <strong>{relatedAuditCount} linked</strong>
@@ -696,11 +696,7 @@ export function AuditLogPanel({
             </div>
             <div
               className="auditEventMetric"
-              title={
-                auditActors.length > 0
-                  ? `${auditActors.length} distinct actors are visible in the loaded audit events.`
-                  : "No actor identity is available in the loaded audit events."
-              }
+              title="Distinct non-empty actor identifiers in the loaded audit event set."
             >
               <span>Known actors</span>
               <strong>{auditActors.length || "None"}</strong>
@@ -1132,7 +1128,7 @@ export function AuditLogPanel({
                     data-tooltip-empty-reason="No cleanup cutoff is configured for the selected history domain."
                     title={
                       retentionDays.trim()
-                        ? `Cleanup includes records older than ${retentionDays} days.`
+                        ? undefined
                         : "No cleanup cutoff is configured for the selected history domain."
                     }
                   >
@@ -1485,7 +1481,10 @@ function AuditEventDetailPanel({
             ))}
         </div>
       )}
-      <details className="auditEventAdvanced">
+      <details
+        className="auditEventAdvanced"
+        title="Raw persisted action, target, identifiers, and metadata for this audit event."
+      >
         <summary>Advanced event data</summary>
         <div className="consoleInlineDetailGrid">
           <span>
@@ -1509,9 +1508,7 @@ function AuditEventDetailPanel({
             <span>{audit.target}</span>
           </span>
         </div>
-        <pre className="auditEventMetadata" data-value-tooltip-skip="true">
-          {jsonText(audit.metadata)}
-        </pre>
+        <pre className="auditEventMetadata">{jsonText(audit.metadata)}</pre>
       </details>
     </div>
   );

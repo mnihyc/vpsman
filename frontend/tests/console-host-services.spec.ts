@@ -26,8 +26,12 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
   await expect(summary.getByText("systemd", { exact: true })).toBeVisible();
   await expect(summary.getByText("1 / 3", { exact: true })).toBeVisible();
   await expect(summary.getByText("1", { exact: true }).first()).toBeVisible();
-  await expect(panel.getByText("sshd.service", { exact: true }).first()).toBeVisible();
-  await expect(panel.getByText("example-worker.service", { exact: true }).first()).toBeVisible();
+  await expect(
+    panel.getByText("sshd.service", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    panel.getByText("example-worker.service", { exact: true }).first(),
+  ).toBeVisible();
 
   const beforeRefresh = await serviceInventoryRequestCount(page);
   await panel
@@ -36,15 +40,27 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
       (button as HTMLButtonElement).click();
       (button as HTMLButtonElement).click();
     });
-  await expect.poll(() => serviceInventoryRequestCount(page)).toBe(
-    beforeRefresh + 1,
-  );
+  await expect
+    .poll(() => serviceInventoryRequestCount(page))
+    .toBe(beforeRefresh + 1);
   await expect(
     panel.getByText(/Service inventory refreshed from edge-sfo-01/),
   ).toBeVisible();
 
   const grid = panel.getByLabel("Host service inventory data grid");
-  await expect(grid.locator(".status.danger", { hasText: "Failed" })).toBeVisible();
+  await expect(
+    grid.locator(".status.danger", { hasText: "Failed" }),
+  ).toBeVisible();
+  const failedServiceRow = grid
+    .locator(
+      testInfo.project.name.includes("mobile") ? ".gridMobileCard" : ".gridRow",
+    )
+    .filter({ hasText: "example-worker.service" });
+  await expect(
+    failedServiceRow.locator(
+      '.historyPrimary[title="Provider diagnostic: Result: exit-code"]',
+    ),
+  ).toBeVisible();
   if (testInfo.project.name.includes("mobile")) {
     const card = grid.getByLabel(
       "Host service inventory mobile card sshd.service",
@@ -61,11 +77,20 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
     }),
   ).toBeVisible();
 
-  await invokeServiceAction(page, grid, "sshd.service", "Logs", testInfo.project.name);
-  const logs = page.locator(".consoleDetailPanel", { hasText: "sshd.service logs" });
+  await invokeServiceAction(
+    page,
+    grid,
+    "sshd.service",
+    "Logs",
+    testInfo.project.name,
+  );
+  const logs = page.locator(".consoleDetailPanel", {
+    hasText: "sshd.service logs",
+  });
   await expect(logs).toBeVisible();
   await expect(logs).toContainText("Server listening on 0.0.0.0 port 22");
   await expect(logs).toContainText("Accepted publickey for operator");
+  await expect(logs.locator(".serviceLogOutput")).not.toHaveAttribute("title");
   await activate(logs.getByRole("button", { name: "Close detail panel" }));
   await expect(logs).toBeHidden();
 
@@ -91,6 +116,9 @@ test("keeps host services routable and exposes logs plus snapshot-bound actions"
   await expect(
     panel.getByText(/Restarted sshd\.service on edge-sfo-01/),
   ).toBeVisible();
+  await expect(panel.locator(".hostServiceActionFeedback")).not.toHaveAttribute(
+    "title",
+  );
   await expect
     .poll(() =>
       panel.locator(".hostServiceActionFeedback").evaluate((element) => {
@@ -156,7 +184,7 @@ test("keeps an unsupported service provider visible and non-mutating", async ({
     provider: null,
     provider_version: null,
     reason:
-      "PID 1 is \"tini\"; no active supported provider was confirmed (systemd, OpenRC, or SysV init)",
+      'PID 1 is "tini"; no active supported provider was confirmed (systemd, OpenRC, or SysV init)',
     status: "unsupported",
   };
   unsupported.services = [];
@@ -171,7 +199,9 @@ test("keeps an unsupported service provider visible and non-mutating", async ({
   await page.getByRole("option", { name: /edge-sfo-01/ }).click();
 
   const panel = page.locator(".hostServicesPanel");
-  await expect(panel.getByText(/^Unsupported:/)).toContainText("PID 1 is \"tini\"");
+  await expect(panel.getByText(/^Unsupported:/)).toContainText(
+    'PID 1 is "tini"',
+  );
   await expect(panel.getByText("Not detected", { exact: true })).toBeVisible();
   await expect(panel.getByText("Service provider not checked")).toBeVisible();
   await expect(

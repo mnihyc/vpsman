@@ -136,10 +136,12 @@ export function ConsoleShell({
 }: ConsoleShellProps) {
   const { preferences } = usePanelDisplaySettings();
   const initialSubpanelPreferences = useRef(readSidebarSubpanelPreferences());
-  const storedDefaultRef = useRef<string | null>(initialSubpanelPreferences.current.defaultMode);
-  const [manualSubpanelState, setManualSubpanelState] = useState<Record<string, boolean>>(
-    initialSubpanelPreferences.current.state,
+  const storedDefaultRef = useRef<string | null>(
+    initialSubpanelPreferences.current.defaultMode,
   );
+  const [manualSubpanelState, setManualSubpanelState] = useState<
+    Record<string, boolean>
+  >(initialSubpanelPreferences.current.state);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [activeCommandIndex, setActiveCommandIndex] = useState(0);
@@ -156,22 +158,27 @@ export function ConsoleShell({
   const activeSubpageButtonRef = useRef<HTMLButtonElement | null>(null);
   const handledSidebarFocusRequestRef = useRef(sidebarFocusRequest);
   const topbarRef = useRef<HTMLElement | null>(null);
-  const hasFleetScope = fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
-  const activeSavedFleetView = savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
+  const hasFleetScope =
+    fleetQuery.trim().length > 0 || activeSavedFleetViewId !== null;
+  const activeSavedFleetView =
+    savedFleetViews.find((view) => view.id === activeSavedFleetViewId) ?? null;
   const draftSavedFleetViewMatchesExisting = Boolean(
     draftSavedFleetViewName.trim() &&
-      savedFleetViews.some(
-        (view) =>
-          view.name.trim().toLocaleLowerCase() ===
-          draftSavedFleetViewName.trim().toLocaleLowerCase(),
-      ),
+    savedFleetViews.some(
+      (view) =>
+        view.name.trim().toLocaleLowerCase() ===
+        draftSavedFleetViewName.trim().toLocaleLowerCase(),
+    ),
   );
   const savedFleetViewActionLabel = draftSavedFleetViewMatchesExisting
     ? "Override saved fleet view"
     : "Save current fleet view";
-  const scopeName = activeSavedFleetView?.name ?? (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
+  const scopeName =
+    activeSavedFleetView?.name ??
+    (fleetQuery.trim() ? "Filtered resources" : "All VPS resources");
   const showFullFleetMetrics =
-    activeView === "Home" || (activeView === "Fleet" && activeSubpage === "monitor");
+    activeView === "Home" ||
+    (activeView === "Fleet" && activeSubpage === "monitor");
   const noContactCount = summary.never + summary.unknown;
   const unavailableCount =
     summary.offline + summary.stale + summary.revoked + noContactCount;
@@ -194,7 +201,10 @@ export function ConsoleShell({
   const activeViewLabel = viewLabel(activeView);
   const activeSubpageBase = activeSubpage.split(":")[0];
   const activeSubpageLabel = subpageLabel(activeView, activeSubpage);
-  const activeSubpageDescription = subpageDescription(activeView, activeSubpage);
+  const activeSubpageDescription = subpageDescription(
+    activeView,
+    activeSubpage,
+  );
   const controlPlaneLabel = !browserOnline
     ? "Offline"
     : wsState === "connected"
@@ -255,20 +265,32 @@ export function ConsoleShell({
     if (manual !== undefined) {
       return manual;
     }
-    return preferences.sidebar_subpanel_default === "all" || activeView === view;
+    return (
+      preferences.sidebar_subpanel_default === "all" || activeView === view
+    );
   };
   const toggleSubpanel = (view: ActiveView, expanded: boolean) => {
     setManualSubpanelState((current) => {
       const next = { ...current, [view]: !expanded };
-      writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+      writeSidebarSubpanelPreferences(
+        preferences.sidebar_subpanel_default,
+        next,
+      );
       return next;
     });
   };
-  const selectPrimaryNavItem = (view: ActiveView, hasSubpages: boolean, expanded: boolean) => {
+  const selectPrimaryNavItem = (
+    view: ActiveView,
+    hasSubpages: boolean,
+    expanded: boolean,
+  ) => {
     if (hasSubpages && !expanded) {
       setManualSubpanelState((current) => {
         const next = { ...current, [view]: true };
-        writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+        writeSidebarSubpanelPreferences(
+          preferences.sidebar_subpanel_default,
+          next,
+        );
         return next;
       });
     }
@@ -377,7 +399,9 @@ export function ConsoleShell({
         onChange={(event) => onApplySavedFleetView(event.target.value)}
         value={activeSavedFleetViewId ?? ""}
       >
-        <option value="" title="Saved views">Saved views</option>
+        <option value="" title="Saved views">
+          Saved views
+        </option>
         {savedFleetViews.map((view) => (
           <option key={view.id} value={view.id} title={view.name}>
             {view.name}
@@ -389,7 +413,6 @@ export function ConsoleShell({
         name="saved_fleet_view_name"
         onChange={(event) => onSavedFleetViewNameChange(event.target.value)}
         placeholder="View name"
-        title={draftSavedFleetViewName || "View name"}
         value={draftSavedFleetViewName}
       />
       <button
@@ -442,7 +465,11 @@ export function ConsoleShell({
     }
     storedDefaultRef.current = defaultMode;
     writeSidebarSubpanelPreferences(defaultMode, manualSubpanelState);
-  }, [manualSubpanelState, operatorPreferencesReady, preferences.sidebar_subpanel_default]);
+  }, [
+    manualSubpanelState,
+    operatorPreferencesReady,
+    preferences.sidebar_subpanel_default,
+  ]);
 
   useEffect(() => {
     if ((viewSubpages[activeView] ?? []).length <= 1) {
@@ -453,14 +480,13 @@ export function ConsoleShell({
         return current;
       }
       const next = { ...current, [activeView]: true };
-      writeSidebarSubpanelPreferences(preferences.sidebar_subpanel_default, next);
+      writeSidebarSubpanelPreferences(
+        preferences.sidebar_subpanel_default,
+        next,
+      );
       return next;
     });
-  }, [
-    activeView,
-    preferences.sidebar_subpanel_default,
-    sidebarFocusRequest,
-  ]);
+  }, [activeView, preferences.sidebar_subpanel_default, sidebarFocusRequest]);
 
   useEffect(() => {
     const content = contentRef.current;
@@ -474,9 +500,10 @@ export function ConsoleShell({
     );
     const updateScrollOffset = () => {
       const height = Math.ceil(topbar.getBoundingClientRect().height);
-      const offset = getComputedStyle(topbar).position === "sticky"
-        ? `${height + 16}px`
-        : "16px";
+      const offset =
+        getComputedStyle(topbar).position === "sticky"
+          ? `${height + 16}px`
+          : "16px";
       content.style.setProperty("--console-sticky-offset", offset);
       root.style.setProperty("--console-sticky-offset", offset);
     };
@@ -500,7 +527,10 @@ export function ConsoleShell({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLocaleLowerCase() === "k"
+      ) {
         event.preventDefault();
         openCommandPalette();
         return;
@@ -558,10 +588,7 @@ export function ConsoleShell({
       sibling.element.setAttribute("aria-hidden", "true");
     }
     const containFocus = (event: FocusEvent) => {
-      if (
-        event.target instanceof Node &&
-        !backdrop.contains(event.target)
-      ) {
+      if (event.target instanceof Node && !backdrop.contains(event.target)) {
         commandInputRef.current?.focus({ preventScroll: true });
       }
     };
@@ -654,12 +681,7 @@ export function ConsoleShell({
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [
-    activeSubpageBase,
-    activeView,
-    manualSubpanelState,
-    sidebarFocusRequest,
-  ]);
+  }, [activeSubpageBase, activeView, manualSubpanelState, sidebarFocusRequest]);
 
   return (
     <div className="shell">
@@ -693,12 +715,26 @@ export function ConsoleShell({
                 const expanded = isSubpanelExpanded(item.view, hasSubpages);
                 return (
                   <div className="navGroup" key={item.view}>
-                    <div className={activeView === item.view ? "navItemRow active" : "navItemRow"}>
+                    <div
+                      className={
+                        activeView === item.view
+                          ? "navItemRow active"
+                          : "navItemRow"
+                      }
+                    >
                       <button
                         aria-label={label}
-                        aria-current={activeView === item.view ? "page" : undefined}
-                        className={activeView === item.view ? "navItem active" : "navItem"}
-                        onClick={() => selectPrimaryNavItem(item.view, hasSubpages, expanded)}
+                        aria-current={
+                          activeView === item.view ? "page" : undefined
+                        }
+                        className={
+                          activeView === item.view
+                            ? "navItem active"
+                            : "navItem"
+                        }
+                        onClick={() =>
+                          selectPrimaryNavItem(item.view, hasSubpages, expanded)
+                        }
                         ref={
                           activeView === item.view
                             ? activePrimaryButtonRef
@@ -713,13 +749,19 @@ export function ConsoleShell({
                       {hasSubpages && (
                         <button
                           aria-expanded={expanded}
-                          aria-label={expanded ? "Collapse subpages" : "Expand subpages"}
+                          aria-label={
+                            expanded ? "Collapse subpages" : "Expand subpages"
+                          }
                           className="subnavToggle"
                           onClick={() => toggleSubpanel(item.view, expanded)}
                           title={`${expanded ? "Collapse" : "Expand"} ${label} sections`}
                           type="button"
                         >
-                          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                          {expanded ? (
+                            <ChevronDown size={16} />
+                          ) : (
+                            <ChevronRight size={16} />
+                          )}
                         </button>
                       )}
                     </div>
@@ -757,7 +799,12 @@ export function ConsoleShell({
         </nav>
       </aside>
 
-      <main className="content" id="console-main-content" ref={contentRef} tabIndex={-1}>
+      <main
+        className="content"
+        id="console-main-content"
+        ref={contentRef}
+        tabIndex={-1}
+      >
         <header className="topbar" ref={topbarRef}>
           <div className="scopeSelectorGroup">
             <button
@@ -814,7 +861,10 @@ export function ConsoleShell({
                   <optgroup key={section.label} label={section.label}>
                     {section.items.flatMap((item) =>
                       (viewSubpages[item.view] ?? []).map((subpage) => (
-                        <option key={`${item.view}:${subpage.id}`} value={`${item.view}::${subpage.id}`}>
+                        <option
+                          key={`${item.view}:${subpage.id}`}
+                          value={`${item.view}::${subpage.id}`}
+                        >
                           {viewLabel(item.view)} / {subpage.label}
                         </option>
                       )),
@@ -920,12 +970,23 @@ export function ConsoleShell({
           className={`consoleHeader${hideFleetStatusSummary ? " withoutFleetStatus" : ""}`}
         >
           <div className="titleBlock">
-            <span className="breadcrumb" title={`vpsman / ${activeViewLabel} / ${activeSubpageLabel}`}>
+            <span
+              className="breadcrumb"
+              title={`vpsman / ${activeViewLabel} / ${activeSubpageLabel}`}
+            >
               vpsman / {activeViewLabel} / {activeSubpageLabel}
             </span>
             <h1>{pageTitle}</h1>
-            <p className="pageDescription" title={pageDescription || activeSubpageDescription}>{pageDescription || activeSubpageDescription}</p>
-            <div className="pageHeaderContext" aria-label="Page operational context">
+            <p
+              className="pageDescription"
+              title={pageDescription || activeSubpageDescription}
+            >
+              {pageDescription || activeSubpageDescription}
+            </p>
+            <div
+              className="pageHeaderContext"
+              aria-label="Page operational context"
+            >
               <span>
                 <strong>Scope</strong>
                 {scopeName}
@@ -948,7 +1009,9 @@ export function ConsoleShell({
               <Metric
                 label="Online"
                 value={
-                  fleetCoreEvidenceAvailable ? String(summary.online) : "Unknown"
+                  fleetCoreEvidenceAvailable
+                    ? String(summary.online)
+                    : "Unknown"
                 }
                 tone={fleetCoreEvidenceAvailable ? "green" : "neutral"}
               />
@@ -980,7 +1043,9 @@ export function ConsoleShell({
                 label="Access revoked"
                 title="VPS identities whose current key is blocked; assign a new key to recover the same VPS ID"
                 value={
-                  fleetCoreEvidenceAvailable ? String(summary.revoked) : "Unknown"
+                  fleetCoreEvidenceAvailable
+                    ? String(summary.revoked)
+                    : "Unknown"
                 }
                 tone={
                   fleetCoreEvidenceAvailable && summary.revoked > 0
@@ -1028,18 +1093,18 @@ export function ConsoleShell({
                   !fleetAlertsEvidenceAvailable
                     ? "Unknown"
                     : alertCounts.truncated && alertCounts.total === 0
-                    ? "0 loaded"
-                    : formatLowerBoundCount(
-                        alertCounts.total,
-                        alertCounts.truncated,
-                      )
+                      ? "0 loaded"
+                      : formatLowerBoundCount(
+                          alertCounts.total,
+                          alertCounts.truncated,
+                        )
                 }
                 tone={
                   !fleetAlertsEvidenceAvailable
                     ? "neutral"
                     : alertCounts.total > 0 || alertCounts.truncated
-                    ? "yellow"
-                    : "green"
+                      ? "yellow"
+                      : "green"
                 }
               />
               <Metric
@@ -1077,12 +1142,14 @@ export function ConsoleShell({
                 {!fleetAlertsEvidenceAvailable
                   ? "Alert evidence unavailable"
                   : alertCounts.total > 0
-                  ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} open · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
-                  : alertCounts.truncated
-                    ? "No matching alerts in the loaded page · more may exist"
-                    : "No active alerts"}
+                    ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} open · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
+                    : alertCounts.truncated
+                      ? "No matching alerts in the loaded page · more may exist"
+                      : "No active alerts"}
               </span>
-              <small className={fleetCoreEvidenceAvailable ? undefined : "unknown"}>
+              <small
+                className={fleetCoreEvidenceAvailable ? undefined : "unknown"}
+              >
                 {fleetCoreEvidenceAvailable
                   ? `${onlineRatio} online`
                   : "Online evidence unavailable"}
@@ -1128,8 +1195,7 @@ export function ConsoleShell({
                   if (event.key === "ArrowDown") {
                     event.preventDefault();
                     setActiveCommandIndex(
-                      (current) =>
-                        (current + 1) % filteredCommandItems.length,
+                      (current) => (current + 1) % filteredCommandItems.length,
                     );
                   } else if (event.key === "ArrowUp") {
                     event.preventDefault();
@@ -1204,7 +1270,9 @@ export function ConsoleShell({
                             <strong title={item.label}>{item.label}</strong>
                             <small title={item.detail}>{item.detail}</small>
                           </span>
-                          <span className="commandPaletteGroupBadge">{item.group}</span>
+                          <span className="commandPaletteGroupBadge">
+                            {item.group}
+                          </span>
                         </button>
                       );
                     })}
@@ -1241,7 +1309,8 @@ function readSidebarSubpanelPreferences(): SidebarSubpanelPreferences {
     if ("state" in parsed) {
       const record = parsed as { defaultMode?: unknown; state?: unknown };
       return {
-        defaultMode: typeof record.defaultMode === "string" ? record.defaultMode : null,
+        defaultMode:
+          typeof record.defaultMode === "string" ? record.defaultMode : null,
         state: sanitizeSidebarSubpanelState(record.state),
       };
     }
@@ -1259,11 +1328,16 @@ function sanitizeSidebarSubpanelState(value: unknown): Record<string, boolean> {
     return {};
   }
   return Object.fromEntries(
-    Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"),
+    Object.entries(value).filter(
+      (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
+    ),
   );
 }
 
-function writeSidebarSubpanelPreferences(defaultMode: string, state: Record<string, boolean>) {
+function writeSidebarSubpanelPreferences(
+  defaultMode: string,
+  state: Record<string, boolean>,
+) {
   try {
     window.localStorage.setItem(
       SIDEBAR_SUBPANEL_STORAGE_KEY,

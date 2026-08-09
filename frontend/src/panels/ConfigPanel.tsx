@@ -2084,7 +2084,14 @@ function BulkConfigApply({
 
   return (
     <div className="configApplyGrid">
-      <section className="compactForm bulkPatchPrimary">
+      <section
+        className="compactForm bulkPatchPrimary"
+        title={
+          patchMode === "generator"
+            ? "Supply values for the selected generator and review its server-rendered TOML patch before dispatch."
+            : "Write an incremental TOML patch to review before dispatch."
+        }
+      >
         <div className="bulkPatchHeader">
           <ConfigHelpLabel
             help={CONFIG_HELP.incrementalPatch}
@@ -2161,23 +2168,19 @@ function BulkConfigApply({
             )}
             <textarea
               aria-label="Patch generator values JSON"
-              data-tooltip-sensitive="true"
               onChange={(event) => {
                 setValuesText(event.target.value);
                 setRendered(null);
                 clearBulkConfigReview();
               }}
               rows={7}
-              title="Patch generator values JSON editor; content is excluded from tooltips"
               value={valuesText}
             />
             {rendered && (
               <textarea
                 aria-label="Rendered bulk runtime config patch TOML"
-                data-tooltip-sensitive="true"
                 readOnly
                 rows={8}
-                title="Rendered runtime configuration patch; content is excluded from tooltips"
                 value={rendered.toml}
               />
             )}
@@ -2185,14 +2188,12 @@ function BulkConfigApply({
         ) : (
           <textarea
             aria-label="Temporary bulk runtime config patch TOML"
-            data-tooltip-sensitive="true"
             onChange={(event) => {
               setTemporaryToml(event.target.value);
               clearBulkConfigReview();
             }}
             placeholder="[telemetry]\n# paste one incremental TOML patch"
             rows={14}
-            title="Temporary runtime configuration patch editor; content is excluded from tooltips"
             value={temporaryToml}
           />
         )}
@@ -2486,11 +2487,10 @@ function BulkConfigApply({
                   </label>
                   <label
                     className="consoleField fieldFull"
-                    title="Patch generator field schema editor; JSON content is excluded from tooltips"
+                    title="Define the patch generator fields as JSON."
                   >
                     <span>Field schema JSON</span>
                     <textarea
-                      data-tooltip-sensitive="true"
                       required
                       rows={7}
                       value={patchGeneratorEditor.fieldSchemaText}
@@ -2503,11 +2503,10 @@ function BulkConfigApply({
                   </label>
                   <label
                     className="consoleField fieldFull"
-                    title="Patch generator body editor; template content is excluded from tooltips"
+                    title="Define the configuration template rendered by this patch generator."
                   >
                     <span>Generator body</span>
                     <textarea
-                      data-tooltip-sensitive="true"
                       required
                       rows={8}
                       value={patchGeneratorEditor.rawGeneratorBody}
@@ -2521,11 +2520,10 @@ function BulkConfigApply({
                   </label>
                   <label
                     className="consoleField fieldFull"
-                    title="Patch generator documentation metadata editor; JSON content is excluded from tooltips"
+                    title="Define patch generator documentation metadata as JSON."
                   >
                     <span>Docs metadata JSON</span>
                     <textarea
-                      data-tooltip-sensitive="true"
                       required
                       rows={6}
                       value={patchGeneratorEditor.docsMetadataText}
@@ -3287,10 +3285,8 @@ function SingleVpsConfig({
             </span>
             <textarea
               aria-label="VPS redacted runtime config TOML"
-              data-tooltip-sensitive="true"
               readOnly
               rows={18}
-              title="Redacted runtime configuration; TOML content is excluded from tooltips"
               value={redactedToml}
             />
             <span className="formHint">
@@ -3329,14 +3325,12 @@ function SingleVpsConfig({
             />
             <textarea
               aria-label="One-VPS runtime config override TOML"
-              data-tooltip-sensitive="true"
               onChange={(event) => {
                 clearSingleConfigReview();
                 setOverrideToml(event.target.value);
               }}
               placeholder="[update]\n# one incremental override for this VPS"
               rows={14}
-              title="One-VPS runtime configuration override editor; TOML content is excluded from tooltips"
               value={overrideToml}
             />
             <ActionFeedback
@@ -3519,14 +3513,14 @@ const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
     placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
   },
   {
-    help: "Day of month in UTC when traffic accounting resets. Use -1 for no reset; totals then accumulate from the earliest retained counter evidence.",
+    help: "Day of month in UTC when traffic accounting resets. Use -1 to accumulate totals continuously from the earliest retained counter evidence.",
     inputMode: "numeric",
     key: "traffic.reset_day",
     label: "Reset day",
     placeholder: "-1 or 14",
   },
   {
-    help: "Total traffic quota for the current reset cycle or accumulated no-reset total. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
+    help: "Total traffic quota for the current reset cycle or continuously accumulated total. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
     inputMode: "text",
     key: "traffic.quota.total",
     label: "Total quota",
@@ -3734,7 +3728,7 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
     "Do not select the same interface direction more than once.",
   traffic_selector_too_many_items: "Use no more than 16 selectors.",
   traffic_reset_day_invalid:
-    "Traffic reset day must be -1 for no reset, or between 1 and 31.",
+    "Traffic reset day must be -1 for continuous accumulation, or between 1 and 31.",
   byte_size_empty: "Enter a traffic quota or use -1 for unlimited.",
   byte_size_number_invalid: "Traffic quota must start with a valid number.",
   byte_size_unit_invalid: "Use bytes, KB, MB, GB, TB, KiB, MiB, GiB, or TiB.",
@@ -4924,6 +4918,7 @@ function VpsRulesPanel({
                       </span>
                       <input
                         aria-label={field.label}
+                        data-tooltip-disabled-reason={`Wait for the current VPS rule operation to finish before editing ${field.label}.`}
                         disabled={applyPending}
                         inputMode={field.inputMode ?? "text"}
                         onChange={(event) => {
@@ -4939,11 +4934,6 @@ function VpsRulesPanel({
                           );
                         }}
                         placeholder={field.placeholder}
-                        title={
-                          applyPending
-                            ? `Wait for the current VPS rule operation to finish before editing ${field.label}`
-                            : field.help
-                        }
                         value={typedRuleValues[field.key] ?? ""}
                       />
                     </label>
@@ -4953,18 +4943,11 @@ function VpsRulesPanel({
                   className="vpsRulesAdvancedRaw"
                   title="Edit advanced VPS rule key/value lines not covered by the common typed cards"
                 >
-                  <summary title="Show or hide the advanced raw VPS rule editor">
-                    Advanced raw key/value
-                  </summary>
+                  <summary>Advanced raw key/value</summary>
                   <textarea
                     aria-label="VPS rule set values"
-                    data-tooltip-sensitive="true"
+                    data-tooltip-disabled-reason="Wait for the current VPS rule operation to finish before editing raw values."
                     disabled={applyPending}
-                    title={
-                      applyPending
-                        ? "Wait for the current VPS rule operation to finish before editing raw values"
-                        : "One typed key=value VPS rule update per line"
-                    }
                     value={valuesText}
                     onChange={(event) => {
                       ruleDraftTouchedRef.current = true;
@@ -4999,14 +4982,10 @@ function VpsRulesPanel({
                       <input
                         aria-label={`Unset ${key}`}
                         checked={unsetKeys.includes(key)}
+                        data-tooltip-disabled-reason={`Wait for the current VPS rule operation to finish before selecting ${key}.`}
                         disabled={applyPending}
                         onChange={(event) =>
                           toggleUnsetKey(key, event.target.checked)
-                        }
-                        title={
-                          applyPending
-                            ? `Wait for the current VPS rule operation to finish before selecting ${key}`
-                            : `Unset VPS rule key ${key}`
                         }
                         type="checkbox"
                       />

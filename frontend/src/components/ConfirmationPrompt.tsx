@@ -467,7 +467,6 @@ export function ConfirmationPrompt({
       aria-modal={displayMode === "overlay" ? true : undefined}
       role={displayMode === "overlay" ? "dialog" : "region"}
       tabIndex={-1}
-      title={`${title}. Review the exact scope and effect before confirming.`}
     >
       <div className="confirmationPromptIcon">
         <AlertTriangle size={18} />
@@ -477,26 +476,18 @@ export function ConfirmationPrompt({
         <span>{detail}</span>
         {items.length > 0 && (
           <dl>
-            {items.map((item) => {
-              const valueTitle = item.sensitive
-                ? confirmationItemTitle(item.label, item.value, true)
-                : (item.title ??
-                  confirmationItemTitle(item.label, item.value, false));
-              return (
-                <div key={item.label}>
-                  <dt title={`${item.label} review field.`}>{item.label}</dt>
-                  <dd
-                    data-tooltip-sensitive={item.sensitive ? "true" : undefined}
-                    data-value-tooltip-skip={
-                      item.sensitive ? "true" : undefined
-                    }
-                    title={valueTitle}
-                  >
-                    {item.value}
-                  </dd>
-                </div>
-              );
-            })}
+            {items.map((item) => (
+              <div key={item.label}>
+                <dt>{item.label}</dt>
+                <dd
+                  data-tooltip-sensitive={item.sensitive ? "true" : undefined}
+                  data-value-tooltip-skip={item.sensitive ? "true" : undefined}
+                  title={item.title}
+                >
+                  {item.value}
+                </dd>
+              </div>
+            ))}
           </dl>
         )}
         {typedConfirmationRequired && (
@@ -804,21 +795,4 @@ function resolveConfirmationFocusTarget(
 
 function normalizeFocusText(value: string) {
   return value.replace(/\s+/g, " ").trim();
-}
-
-function confirmationItemTitle(
-  label: string,
-  value: ReactNode,
-  sensitive: boolean,
-): string {
-  if (sensitive) {
-    return `${label} is shown in this confirmation; its exact value is excluded from tooltips.`;
-  }
-  if (typeof value === "string" || typeof value === "number") {
-    const text = String(value);
-    return text === "-"
-      ? `${label} has no available value.`
-      : `${label}: ${text}.`;
-  }
-  return `${label} review value.`;
 }

@@ -1,5 +1,14 @@
-import { Activity, DatabaseBackup, Download, PackageCheck, Upload } from "lucide-react";
-import { FILE_TRANSFER_CHUNK_BYTES, MAX_CHUNKED_FILE_PUSH_BYTES } from "../../fileTransfer";
+import {
+  Activity,
+  DatabaseBackup,
+  Download,
+  PackageCheck,
+  Upload,
+} from "lucide-react";
+import {
+  FILE_TRANSFER_CHUNK_BYTES,
+  MAX_CHUNKED_FILE_PUSH_BYTES,
+} from "../../fileTransfer";
 import {
   COMMAND_ARGV_PLACEHOLDER,
   FILE_PULL_PATH_PLACEHOLDER,
@@ -12,7 +21,10 @@ import {
   MAX_BROWSER_RESUMABLE_UPLOAD_BYTES,
   MAX_FILE_TRANSFER_RATE_LIMIT_KBPS,
 } from "../../resumableFileTransfer";
-import type { BrowserDownloadSinkMode, BrowserTransferMultiTargetPolicy } from "../../resumableFileTransfer";
+import type {
+  BrowserDownloadSinkMode,
+  BrowserTransferMultiTargetPolicy,
+} from "../../resumableFileTransfer";
 import type { FileExistingPolicy } from "../../types";
 import type { FileTransferSourceArtifactRecord } from "../../typesFileTransfer";
 import type { DispatchMode, SupervisorAction } from "../jobDispatchModel";
@@ -52,7 +64,10 @@ export function OperationModeTabs({
           ))}
         </select>
       </label>
-      <div className="operationGroupTabs" aria-label="Dispatch operation groups">
+      <div
+        className="operationGroupTabs"
+        aria-label="Dispatch operation groups"
+      >
         {groups.map((group) => (
           <button
             aria-pressed={group.id === activeGroup.id}
@@ -65,7 +80,10 @@ export function OperationModeTabs({
           </button>
         ))}
       </div>
-      <div className="operationChoiceStrip" aria-label={`${activeGroup.label} operations`}>
+      <div
+        className="operationChoiceStrip"
+        aria-label={`${activeGroup.label} operations`}
+      >
         {activeGroup.modes.map((item) => (
           <button
             className={mode === item.mode ? "selected" : ""}
@@ -128,7 +146,10 @@ function operationModeGroups(includeTerminal: boolean): OperationModeGroup[] {
       id: "network",
       label: "Network",
       modes: [
-        { label: "Import vnStat history", mode: "network_traffic_import_vnstat" },
+        {
+          label: "Import vnStat history",
+          mode: "network_traffic_import_vnstat",
+        },
       ],
     },
     {
@@ -326,12 +347,16 @@ export function JobOperationEditor({
   setFileTransferDownloadName: (value: string) => void;
   setFileTransferChunkSize: (value: number) => void;
   setFileTransferExistingPolicy: (value: FileExistingPolicy) => void;
-  setFileTransferMultiTargetPolicy: (value: BrowserTransferMultiTargetPolicy) => void;
+  setFileTransferMultiTargetPolicy: (
+    value: BrowserTransferMultiTargetPolicy,
+  ) => void;
   setFileTransferRateLimit: (value: number) => void;
   setFileTransferResumeToken: (value: string) => void;
   setFileTransferSessionId: (value: string) => void;
   setFileTransferSourceArtifactId: (value: string) => void;
-  setFileTransferUploadSourceKind: (value: "local-file" | "source-artifact") => void;
+  setFileTransferUploadSourceKind: (
+    value: "local-file" | "source-artifact",
+  ) => void;
   setNetworkTrafficImportInterfacesText: (value: string) => void;
   setNetworkTrafficImportStartDate: (value: string) => void;
   setProcessLimit: (value: number) => void;
@@ -366,12 +391,11 @@ export function JobOperationEditor({
       <div className="compactOperation shellOperation">
         <label
           className="wideField"
-          title="Command arguments are intentionally omitted from tooltips because they may contain sensitive values."
+          title="Command and arguments submitted to each selected VPS."
         >
           <span>Command argv</span>
           <textarea
             aria-label="Command argv"
-            data-value-tooltip-skip="true"
             onChange={(event) => setCommandText(event.target.value)}
             placeholder={COMMAND_ARGV_PLACEHOLDER}
             rows={3}
@@ -392,11 +416,10 @@ export function JobOperationEditor({
 
   if (mode === "shell_script") {
     return (
-      <label title="Shell script contents are intentionally omitted from tooltips because scripts may contain sensitive values.">
+      <label title="Shell script executed on each selected VPS.">
         <span>Shell script</span>
         <textarea
           aria-label="Shell script"
-          data-value-tooltip-skip="true"
           onChange={(event) => setShellScript(event.target.value)}
           placeholder="set -eu&#10;hostname&#10;uptime"
           rows={5}
@@ -436,7 +459,10 @@ export function JobOperationEditor({
   if (mode === "file_pull") {
     return (
       <div className="compactOperation filePathOperation">
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="SHA-256 digest of the staged agent artifact; enter exactly 64 hexadecimal characters."
+        >
           <span>Absolute path</span>
           <input
             aria-label="File pull path"
@@ -466,13 +492,18 @@ export function JobOperationEditor({
         <Upload size={18} />
         <div>
           <strong>File push</strong>
-          <span>Privilege-unlocked, chunk-hashed, atomic agent write up to {MAX_CHUNKED_FILE_PUSH_BYTES} bytes</span>
+          <span>
+            Privilege-unlocked, chunk-hashed, atomic agent write up to{" "}
+            {MAX_CHUNKED_FILE_PUSH_BYTES} bytes
+          </span>
         </div>
         <label className="wideField">
           <span>Source file</span>
           <input
             aria-label="File push source"
-            onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
+            onChange={(event) =>
+              setFilePushSource(event.target.files?.[0] ?? null)
+            }
             type="file"
           />
         </label>
@@ -487,7 +518,11 @@ export function JobOperationEditor({
         </label>
         <label>
           <span>Mode</span>
-          <input aria-label="File push mode" onChange={(event) => setFilePushMode(event.target.value)} value={filePushMode} />
+          <input
+            aria-label="File push mode"
+            onChange={(event) => setFilePushMode(event.target.value)}
+            value={filePushMode}
+          />
         </label>
       </div>
     );
@@ -500,14 +535,21 @@ export function JobOperationEditor({
           <Upload size={18} />
           <div>
             <strong>Resumable upload</strong>
-            <span>Streamed ACK-tracked browser upload up to {formatBytes(MAX_BROWSER_RESUMABLE_UPLOAD_BYTES)}</span>
+            <span>
+              Streamed ACK-tracked browser upload up to{" "}
+              {formatBytes(MAX_BROWSER_RESUMABLE_UPLOAD_BYTES)}
+            </span>
           </div>
         </div>
         <label>
           <span>Source kind</span>
           <select
             aria-label="Resumable upload producer"
-            onChange={(event) => setFileTransferUploadSourceKind(event.target.value as "local-file" | "source-artifact")}
+            onChange={(event) =>
+              setFileTransferUploadSourceKind(
+                event.target.value as "local-file" | "source-artifact",
+              )
+            }
             value={fileTransferUploadSourceKind}
           >
             <option value="local-file">Local file</option>
@@ -519,7 +561,9 @@ export function JobOperationEditor({
             <span>Resumable upload source artifact</span>
             <select
               aria-label="Resumable upload source artifact"
-              onChange={(event) => setFileTransferSourceArtifactId(event.target.value)}
+              onChange={(event) =>
+                setFileTransferSourceArtifactId(event.target.value)
+              }
               value={fileTransferSourceArtifactId}
             >
               <option value="">
@@ -544,7 +588,10 @@ export function JobOperationEditor({
           <div className="wideField transferPrimaryField dispatchFileSourceField">
             <span>Source file</span>
             <div className="dispatchFileSourceControl">
-              <span className="dispatchSelectedFile" title={filePushSource?.name}>
+              <span
+                className="dispatchSelectedFile"
+                title={filePushSource?.name}
+              >
                 {filePushSource
                   ? `${filePushSource.name} · ${formatBytes(filePushSource.size)}`
                   : "No local file selected"}
@@ -554,7 +601,9 @@ export function JobOperationEditor({
                 <span>{filePushSource ? "Replace" : "Choose file"}</span>
                 <input
                   aria-label="Resumable upload source"
-                  onChange={(event) => setFilePushSource(event.target.files?.[0] ?? null)}
+                  onChange={(event) =>
+                    setFilePushSource(event.target.files?.[0] ?? null)
+                  }
                   type="file"
                 />
               </label>
@@ -584,7 +633,9 @@ export function JobOperationEditor({
             aria-label="Resumable upload chunk bytes"
             max={FILE_TRANSFER_CHUNK_BYTES}
             min={1}
-            onChange={(event) => setFileTransferChunkSize(Number(event.target.value))}
+            onChange={(event) =>
+              setFileTransferChunkSize(Number(event.target.value))
+            }
             type="number"
             value={fileTransferChunkSize}
           />
@@ -609,7 +660,11 @@ export function JobOperationEditor({
           <span>Existing file</span>
           <select
             aria-label="Resumable upload existing-file policy"
-            onChange={(event) => setFileTransferExistingPolicy(event.target.value as FileExistingPolicy)}
+            onChange={(event) =>
+              setFileTransferExistingPolicy(
+                event.target.value as FileExistingPolicy,
+              )
+            }
             value={fileTransferExistingPolicy}
           >
             <option value="skip">Skip</option>
@@ -620,7 +675,11 @@ export function JobOperationEditor({
           <span>Multi-VPS resume</span>
           <select
             aria-label="Resumable upload multi-target policy"
-            onChange={(event) => setFileTransferMultiTargetPolicy(event.target.value as BrowserTransferMultiTargetPolicy)}
+            onChange={(event) =>
+              setFileTransferMultiTargetPolicy(
+                event.target.value as BrowserTransferMultiTargetPolicy,
+              )
+            }
             value={fileTransferMultiTargetPolicy}
           >
             <option value="same-offset">Shared offset (all targets)</option>
@@ -636,11 +695,13 @@ export function JobOperationEditor({
             value={fileTransferSessionId}
           />
         </label>
-        <label className="wideField transferIdentityField">
+        <label
+          className="wideField transferIdentityField"
+          title="Optional stable token used to resume an interrupted upload; leave blank to generate it automatically."
+        >
           <span>Resume token</span>
           <input
             aria-label="Resumable upload resume token"
-            data-value-tooltip-skip="true"
             onChange={(event) => setFileTransferResumeToken(event.target.value)}
             placeholder="auto"
             value={fileTransferResumeToken}
@@ -658,7 +719,9 @@ export function JobOperationEditor({
           <div>
             <strong>Resumable download</strong>
             <span>
-              Browser download up to {formatBytes(MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES)}; stream-to-file up to{" "}
+              Browser download up to{" "}
+              {formatBytes(MAX_BROWSER_RESUMABLE_DOWNLOAD_BYTES)};
+              stream-to-file up to{" "}
               {formatBytes(MAX_BROWSER_STREAMING_RESUMABLE_DOWNLOAD_BYTES)}
             </span>
           </div>
@@ -687,7 +750,9 @@ export function JobOperationEditor({
           <span>Browser filename</span>
           <input
             aria-label="Resumable download filename"
-            onChange={(event) => setFileTransferDownloadName(event.target.value)}
+            onChange={(event) =>
+              setFileTransferDownloadName(event.target.value)
+            }
             placeholder="auto from remote path"
             value={fileTransferDownloadName}
           />
@@ -698,7 +763,9 @@ export function JobOperationEditor({
             aria-label="Resumable download chunk bytes"
             max={FILE_TRANSFER_CHUNK_BYTES}
             min={1}
-            onChange={(event) => setFileTransferChunkSize(Number(event.target.value))}
+            onChange={(event) =>
+              setFileTransferChunkSize(Number(event.target.value))
+            }
             type="number"
             value={fileTransferChunkSize}
           />
@@ -723,7 +790,11 @@ export function JobOperationEditor({
           <span>Save method</span>
           <select
             aria-label="Resumable download save method"
-            onChange={(event) => setFileTransferDownloadSink(event.target.value as BrowserDownloadSinkMode)}
+            onChange={(event) =>
+              setFileTransferDownloadSink(
+                event.target.value as BrowserDownloadSinkMode,
+              )
+            }
             value={fileTransferDownloadSink}
           >
             <option value="browser-download">Browser download</option>
@@ -739,11 +810,13 @@ export function JobOperationEditor({
             value={fileTransferSessionId}
           />
         </label>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Optional stable token used to resume an interrupted download; leave blank to generate it automatically."
+        >
           <span>Resume token</span>
           <input
             aria-label="Resumable download resume token"
-            data-value-tooltip-skip="true"
             onChange={(event) => setFileTransferResumeToken(event.target.value)}
             placeholder="auto"
             value={fileTransferResumeToken}
@@ -760,13 +833,16 @@ export function JobOperationEditor({
         <div>
           <strong>Import retained vnStat traffic</strong>
           <span>
-            The agent reads vnStat once. The API backfills synthetic minute samples from
-            the UTC start date up to, but not including, each interface&apos;s first live
-            agent counter sample. A rerun replaces prior vnStat-imported samples for
-            those interfaces.
+            The agent reads vnStat once. The API backfills synthetic minute
+            samples from the UTC start date up to, but not including, each
+            interface&apos;s first live agent counter sample. A rerun replaces
+            prior vnStat-imported samples for those interfaces.
           </span>
         </div>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Comma-separated host interfaces to import, such as eth0, ens3. Leave blank to import every interface reported by vnStat."
+        >
           <span>Host interfaces</span>
           <textarea
             aria-label="vnStat import host interfaces"
@@ -790,10 +866,11 @@ export function JobOperationEditor({
           />
         </label>
         <span className="operationHint">
-          There is no fixed lookback limit: choose the earliest date covered by the
-          retained vnStat database. The operation also requires an existing live agent
-          sample after the start. Aggregate bytes are preserved; minute-level distribution
-          is reconstructed from vnStat&apos;s retained resolutions.
+          There is no fixed lookback limit: choose the earliest date covered by
+          the retained vnStat database. The operation also requires an existing
+          live agent sample after the start. Aggregate bytes are preserved;
+          minute-level distribution is reconstructed from vnStat&apos;s retained
+          resolutions.
         </span>
       </div>
     );
@@ -837,7 +914,10 @@ export function JobOperationEditor({
         <DatabaseBackup size={18} />
         <div>
           <strong>Backup artifact</strong>
-          <span>Agent packages selected regular files and config into a plain tar artifact</span>
+          <span>
+            Agent packages selected regular files and config into a plain tar
+            artifact
+          </span>
         </div>
         <label className="wideField">
           <span>Selected paths</span>
@@ -849,7 +929,10 @@ export function JobOperationEditor({
             value={backupPathsText}
           />
         </label>
-        <div className="backupOptionStrip" aria-label="Backup collection options">
+        <div
+          className="backupOptionStrip"
+          aria-label="Backup collection options"
+        >
           <label className="checkLine inlineCheck">
             <input
               checked={backupIncludeConfig}
@@ -864,7 +947,9 @@ export function JobOperationEditor({
           >
             <input
               checked={backupFollowSymlinks}
-              onChange={(event) => setBackupFollowSymlinks(event.target.checked)}
+              onChange={(event) =>
+                setBackupFollowSymlinks(event.target.checked)
+              }
               type="checkbox"
             />
             <span>Follow symlinks</span>
@@ -875,7 +960,9 @@ export function JobOperationEditor({
           >
             <input
               checked={backupSkipMissingPaths}
-              onChange={(event) => setBackupSkipMissingPaths(event.target.checked)}
+              onChange={(event) =>
+                setBackupSkipMissingPaths(event.target.checked)
+              }
               type="checkbox"
             />
             <span>Skip missing roots</span>
@@ -891,28 +978,31 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Agent binary</strong>
-          <span>HTTPS artifact staged side-by-side after SHA-256 verification</span>
+          <span>
+            HTTPS artifact staged side-by-side after SHA-256 verification
+          </span>
         </div>
         <label
           className="wideField"
-          title="Agent update artifact URL; the value is intentionally omitted from tooltips because URLs may contain signed credentials."
+          title="HTTPS URL used to download the agent binary before SHA-256 verification."
         >
           <span>Artifact URL</span>
           <input
             aria-label="Agent update artifact URL"
-            data-value-tooltip-skip="true"
             onChange={(event) => setUpdateArtifactUrl(event.target.value)}
             placeholder="https://updates.example/vpsman-agent"
             value={updateArtifactUrl}
           />
         </label>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Expected SHA-256 digest for the downloaded agent binary, as 64 hexadecimal characters."
+        >
           <span>SHA-256</span>
           <input
             aria-label="Agent update SHA-256"
             onChange={(event) => setUpdateSha256Hex(event.target.value)}
             placeholder="64 hex characters"
-            title={updateSha256Hex || undefined}
             value={updateSha256Hex}
           />
         </label>
@@ -926,23 +1016,26 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Version manifest</strong>
-          <span>Checks version.json and stages its newer architecture-specific artifact without activating or restarting it</span>
+          <span>
+            Checks version.json and stages its newer architecture-specific
+            artifact without activating or restarting it
+          </span>
         </div>
         <label
           className="wideField"
-          title="Agent update manifest URL; the value is intentionally omitted from tooltips because URLs may contain signed credentials."
+          title="HTTPS URL of version.json used to select the architecture-specific agent artifact."
         >
           <span>Manifest URL</span>
           <input
             aria-label="Agent update version manifest URL"
-            data-value-tooltip-skip="true"
             onChange={(event) => setUpdateCheckVersionUrl(event.target.value)}
             placeholder="https://github.com/mnihyc/vpsman/releases/latest/download/version.json"
             value={updateCheckVersionUrl}
           />
         </label>
         <div className="operationSafetyNote" role="note">
-          Activation is a separate reviewed action after the staged SHA-256 is visible.
+          Activation is a separate reviewed action after the staged SHA-256 is
+          visible.
         </div>
       </div>
     );
@@ -954,15 +1047,19 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Activate staged agent</strong>
-          <span>Promotes the verified side-by-side artifact and keeps rollback copy for restart recovery</span>
+          <span>
+            Promotes the verified side-by-side artifact and keeps rollback copy
+            for restart recovery
+          </span>
         </div>
         <label className="wideField">
           <span>Staged SHA-256</span>
           <input
             aria-label="Agent update staged SHA-256"
-            onChange={(event) => setUpdateActivationSha256Hex(event.target.value)}
+            onChange={(event) =>
+              setUpdateActivationSha256Hex(event.target.value)
+            }
             placeholder="64 hex characters"
-            title={updateActivationSha256Hex || undefined}
             value={updateActivationSha256Hex}
           />
         </label>
@@ -984,15 +1081,20 @@ export function JobOperationEditor({
         <PackageCheck size={18} />
         <div>
           <strong>Rollback agent</strong>
-          <span>Restores the saved rollback binary and leaves restart under operator control</span>
+          <span>
+            Restores the saved rollback binary and leaves restart under operator
+            control
+          </span>
         </div>
-        <label className="wideField">
+        <label
+          className="wideField"
+          title="Optional SHA-256 digest of the rollback artifact; enter exactly 64 hexadecimal characters when specified."
+        >
           <span>Rollback SHA-256</span>
           <input
             aria-label="Agent update rollback SHA-256"
             onChange={(event) => setUpdateRollbackSha256Hex(event.target.value)}
             placeholder="Optional 64 hex characters"
-            title={updateRollbackSha256Hex || undefined}
             value={updateRollbackSha256Hex}
           />
         </label>
@@ -1054,13 +1156,17 @@ function SupervisorEditor({
       <Activity size={18} />
       <div>
         <strong>Managed process</strong>
-        <span>Start, inspect, restart, stop, or tail vpsman-launched processes</span>
+        <span>
+          Start, inspect, restart, stop, or tail vpsman-launched processes
+        </span>
       </div>
       <label>
         <span>Action</span>
         <select
           aria-label="Supervisor action"
-          onChange={(event) => setSupervisorAction(event.target.value as SupervisorAction)}
+          onChange={(event) =>
+            setSupervisorAction(event.target.value as SupervisorAction)
+          }
           value={supervisorAction}
         >
           <option value="status">Status</option>
@@ -1083,12 +1189,11 @@ function SupervisorEditor({
         <>
           <label
             className="wideField"
-            title="Supervisor command arguments are intentionally omitted from tooltips because they may contain sensitive values."
+            title="Command and arguments used to start the managed process."
           >
             <span>Command argv</span>
             <textarea
               aria-label="Supervisor command argv"
-              data-value-tooltip-skip="true"
               onChange={(event) => setSupervisorArgv(event.target.value)}
               placeholder={SUPERVISOR_COMMAND_PLACEHOLDER}
               rows={2}
@@ -1106,12 +1211,11 @@ function SupervisorEditor({
           </label>
           <label
             className="wideField"
-            title="Supervisor environment values are intentionally omitted from tooltips because they may contain credentials."
+            title="Environment entries for the managed process, one KEY=value pair per line."
           >
             <span>Env</span>
             <textarea
               aria-label="Supervisor environment"
-              data-value-tooltip-skip="true"
               onChange={(event) => setSupervisorEnv(event.target.value)}
               placeholder="KEY=value"
               rows={2}
@@ -1127,7 +1231,9 @@ function SupervisorEditor({
             aria-label="Supervisor log bytes"
             max={524288}
             min={1}
-            onChange={(event) => setSupervisorLogBytes(Number(event.target.value))}
+            onChange={(event) =>
+              setSupervisorLogBytes(Number(event.target.value))
+            }
             type="number"
             value={supervisorLogBytes}
           />

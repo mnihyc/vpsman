@@ -6,7 +6,10 @@ import { ExecutionResultPanel } from "../../components/ExecutionResultPanel";
 import { PrivilegeVaultBox } from "../../components/PrivilegeVaultBox";
 import { SearchExpressionInput } from "../../components/SearchExpressionInput";
 import { agentDisplayState } from "../../agentDisplayState";
-import { useReviewGenerationGuard, waitForReviewRender } from "../../hooks/useReviewGenerationGuard";
+import {
+  useReviewGenerationGuard,
+  waitForReviewRender,
+} from "../../hooks/useReviewGenerationGuard";
 import {
   buildBulkJobProgress,
   createJobTargetCount,
@@ -30,7 +33,10 @@ import {
   type FileOperationStatus,
 } from "../../fileBrowser";
 import { parseFileMode } from "../../fileTransfer";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
+import {
+  buildPrivilegeForJobOperation,
+  type PrivilegeMaterial,
+} from "../../privilege";
 import { agentsMatchingExpression } from "../../searchExpression";
 import {
   isJobTargetStatus,
@@ -57,7 +63,16 @@ const BULK_JOB_TIMEOUT_SECS = 60;
 const BULK_OUTPUT_SUMMARY_POLL_INTERVAL_MS = 500;
 const BULK_OUTPUT_SUMMARY_WAIT_MS = 5_000;
 
-type MultiFileAction = "download_files" | "upload_file" | "copy" | "rename" | "delete" | "chmod" | "chown" | "mkdir" | "write_text";
+type MultiFileAction =
+  | "download_files"
+  | "upload_file"
+  | "copy"
+  | "rename"
+  | "delete"
+  | "chmod"
+  | "chown"
+  | "mkdir"
+  | "write_text";
 
 type PendingBulkConfirmation = {
   jobId: string;
@@ -118,7 +133,9 @@ export function MultiFileActionsPanel({
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onOpenJobDetails?: (jobId: string) => void;
   onOpenPrivilegeUnlock: () => void;
-  onResolveTargets: (selection: JobTargetSelection) => Promise<BulkResolveResponse>;
+  onResolveTargets: (
+    selection: JobTargetSelection,
+  ) => Promise<BulkResolveResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
@@ -127,7 +144,9 @@ export function MultiFileActionsPanel({
     invalidateReviewGeneration,
     isReviewGenerationCurrent,
   } = useReviewGenerationGuard();
-  const [selectorExpression, setSelectorExpression] = useState(() => localStorage.getItem(SELECTOR_STORAGE_KEY) ?? "id:*");
+  const [selectorExpression, setSelectorExpression] = useState(
+    () => localStorage.getItem(SELECTOR_STORAGE_KEY) ?? "id:*",
+  );
   const [path, setPath] = useState(() => initialBulkPath(initialPath));
   const [newPath, setNewPath] = useState("");
   const [mode, setMode] = useState("0644");
@@ -138,8 +157,10 @@ export function MultiFileActionsPanel({
   const [overwrite, setOverwrite] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadMode, setUploadMode] = useState("0644");
-  const [uploadExistingPolicy, setUploadExistingPolicy] = useState<FileExistingPolicy>("skip");
-  const [uploadOwnershipPolicy, setUploadOwnershipPolicy] = useState<FileOwnershipPolicy>("fail");
+  const [uploadExistingPolicy, setUploadExistingPolicy] =
+    useState<FileExistingPolicy>("skip");
+  const [uploadOwnershipPolicy, setUploadOwnershipPolicy] =
+    useState<FileOwnershipPolicy>("fail");
   const [uploadOwner, setUploadOwner] = useState("");
   const [uploadGroup, setUploadGroup] = useState("");
   const [policy, setPolicy] = useState<FileActionPolicy>("fail");
@@ -153,21 +174,38 @@ export function MultiFileActionsPanel({
     "refresh" | "operation"
   >("operation");
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<PendingBulkConfirmation | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<PendingBulkConfirmation | null>(null);
   const [lastSummary, setLastSummary] = useState<BulkSummaryGroup[]>([]);
   const [lastOutputs, setLastOutputs] = useState<JobOutputRecord[]>([]);
   const [lastOperation, setLastOperation] = useState<JobOperation | null>(null);
   const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [bulkProgress, setBulkProgress] = useState<BulkJobProgress | null>(null);
-  const [lastRunProgress, setLastRunProgress] = useState<BulkJobProgress | null>(null);
-  const localMatches = useMemo(() => agentsMatchingExpression(agents, selectorExpression), [agents, selectorExpression]);
-  const agentById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent])), [agents]);
+  const [bulkProgress, setBulkProgress] = useState<BulkJobProgress | null>(
+    null,
+  );
+  const [lastRunProgress, setLastRunProgress] =
+    useState<BulkJobProgress | null>(null);
+  const localMatches = useMemo(
+    () => agentsMatchingExpression(agents, selectorExpression),
+    [agents, selectorExpression],
+  );
+  const agentById = useMemo(
+    () => new Map(agents.map((agent) => [agent.id, agent])),
+    [agents],
+  );
   const downloadComparison = useMemo(
-    () => (lastOperation?.type === "file_download" ? buildDownloadComparison(lastOutputs) : null),
+    () =>
+      lastOperation?.type === "file_download"
+        ? buildDownloadComparison(lastOutputs)
+        : null,
     [lastOperation, lastOutputs],
   );
   const actionFeedbackMessage = actionError ?? reviewStatus ?? actionMessage;
-  const actionFeedbackTone = actionError ? "danger" : actionMessage ? "success" : "progress";
+  const actionFeedbackTone = actionError
+    ? "danger"
+    : actionMessage
+      ? "success"
+      : "progress";
 
   function clearExecutionResults() {
     setBulkProgress(null);
@@ -200,17 +238,17 @@ export function MultiFileActionsPanel({
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
-      const next = await onResolveTargets({
-        selector_expression: reviewSelectorExpression,
+        const next = await onResolveTargets({
+          selector_expression: reviewSelectorExpression,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(next);
+        clearPendingConfirmation();
+        localStorage.setItem(SELECTOR_STORAGE_KEY, reviewSelectorExpression);
+        setActionMessage(`${next.target_count} VPSs resolved`);
       });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setPreview(next);
-      clearPendingConfirmation();
-      localStorage.setItem(SELECTOR_STORAGE_KEY, reviewSelectorExpression);
-      setActionMessage(`${next.target_count} VPSs resolved`);
-    });
     } finally {
       setReviewStatus(null);
     }
@@ -224,27 +262,27 @@ export function MultiFileActionsPanel({
     try {
       await waitForReviewRender();
       await runPanelAction(setPending, setActionError, async () => {
-      const resolved = await onResolveTargets({
-        selector_expression: reviewSelectorExpression,
+        const resolved = await onResolveTargets({
+          selector_expression: reviewSelectorExpression,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPreview(resolved);
+        if (resolved.targets.length === 0) {
+          throw new Error("No VPSs match the selector");
+        }
+        const operation = await buildOperation();
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        setPendingConfirmation({
+          jobId: crypto.randomUUID(),
+          operation,
+          selectorExpression: reviewSelectorExpression,
+          targets: resolved.targets,
+        });
       });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setPreview(resolved);
-      if (resolved.targets.length === 0) {
-        throw new Error("No VPSs match the selector");
-      }
-      const operation = await buildOperation();
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setPendingConfirmation({
-        jobId: crypto.randomUUID(),
-        operation,
-        selectorExpression: reviewSelectorExpression,
-        targets: resolved.targets,
-      });
-    });
     } finally {
       setReviewStatus(null);
     }
@@ -264,12 +302,17 @@ export function MultiFileActionsPanel({
       if (!uploadFile) {
         throw new Error("Choose a file to upload");
       }
-      return await buildUploadOperation(uploadFile, uploadDestinationPath(path, normalizedPath, uploadFile.name), uploadMode, {
-        existingPolicy: uploadExistingPolicy,
-        owner: uploadOwner.trim() || null,
-        group: uploadGroup.trim() || null,
-        ownershipPolicy: uploadOwnershipPolicy,
-      });
+      return await buildUploadOperation(
+        uploadFile,
+        uploadDestinationPath(path, normalizedPath, uploadFile.name),
+        uploadMode,
+        {
+          existingPolicy: uploadExistingPolicy,
+          owner: uploadOwner.trim() || null,
+          group: uploadGroup.trim() || null,
+          ownershipPolicy: uploadOwnershipPolicy,
+        },
+      );
     }
     if (action === "chown") {
       return {
@@ -310,7 +353,13 @@ export function MultiFileActionsPanel({
       };
     }
     if (action === "mkdir") {
-      return { type: "file_mkdir", path: normalizedPath, mode: parseMode(mode), recursive, policy };
+      return {
+        type: "file_mkdir",
+        path: normalizedPath,
+        mode: parseMode(mode),
+        recursive,
+        policy,
+      };
     }
     if (action === "rename") {
       if (!newPath.trim()) {
@@ -388,7 +437,11 @@ export function MultiFileActionsPanel({
           maxTimeoutSecs: BULK_JOB_TIMEOUT_SECS,
         });
         targets = result.targets;
-        outputs = await loadOutputsForSummary(job.job_id, onLoadOutputs, targets);
+        outputs = await loadOutputsForSummary(
+          job.job_id,
+          onLoadOutputs,
+          targets,
+        );
         finalProgress = buildBulkJobProgress({
           jobId: job.job_id,
           targetCount,
@@ -404,8 +457,18 @@ export function MultiFileActionsPanel({
       setLastOperation(confirmation.operation);
       setLastJobId(job.job_id);
       setLastRunProgress(finalProgress);
-      setLastSummary(groupBulkOutputs(outputs, confirmation.operation.type, confirmation.targets, targets, agentById));
-      setActionMessage(`${fileBrowserOperationLabel(confirmation.operation)} job ${shortId(job.job_id)} finished`);
+      setLastSummary(
+        groupBulkOutputs(
+          outputs,
+          confirmation.operation.type,
+          confirmation.targets,
+          targets,
+          agentById,
+        ),
+      );
+      setActionMessage(
+        `${fileBrowserOperationLabel(confirmation.operation)} job ${shortId(job.job_id)} finished`,
+      );
     });
   }
 
@@ -526,7 +589,9 @@ export function MultiFileActionsPanel({
             <button
               aria-pressed={action === "download_files"}
               className={
-                action === "download_files" ? "primaryAction" : "secondaryAction"
+                action === "download_files"
+                  ? "primaryAction"
+                  : "secondaryAction"
               }
               onClick={() => {
                 setAction("download_files");
@@ -560,9 +625,15 @@ export function MultiFileActionsPanel({
           </div>
           <div className="multiFileGrid">
             <label>
-              <span>{action === "upload_file" ? "Destination path" : "Path"}</span>
+              <span>
+                {action === "upload_file" ? "Destination path" : "Path"}
+              </span>
               <input
-                aria-label={action === "upload_file" ? "Bulk file destination path" : "Bulk file path"}
+                aria-label={
+                  action === "upload_file"
+                    ? "Bulk file destination path"
+                    : "Bulk file path"
+                }
                 onChange={(event) => {
                   setPath(event.target.value);
                   if (!isRootPathValue(event.target.value)) {
@@ -570,7 +641,11 @@ export function MultiFileActionsPanel({
                   }
                   invalidateBulkReview();
                 }}
-                placeholder={action === "upload_file" ? "/etc/app.conf or /etc/app.d/" : "/etc/app.conf"}
+                placeholder={
+                  action === "upload_file"
+                    ? "/etc/app.conf or /etc/app.d/"
+                    : "/etc/app.conf"
+                }
                 value={path}
               />
             </label>
@@ -578,7 +653,10 @@ export function MultiFileActionsPanel({
           {isRootPathValue(path) && (
             <div className="operationNote compactNote rootPathApprovalNote">
               <strong>Filesystem root selected</strong>
-              <span>Bulk operations against / are blocked until you explicitly approve the root path for this run.</span>
+              <span>
+                Bulk operations against / are blocked until you explicitly
+                approve the root path for this run.
+              </span>
               <label className="inlineCheck actionCheck">
                 <input
                   checked={allowRootPath}
@@ -595,7 +673,10 @@ export function MultiFileActionsPanel({
           {action === "download_files" && (
             <div className="operationNote compactNote">
               <strong>Download files</strong>
-              <span>Folders download as tar per VPS; the summary action returns one tar bundle.</span>
+              <span>
+                Folders download as tar per VPS; the summary action returns one
+                tar bundle.
+              </span>
             </div>
           )}
           {action === "upload_file" && (
@@ -614,10 +695,10 @@ export function MultiFileActionsPanel({
               <label>
                 <span>Mode</span>
                 <input
-                onChange={(event) => {
-                  setUploadMode(event.target.value);
-                  invalidateBulkReview();
-                }}
+                  onChange={(event) => {
+                    setUploadMode(event.target.value);
+                    invalidateBulkReview();
+                  }}
                   value={uploadMode}
                 />
               </label>
@@ -625,7 +706,9 @@ export function MultiFileActionsPanel({
                 <span>Existing file</span>
                 <select
                   onChange={(event) => {
-                    setUploadExistingPolicy(event.target.value as FileExistingPolicy);
+                    setUploadExistingPolicy(
+                      event.target.value as FileExistingPolicy,
+                    );
                     invalidateBulkReview();
                   }}
                   value={uploadExistingPolicy}
@@ -658,7 +741,9 @@ export function MultiFileActionsPanel({
                 <span>Missing owner/group</span>
                 <select
                   onChange={(event) => {
-                    setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
+                    setUploadOwnershipPolicy(
+                      event.target.value as FileOwnershipPolicy,
+                    );
                     invalidateBulkReview();
                   }}
                   value={uploadOwnershipPolicy}
@@ -673,11 +758,16 @@ export function MultiFileActionsPanel({
             <summary>Advanced actions</summary>
             <label>
               <span>Action</span>
-              <select onChange={(event) => {
-                setAction(event.target.value as MultiFileAction);
-                invalidateBulkReview();
-              }} value={isAdvancedAction(action) ? action : ""}>
-                <option disabled value="">Choose action</option>
+              <select
+                onChange={(event) => {
+                  setAction(event.target.value as MultiFileAction);
+                  invalidateBulkReview();
+                }}
+                value={isAdvancedAction(action) ? action : ""}
+              >
+                <option disabled value="">
+                  Choose action
+                </option>
                 <option value="copy">Copy</option>
                 <option value="rename">Move</option>
                 <option value="delete">Delete path</option>
@@ -699,7 +789,9 @@ export function MultiFileActionsPanel({
                 value={policy}
               >
                 <option value="fail">Strict: fail on conflict</option>
-                <option value="ensure">Converge: accept already-correct state</option>
+                <option value="ensure">
+                  Converge: accept already-correct state
+                </option>
                 <option value="ignore">Skip missing/conflicting targets</option>
               </select>
             </label>
@@ -717,7 +809,9 @@ export function MultiFileActionsPanel({
               />
             </label>
           )}
-          {(action === "chmod" || action === "mkdir" || action === "write_text") && (
+          {(action === "chmod" ||
+            action === "mkdir" ||
+            action === "write_text") && (
             <label>
               <span>Mode</span>
               <input
@@ -755,7 +849,9 @@ export function MultiFileActionsPanel({
                 <span>Missing owner/group</span>
                 <select
                   onChange={(event) => {
-                    setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy);
+                    setUploadOwnershipPolicy(
+                      event.target.value as FileOwnershipPolicy,
+                    );
                     invalidateBulkReview();
                   }}
                   value={uploadOwnershipPolicy}
@@ -767,10 +863,9 @@ export function MultiFileActionsPanel({
             </div>
           )}
           {action === "write_text" && (
-            <label title="File content is intentionally omitted from tooltips because it may contain sensitive values.">
+            <label title="Text written to the selected remote files.">
               <span>Content</span>
               <textarea
-                data-value-tooltip-skip="true"
                 onChange={(event) => {
                   setContent(event.target.value);
                   invalidateBulkReview();
@@ -780,9 +875,19 @@ export function MultiFileActionsPanel({
               />
             </label>
           )}
-          {(action === "download_files" || action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir" || action === "rename") && (
+          {(action === "download_files" ||
+            action === "copy" ||
+            action === "chmod" ||
+            action === "chown" ||
+            action === "delete" ||
+            action === "mkdir" ||
+            action === "rename") && (
             <div className="multiFileGrid">
-              {(action === "copy" || action === "chmod" || action === "chown" || action === "delete" || action === "mkdir") && (
+              {(action === "copy" ||
+                action === "chmod" ||
+                action === "chown" ||
+                action === "delete" ||
+                action === "mkdir") && (
                 <label className="inlineCheck actionCheck">
                   <input
                     checked={recursive}
@@ -792,7 +897,11 @@ export function MultiFileActionsPanel({
                     }}
                     type="checkbox"
                   />
-                  <span>{action === "mkdir" ? "Create missing parents" : "Recursive"}</span>
+                  <span>
+                    {action === "mkdir"
+                      ? "Create missing parents"
+                      : "Recursive"}
+                  </span>
                 </label>
               )}
               {(action === "copy" || action === "rename") && (
@@ -808,7 +917,9 @@ export function MultiFileActionsPanel({
                   <span>Overwrite destination</span>
                 </label>
               )}
-              {(action === "download_files" || action === "copy" || action === "chmod") && (
+              {(action === "download_files" ||
+                action === "copy" ||
+                action === "chmod") && (
                 <label
                   className="inlineCheck actionCheck"
                   title="Disabled by default. Enable only when selected paths are intentionally symlinks and operations should use their targets."
@@ -846,7 +957,7 @@ export function MultiFileActionsPanel({
                   ? "Unlock privilege before reviewing this bulk file operation."
                   : loading
                     ? "Wait for the bulk target scope to finish loading."
-                    : bulkDraftError ?? undefined
+                    : (bulkDraftError ?? undefined)
             }
             disabled={
               pending ||
@@ -873,15 +984,30 @@ export function MultiFileActionsPanel({
         <section className="bulkSummaryPane">
           <div className="sectionSubheader">
             <div>
-              <h3>{visibleProgress || lastSummary.length > 0 ? "Execution summary" : "Live match summary"}</h3>
+              <h3>
+                {visibleProgress || lastSummary.length > 0
+                  ? "Execution summary"
+                  : "Live match summary"}
+              </h3>
               <span>{executionSummary}</span>
             </div>
-            {lastOperation?.type === "file_download" && lastOutputs.length > 0 && (
-              <button className="secondaryAction compactAction" onClick={() => void downloadBulkBundle(onDownloadFileBundle, lastJobId, successfulDownloadClientIds(lastSummary))} type="button">
-                <Download size={14} />
-                <span>Download Archive</span>
-              </button>
-            )}
+            {lastOperation?.type === "file_download" &&
+              lastOutputs.length > 0 && (
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() =>
+                    void downloadBulkBundle(
+                      onDownloadFileBundle,
+                      lastJobId,
+                      successfulDownloadClientIds(lastSummary),
+                    )
+                  }
+                  type="button"
+                >
+                  <Download size={14} />
+                  <span>Download Archive</span>
+                </button>
+              )}
           </div>
           <BulkPreflightChecklist items={preflightItems} />
           {visibleProgress && (
@@ -892,18 +1018,33 @@ export function MultiFileActionsPanel({
               progress={visibleProgress}
             />
           )}
-          {postRunItems.length > 0 && <BulkPreflightChecklist items={postRunItems} label="Bulk file post-run handling" />}
-          {downloadComparison && <BulkDownloadComparisonView agentById={agentById} comparison={downloadComparison} />}
+          {postRunItems.length > 0 && (
+            <BulkPreflightChecklist
+              items={postRunItems}
+              label="Bulk file post-run handling"
+            />
+          )}
+          {downloadComparison && (
+            <BulkDownloadComparisonView
+              agentById={agentById}
+              comparison={downloadComparison}
+            />
+          )}
           <div className="bulkSummaryList">
-            {lastSummary.length === 0 && (visibleProgress || postRunItems.length > 0) ? (
-              <div className="bulkNoResultsState" aria-label="Bulk file pending output placeholder">
+            {lastSummary.length === 0 &&
+            (visibleProgress || postRunItems.length > 0) ? (
+              <div
+                className="bulkNoResultsState"
+                aria-label="Bulk file pending output placeholder"
+              >
                 <strong>
                   {visibleProgress
                     ? `${visibleProgress.terminal} of ${visibleProgress.total} targets reported`
                     : "No per-target results retained"}
                 </strong>
                 <p>
-                  {visibleProgress && visibleProgress.terminal < visibleProgress.total
+                  {visibleProgress &&
+                  visibleProgress.terminal < visibleProgress.total
                     ? "Waiting for remaining targets; completed outcomes appear here as their evidence is retained."
                     : "The run reached a terminal state without grouped output evidence. Open job details for target status and retained output."}
                 </p>
@@ -912,43 +1053,31 @@ export function MultiFileActionsPanel({
               lastSummary.map((group) => (
                 <details key={group.key} open>
                   <summary>
-                    <span
-                      className={`status ${bulkSummaryStatusClass(group)}`}
-                      title={`Bulk file result state: ${group.status}. Exact per-target detail is excluded from tooltips.`}
-                    >
+                    <span className={`status ${bulkSummaryStatusClass(group)}`}>
                       {group.status}
                     </span>
                     <strong>{vpsCountLabel(group.clientIds.length)}</strong>
-                    <span
-                      data-tooltip-sensitive="true"
-                      data-value-tooltip-skip="true"
-                      title="Bulk file result reason is displayed here; exact per-target detail is excluded from tooltips."
-                    >
-                      {group.reason || group.label}
-                    </span>
+                    <span>{group.reason || group.label}</span>
                   </summary>
                   {group.detail && (
-                    <p
-                      className="bulkSummaryDetail"
-                      data-tooltip-sensitive="true"
-                      data-value-tooltip-skip="true"
-                      title="Bulk file result detail is displayed here; exact per-target content is excluded from tooltips."
-                    >
-                      {group.detail}
-                    </p>
+                    <p className="bulkSummaryDetail">{group.detail}</p>
                   )}
                   {(group.sha256Hex || group.preview) && (
                     <div className="bulkEvidenceBox">
                       {group.sha256Hex && (
                         <div>
                           <span>Same hash</span>
-                          <strong title={group.sha256Hex}>{shortId(group.sha256Hex)}</strong>
+                          <strong title={group.sha256Hex}>
+                            {shortId(group.sha256Hex)}
+                          </strong>
                         </div>
                       )}
                       {group.preview && (
                         <div className="bulkEvidencePreview">
                           <span>Content preview</span>
-                          <pre className="bulkSummaryPreview">{group.preview}</pre>
+                          <pre className="bulkSummaryPreview">
+                            {group.preview}
+                          </pre>
                         </div>
                       )}
                     </div>
@@ -980,13 +1109,22 @@ export function MultiFileActionsPanel({
       </div>
 
       <ConfirmationPrompt
-        confirmLabel={pendingConfirmation ? bulkConfirmLabel(pendingConfirmation.operation) : "Run bulk file action"}
+        confirmLabel={
+          pendingConfirmation
+            ? bulkConfirmLabel(pendingConfirmation.operation)
+            : "Run bulk file action"
+        }
         detail={
           pendingConfirmation
-            ? compactConfirmationDetail(pendingConfirmation.operation, pendingConfirmation.targets.length)
+            ? compactConfirmationDetail(
+                pendingConfirmation.operation,
+                pendingConfirmation.targets.length,
+              )
             : ""
         }
-        items={pendingConfirmation ? confirmationItems(pendingConfirmation) : []}
+        items={
+          pendingConfirmation ? confirmationItems(pendingConfirmation) : []
+        }
         onCancel={() => setPendingConfirmation(null)}
         onConfirm={() => {
           const confirmation = pendingConfirmation;
@@ -998,7 +1136,11 @@ export function MultiFileActionsPanel({
         open={pendingConfirmation !== null}
         pending={pending}
         title="Confirm bulk file operation"
-        tone={pendingConfirmation?.operation.type === "file_delete" ? "danger" : "normal"}
+        tone={
+          pendingConfirmation?.operation.type === "file_delete"
+            ? "danger"
+            : "normal"
+        }
       />
     </div>
   );
@@ -1014,7 +1156,10 @@ function BulkPreflightChecklist({
   return (
     <div className="bulkPreflightChecklist" aria-label={label}>
       {items.map((item) => (
-        <div className={`bulkPreflightCard ${item.tone ?? "neutral"}`} key={item.key}>
+        <div
+          className={`bulkPreflightCard ${item.tone ?? "neutral"}`}
+          key={item.key}
+        >
           <span>{item.label}</span>
           <strong>{item.value}</strong>
           <p>{item.detail}</p>
@@ -1030,14 +1175,20 @@ function BulkLiveMatchSummary({
   summary: BulkLiveMatchSummaryModel;
 }) {
   return (
-    <div className={`bulkLiveSummary ${summary.tone}`} aria-label="Bulk file live match summary">
+    <div
+      className={`bulkLiveSummary ${summary.tone}`}
+      aria-label="Bulk file live match summary"
+    >
       <div>
         <span>{summary.label}</span>
         <strong>{summary.value}</strong>
         <p>{summary.detail}</p>
       </div>
       {summary.attentionTargets.length > 0 && (
-        <div className="bulkLiveSummaryTargets" aria-label="Bulk file attention targets">
+        <div
+          className="bulkLiveSummaryTargets"
+          aria-label="Bulk file attention targets"
+        >
           {summary.attentionTargets.map((target) => (
             <span className={target.tone} key={target.id} title={target.title}>
               {target.label}
@@ -1072,8 +1223,14 @@ function BulkDownloadComparisonView({
               </div>
               <div className="bulkComparisonVariants">
                 {row.variants.map((variant) => (
-                  <div className="bulkComparisonVariant" key={`${row.label}:${variant.label}`}>
-                    <span className="bulkComparisonVariantLabel" title={variant.label}>
+                  <div
+                    className="bulkComparisonVariant"
+                    key={`${row.label}:${variant.label}`}
+                  >
+                    <span
+                      className="bulkComparisonVariantLabel"
+                      title={variant.label}
+                    >
                       {variant.label}
                     </span>
                     <div className="bulkSummaryClients bulkComparisonClients">
@@ -1088,7 +1245,11 @@ function BulkDownloadComparisonView({
               </div>
             </div>
           ))}
-          {comparison.extraRowCount > 0 && <p className="bulkSummaryDetail">{comparison.extraRowCount} more differing paths not shown.</p>}
+          {comparison.extraRowCount > 0 && (
+            <p className="bulkSummaryDetail">
+              {comparison.extraRowCount} more differing paths not shown.
+            </p>
+          )}
         </div>
       )}
     </div>
@@ -1170,7 +1331,9 @@ function groupBulkOutputs(
     group.clientIds.push(output.client_id);
     groups.set(key, group);
   }
-  const targetRecordByClient = new Map(targetRecords.map((target) => [target.client_id, target]));
+  const targetRecordByClient = new Map(
+    targetRecords.map((target) => [target.client_id, target]),
+  );
   for (const target of targets) {
     if (clientsWithStatus.has(target.id)) {
       continue;
@@ -1178,9 +1341,17 @@ function groupBulkOutputs(
     const targetRecord = targetRecordByClient.get(target.id);
     const agent = agentById.get(target.id) ?? target;
     const unavailable = targetPreflightUnavailable(agent);
-    const state = unavailable ? "unavailable" : targetRecord?.status ?? "queued";
-    const reason = unavailable ? agent.status : targetRecord?.message ?? targetRecord?.status ?? "waiting_for_output";
-    const label = unavailable ? "Agent unavailable" : targetRecord?.status ? "Job target status" : "No file status";
+    const state = unavailable
+      ? "unavailable"
+      : (targetRecord?.status ?? "queued");
+    const reason = unavailable
+      ? agent.status
+      : (targetRecord?.message ?? targetRecord?.status ?? "waiting_for_output");
+    const label = unavailable
+      ? "Agent unavailable"
+      : targetRecord?.status
+        ? "Job target status"
+        : "No file status";
     const detail = unavailable
       ? `Matched by selector; agent status ${agent.status}.`
       : targetRecord?.status
@@ -1201,7 +1372,9 @@ function groupBulkOutputs(
     group.clientIds.push(target.id);
     groups.set(key, group);
   }
-  return Array.from(groups.values()).sort((left, right) => right.clientIds.length - left.clientIds.length);
+  return Array.from(groups.values()).sort(
+    (left, right) => right.clientIds.length - left.clientIds.length,
+  );
 }
 
 function bulkSummaryStatusClass(group: BulkSummaryGroup): string {
@@ -1212,10 +1385,16 @@ function bulkSummaryStatusClass(group: BulkSummaryGroup): string {
 }
 
 function successfulDownloadClientIds(groups: BulkSummaryGroup[]): string[] {
-  return groups.filter((group) => group.type === "file_download" && group.status === "completed").flatMap((group) => group.clientIds);
+  return groups
+    .filter(
+      (group) => group.type === "file_download" && group.status === "completed",
+    )
+    .flatMap((group) => group.clientIds);
 }
 
-function buildDownloadComparison(outputs: JobOutputRecord[]): BulkDownloadComparison | null {
+function buildDownloadComparison(
+  outputs: JobOutputRecord[],
+): BulkDownloadComparison | null {
   const records = downloadStatusRecords(outputs);
   if (records.length < 2) {
     return null;
@@ -1240,7 +1419,9 @@ function buildDownloadComparison(outputs: JobOutputRecord[]): BulkDownloadCompar
   return buildRegularFileDownloadComparison(records);
 }
 
-function downloadStatusRecords(outputs: JobOutputRecord[]): DownloadStatusRecord[] {
+function downloadStatusRecords(
+  outputs: JobOutputRecord[],
+): DownloadStatusRecord[] {
   const records: DownloadStatusRecord[] = [];
   for (const output of outputs) {
     if (output.stream !== "status") {
@@ -1257,8 +1438,12 @@ function downloadStatusRecords(outputs: JobOutputRecord[]): DownloadStatusRecord
   return records;
 }
 
-function buildRegularFileDownloadComparison(records: DownloadStatusRecord[]): BulkDownloadComparison {
-  const variants = groupedDownloadVariants(records, fileContentKey, (record) => fileContentLabel(record.status));
+function buildRegularFileDownloadComparison(
+  records: DownloadStatusRecord[],
+): BulkDownloadComparison {
+  const variants = groupedDownloadVariants(records, fileContentKey, (record) =>
+    fileContentLabel(record.status),
+  );
   if (variants.length <= 1) {
     const status = records[0]?.status;
     return {
@@ -1278,18 +1463,37 @@ function buildRegularFileDownloadComparison(records: DownloadStatusRecord[]): Bu
   };
 }
 
-function buildDirectoryDownloadComparison(records: DownloadStatusRecord[]): BulkDownloadComparison {
-  const hierarchyVariants = groupedDownloadVariants(records, directoryHierarchyKey, (record) => directoryHierarchyLabel(record.status));
-  if (hierarchyVariants.length > 1 || hierarchyVariants.some((variant) => variant.label.includes("missing"))) {
+function buildDirectoryDownloadComparison(
+  records: DownloadStatusRecord[],
+): BulkDownloadComparison {
+  const hierarchyVariants = groupedDownloadVariants(
+    records,
+    directoryHierarchyKey,
+    (record) => directoryHierarchyLabel(record.status),
+  );
+  if (
+    hierarchyVariants.length > 1 ||
+    hierarchyVariants.some((variant) => variant.label.includes("missing"))
+  ) {
     return {
-      detail: "Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.",
+      detail:
+        "Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.",
       extraRowCount: 0,
-      rows: [{ label: records[0]?.status.path ?? "Selected directory", variants: hierarchyVariants }],
+      rows: [
+        {
+          label: records[0]?.status.path ?? "Selected directory",
+          variants: hierarchyVariants,
+        },
+      ],
       title: "Hierarchy differs",
       tone: "hierarchyDiscrepancy",
     };
   }
-  const contentVariants = groupedDownloadVariants(records, directoryContentKey, (record) => directoryContentLabel(record.status));
+  const contentVariants = groupedDownloadVariants(
+    records,
+    directoryContentKey,
+    (record) => directoryContentLabel(record.status),
+  );
   if (contentVariants.length <= 1) {
     const status = records[0]?.status;
     return {
@@ -1311,21 +1515,40 @@ function buildDirectoryDownloadComparison(records: DownloadStatusRecord[]): Bulk
     };
   }
   return {
-    detail: "Hierarchy matches, but the manifest is unavailable or truncated; content differs by manifest hash.",
+    detail:
+      "Hierarchy matches, but the manifest is unavailable or truncated; content differs by manifest hash.",
     extraRowCount: 0,
-    rows: [{ label: records[0]?.status.path ?? "Selected directory", variants: contentVariants }],
+    rows: [
+      {
+        label: records[0]?.status.path ?? "Selected directory",
+        variants: contentVariants,
+      },
+    ],
     title: "Content manifest differs",
     tone: "contentDiscrepancy",
   };
 }
 
-function exactDirectoryFileDifferenceRows(records: DownloadStatusRecord[]): { extraRowCount: number; rows: BulkDownloadComparisonRow[] } | null {
-  if (records.some((record) => record.status.manifest_truncated || !Array.isArray(record.status.manifest_entries))) {
+function exactDirectoryFileDifferenceRows(
+  records: DownloadStatusRecord[],
+): { extraRowCount: number; rows: BulkDownloadComparisonRow[] } | null {
+  if (
+    records.some(
+      (record) =>
+        record.status.manifest_truncated ||
+        !Array.isArray(record.status.manifest_entries),
+    )
+  ) {
     return null;
   }
   const manifests = records.map((record) => ({
     clientId: record.clientId,
-    entries: new Map((record.status.manifest_entries ?? []).map((entry) => [entry.path, entry])),
+    entries: new Map(
+      (record.status.manifest_entries ?? []).map((entry) => [
+        entry.path,
+        entry,
+      ]),
+    ),
   }));
   const paths = Array.from(
     new Set(
@@ -1353,12 +1576,17 @@ function exactDirectoryFileDifferenceRows(records: DownloadStatusRecord[]): { ex
       rows.push({
         detail: `${variants.size} variants`,
         label: path,
-        variants: Array.from(variants.values()).sort((left, right) => right.clientIds.length - left.clientIds.length),
+        variants: Array.from(variants.values()).sort(
+          (left, right) => right.clientIds.length - left.clientIds.length,
+        ),
       });
     }
   }
   const visibleRows = rows.slice(0, 8);
-  return { extraRowCount: Math.max(0, rows.length - visibleRows.length), rows: visibleRows };
+  return {
+    extraRowCount: Math.max(0, rows.length - visibleRows.length),
+    rows: visibleRows,
+  };
 }
 
 function groupedDownloadVariants(
@@ -1369,11 +1597,16 @@ function groupedDownloadVariants(
   const groups = new Map<string, BulkDownloadComparisonVariant>();
   for (const record of records) {
     const key = keyFor(record);
-    const variant = groups.get(key) ?? { clientIds: [], label: labelFor(record) };
+    const variant = groups.get(key) ?? {
+      clientIds: [],
+      label: labelFor(record),
+    };
     variant.clientIds.push(record.clientId);
     groups.set(key, variant);
   }
-  return Array.from(groups.values()).sort((left, right) => right.clientIds.length - left.clientIds.length);
+  return Array.from(groups.values()).sort(
+    (left, right) => right.clientIds.length - left.clientIds.length,
+  );
 }
 
 function fileContentKey(record: DownloadStatusRecord): string {
@@ -1393,7 +1626,11 @@ function directoryHierarchyLabel(status: FileOperationStatus): string {
 }
 
 function directoryContentKey(record: DownloadStatusRecord): string {
-  return record.status.content_manifest_sha256_hex ?? record.status.sha256_hex ?? "missing";
+  return (
+    record.status.content_manifest_sha256_hex ??
+    record.status.sha256_hex ??
+    "missing"
+  );
 }
 
 function directoryContentLabel(status: FileOperationStatus): string {
@@ -1414,14 +1651,18 @@ function directoryCountsLabel(status: FileOperationStatus | undefined): string {
   return parts.length > 0 ? parts.join(" · ") : "manifest unavailable";
 }
 
-function manifestEntryContentKey(entry: FileDownloadManifestEntry | undefined): string {
+function manifestEntryContentKey(
+  entry: FileDownloadManifestEntry | undefined,
+): string {
   if (!entry) {
     return "missing";
   }
   return `${entry.kind ?? "unknown"}:${entry.size_bytes ?? "unknown"}:${entry.sha256_hex ?? "missing"}`;
 }
 
-function manifestEntryContentLabel(entry: FileDownloadManifestEntry | undefined): string {
+function manifestEntryContentLabel(
+  entry: FileDownloadManifestEntry | undefined,
+): string {
   if (!entry) {
     return "missing";
   }
@@ -1432,12 +1673,17 @@ function hashLabel(label: string, value: string | null | undefined): string {
   return `${label} ${value ? shortId(value) : "missing"}`;
 }
 
-function clientDisplayName(clientId: string, agentById: Map<string, AgentView>): string {
+function clientDisplayName(
+  clientId: string,
+  agentById: Map<string, AgentView>,
+): string {
   const agent = agentById.get(clientId);
   return agent ? targetDisplayName(agent) : clientId;
 }
 
-function targetDisplayName(target: Pick<AgentView, "display_name" | "id">): string {
+function targetDisplayName(
+  target: Pick<AgentView, "display_name" | "id">,
+): string {
   const name = target.display_name?.trim();
   if (!name || name === target.id) {
     return target.id;
@@ -1469,7 +1715,9 @@ function saveBlob(blob: Blob, name: string) {
   URL.revokeObjectURL(url);
 }
 
-function statusLabel(status: NonNullable<ReturnType<typeof parseLatestFileStatus>>): string {
+function statusLabel(
+  status: NonNullable<ReturnType<typeof parseLatestFileStatus>>,
+): string {
   if (status.type === "file_download") {
     return status.archive ? "Folder tar" : "File download";
   }
@@ -1479,7 +1727,9 @@ function statusLabel(status: NonNullable<ReturnType<typeof parseLatestFileStatus
   return status.type;
 }
 
-function statusDetail(status: NonNullable<ReturnType<typeof parseLatestFileStatus>>): string {
+function statusDetail(
+  status: NonNullable<ReturnType<typeof parseLatestFileStatus>>,
+): string {
   const parts = [status.path];
   if (typeof status.size_bytes === "number") {
     parts.push(formatBytes(status.size_bytes));
@@ -1499,12 +1749,22 @@ function statusDetail(status: NonNullable<ReturnType<typeof parseLatestFileStatu
   return parts.join(" · ");
 }
 
-function statusPreview(status: NonNullable<ReturnType<typeof parseLatestFileStatus>>): string {
+function statusPreview(
+  status: NonNullable<ReturnType<typeof parseLatestFileStatus>>,
+): string {
   if (status.type === "file_download") {
-    return [status.source_kind, status.filename, status.content_type].filter(Boolean).join(" · ");
+    return [status.source_kind, status.filename, status.content_type]
+      .filter(Boolean)
+      .join(" · ");
   }
-  if (status.type === "file_read_text" && "content_base64" in status && typeof status.content_base64 === "string") {
-    const text = decodedText(status as Parameters<typeof decodedText>[0]).trimEnd();
+  if (
+    status.type === "file_read_text" &&
+    "content_base64" in status &&
+    typeof status.content_base64 === "string"
+  ) {
+    const text = decodedText(
+      status as Parameters<typeof decodedText>[0],
+    ).trimEnd();
     if (text.length <= 600) {
       return text;
     }
@@ -1518,7 +1778,9 @@ async function loadOutputsForSummary(
   onLoadOutputs: (jobId: string) => Promise<JobOutputRecord[]>,
   targetRecords: JobTargetRecord[],
 ): Promise<JobOutputRecord[]> {
-  const expectedStatusOutputs = targetRecords.filter((target) => target.status === "completed").length;
+  const expectedStatusOutputs = targetRecords.filter(
+    (target) => target.status === "completed",
+  ).length;
   let lastOutputs: JobOutputRecord[] = [];
   const deadline = Date.now() + BULK_OUTPUT_SUMMARY_WAIT_MS;
   while (Date.now() <= deadline) {
@@ -1527,11 +1789,18 @@ async function loadOutputsForSummary(
     } catch {
       lastOutputs = [];
     }
-    const statusOutputCount = lastOutputs.filter((output) => output.stream === "status" && output.done).length;
-    if (expectedStatusOutputs === 0 || statusOutputCount >= expectedStatusOutputs) {
+    const statusOutputCount = lastOutputs.filter(
+      (output) => output.stream === "status" && output.done,
+    ).length;
+    if (
+      expectedStatusOutputs === 0 ||
+      statusOutputCount >= expectedStatusOutputs
+    ) {
       return lastOutputs;
     }
-    await new Promise((resolve) => window.setTimeout(resolve, BULK_OUTPUT_SUMMARY_POLL_INTERVAL_MS));
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, BULK_OUTPUT_SUMMARY_POLL_INTERVAL_MS),
+    );
   }
   return lastOutputs;
 }
@@ -1541,7 +1810,11 @@ function parseMode(value: string): number {
   return parseFileMode(normalized);
 }
 
-function uploadDestinationPath(path: string, normalizedPath: string, fileName: string): string {
+function uploadDestinationPath(
+  path: string,
+  normalizedPath: string,
+  fileName: string,
+): string {
   const trimmed = path.trim();
   if (trimmed.endsWith("/")) {
     return normalizeAbsolutePath(`${trimmed}${fileName}`);
@@ -1596,7 +1869,12 @@ function buildBulkPreflightItems({
   const targets = preview?.targets ?? localMatches;
   const targetCount = preview?.target_count ?? localMatches.length;
   const availability = targetAvailabilityCounts(targets);
-  const targetTone = availability.unavailable > 0 || availability.stale > 0 ? "attention" : preview ? "ready" : "neutral";
+  const targetTone =
+    availability.unavailable > 0 || availability.stale > 0
+      ? "attention"
+      : preview
+        ? "ready"
+        : "neutral";
   return [
     {
       detail: pathReadiness.detail,
@@ -1612,7 +1890,9 @@ function buildBulkPreflightItems({
       key: "targets",
       label: preview ? "Server target preview" : "Local selector estimate",
       tone: targetTone,
-      value: preview ? formatTargetAvailabilitySummary(targets) : formatLocalAvailabilitySummary(localMatches, agentCount),
+      value: preview
+        ? formatTargetAvailabilitySummary(targets)
+        : formatLocalAvailabilitySummary(localMatches, agentCount),
     },
     bulkTransferEstimateItem({
       action,
@@ -1630,11 +1910,24 @@ function buildBulkPreflightItems({
       detail: `${privilegeMaterial ? "Privilege material is unlocked for this browser session." : "Privilege unlock is required before running."} Stale agents may still reject with a command-version mismatch at execution; unavailable agents remain visible as failed/unavailable targets.`,
       key: "compatibility",
       label: "Compatibility",
-      tone: privilegeMaterial && availability.unavailable === 0 && availability.stale === 0 ? "ready" : "attention",
-      value: availability.unavailable > 0 ? `${availability.unavailable} unavailable` : availability.stale > 0 ? `${availability.stale} stale` : privilegeMaterial ? "Privilege-ready" : "Privilege locked",
+      tone:
+        privilegeMaterial &&
+        availability.unavailable === 0 &&
+        availability.stale === 0
+          ? "ready"
+          : "attention",
+      value:
+        availability.unavailable > 0
+          ? `${availability.unavailable} unavailable`
+          : availability.stale > 0
+            ? `${availability.stale} stale`
+            : privilegeMaterial
+              ? "Privilege-ready"
+              : "Privilege locked",
     },
     {
-      detail: "Execution result groups failures by reason and target. Use Open job details or narrow the selector to rerun only affected VPSs; output artifacts follow the configured job-output retention policy.",
+      detail:
+        "Execution result groups failures by reason and target. Use Open job details or narrow the selector to rerun only affected VPSs; output artifacts follow the configured job-output retention policy.",
       key: "retry-retention",
       label: "Retry and retention",
       tone: "neutral",
@@ -1654,9 +1947,15 @@ function buildBulkLiveMatchSummary({
 }): BulkLiveMatchSummaryModel {
   const targets = preview?.targets ?? localMatches;
   const availability = targetAvailabilityCounts(targets);
-  const ready = Math.max(0, targets.length - availability.stale - availability.unavailable);
+  const ready = Math.max(
+    0,
+    targets.length - availability.stale - availability.unavailable,
+  );
   const attentionTargets = targets
-    .filter((target) => target.status === "stale" || targetPreflightUnavailable(target))
+    .filter(
+      (target) =>
+        target.status === "stale" || targetPreflightUnavailable(target),
+    )
     .slice(0, 6)
     .map((target) => {
       const displayState = agentDisplayState(target);
@@ -1665,7 +1964,7 @@ function buildBulkLiveMatchSummary({
         id: target.id,
         label: `${targetDisplayName(target)} ${displayState.label}`,
         title: `${target.display_name || target.id} / ${target.id} / ${displayState.detail}`,
-        tone: isStale ? "stale" as const : "unavailable" as const,
+        tone: isStale ? ("stale" as const) : ("unavailable" as const),
       };
     });
   const hiddenAttentionCount =
@@ -1713,7 +2012,10 @@ function formatBulkLiveMatchValue(
   return parts.join(" · ");
 }
 
-function formatLocalAvailabilitySummary(localMatches: AgentView[], agentCount: number): string {
+function formatLocalAvailabilitySummary(
+  localMatches: AgentView[],
+  agentCount: number,
+): string {
   const availability = targetAvailabilityCounts(localMatches);
   if (availability.stale === 0 && availability.unavailable === 0) {
     return `${localMatches.length}/${agentCount} local matches`;
@@ -1764,7 +2066,8 @@ function bulkTransferEstimateItem({
   if (action === "upload_file") {
     if (!uploadFile) {
       return {
-      detail: "Select a browser file before running so the operation can calculate payload size, hash, and chunking.",
+        detail:
+          "Select a browser file before running so the operation can calculate payload size, hash, and chunking.",
         key: "transfer",
         label: "Size estimate",
         tone: "attention",
@@ -1810,7 +2113,10 @@ function buildBulkPostRunItems({
   if (!lastRunProgress || !lastOperation) {
     return [];
   }
-  const successfulDownloads = lastOperation.type === "file_download" ? successfulDownloadClientIds(lastSummary).length : 0;
+  const successfulDownloads =
+    lastOperation.type === "file_download"
+      ? successfulDownloadClientIds(lastSummary).length
+      : 0;
   const retryValue =
     lastRunProgress.unsuccessful > 0
       ? `${vpsCountLabel(lastRunProgress.unsuccessful)} retry candidates`
@@ -1822,11 +2128,15 @@ function buildBulkPostRunItems({
       detail: `${lastRunProgress.completed} completed, ${lastRunProgress.skipped} skipped, ${lastRunProgress.unsuccessful} unsuccessful, ${lastRunProgress.unavailable} pre-run unavailable.`,
       key: "post-outcome",
       label: "Run outcome",
-      tone: lastRunProgress.unsuccessful > 0 || lastRunProgress.unavailable > 0 ? "attention" : "ready",
+      tone:
+        lastRunProgress.unsuccessful > 0 || lastRunProgress.unavailable > 0
+          ? "attention"
+          : "ready",
       value: `${lastRunProgress.terminal}/${lastRunProgress.total} terminal`,
     },
     {
-      detail: "Failure reasons below preserve the operator's retry scope. Open job details for exact target records, then rerun with a narrowed selector when only failed targets should be retried.",
+      detail:
+        "Failure reasons below preserve the operator's retry scope. Open job details for exact target records, then rerun with a narrowed selector when only failed targets should be retried.",
       key: "post-retry",
       label: "Retry scope",
       tone: lastRunProgress.unsuccessful > 0 ? "attention" : "ready",
@@ -1840,7 +2150,10 @@ function buildBulkPostRunItems({
       key: "post-artifacts",
       label: "Artifacts",
       tone: "neutral",
-      value: lastOperation.type === "file_download" ? `${successfulDownloads} downloadable` : "Retained job output",
+      value:
+        lastOperation.type === "file_download"
+          ? `${successfulDownloads} downloadable`
+          : "Retained job output",
     },
   ];
 }
@@ -1917,7 +2230,8 @@ function bulkPathReadiness(
   const normalized = normalizeAbsolutePath(value);
   if (normalized === "/") {
     return {
-      detail: "Filesystem root was explicitly approved for this run. Confirm target scope before executing.",
+      detail:
+        "Filesystem root was explicitly approved for this run. Confirm target scope before executing.",
       label: "Root path explicitly allowed",
       normalizedPath: normalized,
       shortLabel: "root path approved",
@@ -1957,7 +2271,11 @@ function bulkReviewButtonTitle({
   if (!privilegeMaterial) {
     return "Unlock privilege before running a bulk file operation.";
   }
-  return draftError ?? pathReadiness.validationError ?? `Resolve the latest targets, preview impact, and open one ${bulkActionNoun(action)} confirmation.`;
+  return (
+    draftError ??
+    pathReadiness.validationError ??
+    `Resolve the latest targets, preview impact, and open one ${bulkActionNoun(action)} confirmation.`
+  );
 }
 
 function bulkDraftValidationMessage({
@@ -2000,7 +2318,9 @@ function bulkDraftValidationMessage({
     try {
       normalizeAbsolutePath(newPath);
     } catch (error) {
-      return error instanceof Error ? error.message : "Destination path is invalid.";
+      return error instanceof Error
+        ? error.message
+        : "Destination path is invalid.";
     }
   }
   if (action === "chown" && !uploadOwner.trim() && !uploadGroup.trim()) {
@@ -2017,7 +2337,15 @@ function bulkDraftValidationMessage({
 }
 
 function usesFileActionPolicy(action: MultiFileAction): boolean {
-  return action === "write_text" || action === "mkdir" || action === "copy" || action === "rename" || action === "chmod" || action === "chown" || action === "delete";
+  return (
+    action === "write_text" ||
+    action === "mkdir" ||
+    action === "copy" ||
+    action === "rename" ||
+    action === "chmod" ||
+    action === "chown" ||
+    action === "delete"
+  );
 }
 
 function isAdvancedAction(action: MultiFileAction): boolean {
@@ -2146,7 +2474,10 @@ function confirmationPolicyText(operation: JobOperation): string {
   if (operation.type === "file_download") {
     return "";
   }
-  if (operation.type === "file_push" || operation.type === "file_push_chunked") {
+  if (
+    operation.type === "file_push" ||
+    operation.type === "file_push_chunked"
+  ) {
     return `${existingFilePolicyLabel(operation.existing_policy ?? "skip")}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`;
   }
   if (operation.type === "file_rename") {
@@ -2155,18 +2486,27 @@ function confirmationPolicyText(operation: JobOperation): string {
   if (operation.type === "file_copy") {
     return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
   }
-  if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
+  if (
+    "policy" in operation &&
+    (typeof operation.policy === "string" ||
+      typeof operation.policy === "undefined")
+  ) {
     return `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
   }
   return "";
 }
 
-function compactConfirmationDetail(operation: JobOperation, targetCount: number): string {
+function compactConfirmationDetail(
+  operation: JobOperation,
+  targetCount: number,
+): string {
   const policy = confirmationPolicyText(operation);
   return `${bulkOperationSummary(operation)} on ${vpsCountLabel(targetCount)}${policy ? `. ${policy}` : ""}`;
 }
 
-function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label: string; value: string | number }> {
+function confirmationItems(
+  confirmation: PendingBulkConfirmation,
+): Array<{ label: string; value: string | number }> {
   const operation = confirmation.operation;
   const items: Array<{ label: string; value: string | number }> = [
     { label: "Selector", value: confirmation.selectorExpression },
@@ -2176,28 +2516,55 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
   if ("path" in operation) {
     items.push({ label: "Path", value: operation.path });
     if (operation.path === "/") {
-      items.push({ label: "Root path", value: "Explicitly allowed before run" });
+      items.push({
+        label: "Root path",
+        value: "Explicitly allowed before run",
+      });
     }
   }
   if ("new_path" in operation) {
     items.push({ label: "Destination", value: operation.new_path });
   }
   if ("recursive" in operation) {
-    items.push({ label: "Recursive", value: operation.recursive ? "Include child paths" : "This path only" });
+    items.push({
+      label: "Recursive",
+      value: operation.recursive ? "Include child paths" : "This path only",
+    });
   }
   if ("follow_symlinks" in operation) {
-    items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
+    items.push({
+      label: "Symlinks",
+      value: operation.follow_symlinks ? "Follow targets" : "Do not follow",
+    });
   }
   if ("overwrite" in operation) {
-    items.push({ label: "Overwrite", value: operation.overwrite ? "May overwrite destination" : "Destination must be new" });
+    items.push({
+      label: "Overwrite",
+      value: operation.overwrite
+        ? "May overwrite destination"
+        : "Destination must be new",
+    });
   }
-  if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
-    items.push({ label: "Policy", value: fileActionPolicyLabel(operation.policy ?? "fail") });
+  if (
+    "policy" in operation &&
+    (typeof operation.policy === "string" ||
+      typeof operation.policy === "undefined")
+  ) {
+    items.push({
+      label: "Policy",
+      value: fileActionPolicyLabel(operation.policy ?? "fail"),
+    });
   }
   if ("existing_policy" in operation) {
-    items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
+    items.push({
+      label: "Existing file",
+      value: existingFilePolicyLabel(operation.existing_policy ?? "skip"),
+    });
   }
-  if (operation.type === "file_push" || operation.type === "file_push_chunked") {
+  if (
+    operation.type === "file_push" ||
+    operation.type === "file_push_chunked"
+  ) {
     items.push(
       { label: "Payload size", value: formatBytes(operation.size_bytes) },
       { label: "Payload SHA-256", value: operation.sha256_hex },
@@ -2205,7 +2572,10 @@ function confirmationItems(confirmation: PendingBulkConfirmation): Array<{ label
     );
   }
   if ("ownership_policy" in operation) {
-    items.push({ label: "Owner/group", value: ownershipPolicyLabel(operation.ownership_policy ?? "fail") });
+    items.push({
+      label: "Owner/group",
+      value: ownershipPolicyLabel(operation.ownership_policy ?? "fail"),
+    });
   }
   return items;
 }

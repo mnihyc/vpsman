@@ -75,9 +75,9 @@ export type ConsoleDataGridColumn<T> = {
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
   /**
-   * Return a safe authored tooltip, `undefined` to use the visible-text
-   * decorator, or `null` to explicitly suppress tooltips for sensitive cell
-   * content. Search and sort metadata are never used as tooltip content.
+   * Return supplemental authored detail, `undefined` for no explicit title,
+   * or `null` to suppress automatic truncation disclosure for this cell.
+   * Search and sort metadata are never used as tooltip content.
    */
   tooltip?: (row: T) => string | null | undefined;
 };
@@ -507,12 +507,7 @@ export function ConsoleDataGrid<T>({
 
   function actionDescription(action: ConsoleDataGridAction<T>, rows: T[]) {
     const description = action.description?.(rows);
-    if (action.disabled?.(rows)) {
-      return (
-        description ?? `${action.label} is unavailable for the selected rows.`
-      );
-    }
-    return description ?? `Activate ${action.label} for the selected rows.`;
+    return description;
   }
 
   function rowDataCells(row: Row<T>) {
@@ -675,10 +670,8 @@ export function ConsoleDataGrid<T>({
                   key={cell.id}
                   title={tooltip.title}
                 >
-                  <span title={cellHeaderLabel(cell)}>
-                    {cellHeaderLabel(cell)}
-                  </span>
-                  <div className="gridMobileFieldValue" title={tooltip.title}>
+                  <span>{cellHeaderLabel(cell)}</span>
+                  <div className="gridMobileFieldValue">
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </div>
                 </div>
@@ -781,10 +774,7 @@ export function ConsoleDataGrid<T>({
   function renderEmptyContent() {
     if (searchError) {
       return (
-        <div
-          className="emptyState compactEmpty"
-          title={`The ${title} search expression is invalid: ${searchError}`}
-        >
+        <div className="emptyState compactEmpty">
           <strong>Invalid table search</strong>
           <span>{searchError}</span>
           <button
@@ -800,10 +790,7 @@ export function ConsoleDataGrid<T>({
     }
     if (rows.length > 0 && globalFilter.trim()) {
       return (
-        <div
-          className="emptyState compactEmpty"
-          title={`No loaded ${itemLabel} match the current ${title} search.`}
-        >
+        <div className="emptyState compactEmpty">
           <strong>
             {rowsTruncated
               ? `No loaded ${itemLabel} match`
@@ -827,21 +814,14 @@ export function ConsoleDataGrid<T>({
     }
     if (rowsTruncated && rows.length === 0) {
       return (
-        <div
-          className="emptyState compactEmpty"
-          title={`No ${itemLabel} are present in the loaded ${title} page.`}
-        >
+        <div className="emptyState compactEmpty">
           No {itemLabel} appear in the loaded page; more may exist.
         </div>
       );
     }
     const emptyContent = empty ?? `No ${itemLabel} match the current view.`;
     if (typeof emptyContent === "string" || typeof emptyContent === "number") {
-      return (
-        <div className="emptyState compactEmpty" title={String(emptyContent)}>
-          {emptyContent}
-        </div>
-      );
+      return <div className="emptyState compactEmpty">{emptyContent}</div>;
     }
     return emptyContent;
   }
@@ -849,25 +829,16 @@ export function ConsoleDataGrid<T>({
   return (
     <div className="consoleDataGrid" aria-label={`${title} data grid`}>
       <div className="gridToolbar">
-        <div
-          className="gridCounts"
-          title={`${title} result and selection summary.`}
-        >
-          <strong title={`${title} data grid.`}>{title}</strong>
-          <span
-            title={`${filteredRows.length} filtered from ${rows.length} loaded ${itemLabel}.`}
-          >
+        <div className="gridCounts">
+          <strong>{title}</strong>
+          <span>
             {rowsTruncated
               ? globalFilter.trim().length > 0
                 ? `${filteredRows.length} matching in ${rows.length} loaded; more may exist`
                 : `${rows.length} loaded; more may exist`
               : `${filteredRows.length} of ${rows.length} ${rows.length === 1 ? singularItemLabel : itemLabel}`}
           </span>
-          {selectable && (
-            <span title={`${selectedRows.length} ${itemLabel} selected.`}>
-              {selectedRows.length} selected
-            </span>
-          )}
+          {selectable && <span>{selectedRows.length} selected</span>}
         </div>
         <SearchExpressionInput
           ariaLabel={`${title} search`}
@@ -1015,7 +986,7 @@ export function ConsoleDataGrid<T>({
                         onCheckedChange={(checked) =>
                           column.toggleVisibility(Boolean(checked))
                         }
-                        title={`${columnLabel} is ${isVisible ? "shown" : "hidden"}. Activate to ${isVisible ? "hide" : "show"} it.`}
+                        title={`${columnLabel} is ${isVisible ? "shown" : "hidden"}; click to ${isVisible ? "hide" : "show"} it.`}
                       >
                         <span className="consoleMenuIcon" aria-hidden>
                           {isVisible ? <Check size={14} /> : <X size={14} />}
@@ -1400,11 +1371,7 @@ function SortableHeaderCell<T>({
   const headerDefinition = header.column.columnDef.header;
   const headerLabel =
     typeof headerDefinition === "string" ? headerDefinition : "";
-  const effectiveHeaderTitle =
-    headerTitle ??
-    (headerLabel
-      ? `${headerLabel} column. Activate the heading to change sorting.`
-      : undefined);
+  const effectiveHeaderTitle = headerTitle;
 
   return (
     <div

@@ -118,14 +118,8 @@ export function ConsoleStatusBadge({
   title?: string;
   tone?: "critical" | "warning" | "ok" | "info" | "neutral";
 }) {
-  const text = typeof children === "string" || typeof children === "number"
-    ? String(children)
-    : null;
   return (
-    <span
-      className={`consoleStatusBadge ${tone}`}
-      title={title ?? (text ? `Status: ${text}.` : "Current status.")}
-    >
+    <span className={`consoleStatusBadge ${tone}`} title={title}>
       {children}
     </span>
   );
@@ -153,7 +147,6 @@ export function ConsoleActionMenu({
         <button
           aria-label={label}
           className="secondaryAction compactAction"
-          title={`Open ${label.toLowerCase()}.`}
           type="button"
         >
           <span>Actions</span>
@@ -301,7 +294,6 @@ export function ConsoleCollapsibleSection({
           <button
             aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
             className="secondaryAction compactAction"
-            title={`${open ? "Collapse" : "Expand"} ${title}.`}
             type="button"
           >
             <ChevronDown
@@ -321,9 +313,9 @@ export function ConsoleCollapsibleSection({
 
 function consoleActionTitle(action: ConsoleMenuAction) {
   if (action.disabled) {
-    return action.disabledReason ?? action.title ?? `${action.label} is unavailable in the current state.`;
+    return action.disabledReason ?? action.title;
   }
-  return action.title ?? `Activate ${action.label}.`;
+  return action.title;
 }
 
 export function ConsoleSplitWorkspace({

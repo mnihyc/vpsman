@@ -33,7 +33,9 @@ test("dispatches and operates a durable staged rollout", async ({
   await composer.getByLabel("Stage delay (seconds)").fill("30");
   await expect(composer.getByLabel("Pause after canary")).toBeChecked();
 
-  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
+  await activate(
+    composer.getByRole("button", { name: "Dispatch", exact: true }),
+  );
   const dispatchPrompt = page.getByLabel("Confirm job dispatch");
   await expect(dispatchPrompt).toBeVisible();
   await expect(dispatchPrompt).toContainText("Staged rollout");
@@ -71,11 +73,11 @@ test("dispatches and operates a durable staged rollout", async ({
   await expect(composer).toContainText(
     "Open staged rollout for authoritative live progress",
   );
-  await activate(
-    composer.getByRole("button", { name: "Open staged rollout" }),
-  );
+  await activate(composer.getByRole("button", { name: "Open staged rollout" }));
 
-  await expect(page).toHaveURL(/rollout_job=11111111-2222-4333-8444-555555555555/);
+  await expect(page).toHaveURL(
+    /rollout_job=11111111-2222-4333-8444-555555555555/,
+  );
   const detail = page.locator(".consoleDetailPanel", {
     hasText: "Rollout 11111111",
   });
@@ -84,6 +86,9 @@ test("dispatches and operates a durable staged rollout", async ({
   await expect(detail.getByText(/^edge-sfo-01/)).toBeVisible();
   await expect(detail.getByText(/^core-fra-02/)).toBeVisible();
   await expect(detail.getByText(/^backup-nyc-03/)).toBeVisible();
+  await expect(
+    detail.locator(".truncateValue", { hasText: "completed" }),
+  ).not.toHaveAttribute("title");
 
   await activate(detail.getByRole("button", { name: "Resume stage" }));
   const resumePrompt = page.getByLabel("Confirm stage release");
@@ -93,9 +98,9 @@ test("dispatches and operates a durable staged rollout", async ({
   await resumePrompt
     .getByRole("button", { name: "Resume stage", exact: true })
     .dblclick({ delay: 50 });
-  await expect.poll(() => rolloutActionRequestCount(page)).toBe(
-    beforeResume + 1,
-  );
+  await expect
+    .poll(() => rolloutActionRequestCount(page))
+    .toBe(beforeResume + 1);
   await expect(resumePrompt).toBeHidden();
   await expect(page.getByLabel("Confirm rollout abort")).toHaveCount(0);
   await expect(detail.getByRole("button", { name: "Pause" })).toBeVisible();
@@ -105,26 +110,40 @@ test("dispatches and operates a durable staged rollout", async ({
     (button as HTMLButtonElement).click();
     (button as HTMLButtonElement).click();
   });
-  await expect.poll(() => rolloutActionRequestCount(page)).toBe(
-    beforePause + 1,
-  );
-  await expect(detail.getByRole("button", { name: "Resume stage" })).toBeVisible();
+  await expect
+    .poll(() => rolloutActionRequestCount(page))
+    .toBe(beforePause + 1);
+  await expect(
+    detail.getByRole("button", { name: "Resume stage" }),
+  ).toBeVisible();
   await page.reload();
-  await expect(page).toHaveURL(/rollout_job=11111111-2222-4333-8444-555555555555/);
+  await expect(page).toHaveURL(
+    /rollout_job=11111111-2222-4333-8444-555555555555/,
+  );
   await expect(detail).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Resume stage" })).toBeVisible();
+  await expect(
+    detail.getByRole("button", { name: "Resume stage" }),
+  ).toBeVisible();
 
   await activate(detail.getByRole("button", { name: "Abort rollout" }));
   const abortPrompt = page.getByLabel("Confirm rollout abort");
   await expect(abortPrompt).toBeVisible();
-  await expect(abortPrompt).toContainText("Unreleased targets will be canceled immediately");
+  await expect(abortPrompt).toContainText(
+    "Unreleased targets will be canceled immediately",
+  );
   await activate(
     abortPrompt.getByRole("button", { name: "Abort rollout", exact: true }),
   );
   await expect(abortPrompt).toBeHidden();
-  await expect(detail.getByText("Aborted", { exact: true }).first()).toBeVisible();
-  await expect(detail.getByRole("button", { name: "Resume stage" })).toHaveCount(0);
-  await expect(detail.getByRole("button", { name: "Abort rollout" })).toHaveCount(0);
+  await expect(
+    detail.getByText("Aborted", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    detail.getByRole("button", { name: "Resume stage" }),
+  ).toHaveCount(0);
+  await expect(
+    detail.getByRole("button", { name: "Abort rollout" }),
+  ).toHaveCount(0);
 
   expect(
     await page.evaluate(
@@ -227,11 +246,12 @@ async function settleScreenshot(page: Page) {
 }
 
 async function rolloutActionRequestCount(page: Page) {
-  return page.evaluate(() =>
-    (
-      window as unknown as {
-        __vpsmanTestRequests: { jobRolloutActions: unknown[] };
-      }
-    ).__vpsmanTestRequests.jobRolloutActions.length,
+  return page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { jobRolloutActions: unknown[] };
+        }
+      ).__vpsmanTestRequests.jobRolloutActions.length,
   );
 }

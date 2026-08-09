@@ -2001,11 +2001,6 @@ export function SystemUsersPanel({
                     invalidateUserReview();
                     setDraftUsername(event.target.value);
                   }}
-                  title={
-                    selectedOperator
-                      ? "Username is immutable after an operator account is created."
-                      : operatorHelpText.username
-                  }
                   ref={operatorUsernameRef}
                   value={draftUsername}
                 />
@@ -2036,11 +2031,6 @@ export function SystemUsersPanel({
                   placeholder={
                     selectedOperator ? "Only fill to reset" : "12+ characters"
                   }
-                  title={
-                    selectedOperator
-                      ? operatorHelpText.newPassword
-                      : operatorHelpText.createPassword
-                  }
                   type="password"
                   value={draftPassword}
                 />
@@ -2064,7 +2054,6 @@ export function SystemUsersPanel({
                     }
                     setDraftRole(nextRole);
                   }}
-                  title={operatorHelpText.role}
                   value={draftRole}
                 >
                   {operatorRoleOptions.map((role) => (
@@ -2093,7 +2082,6 @@ export function SystemUsersPanel({
                     setDraftSessionTtlCustomized(true);
                     setDraftSessionTtlDays(Number(event.target.value));
                   }}
-                  title={operatorHelpText.sessionRefreshTtl}
                   type="number"
                   value={draftSessionTtlDays}
                 />
@@ -2125,7 +2113,6 @@ export function SystemUsersPanel({
                   }}
                   placeholder="Leave empty for role defaults"
                   rows={4}
-                  title={operatorHelpText.scopes}
                   value={draftScopes}
                 />
               </label>
@@ -6063,7 +6050,10 @@ function SystemConfigPanel({
                   ))}
                 </div>
               ) : (
-                <div className="systemTomlEditor">
+                <div
+                  className="systemTomlEditor"
+                  title="Complete Suite Config TOML editor; changes are validated before the review and save workflow."
+                >
                   <div className="systemTomlNotes">
                     <span>
                       {config?.hot_reload_note ??
@@ -6077,7 +6067,6 @@ function SystemConfigPanel({
                   <textarea
                     aria-label="Suite config TOML"
                     className="systemConfigToml"
-                    data-tooltip-sensitive="true"
                     onChange={(event) => {
                       validationRequestId.current += 1;
                       setConfigError(null);
@@ -6270,15 +6259,15 @@ function SystemConfigPanel({
                   </button>
                 </div>
 
-                <details className="systemAdvancedDiff">
+                <details
+                  className="systemAdvancedDiff"
+                  title="Read-only comparison of the persisted and proposed redacted configuration."
+                >
                   <summary>Advanced redacted JSON diff</summary>
                   <div className="systemDiffPreview">
                     <div>
                       <h3>Current redacted</h3>
-                      <pre
-                        className="jsonPreview compactJsonPreview"
-                        data-value-tooltip-skip="true"
-                      >
+                      <pre className="jsonPreview compactJsonPreview">
                         {formatJson(
                           config?.redacted ?? validation?.old_redacted ?? null,
                         )}
@@ -6286,10 +6275,7 @@ function SystemConfigPanel({
                     </div>
                     <div>
                       <h3>Draft redacted</h3>
-                      <pre
-                        className="jsonPreview compactJsonPreview"
-                        data-value-tooltip-skip="true"
-                      >
+                      <pre className="jsonPreview compactJsonPreview">
                         {formatJson(validation?.redacted ?? null)}
                       </pre>
                     </div>
@@ -6443,16 +6429,10 @@ function ConfigFieldControl({
     ? getTomlPath(currentDraft.table, pathParts)
     : undefined;
   const currentLabel = formatConfigValue(currentValue);
-  const draftLabel = formatConfigValue(draftValue);
   const defaultValue = configFieldDefaultValue(field);
   const defaultLabel = formatConfigValue(defaultValue);
   const changed = !configValuesEqual(draftValue, currentValue);
   const impact = configFieldImpact(field.path, activeValidation);
-  const urlValueProtected = configFieldValueIsUrl(field, [
-    currentValue,
-    defaultValue,
-    draftValue,
-  ]);
   const controlId = `suite-config-field-${field.path.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
     <div className={`systemConfigFieldRow ${changed ? "changed" : ""}`}>
@@ -6464,15 +6444,7 @@ function ConfigFieldControl({
         </label>
         <p>{field.help}</p>
         <details className="systemConfigFieldMeta" open={changed}>
-          <summary
-            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
-            data-value-tooltip-skip={urlValueProtected ? "true" : undefined}
-            title={
-              urlValueProtected
-                ? "Loaded and inherited endpoint values are shown here; exact URL content is excluded from tooltips."
-                : undefined
-            }
-          >
+          <summary>
             <strong>{changed ? "Changed metadata" : "Field metadata"}</strong>
             <span>
               Current {currentLabel} · Default {defaultLabel} ·{" "}
@@ -6482,43 +6454,15 @@ function ConfigFieldControl({
           <dl>
             <div>
               <dt>Current</dt>
-              <dd
-                data-tooltip-sensitive={
-                  urlValueProtected ? "true" : undefined
-                }
-                data-value-tooltip-skip={
-                  urlValueProtected ? "true" : undefined
-                }
-                title={
-                  urlValueProtected
-                    ? "Loaded endpoint value; exact URL content is excluded from tooltips."
-                    : currentLabel
-                }
-              >
-                {currentLabel}
-              </dd>
+              <dd>{currentLabel}</dd>
             </div>
             <div>
               <dt>Default</dt>
-              <dd
-                data-tooltip-sensitive={
-                  urlValueProtected ? "true" : undefined
-                }
-                data-value-tooltip-skip={
-                  urlValueProtected ? "true" : undefined
-                }
-                title={
-                  urlValueProtected
-                    ? "Inherited endpoint default; exact URL content is excluded from tooltips."
-                    : defaultLabel
-                }
-              >
-                {defaultLabel}
-              </dd>
+              <dd>{defaultLabel}</dd>
             </div>
             <div>
               <dt>Validation</dt>
-              <dd title={field.rule}>{field.rule}</dd>
+              <dd>{field.rule}</dd>
             </div>
             <div>
               <dt>Impact</dt>
@@ -6529,21 +6473,20 @@ function ConfigFieldControl({
           </dl>
         </details>
       </div>
-      <div className="systemConfigFieldControl">
+      <div
+        className="systemConfigFieldControl"
+        title={
+          draftValue === undefined
+            ? `${field.label} has no explicit value and inherits its configured default.`
+            : undefined
+        }
+      >
         {field.kind === "checkbox" ? (
           <label className="checkLine inlineCheck">
             <input
               aria-label={field.label}
               checked={draftValue === true}
               data-tooltip-disabled-reason="Form fields are unavailable until the Suite Config TOML parses successfully."
-              data-tooltip-sensitive={
-                configFieldValueIsSensitive(field) || urlValueProtected
-                  ? "true"
-                  : undefined
-              }
-              data-value-tooltip-skip={
-                urlValueProtected ? "true" : undefined
-              }
               disabled={!parsedDraft.ok}
               id={controlId}
               onChange={(event) => onChange(field.path, event.target.checked)}
@@ -6557,12 +6500,7 @@ function ConfigFieldControl({
             aria-describedby={`${controlId}-meta`}
             data-tooltip-disabled-reason="Form fields are unavailable until the Suite Config TOML parses successfully."
             data-tooltip-sensitive={
-              configFieldValueIsSensitive(field) || urlValueProtected
-                ? "true"
-                : undefined
-            }
-            data-value-tooltip-skip={
-              urlValueProtected ? "true" : undefined
+              configFieldValueIsSensitive(field) ? "true" : undefined
             }
             disabled={!parsedDraft.ok}
             id={controlId}
@@ -6578,15 +6516,6 @@ function ConfigFieldControl({
                   : undefined,
               );
             }}
-            title={
-              urlValueProtected
-                ? `${field.label} endpoint field. Exact URL content is excluded from tooltips.`
-                : configFieldValueIsSensitive(field)
-                ? undefined
-                : draftValue === undefined
-                  ? `${field.label} has no explicit value; inherited default is ${defaultLabel}.`
-                  : `${field.label}: ${draftLabel}.`
-            }
             type={field.kind === "number" ? "number" : "text"}
             value={
               field.kind === "number"
@@ -6595,11 +6524,7 @@ function ConfigFieldControl({
             }
           />
         )}
-        <span
-          id={`${controlId}-meta`}
-          className="systemConfigPath"
-          title={field.path}
-        >
+        <span id={`${controlId}-meta`} className="systemConfigPath">
           {field.path}
         </span>
         <div className="systemConfigFieldActions">
@@ -6610,22 +6535,16 @@ function ConfigFieldControl({
                 ? "Reset is unavailable until the Suite Config TOML parses successfully."
                 : "This field already matches the loaded value."
             }
-            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
-            data-value-tooltip-skip={
-              urlValueProtected ? "true" : undefined
-            }
             disabled={
               !parsedDraft.ok || configValuesEqual(draftValue, currentValue)
             }
             onClick={() => onChange(field.path, currentValue)}
             title={
-              urlValueProtected
-                ? `Restore the loaded ${field.label} endpoint value. Exact URL content is excluded from tooltips.`
-                : !parsedDraft.ok
+              !parsedDraft.ok
                 ? "Reset is unavailable until the Suite Config TOML parses successfully."
                 : configValuesEqual(draftValue, currentValue)
                   ? "This field already matches the loaded value."
-                  : `Reset ${field.label} to the loaded value${currentValue === undefined ? " (no explicit value)" : `: ${currentLabel}`}.`
+                  : `Reset ${field.label} to the loaded value.`
             }
             type="button"
           >
@@ -6639,20 +6558,14 @@ function ConfigFieldControl({
                 ? "Default inheritance is unavailable until the Suite Config TOML parses successfully."
                 : "This field already inherits its default value."
             }
-            data-tooltip-sensitive={urlValueProtected ? "true" : undefined}
-            data-value-tooltip-skip={
-              urlValueProtected ? "true" : undefined
-            }
             disabled={!parsedDraft.ok || draftValue === undefined}
             onClick={() => onChange(field.path, undefined)}
             title={
-              urlValueProtected
-                ? `Remove the explicit ${field.label} endpoint value and inherit its configured default. Exact URL content is excluded from tooltips.`
-                : !parsedDraft.ok
+              !parsedDraft.ok
                 ? "Default inheritance is unavailable until the Suite Config TOML parses successfully."
                 : draftValue === undefined
                   ? "This field already inherits its default value."
-                  : `Use inherited default for ${field.label}: ${defaultLabel}. Removes the explicit value.`
+                  : `Use the inherited default for ${field.label}; removes the explicit value.`
             }
             type="button"
           >
@@ -6684,19 +6597,6 @@ function configFieldValueIsSensitive(field: ConfigFieldSpec) {
     /password|passphrase|secret|token|private|verifier|salt|api[_-]?key/i.test(
       `${field.path} ${field.label}`,
     )
-  );
-}
-
-function configFieldValueIsUrl(field: ConfigFieldSpec, values: unknown[]) {
-  if (
-    field.path === "api.gateway_control_url" ||
-    field.path === "gateway.api_url"
-  ) {
-    return true;
-  }
-  return values.some(
-    (value) =>
-      typeof value === "string" && /\b(?:https?|wss?):\/\//i.test(value),
   );
 }
 

@@ -6,10 +6,11 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
-import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
 import {
-  JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
-} from "../../generated/protocolContracts";
+  createJobTargetCount,
+  waitForBulkJobTargets,
+} from "../../bulkJobProgress";
+import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../generated/protocolContracts";
 import {
   beginSubmission,
   createSubmissionGuard,
@@ -47,15 +48,16 @@ export function HostProcessInventoryPanel({
   onSelectedClientIdChange: (clientId: string | null) => void;
   selectedClientId: string | null;
 }) {
-  const [inventory, setInventory] =
-    useState<HostProcessInventoryRecord | null>(null);
+  const [inventory, setInventory] = useState<HostProcessInventoryRecord | null>(
+    null,
+  );
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const submissionGuardRef = useRef(createSubmissionGuard());
   const [status, setStatus] = useState<string | null>(null);
   const selectedAgent = selectedClientId
-    ? agents.find((agent) => agent.id === selectedClientId) ?? null
+    ? (agents.find((agent) => agent.id === selectedClientId) ?? null)
     : null;
 
   const loadInventory = useCallback(
@@ -107,11 +109,16 @@ export function HostProcessInventoryPanel({
     const submissionKey = `process-list:${selectedAgent.id}:${HOST_PROCESS_LIMIT}`;
     if (!beginSubmission(submissionGuardRef.current, submissionKey)) return;
     let successful = false;
-    const operation = { type: "process_list", limit: HOST_PROCESS_LIMIT } as const;
+    const operation = {
+      type: "process_list",
+      limit: HOST_PROCESS_LIMIT,
+    } as const;
     const command = JOB_COMMAND_TYPE_BY_OPERATION_TYPE[operation.type];
     const maxTimeoutSecs = 45;
     setLoadError(null);
-    setStatus(`Refreshing host processes on ${clientLabel(selectedAgent.id)}...`);
+    setStatus(
+      `Refreshing host processes on ${clientLabel(selectedAgent.id)}...`,
+    );
     setRefreshing(true);
     try {
       const job = await onCreateJob({
@@ -164,11 +171,7 @@ export function HostProcessInventoryPanel({
       );
       setStatus(null);
     } finally {
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setRefreshing(false);
     }
   }
@@ -182,17 +185,18 @@ export function HostProcessInventoryPanel({
   const columns = useMemo<ConsoleDataGridColumn<HostProcessRecord>[]>(
     () => [
       {
-        cell: (row) => (
-          <span className="historyPrimary">
-            <strong title={row.name}>{row.name}</strong>
-            <small
-              data-value-tooltip-skip="true"
-              title="Process command reported by the selected host; arguments are intentionally omitted from the tooltip."
-            >
-              {compactCommand(row.command, row.name)}
-            </small>
-          </span>
-        ),
+        cell: (row) => {
+          const command = row.command.trim() || row.name;
+          const compact = compactCommand(row.command, row.name);
+          return (
+            <span className="historyPrimary">
+              <strong title={row.name}>{row.name}</strong>
+              <small title={compact === command ? undefined : command}>
+                {compact}
+              </small>
+            </span>
+          );
+        },
         header: "Process",
         id: "process",
         minSize: 180,
@@ -222,7 +226,10 @@ export function HostProcessInventoryPanel({
       },
       {
         cell: (row) => (
-          <span className="status neutral" title={processStateDetail(row.state)}>
+          <span
+            className="status neutral"
+            title={processStateDetail(row.state)}
+          >
             {processStateLabel(row.state)}
           </span>
         ),
@@ -297,11 +304,15 @@ export function HostProcessInventoryPanel({
             <button
               className="secondaryAction compactAction"
               data-tooltip-disabled-reason={
-                refreshing ? "A host-process snapshot refresh is already running." : refreshUnavailable ?? undefined
+                refreshing
+                  ? "A host-process snapshot refresh is already running."
+                  : (refreshUnavailable ?? undefined)
               }
               disabled={Boolean(refreshUnavailable) || refreshing}
               onClick={() => void refreshSnapshot()}
-              title={refreshUnavailable ?? "Capture a new bounded /proc snapshot"}
+              title={
+                refreshUnavailable ?? "Capture a new bounded /proc snapshot"
+              }
               type="button"
             >
               <RefreshCw size={14} />
@@ -343,15 +354,21 @@ export function HostProcessInventoryPanel({
         aria-label="Host process snapshot summary"
         className="processSupervisorSummaryStrip"
       >
-        <span title={`${rows.length} processes are included in the retained bounded snapshot.`}>
+        <span
+          title={`${rows.length} processes are included in the retained bounded snapshot.`}
+        >
           <strong>{rows.length}</strong>
           <small>Processes shown</small>
         </span>
-        <span title={`${formatKib(totalRssKib)} total resident memory is reported across the displayed processes.`}>
+        <span
+          title={`${formatKib(totalRssKib)} total resident memory is reported across the displayed processes.`}
+        >
           <strong>{formatKib(totalRssKib)}</strong>
           <small>Reported RSS</small>
         </span>
-        <span title={`${rootCount} displayed processes report Linux user ID 0.`}>
+        <span
+          title={`${rootCount} displayed processes report Linux user ID 0.`}
+        >
           <strong>{rootCount}</strong>
           <small>UID 0</small>
         </span>
@@ -374,14 +391,32 @@ export function HostProcessInventoryPanel({
           </strong>
           <small>Snapshot</small>
         </span>
-        <span title={inventory?.source ? `Snapshot source: ${inventory.source}.` : "No process snapshot source has been reported."}>
+        <span
+          title={
+            inventory?.source
+              ? `Snapshot source: ${inventory.source}.`
+              : "No process snapshot source has been reported."
+          }
+        >
           <strong title={inventory?.source ?? undefined}>
             {inventory?.source ?? "No source"}
           </strong>
           <small>Agent source</small>
         </span>
-        <span title={inventory?.observed_at ? `Snapshot observed ${formatFullTime(inventory.observed_at)}.` : "No process snapshot observation time has been reported."}>
-          <strong title={inventory?.observed_at ? formatFullTime(inventory.observed_at) : undefined}>
+        <span
+          title={
+            inventory?.observed_at
+              ? `Snapshot observed ${formatFullTime(inventory.observed_at)}.`
+              : "No process snapshot observation time has been reported."
+          }
+        >
+          <strong
+            title={
+              inventory?.observed_at
+                ? formatFullTime(inventory.observed_at)
+                : undefined
+            }
+          >
             {inventory?.observed_at
               ? formatCompactTime(inventory.observed_at)
               : "Never"}
@@ -420,11 +455,7 @@ export function HostProcessInventoryPanel({
               <span>Name</span>
               <strong title={row.name}>{row.name}</strong>
               <span>Command</span>
-              <strong
-                className="processEvidenceValue"
-                data-value-tooltip-skip="true"
-                title="Process command reported by the selected host; command contents are intentionally omitted from the tooltip."
-              >
+              <strong className="processEvidenceValue">
                 {row.command || row.name}
               </strong>
               <span>PID</span>

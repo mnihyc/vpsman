@@ -16,7 +16,10 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
-import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
+import {
+  createJobTargetCount,
+  waitForBulkJobTargets,
+} from "../../bulkJobProgress";
 import {
   JOB_COMMAND_CONFIRMATION_REQUIRED_BY_OPERATION_TYPE,
   JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
@@ -79,9 +82,12 @@ export function HostServicesPanel({
   onOpenPrivilegeUnlock: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
-  const [selectedClientId, setSelectedClientId] = useState(readServiceClientRoute);
-  const [inventory, setInventory] =
-    useState<HostServiceInventoryRecord | null>(null);
+  const [selectedClientId, setSelectedClientId] = useState(
+    readServiceClientRoute,
+  );
+  const [inventory, setInventory] = useState<HostServiceInventoryRecord | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [pending, setPending] = useState(false);
   const submissionGuardRef = useRef(createSubmissionGuard());
@@ -94,7 +100,7 @@ export function HostServicesPanel({
   const actionFeedbackRef = useRef<HTMLDivElement | null>(null);
   const logsPanelRef = useRef<HTMLDivElement | null>(null);
   const selectedAgent = selectedClientId
-    ? agents.find((agent) => agent.id === selectedClientId) ?? null
+    ? (agents.find((agent) => agent.id === selectedClientId) ?? null)
     : null;
 
   const loadInventory = useCallback(
@@ -158,7 +164,10 @@ export function HostServicesPanel({
       return;
     }
     window.requestAnimationFrame(() => {
-      logsPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      logsPanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
       logsPanelRef.current?.focus({ preventScroll: true });
     });
   }, [logs]);
@@ -229,7 +238,9 @@ export function HostServicesPanel({
     setPending(true);
     setError(null);
     setWarning(false);
-    setStatus(`Refreshing service inventory on ${clientLabel(selectedAgent.id)}...`);
+    setStatus(
+      `Refreshing service inventory on ${clientLabel(selectedAgent.id)}...`,
+    );
     try {
       const next = await dispatchInventory(selectedAgent);
       setInventory(next);
@@ -261,11 +272,7 @@ export function HostServicesPanel({
       );
       setStatus(null);
     } finally {
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setPending(false);
     }
   }
@@ -398,7 +405,9 @@ export function HostServicesPanel({
     setPending(true);
     setError(null);
     setWarning(false);
-    setStatus(`Loading logs for ${service.name} on ${clientLabel(agent.id)}...`);
+    setStatus(
+      `Loading logs for ${service.name} on ${clientLabel(agent.id)}...`,
+    );
     try {
       const job = await onCreateJob({
         argv: [],
@@ -420,9 +429,7 @@ export function HostServicesPanel({
       });
       if (result.progress.completed < result.progress.total) {
         const reason = result.progress.failureReasons?.[0]?.reason;
-        throw new Error(
-          `Service logs failed${reason ? `: ${reason}` : "."}`,
-        );
+        throw new Error(`Service logs failed${reason ? `: ${reason}` : "."}`);
       }
       const blob = await onDownloadOutputStream(job.job_id, agent.id, "stdout");
       const snapshot = JSON.parse(await blob.text()) as HostServiceLogSnapshot;
@@ -444,11 +451,7 @@ export function HostServicesPanel({
       );
       setStatus(null);
     } finally {
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setPending(false);
     }
   }
@@ -484,18 +487,18 @@ export function HostServicesPanel({
       },
       {
         cell: (service) => (
-          <span className="historyPrimary">
-            <span
-              className={`status ${serviceTone(service.active_state)}`}
-              title={`Service runtime state: ${readableState(service.active_state)}; sub-state: ${readableState(service.sub_state)}.${service.state_reason ? " Exact provider diagnostic content is excluded from tooltips." : ""}`}
-            >
+          <span
+            className="historyPrimary"
+            title={
+              service.state_reason
+                ? `Provider diagnostic: ${service.state_reason}`
+                : undefined
+            }
+          >
+            <span className={`status ${serviceTone(service.active_state)}`}>
               {readableState(service.active_state)}
             </span>
-            <small
-              title={`Service runtime sub-state: ${readableState(service.sub_state)}.${service.state_reason ? " Exact provider diagnostic content is excluded from tooltips." : ""}`}
-            >
-              {readableState(service.sub_state)}
-            </small>
+            <small>{readableState(service.sub_state)}</small>
           </span>
         ),
         header: "Runtime",
@@ -527,7 +530,8 @@ export function HostServicesPanel({
   const rowActions = useMemo<ConsoleDataGridAction<HostServiceRecord>[]>(
     () => [
       {
-        description: (rows) => `Read journal logs for ${rows[0]?.name ?? "service"}.`,
+        description: (rows) =>
+          `Read journal logs for ${rows[0]?.name ?? "service"}.`,
         disabled: () => pending || !capability?.can_read_logs,
         icon: <FileText size={14} />,
         label: "Logs",
@@ -587,7 +591,10 @@ export function HostServicesPanel({
         <div className="sectionHeader">
           <div>
             <h2>Host services</h2>
-            <span>Active init provider, service state, boot policy, actions, and logs</span>
+            <span>
+              Active init provider, service state, boot policy, actions, and
+              logs
+            </span>
           </div>
           <div className="headerActionStack">
             <div className="processHeaderActions">
@@ -614,11 +621,16 @@ export function HostServicesPanel({
               <button
                 className="secondaryAction compactAction"
                 data-tooltip-disabled-reason={
-                  pending ? "A service inventory operation is already running." : refreshUnavailable ?? undefined
+                  pending
+                    ? "A service inventory operation is already running."
+                    : (refreshUnavailable ?? undefined)
                 }
                 disabled={Boolean(refreshUnavailable) || pending}
                 onClick={() => void refreshInventory()}
-                title={refreshUnavailable ?? "Detect the active init provider and refresh services"}
+                title={
+                  refreshUnavailable ??
+                  "Detect the active init provider and refresh services"
+                }
                 type="button"
               >
                 <RefreshCw size={14} />
@@ -650,14 +662,24 @@ export function HostServicesPanel({
           className="processSupervisorSummaryStrip"
         >
           <span
-            className={capability?.status !== "supported" ? "attention" : undefined}
-            title={capability ? `${providerLabel(capability.provider)} provider capability is ${readableState(capability.status)}.` : "The service provider has not been detected."}
+            className={
+              capability?.status !== "supported" ? "attention" : undefined
+            }
+            title={
+              capability
+                ? `${providerLabel(capability.provider)} provider capability is ${readableState(capability.status)}.`
+                : "The service provider has not been detected."
+            }
           >
             <strong>{providerLabel(capability?.provider ?? null)}</strong>
             <small>Provider</small>
           </span>
-          <span title={`${activeCount} of ${services.length} retained services are active.`}>
-            <strong>{activeCount} / {services.length}</strong>
+          <span
+            title={`${activeCount} of ${services.length} retained services are active.`}
+          >
+            <strong>
+              {activeCount} / {services.length}
+            </strong>
             <small>Active</small>
           </span>
           <span
@@ -667,20 +689,44 @@ export function HostServicesPanel({
             <strong>{failedCount}</strong>
             <small>Failed</small>
           </span>
-          <span title={`${enabledCount} retained services are enabled at boot.`}>
+          <span
+            title={`${enabledCount} retained services are enabled at boot.`}
+          >
             <strong>{enabledCount}</strong>
             <small>Enabled at boot</small>
           </span>
           <span
-            className={capability && !capability.can_read_logs ? "attention" : undefined}
-            title={capability?.can_read_logs ? "The detected provider supports service log reads." : "Service log reads are not supported by the detected provider."}
+            className={
+              capability && !capability.can_read_logs ? "attention" : undefined
+            }
+            title={
+              capability?.can_read_logs
+                ? "The detected provider supports service log reads."
+                : "Service log reads are not supported by the detected provider."
+            }
           >
-            <strong>{capability?.can_read_logs ? "Available" : "Unsupported"}</strong>
+            <strong>
+              {capability?.can_read_logs ? "Available" : "Unsupported"}
+            </strong>
             <small>Service logs</small>
           </span>
-          <span title={inventory?.observed_at ? `Service inventory observed ${formatFullTime(inventory.observed_at)}.` : "No service inventory observation time has been reported."}>
-            <strong title={inventory?.observed_at ? formatFullTime(inventory.observed_at) : undefined}>
-              {inventory?.observed_at ? formatCompactTime(inventory.observed_at) : "Never"}
+          <span
+            title={
+              inventory?.observed_at
+                ? `Service inventory observed ${formatFullTime(inventory.observed_at)}.`
+                : "No service inventory observation time has been reported."
+            }
+          >
+            <strong
+              title={
+                inventory?.observed_at
+                  ? formatFullTime(inventory.observed_at)
+                  : undefined
+              }
+            >
+              {inventory?.observed_at
+                ? formatCompactTime(inventory.observed_at)
+                : "Never"}
             </strong>
             <small>Observed</small>
           </span>
@@ -688,7 +734,7 @@ export function HostServicesPanel({
 
         <ActionFeedback
           className="localActionFeedback hostServiceActionFeedback"
-          message={!pendingAction ? error ?? status : null}
+          message={!pendingAction ? (error ?? status) : null}
           ref={actionFeedbackRef}
           tone={
             error
@@ -747,15 +793,7 @@ export function HostServicesPanel({
               <span>Boot state</span>
               <strong>{readableState(service.enabled_state)}</strong>
               <span>Provider evidence</span>
-              <strong
-                data-tooltip-sensitive={service.state_reason ? "true" : undefined}
-                data-value-tooltip-skip={service.state_reason ? "true" : undefined}
-                title={
-                  service.state_reason
-                    ? "Provider diagnostic evidence is displayed here; exact command output is excluded from tooltips."
-                    : "The provider reported no additional service diagnostic."
-                }
-              >
+              <strong>
                 {service.state_reason ?? "No additional diagnostic"}
               </strong>
               <span>Observed</span>
@@ -776,14 +814,19 @@ export function HostServicesPanel({
         />
 
         <ConfirmationPrompt
-          confirmLabel={pendingAction ? actionLabel(pendingAction.action) : "Confirm"}
+          confirmLabel={
+            pendingAction ? actionLabel(pendingAction.action) : "Confirm"
+          }
           detail="The agent rechecks the provider and both observed states immediately before mutation. A changed snapshot is rejected without applying the action."
-          error={pendingAction ? error ?? undefined : undefined}
+          error={pendingAction ? (error ?? undefined) : undefined}
           items={
             pendingAction && selectedAgent && capability?.provider
               ? [
                   { label: "VPS", value: clientLabel(selectedAgent.id) },
-                  { label: "Provider", value: providerLabel(capability.provider) },
+                  {
+                    label: "Provider",
+                    value: providerLabel(capability.provider),
+                  },
                   { label: "Service", value: pendingAction.service.name },
                   {
                     label: "Observed runtime",
@@ -822,12 +865,10 @@ export function HostServicesPanel({
             onClose={() => setLogs(null)}
             title={`${logs.service} logs`}
           >
-            <pre
-              className="serviceLogOutput"
-              data-value-tooltip-skip="true"
-              title={`${logs.lines.length} retained journal line${logs.lines.length === 1 ? "" : "s"}; log contents are intentionally omitted from the tooltip.`}
-            >
-              {logs.lines.length > 0 ? logs.lines.join("\n") : "No journal entries returned."}
+            <pre className="serviceLogOutput">
+              {logs.lines.length > 0
+                ? logs.lines.join("\n")
+                : "No journal entries returned."}
             </pre>
           </ConsoleDetailPanel>
         </div>
@@ -840,7 +881,10 @@ function readServiceClientRoute(): string | null {
   if (typeof window === "undefined") {
     return null;
   }
-  return new URLSearchParams(window.location.search).get("service_client")?.trim() || null;
+  return (
+    new URLSearchParams(window.location.search).get("service_client")?.trim() ||
+    null
+  );
 }
 
 function setServiceClientRoute(clientId: string | null) {

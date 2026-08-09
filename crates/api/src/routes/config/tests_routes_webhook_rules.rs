@@ -70,3 +70,30 @@ fn webhook_rule_template_errors_keep_the_parser_reason() {
         "the API should preserve the actionable template parser reason"
     );
 }
+
+#[test]
+fn webhook_rule_template_accepts_commented_alternatives() {
+    let request = CreateWebhookRuleRequest {
+        id: None,
+        name: "Operations".to_string(),
+        enabled: true,
+        expression: "interval.30sec".to_string(),
+        target: "https://hooks.acme.com/vpsman".to_string(),
+        body_template: concat!(
+            "{#\n",
+            "Alert: [{alert.severity}] {alert.title} on {vps.display_name}\n",
+            "Threshold: {traffic.cycle_percent}% [if intentionally invalid]\n",
+            "#}\n",
+            "{event.kind}",
+        )
+        .to_string(),
+        signing_secret: None,
+        clear_signing_secret: false,
+        cooldown_secs: Some(300),
+        notes: None,
+        confirmed: true,
+    };
+
+    validate_webhook_rule_request(&request)
+        .expect("commented alternatives must not participate in template validation");
+}

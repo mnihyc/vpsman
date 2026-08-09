@@ -756,7 +756,11 @@ export function ConfigurationSourcesPanel({
         cell: (source) => (
           <span
             className={`status ${syncTone(source.runtime_sync.state)}`}
-            title={`Runtime synchronization state: ${tokenLabel(source.runtime_sync.state)}.${source.runtime_sync.state === "failed" ? " Exact persisted agent error content is excluded from tooltips." : ""}`}
+            title={
+              source.runtime_sync.reason
+                ? `Runtime synchronization diagnostic: ${source.runtime_sync.reason}`
+                : undefined
+            }
           >
             {tokenLabel(source.runtime_sync.state)}
           </span>
@@ -1296,9 +1300,7 @@ export function ConfigurationSourcesPanel({
                   : "Choose a behavior, preset, and exact VPS target scope"
               }
             >
-              <strong title="Choose the configuration behavior and source preset to assign">
-                Choose behavior and preset
-              </strong>
+              <strong>Choose behavior and preset</strong>
               <div className="formRow">
                 <label>
                   <span>Behavior</span>
@@ -1482,7 +1484,11 @@ export function ConfigurationSourcesPanel({
                 </button>
               ) : null}
               {renderedConfig ? (
-                <details className="configPreview" open>
+                <details
+                  className="configPreview"
+                  open
+                  title="Server-rendered effective agent configuration in TOML format."
+                >
                   <summary>Current effective config (TOML)</summary>
                   <div className="previewMeta">
                     <span>
@@ -1503,9 +1509,7 @@ export function ConfigurationSourcesPanel({
                   </span>
                   <textarea
                     aria-label="Effective agent config TOML"
-                    data-tooltip-sensitive="true"
                     readOnly
-                    title="Effective agent configuration; TOML content is excluded from tooltips"
                     value={renderedConfig.toml}
                   />
                 </details>
@@ -1527,7 +1531,7 @@ export function ConfigurationSourcesPanel({
               title={
                 pending
                   ? "Preset fields are disabled while the reviewed configuration request is pending"
-                  : `${drawerTitle(drawer)} fields`
+                  : undefined
               }
             >
               {drawer.kind === "create" ? (
@@ -1567,10 +1571,17 @@ export function ConfigurationSourcesPanel({
               ) : (
                 <>
                   <div className="formRow">
-                    <label>
+                    <label
+                      title={
+                        drawer.kind === "edit"
+                          ? "Preset behavior is immutable after creation; clone the preset to use another behavior"
+                          : "Behavior whose configuration fields this preset supplies"
+                      }
+                    >
                       <span>Behavior</span>
                       <select
                         aria-label="Preset behavior"
+                        data-tooltip-disabled-reason="Preset behavior is immutable after creation; clone the preset to use another behavior."
                         disabled={drawer.kind === "edit"}
                         onChange={(event) => {
                           const behavior = event.target
@@ -1578,11 +1589,6 @@ export function ConfigurationSourcesPanel({
                           setEditorBehavior(behavior);
                           replaceEditorDefinition(defaultDefinition(behavior));
                         }}
-                        title={
-                          drawer.kind === "edit"
-                            ? "Preset behavior is immutable after creation; clone the preset to use another behavior"
-                            : "Behavior whose configuration fields this preset supplies"
-                        }
                         value={editorBehavior}
                       >
                         {BEHAVIORS.map((behavior) => (
@@ -1592,17 +1598,19 @@ export function ConfigurationSourcesPanel({
                         ))}
                       </select>
                     </label>
-                    <label>
+                    <label
+                      title={
+                        drawer.kind === "edit"
+                          ? "Preset name is immutable after creation; clone the preset to choose another name"
+                          : "Unique operator-facing preset name"
+                      }
+                    >
                       <span>Name</span>
                       <input
                         aria-label="Preset name"
+                        data-tooltip-disabled-reason="Preset name is immutable after creation; clone the preset to choose another name."
                         disabled={drawer.kind === "edit"}
                         onChange={(event) => setEditorName(event.target.value)}
-                        title={
-                          drawer.kind === "edit"
-                            ? "Preset name is immutable after creation; clone the preset to choose another name"
-                            : "Unique operator-facing preset name"
-                        }
                         value={editorName}
                       />
                     </label>
@@ -1873,11 +1881,10 @@ function PresetDefinitionEditor({
           onChange={(value) => onTextDraftChange("environment_keep", value)}
           value={textDrafts.environment_keep ?? ""}
         />
-        <label title="Command environment value editor; values are excluded from tooltips">
+        <label title="Variables injected into command execution; enter one KEY=value pair per line.">
           <span>Environment values (KEY=value, one per line)</span>
           <textarea
             aria-label="Command environment values"
-            data-tooltip-sensitive="true"
             onChange={(event) =>
               onTextDraftChange("environment_set", event.target.value)
             }
@@ -2004,11 +2011,10 @@ function ArgvField({
   value: string;
 }) {
   return (
-    <label title={`${label} editor; command arguments are excluded from tooltips`}>
+    <label title="Put the absolute executable path on the first line, followed by one argument per line.">
       <span>{label} (one argument per line)</span>
       <textarea
         aria-label={label}
-        data-tooltip-sensitive="true"
         onChange={(event) => onChange(event.target.value)}
         placeholder={"/absolute/path/to/executable\n--argument"}
         value={value}
@@ -2027,11 +2033,10 @@ function StringListField({
   value: string;
 }) {
   return (
-    <label title={`${label} editor; environment names are excluded from tooltips`}>
+    <label title="Names from the inherited environment that remain available to the command.">
       <span>{label} (one per line)</span>
       <textarea
         aria-label={label}
-        data-tooltip-sensitive="true"
         onChange={(event) => onChange(event.target.value)}
         value={value}
       />

@@ -64,27 +64,17 @@ function ReleaseStatusList({
   tone: "ready" | "pending" | "blocked";
 }) {
   return (
-    <section
-      className={`releaseStatusList ${tone}`}
-      title={`${title}: ${items.length} ${items.length === 1 ? "item" : "items"}.`}
-    >
-      <div
-        className="releaseStatusListTitle"
-        title={`${title} release category.`}
-      >
+    <section className={`releaseStatusList ${tone}`}>
+      <div className="releaseStatusListTitle">
         {icon}
         <strong>{title}</strong>
       </div>
       {items.length === 0 ? (
-        <p title={`No items are recorded in the ${title} category.`}>
-          No items recorded for this category.
-        </p>
+        <p>No items recorded for this category.</p>
       ) : (
         <ul>
           {items.map((item) => (
-            <li key={item} title={item}>
-              {item}
-            </li>
+            <li key={item}>{item}</li>
           ))}
         </ul>
       )}

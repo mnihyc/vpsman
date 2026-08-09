@@ -1654,7 +1654,7 @@ export function AccessPanel({
                     </span>
                   </div>
                   <div className="totpActionGrid">
-                    <label title="Current password field; password content is excluded from tooltips.">
+                    <label title="Enter the current account password to authorize disabling TOTP.">
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
@@ -1676,7 +1676,7 @@ export function AccessPanel({
                         value={totpPassword}
                       />
                     </label>
-                    <label title="Authenticator code field; one-time code content is excluded from tooltips.">
+                    <label title="Enter the current authenticator code to authorize disabling TOTP.">
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
@@ -1765,7 +1765,7 @@ export function AccessPanel({
                     </li>
                   </ol>
                   <div className="totpActionGrid">
-                    <label title="Current password field; password content is excluded from tooltips.">
+                    <label title="Enter the current account password to generate TOTP setup material.">
                       <span>Current password</span>
                       <input
                         aria-label="TOTP password"
@@ -1816,7 +1816,7 @@ export function AccessPanel({
                         </span>
                       </div>
                     )}
-                    <label title="Authenticator code field; one-time code content is excluded from tooltips.">
+                    <label title="Enter the authenticator code from the newly enrolled TOTP account.">
                       <span>Authenticator code</span>
                       <input
                         aria-label="TOTP code"
@@ -2262,7 +2262,11 @@ export function AccessPanel({
                 </button>
               </label>
               {privateKeyHex && (
-                <div className="inlineSecret" data-tooltip-sensitive="true">
+                <div
+                  className="inlineSecret"
+                  data-tooltip-sensitive="true"
+                  title="Private key generated for this VPS identity and displayed only once."
+                >
                   <strong>Private key - shown once</strong>
                   <div className="secretRow">
                     <input
@@ -2275,7 +2279,7 @@ export function AccessPanel({
                     <button
                       className="secondaryAction compact"
                       onClick={() => void handleCopyPrivateKey()}
-                      title="Copy the one-time private key to the clipboard; key content is excluded from tooltips."
+                      title="Copy the one-time private key to the clipboard."
                       type="button"
                     >
                       <Copy size={15} />
@@ -3379,7 +3383,10 @@ function InstallCommand({
         </div>
       </div>
       <div className="installCommandControls">
-        <label htmlFor={gatewayKeyInputId}>
+        <label
+          htmlFor={gatewayKeyInputId}
+          title="Gateway server public key hex used by the agent to authenticate the gateway."
+        >
           <span>Gateway public key</span>
           <input
             aria-describedby={gatewayKeyInvalid ? gatewayKeyErrorId : undefined}
@@ -3397,11 +3404,13 @@ function InstallCommand({
               setInstallFeedback(null);
             }}
             placeholder="64 hex characters"
-            title="Gateway server public key hex used by the agent to authenticate the gateway."
             value={gatewayServerPublicKeyHex}
           />
         </label>
-        <label htmlFor={gatewayEndpointsInputId}>
+        <label
+          htmlFor={gatewayEndpointsInputId}
+          title="Comma- or newline-separated gateway endpoints accepted by the installer."
+        >
           <span>Gateway endpoints</span>
           <textarea
             aria-describedby={
@@ -3421,11 +3430,13 @@ function InstallCommand({
             }}
             placeholder="primary=gw.example.com:9443=10"
             rows={2}
-            title="Comma- or newline-separated gateway endpoints accepted by the installer."
             value={gatewayEndpoints}
           />
         </label>
-        <label htmlFor={installModeInputId}>
+        <label
+          htmlFor={installModeInputId}
+          title="Root and user service modes start through systemd. Stage only writes the agent files and shows the foreground start command."
+        >
           <span>Install mode</span>
           <select
             aria-label="Install mode"
@@ -3435,7 +3446,6 @@ function InstallCommand({
               setInstallMode(event.target.value as AgentInstallMode);
               setInstallFeedback(null);
             }}
-            title="Root and user service modes start through systemd. Stage only writes the agent files and shows the foreground start command."
             value={installMode}
           >
             <option value="root">Root service</option>
@@ -3473,8 +3483,7 @@ function InstallCommand({
       {hasInstallIdentity ? (
         <pre
           data-tooltip-sensitive="true"
-          data-value-tooltip-skip="true"
-          title="Agent install command. Exact command content is excluded from tooltips."
+          title="Paste-ready install command containing the one-time private key; copy it only into a trusted shell."
         >
           <code>{installCommand}</code>
         </pre>
@@ -3482,11 +3491,7 @@ function InstallCommand({
       {hasInstallIdentity && installMode === "staged" ? (
         <div className="installCommandFollowup" role="note">
           <strong>Then run in foreground</strong>
-          <code
-            data-tooltip-sensitive="true"
-            data-value-tooltip-skip="true"
-            title="Foreground agent start command. Exact command content is excluded from tooltips."
-          >
+          <code title="Foreground command for a staged unprivileged installation.">
             {foregroundStartCommand}
           </code>
         </div>

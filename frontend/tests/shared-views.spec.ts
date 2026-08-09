@@ -349,12 +349,14 @@ test("unauthenticated public shares call only public monitoring APIs", async ({
   await expect(
     page.getByRole("combobox", { name: "Filter shared VPSs by status" }),
   ).toHaveAttribute("title", /Filter shared VPSs by status: All statuses/);
-  const generatedTitles = await page.locator("[title]").evaluateAll((elements) =>
-    elements.map((element) => element.getAttribute("title") ?? ""),
-  );
-  expect(generatedTitles.some((title) => title.includes(publicShareSecret))).toBe(
-    false,
-  );
+  const generatedTitles = await page
+    .locator("[title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? ""),
+    );
+  expect(
+    generatedTitles.some((title) => title.includes(publicShareSecret)),
+  ).toBe(false);
 });
 
 test("public cards remain static when detail history is not shared", async ({
@@ -481,10 +483,7 @@ test("public monitoring keeps grid and detail history state without exposing hid
   );
   await expect(
     publicPing.locator(':scope > span:not([role="img"])'),
-  ).toHaveAttribute(
-    "title",
-    /\S/,
-  );
+  ).toHaveAttribute("title", /\S/);
   await expect(
     publicPing.locator(":scope > small:not(.vpsMonitorRowHeading)"),
   ).toHaveAttribute("title", /\S/);
@@ -645,7 +644,10 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     card.getByText("Online · Warning", { exact: true }),
   ).toBeVisible();
   await expect(card.getByText(/Last sample 18\.5 ms/)).toBeVisible();
-  await expect(card).toContainText("Primary Ping disabled");
+  const pingDiagnostic = card.locator(
+    ".publicMonitoringPing > small:not(.vpsMonitorRowHeading)",
+  );
+  await expect(pingDiagnostic).toHaveCount(0);
   await expect(card.locator(".publicMonitoringWarnings")).toHaveCount(0);
   await expect(
     card.getByLabel("Current resources for Shared edge"),
@@ -656,6 +658,8 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     "(47 GiB)",
   ]);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(pingDiagnostic).toHaveText("Primary Ping disabled");
+  await expect(pingDiagnostic).toBeVisible();
   await expect(card.locator(".publicMonitoringWarnings")).toHaveCount(1);
   const resourceMetrics = card.locator(".vpsMonitorMetric");
   for (const index of [0, 1, 2]) {
@@ -989,19 +993,16 @@ test("public monitoring presents no-reset accumulation without a synthetic cycle
     name: /Shared edge · Online shared monitoring card/,
   });
   const traffic = card.locator(".publicMonitoringTraffic");
-  await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText(
-    "Traffic · No reset",
-  );
+  await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText("Traffic");
   await expect(traffic.locator(".vpsMonitorRowEvidence > strong")).toHaveText(
     "2.9 KiB / 12 KiB · Total · 25.0%",
   );
 
   await card.click();
   const cycle = page.locator(".publicMonitoringTrafficCycle");
-  await expect(
-    cycle.getByText("Traffic · No reset", { exact: true }),
-  ).toBeVisible();
-  await expect(cycle).toContainText("Accumulated total · No reset");
+  await expect(cycle.getByText("Traffic", { exact: true })).toBeVisible();
+  await expect(cycle).toContainText("Accumulated total");
+  await expect(cycle).not.toContainText("No reset");
   await expect(cycle).not.toContainText("Current accounting cycle");
 });
 

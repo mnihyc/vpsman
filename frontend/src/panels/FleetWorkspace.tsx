@@ -2917,7 +2917,9 @@ function ConfigPreviewBlock({
         <button
           className="secondaryAction compactAction"
           data-tooltip-disabled-reason={
-            pending ? "The effective agent config is already loading" : undefined
+            pending
+              ? "The effective agent config is already loading"
+              : undefined
           }
           disabled={pending}
           onClick={onLoad}
@@ -3470,7 +3472,7 @@ function TrafficRulesDetail({
           <strong>Cycle start</strong>
           <span>
             {trafficAccounting?.reset_day === -1
-              ? "No reset"
+              ? "-"
               : (trafficAccounting?.cycle_start ??
                 (trafficMissingUnderCap
                   ? unknownTrafficPage
@@ -3481,7 +3483,7 @@ function TrafficRulesDetail({
           <strong>Cycle end</strong>
           <span>
             {trafficAccounting?.reset_day === -1
-              ? "No reset"
+              ? "-"
               : (trafficAccounting?.cycle_end ??
                 (trafficMissingUnderCap
                   ? unknownTrafficPage
@@ -4228,7 +4230,7 @@ function TokenPreview({
   return (
     <span className="tokenPreview">
       {values.map((value) => (
-        <span className="tokenChip" key={value} title={value}>
+        <span className="tokenChip" key={value}>
           {value}
         </span>
       ))}
@@ -4599,10 +4601,7 @@ function ChannelDetailGrid({
       </span>
       <span>
         <strong>Delivery</strong>
-        <span
-          data-tooltip-sensitive="true"
-          title="Configured notification destination"
-        >
+        <span>
           {channel.delivery_kind}: {channel.target}
         </span>
       </span>
@@ -4643,12 +4642,7 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
       </span>
       <span>
         <strong>Target</strong>
-        <span
-          data-tooltip-sensitive="true"
-          title="Configured webhook destination"
-        >
-          {rule.target}
-        </span>
+        <span>{rule.target}</span>
       </span>
       <span>
         <strong>Cooldown</strong>
@@ -4664,13 +4658,7 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
       </span>
       <span>
         <strong>Body template</strong>
-        <span
-          className="monoValue"
-          data-tooltip-sensitive="true"
-          title="Webhook message body template; content is excluded from tooltips"
-        >
-          {rule.body_template}
-        </span>
+        <span className="monoValue">{rule.body_template}</span>
       </span>
       <span>
         <strong>Updated</strong>
@@ -5572,7 +5560,7 @@ export function FleetAlertPolicyManager({
                     data-tooltip-disabled-reason={
                       dryRunPending || savePending
                         ? "An alert policy preview or save is already in progress"
-                        : policyPreviewValidation ?? undefined
+                        : (policyPreviewValidation ?? undefined)
                     }
                     disabled={
                       dryRunPending ||
@@ -5593,7 +5581,7 @@ export function FleetAlertPolicyManager({
                     data-tooltip-disabled-reason={
                       dryRunPending || savePending
                         ? "An alert policy preview or save is already in progress"
-                        : policySaveValidation ?? undefined
+                        : (policySaveValidation ?? undefined)
                     }
                     disabled={
                       dryRunPending ||
@@ -5617,7 +5605,7 @@ export function FleetAlertPolicyManager({
                     data-tooltip-disabled-reason={
                       dryRunPending || savePending
                         ? "An alert policy preview or save is already in progress"
-                        : policyPreviewValidation ?? undefined
+                        : (policyPreviewValidation ?? undefined)
                     }
                     disabled={
                       dryRunPending ||
@@ -5638,7 +5626,7 @@ export function FleetAlertPolicyManager({
                     data-tooltip-disabled-reason={
                       dryRunPending || savePending
                         ? "An alert policy preview or save is already in progress"
-                        : policySaveValidation ?? undefined
+                        : (policySaveValidation ?? undefined)
                     }
                     disabled={
                       dryRunPending ||
@@ -6414,7 +6402,7 @@ export function FleetAlertNotificationManager({
         sortValue: (channel) => channel.name,
         searchValue: (channel) => `${channel.name} ${channel.notes ?? ""}`,
         cell: (channel) => (
-          <span className="historyPrimary" data-value-tooltip-skip="true">
+          <span className="historyPrimary">
             <strong>{channel.name}</strong>
             <small>{channel.notes || "no notes"}</small>
           </span>
@@ -6485,8 +6473,7 @@ export function FleetAlertNotificationManager({
         cell: (channel) => (
           <span
             className="historyPrimary"
-            data-tooltip-sensitive="true"
-            title="Configured notification destination"
+            title={`${channel.delivery_kind}: ${channel.target}`}
           >
             <strong>{channel.delivery_kind}</strong>
             <small>{channel.target}</small>
@@ -7084,7 +7071,6 @@ export function FleetAlertNotificationManager({
         },
         {
           label: "Delivery",
-          title: saveSnapshot ? "Configured notification destination" : undefined,
           value: saveSnapshot
             ? `${saveSnapshot.request.delivery_kind} -> ${saveSnapshot.request.target}`
             : "-",
@@ -7201,7 +7187,7 @@ export function FleetAlertNotificationManager({
                   data-tooltip-disabled-reason={
                     savePending
                       ? "A notification channel save is already in progress"
-                      : channelDraftValidation ?? undefined
+                      : (channelDraftValidation ?? undefined)
                   }
                   disabled={savePending || channelDraftValidation !== null}
                   title={
@@ -7345,13 +7331,12 @@ export function FleetAlertNotificationManager({
               </ConsoleField>
               <ConsoleField
                 label="Delivery target"
-                labelTitle="Configured notification destination; exact URL is excluded from tooltips"
+                labelTitle="HTTPS endpoint that receives alert notification deliveries."
                 className="fieldWide"
                 hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
               >
                 <input
                   aria-label="Delivery target"
-                  data-tooltip-sensitive="true"
                   placeholder="https://hooks.example/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
@@ -7636,11 +7621,7 @@ export function NotificationDeliveryHistoryGrid({
               {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
-              <small
-                className="deliveryErrorText"
-                data-tooltip-sensitive="true"
-                title="Notification delivery error; exact content is excluded from tooltips"
-              >
+              <small className="deliveryErrorText" title={delivery.error}>
                 {shortDeliveryError(delivery.error)}
               </small>
             )}
@@ -7675,13 +7656,10 @@ export function NotificationDeliveryHistoryGrid({
         cell: (delivery) => (
           <span
             className="historyPrimary"
-            data-tooltip-sensitive="true"
-            title="Configured notification destination"
+            title={`${delivery.delivery_kind}: ${delivery.target}`}
           >
             <strong>{delivery.delivery_kind}</strong>
-            <small title="Configured notification destination">
-              {delivery.target}
-            </small>
+            <small>{delivery.target}</small>
           </span>
         ),
       },
@@ -7729,12 +7707,7 @@ export function NotificationDeliveryHistoryGrid({
           <strong>{delivery.channel_name}</strong>
           <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.delivery_kind}</span>
-          <span
-            data-tooltip-sensitive="true"
-            title="Configured notification destination"
-          >
-            {delivery.target}
-          </span>
+          <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
           {delivery.next_attempt_at && (
             <span title={delivery.next_attempt_at}>
@@ -7742,13 +7715,7 @@ export function NotificationDeliveryHistoryGrid({
             </span>
           )}
           {delivery.error && (
-            <span
-              className="deliveryErrorText"
-              data-tooltip-sensitive="true"
-              title="Notification delivery error; exact content is excluded from tooltips"
-            >
-              error: {delivery.error}
-            </span>
+            <span className="deliveryErrorText">error: {delivery.error}</span>
           )}
         </div>
       )}
@@ -7811,8 +7778,14 @@ const ALERT_NOTIFICATION_PAYLOAD_EXAMPLE = `{
   }
 }`;
 
-const DEFAULT_WEBHOOK_BODY_TEMPLATE =
-  "[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}";
+const DEFAULT_WEBHOOK_BODY_TEMPLATE = `{#
+Alert: [{alert.severity}] {alert.title} on {vps.display_name} ({event.id})
+Traffic threshold: {vps.display_name} used {traffic.cycle_percent}% in {policy.name}; source rule {policy_rule.name}
+Resource threshold: [{alert.severity}] {alert.title} on {vps.display_name}; condition {policy_rule.condition_expression}
+VPS status event: [{event.kind}] {vps.display_name} is {vps.status}
+Interval fleet summary: [{event.kind}] {matched_vps.length} VPSs: {matched_vps.map(vps.name).join(", ")}
+#}
+[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}`;
 
 function notificationChannelDraftValidationMessage({
   cooldownSecs,
@@ -8035,14 +8008,7 @@ export function WebhookRuleManager({
         minSize: 180,
         sortValue: (rule) => rule.target,
         searchValue: (rule) => rule.target,
-        cell: (rule) => (
-          <small
-            data-tooltip-sensitive="true"
-            title="Configured webhook destination"
-          >
-            {rule.target}
-          </small>
-        ),
+        cell: (rule) => <small>{rule.target}</small>,
       },
       {
         id: "state",
@@ -8739,7 +8705,6 @@ export function WebhookRuleManager({
         },
         {
           label: "Target",
-          title: saveSnapshot ? "Configured webhook destination" : undefined,
           value: saveSnapshot?.request.target ?? "-",
         },
         {
@@ -8748,9 +8713,6 @@ export function WebhookRuleManager({
         },
         {
           label: "Body template",
-          title: saveSnapshot
-            ? "Webhook message body template; content is excluded from tooltips"
-            : undefined,
           value: saveSnapshot?.request.body_template || "Default message",
         },
         {
@@ -8912,7 +8874,7 @@ export function WebhookRuleManager({
                   data-tooltip-disabled-reason={
                     queuePending || savePending
                       ? "A webhook preview, delivery, or save is already in progress"
-                      : webhookDraftValidation ?? undefined
+                      : (webhookDraftValidation ?? undefined)
                   }
                   disabled={
                     queuePending ||
@@ -8933,7 +8895,7 @@ export function WebhookRuleManager({
                   data-tooltip-disabled-reason={
                     queuePending || savePending
                       ? "A webhook preview, delivery, or save is already in progress"
-                      : webhookDraftValidation ?? undefined
+                      : (webhookDraftValidation ?? undefined)
                   }
                   disabled={
                     queuePending ||
@@ -9040,13 +9002,12 @@ export function WebhookRuleManager({
               </ConsoleField>
               <ConsoleField
                 label="Target URL"
-                labelTitle="Configured webhook destination; exact URL is excluded from tooltips"
+                labelTitle="HTTPS endpoint that receives webhook deliveries."
                 className="fieldFull"
                 hint="Delivery is sent by the vpsman server. Production targets require a public HTTPS URL; local HTTP requires explicit server development opt-in."
               >
                 <input
                   aria-label="Webhook target"
-                  data-tooltip-sensitive="true"
                   placeholder="https://hooks.example.net/vpsman"
                   value={target}
                   onChange={(event) => setTarget(event.target.value)}
@@ -9120,9 +9081,9 @@ export function WebhookRuleManager({
               </ConsoleField>
               <ConsoleField
                 label="Body template"
-                labelTitle="Webhook message body template; content is excluded from tooltips"
+                labelTitle="Template used to render the webhook message field."
                 className="fieldFull"
-                hint="Renders the message field in the fixed webhook JSON envelope. Available placeholders: {vps.name}, {vps.display_name}, {vps.id}, {vps.status}, {vps.tags}, {event.kind}, {event.id}, {rule.id}, {rule.name}."
+                hint="Renders the message field in the fixed webhook JSON envelope. The multiline block between standalone {# and #} markers contains non-rendering examples; copy one outside the block to use it. Available roots include vps, matched_vps, event, rule, alert, policy, policy_rule, and traffic."
               >
                 <WebhookTemplateEditor
                   value={bodyTemplate}
@@ -9478,8 +9439,7 @@ export function WebhookDryRunNotice({
   return (
     <div
       className="consoleInlineNotice"
-      data-tooltip-sensitive="true"
-      title="Server-resolved webhook dry-run evidence; rendered content is excluded from tooltips"
+      title="Server-resolved dry run; no webhook delivery is sent."
     >
       <strong>
         {preview.matched_vps.length}{" "}
@@ -9516,8 +9476,7 @@ function WebhookRuleSamplePreview({
   return (
     <div
       className="webhookRuleSamplePreview"
-      data-tooltip-sensitive="true"
-      title="Webhook sample payload; rendered content is excluded from tooltips"
+      title="Server-rendered webhook preview; no delivery is sent."
     >
       <div className="consoleInlineNotice">
         <strong>
@@ -9590,11 +9549,7 @@ export function WebhookDeliveryHistoryGrid({
               {deliveryStatusLabel(delivery.status)}
             </ConsoleStatusBadge>
             {delivery.error && (
-              <small
-                className="deliveryErrorText"
-                data-tooltip-sensitive="true"
-                title="Webhook delivery error; exact content is excluded from tooltips"
-              >
+              <small className="deliveryErrorText" title={delivery.error}>
                 {shortDeliveryError(delivery.error)}
               </small>
             )}
@@ -9608,14 +9563,7 @@ export function WebhookDeliveryHistoryGrid({
         minSize: 180,
         sortValue: (delivery) => delivery.target,
         searchValue: (delivery) => delivery.target,
-        cell: (delivery) => (
-          <small
-            data-tooltip-sensitive="true"
-            title="Configured webhook delivery destination"
-          >
-            {delivery.target}
-          </small>
-        ),
+        cell: (delivery) => <small>{delivery.target}</small>,
       },
       {
         id: "matched",
@@ -9675,28 +9623,14 @@ export function WebhookDeliveryHistoryGrid({
           <strong>{delivery.rule_name}</strong>
           <span>{deliveryStatusLabel(delivery.status)}</span>
           <span>{delivery.event_kind}</span>
-          <span
-            data-tooltip-sensitive="true"
-            title="Configured webhook delivery destination"
-          >
-            {delivery.target}
-          </span>
+          <span>{delivery.target}</span>
           <span>{delivery.attempt_count} attempts</span>
-          <span
-            className="monoValue"
-            title={webhookMatchedVpsNames(delivery.matched_vps)}
-          >
+          <span className="monoValue">
             Matched VPS:{" "}
             {webhookMatchedVpsNames(delivery.matched_vps) || "none"}
           </span>
           {delivery.error && (
-            <span
-              className="deliveryErrorText"
-              data-tooltip-sensitive="true"
-              title="Webhook delivery error; exact content is excluded from tooltips"
-            >
-              error: {delivery.error}
-            </span>
+            <span className="deliveryErrorText">error: {delivery.error}</span>
           )}
         </div>
       )}
@@ -10014,9 +9948,8 @@ function WebhookTemplateEditor({
   return (
     <div
       className="webhookCodeMirror"
-      data-tooltip-sensitive="true"
       ref={containerRef}
-      title="Webhook message body template; content is excluded from tooltips"
+      title="Template used to render the webhook message field."
     />
   );
 }
@@ -10379,7 +10312,7 @@ function resetDaySummary(
   traffic: TrafficAccountingRecord | null | undefined,
 ): string {
   if (traffic?.reset_day === -1) {
-    return "No reset";
+    return "-";
   }
   if (!traffic?.reset_day) {
     return "not set";

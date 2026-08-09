@@ -680,13 +680,15 @@ test("shows the effective agent update policy without inferring from optional TO
   await expect(manifestUrl).toHaveValue(
     "https://github.com/mnihyc/vpsman/releases/latest/download/version.json",
   );
-  await expect(manifestUrl).not.toHaveAttribute("title", /.+/);
-  const manifestUrlLabel = manifestUrl.locator("..");
-  await expect(manifestUrlLabel).toHaveAttribute(
+  await expect(manifestUrl).not.toHaveAttribute("title");
+  await expect(manifestUrl.locator("..")).toHaveAttribute(
     "title",
-    /value is intentionally omitted from tooltips/i,
+    "HTTPS URL of version.json used to select the architecture-specific agent artifact.",
   );
-  await expect(manifestUrlLabel).not.toHaveAttribute("title", /https?:\/\//i);
+  await expect(manifestUrl.locator("..")).not.toHaveAttribute(
+    "title",
+    /github\.com/,
+  );
   await expect(composer).toContainText(
     "stages its newer architecture-specific artifact without activating or restarting it",
   );

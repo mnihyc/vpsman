@@ -64,7 +64,7 @@ export function TotpEnrollmentQr({ setup }: { setup: TotpSetupResponse }) {
           below.
         </span>
         <div className="totpManualKey">
-          <span>
+          <span title="Manual TOTP enrollment key for authenticator apps that cannot scan the QR code.">
             <small>Manual setup key</small>
             <code data-tooltip-sensitive="true" data-value-tooltip-skip="true">
               {setup.secret_base32}

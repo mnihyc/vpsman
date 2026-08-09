@@ -2637,6 +2637,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorTraffic.warning:not(.exceeded),
+.vpsMonitorTraffic.unconfigured,
 .publicMonitoringTraffic.warning:not(.overQuota),
 .publicMonitoringPing.warning {
   border: 1px solid var(--warning-border);
@@ -2654,7 +2655,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorTraffic.exceeded .vpsMonitorTrafficTrack > span {
-  background: var(--danger);
+  background: var(--warning);
 }
 
 .vpsMonitorPingVisual {
@@ -2663,6 +2664,10 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorPingVisual .vpsMonitorSparkline {
+  height: 10px;
+}
+
+.vpsMonitorCard.compact .vpsMonitorPingVisual > span.vpsMonitorSparkline.empty {
   height: 10px;
 }
 
@@ -2698,17 +2703,13 @@ span.vpsMonitorSparkline.empty {
   padding: 6px 0 0;
 }
 
-.vpsMonitorCard.compact
-  .vpsMonitorTraffic.contextual
-  > span:first-child {
+.vpsMonitorCard.compact .vpsMonitorTraffic.contextual > span:first-child {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2px;
 }
 
-.vpsMonitorCard.compact
-  .vpsMonitorTraffic.contextual
-  .vpsMonitorRowEvidence {
+.vpsMonitorCard.compact .vpsMonitorTraffic.contextual .vpsMonitorRowEvidence {
   display: contents;
 }
 
@@ -2730,6 +2731,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitorCard.compact .vpsMonitorTraffic.warning,
+.vpsMonitorCard.compact .vpsMonitorTraffic.unconfigured,
 .vpsMonitorCard.compact .vpsMonitorTraffic.exceeded,
 .vpsMonitorCard.compact .vpsMonitorPing.failed,
 .vpsMonitorCard.compact .vpsMonitorPing.down,
@@ -2749,8 +2751,7 @@ span.vpsMonitorSparkline.empty {
   display: none;
 }
 
-.vpsMonitorCard.compact .vpsMonitorTraffic > small.exceptionEvidence,
-.vpsMonitorCard.compact .vpsMonitorPing > small.exceptionEvidence {
+.vpsMonitorCard.compact .vpsMonitorTraffic > small.exceptionEvidence {
   display: block;
 }
 
@@ -2917,7 +2918,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .vpsMonitoringTrafficProgress.overLimit .vpsMonitoringTrafficTrack i {
-  background: var(--danger);
+  background: var(--warning);
 }
 
 .vpsMonitoringTrafficNote {
@@ -3209,7 +3210,7 @@ span.vpsMonitorSparkline.empty {
 }
 
 .publicMonitoringTraffic.overQuota .vpsMonitorMetricTrack > span {
-  background: var(--danger);
+  background: var(--warning);
 }
 
 .publicMonitoringPing {
@@ -3219,25 +3220,18 @@ span.vpsMonitorSparkline.empty {
   padding-top: 6px;
 }
 
-.publicMonitoringCard.compact .publicMonitoringPing {
-  grid-template-columns: auto minmax(0, 1fr);
-}
-
-.publicMonitoringCard.compact
-  .publicMonitoringPing
-  > span:not(.vpsMonitorSparkline) {
-  grid-column: 2;
-  grid-row: 2;
-  justify-self: start;
-  max-width: 100%;
-}
-
 .publicMonitoringPing > .vpsMonitorSparkline,
 .publicMonitoringPing > small:not(.vpsMonitorRowHeading) {
   grid-column: 1 / -1;
 }
 
 .publicMonitoringPing > .vpsMonitorSparkline {
+  height: 12px;
+}
+
+.publicMonitoringCard.compact
+  .publicMonitoringPing
+  > span.vpsMonitorSparkline.empty {
   height: 12px;
 }
 
@@ -3268,10 +3262,7 @@ span.vpsMonitorSparkline.empty {
   display: none;
 }
 
-.publicMonitoringCard.compact .publicMonitoringTraffic.warning > small,
-.publicMonitoringCard.compact
-  .publicMonitoringPing.warning
-  > small:not(.vpsMonitorRowHeading) {
+.publicMonitoringCard.compact .publicMonitoringTraffic.warning > small {
   display: block;
 }
 
@@ -3716,9 +3707,7 @@ span.vpsMonitorSparkline.empty {
   padding: 6px 7px;
 }
 
-.publicMonitoringTrafficCycle
-  .vpsMonitoringTrafficSummary
-  > span + span {
+.publicMonitoringTrafficCycle .vpsMonitoringTrafficSummary > span + span {
   border-left: 1px solid var(--border-subtle);
 }
 

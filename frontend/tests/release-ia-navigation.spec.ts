@@ -218,39 +218,8 @@ async function visibleDisabledControlsWithoutReason(page: Page) {
   });
 }
 
-async function visibleSemanticElementsWithoutTooltip(page: Page) {
+async function tooltipContractViolations(page: Page) {
   return page.evaluate(() => {
-    const selector = [
-      "button",
-      "a[href]",
-      "input:not([type='hidden'])",
-      "select",
-      "textarea",
-      "label",
-      "legend",
-      "summary",
-      "dt",
-      "dd",
-      "th",
-      "td",
-      "[role='cell']",
-      "[role='columnheader']",
-      "[role='link']",
-      ".metric",
-      ".metricCard",
-      ".consoleStatusBadge",
-      ".gridCounts > *",
-      ".gridPageLabel",
-      ".consoleInlineDetailGrid > span",
-      ".vpsFactRow",
-      ".vpsResourceFact",
-      ".topologyMetric",
-      "[data-fact-kind]",
-      ".timeSeriesCoverage",
-    ].join(",");
-    const sensitive =
-      /password|passphrase|secret|token|private|credential|verifier|salt|api[-_ ]?key|\botp\b|totp|one[-_ ]?time|authenticator|verification code|setup key|enrollment key|\brecovery\b/i;
-
     function isVisible(element: HTMLElement) {
       const style = window.getComputedStyle(element);
       const rect = element.getBoundingClientRect();
@@ -263,52 +232,18 @@ async function visibleSemanticElementsWithoutTooltip(page: Page) {
       );
     }
 
-    function isSensitiveControl(element: HTMLElement) {
-      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) {
-        return false;
-      }
-      if (element instanceof HTMLInputElement && element.type === "password") return true;
-      return sensitive.test(
-        [
-          element.name,
-          element.id,
-          element.autocomplete,
-          element.getAttribute("aria-label"),
-          element.placeholder,
-          element.closest("label")?.textContent,
-        ]
-          .filter(Boolean)
-          .join(" "),
-      );
-    }
-
-    function effectiveTitle(element: HTMLElement) {
-      let current: HTMLElement | null = element;
-      while (current && current !== document.body) {
-        const title = current.getAttribute("title")?.trim() ?? "";
-        if (title) return title;
-        current = current.parentElement;
-      }
-      return "";
-    }
-
-    return Array.from(document.querySelectorAll<HTMLElement>(selector))
+    const generic =
+      /^(?:Activate\b|Current value:)|(?:excluded|omitted) from (?:the )?tooltips?|\b(?:review )?field(?: group)?\.$|\bcolumn\.$/i;
+    return Array.from(document.querySelectorAll<HTMLElement>("[title]"))
       .filter(isVisible)
-      .filter(
-        (element) =>
-          !element.closest(
-            "pre, code, .srOnly, .visuallyHidden, [aria-hidden='true'], [data-value-tooltip-skip='true'], [data-tooltip-sensitive='true']",
-          ),
-      )
-      .filter((element) => !isSensitiveControl(element))
       .map((element) => {
-        const title = effectiveTitle(element);
-        if (title && title !== "-") return null;
-        const name =
+        const title = element.getAttribute("title")?.trim() ?? "";
+        if (!generic.test(title)) return null;
+        const label =
           element.getAttribute("aria-label") ??
           element.textContent?.replace(/\s+/g, " ").trim().slice(0, 80) ??
           element.tagName.toLowerCase();
-        return `${element.tagName.toLowerCase()}: ${name || "unnamed"}`;
+        return `${label || element.tagName.toLowerCase()}: ${title}`;
       })
       .filter((value): value is string => Boolean(value));
   });
@@ -994,8 +929,8 @@ test("release IA reaches every configured page and subpage", async ({
       ).toHaveCount(0);
       await expect(page.getByText(/Loading .* workspace/)).toHaveCount(0);
       await page.evaluate(() => new Promise(requestAnimationFrame));
-      const missingTooltips = await visibleSemanticElementsWithoutTooltip(page);
-      expect(missingTooltips, `${view} / ${subpage.label}`).toEqual([]);
+      const tooltipViolations = await tooltipContractViolations(page);
+      expect(tooltipViolations, `${view} / ${subpage.label}`).toEqual([]);
     }
   }
 });
@@ -1926,6 +1861,13 @@ test("home exposes quick actions, availability, running work, failures, attentio
   const attentionTime = attentionPanel.locator(".homeActionMeta").first();
   await expect(attentionTime).toContainText(/ago|in|just now/);
   await expect(attentionTime).toHaveAttribute("title", /2026.*(GMT|UTC)/);
+  const attentionDetail = attentionPanel
+    .locator(".homeActionText small")
+    .first();
+  await expect(attentionDetail).toHaveAttribute(
+    "title",
+    (await attentionDetail.textContent())?.trim() ?? "",
+  );
   await expect(
     page.getByRole("heading", { name: "Recent activity" }),
   ).toBeVisible();
@@ -2102,6 +2044,9 @@ test("fleet monitor keeps unsettled evidence neutral while cards load", async ({
     .first();
   await expect(onlineCard).toHaveClass(/\bonline\b/);
   await expect(onlineCard).not.toHaveClass(/\bwarning\b/);
+  await expect(onlineCard.locator(".vpsMonitorTraffic")).not.toHaveClass(
+    /\bunconfigured\b/,
+  );
   await expect(onlineCard.getByText("Online", { exact: true })).toBeVisible();
   await expect(
     page
@@ -2168,14 +2113,13 @@ test("fleet monitor presents no-reset traffic as accumulated evidence", async ({
     .first();
   await expect(
     card.locator(".vpsMonitorTraffic .vpsMonitorRowHeading"),
-  ).toHaveText("Traffic · No reset");
+  ).toHaveText("Traffic");
   await card.click();
   await page.getByRole("tab", { name: "Resources", exact: true }).click();
   const traffic = page.locator(".vpsMonitoringTrafficCycle");
-  await expect(
-    traffic.getByText("Traffic · No reset", { exact: true }),
-  ).toBeVisible();
-  await expect(traffic).toContainText("Accumulated total · No reset");
+  await expect(traffic.getByText("Traffic", { exact: true })).toBeVisible();
+  await expect(traffic).toContainText("Accumulated total");
+  await expect(traffic).not.toContainText("No reset");
   await expect(traffic).not.toContainText("Current accounting cycle");
 });
 
@@ -2220,21 +2164,31 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
       .locator(".vpsMonitorCard", { hasText: "core-fra-02" })
       .locator('[data-fact-kind="billing"]'),
   ).toContainText("Billing-");
+  const unconfiguredTraffic = monitor
+    .locator(".vpsMonitorCard", { hasText: "core-fra-02" })
+    .locator(".vpsMonitorTraffic");
+  await expect(unconfiguredTraffic).toHaveClass(/\bunconfigured\b/);
+  await expect(
+    unconfiguredTraffic.locator(".vpsMonitorTrafficTrack.missing"),
+  ).toBeVisible();
   await expect(
     edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"] strong'),
   ).toHaveText("8d 3h");
   const snapshot = page.getByLabel("VPS cards current totals");
-  await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(6);
+  await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(0);
+  await expect(edgeCard.locator(".vpsMonitorTraffic")).toHaveAttribute(
+    "title",
+    /traffic/i,
+  );
   await expect(
     edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
-  ).toHaveAttribute("title", /\S/);
+  ).not.toHaveAttribute("title", /\S/);
   await expect(
     edgeCard.locator(".vpsMonitorTraffic .vpsMonitorRowEvidence > strong"),
   ).toContainText("· Total · 80.3%");
-  await expect(edgeCard.locator(".vpsMonitorTraffic > small")).toHaveAttribute(
-    "title",
-    /\S/,
-  );
+  await expect(
+    edgeCard.locator(".vpsMonitorTraffic > small"),
+  ).not.toHaveAttribute("title", /\S/);
   const trafficHeading = edgeCard.locator(
     ".vpsMonitorTraffic .vpsMonitorRowHeading",
   );
@@ -2243,15 +2197,19 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(
     edgeCard.locator(".vpsMonitorTraffic .publicMonitoringPortSpeed"),
   ).toContainText("1.5 Gbps");
+  await expect(edgeCard.locator(".vpsMonitorPing")).toHaveAttribute(
+    "title",
+    /Ping/,
+  );
   await expect(
     edgeCard.locator(".vpsMonitorPing > span:first-child > strong:last-child"),
-  ).toHaveAttribute("title", /\S/);
+  ).not.toHaveAttribute("title", /\S/);
   await expect(
     edgeCard.locator(".vpsMonitorPing .vpsMonitorRowHeading strong"),
   ).toHaveText("Ping");
   await expect(
     edgeCard.locator(".vpsMonitorPing > span small"),
-  ).toHaveAttribute("title", /\S/);
+  ).not.toHaveAttribute("title", /\S/);
   await expect(edgeCard.getByText("No contact").first()).toBeVisible();
   await expect(
     edgeCard.locator(".vpsMonitorCardMain > small"),
@@ -3701,6 +3659,12 @@ test("automation runbooks promotes command templates into reviewed catalog", asy
   const edgeRunbook = catalog.locator(".runbookCard", {
     hasText: "edge-health-check",
   });
+  await expect(
+    edgeRunbook.getByText("uptime", { exact: true }),
+  ).toHaveAttribute(
+    "title",
+    /Operation evidence:[\s\S]*"argv": \[[\s\S]*"uptime"/,
+  );
   await activate(edgeRunbook.getByText("Review inputs"));
   await expect(
     edgeRunbook.getByLabel("Required review for edge-health-check"),
@@ -4591,9 +4555,26 @@ test("observability webhook rule editor retains registry and navigation context"
   await expect(editor).toContainText("Signing secret");
   await expect(editor).toContainText("Sample payload");
   await expect(editor).toContainText("Test before saving");
-  await expect(
-    editor.getByRole("textbox", { name: "Webhook body template" }),
-  ).toBeVisible();
+  const bodyTemplateEditor = editor.getByRole("textbox", {
+    name: "Webhook body template",
+  });
+  await expect(bodyTemplateEditor).toBeVisible();
+  const bodyTemplateLines = await bodyTemplateEditor
+    .locator(".cm-line")
+    .allTextContents();
+  expect(bodyTemplateLines).toEqual([
+    "{#",
+    "Alert: [{alert.severity}] {alert.title} on {vps.display_name} ({event.id})",
+    "Traffic threshold: {vps.display_name} used {traffic.cycle_percent}% in {policy.name}; source rule {policy_rule.name}",
+    "Resource threshold: [{alert.severity}] {alert.title} on {vps.display_name}; condition {policy_rule.condition_expression}",
+    "VPS status event: [{event.kind}] {vps.display_name} is {vps.status}",
+    'Interval fleet summary: [{event.kind}] {matched_vps.length} VPSs: {matched_vps.map(vps.name).join(", ")}',
+    "#}",
+    "[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}",
+  ]);
+  await expect(editor).toContainText(
+    "The multiline block between standalone {# and #} markers contains non-rendering examples",
+  );
   const cooldown = editor.getByLabel("Webhook cooldown seconds");
   await expect(cooldown).toHaveAttribute("min", "0");
   await expect(cooldown).toHaveAttribute("max", "2592000");
@@ -4641,7 +4622,7 @@ test("observability webhook rule editor retains registry and navigation context"
   );
 });
 
-test("raw editors and delivery evidence keep payload data out of tooltip titles", async ({
+test("raw editors do not echo drafts while API evidence remains available in tooltips", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -4657,24 +4638,18 @@ test("raw editors and delivery evidence keep payload data out of tooltip titles"
   const fixtureBody =
     "{rule.name} {event.kind} count={matched_vps.length} {matched_vps.0.display_name}";
   const fixtureDeliveryError = "fixture receiver returned 503";
-  const expectNoPayloadTitles = async (values: string[]) => {
-    await page.waitForTimeout(50);
-    const titles = await page
-      .locator("[title]")
-      .evaluateAll((elements) =>
-        elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
-      );
-    for (const value of values) {
-      expect(titles).not.toContain(value);
-    }
+  const expectControlDoesNotEcho = async (
+    control: import("@playwright/test").Locator,
+    value: string,
+  ) => {
+    expect((await control.getAttribute("title")) ?? "").not.toContain(value);
   };
 
   await gotoConsoleHome(page);
   await openConsoleSubpage(page, "Config", "Bulk patch");
   const jsonEditor = page.getByLabel("Patch generator values JSON");
   await jsonEditor.fill(`{"probe":"${rawJsonSentinel}"}`);
-  await expect(jsonEditor).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expect(jsonEditor).toHaveAttribute("title", /content is excluded/);
+  await expectControlDoesNotEcho(jsonEditor, rawJsonSentinel);
   await activate(
     page.getByRole("button", { name: "Temporary patch", exact: true }),
   );
@@ -4682,14 +4657,11 @@ test("raw editors and delivery evidence keep payload data out of tooltip titles"
     "Temporary bulk runtime config patch TOML",
   );
   await tomlEditor.fill(`[probe]\nvalue = "${rawTomlSentinel}"`);
-  await expect(tomlEditor).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expectNoPayloadTitles([rawJsonSentinel, rawTomlSentinel]);
+  await expectControlDoesNotEcho(tomlEditor, rawTomlSentinel);
 
   await openConsoleSubpage(page, "Config", "Sources");
   const sources = page.locator(".configurationSourcesPanel");
-  await activate(
-    sources.getByRole("tab", { name: "Configuration presets" }),
-  );
+  await activate(sources.getByRole("tab", { name: "Configuration presets" }));
   await activate(sources.getByRole("button", { name: "New preset" }));
   const presetDrawer = page.getByRole("complementary", {
     name: "New configuration preset",
@@ -4703,16 +4675,8 @@ test("raw editors and delivery evidence keep payload data out of tooltip titles"
   );
   await argvEditor.fill(`/opt/operator/${argvSentinel}`);
   await environmentEditor.fill(`PROBE=${environmentSentinel}`);
-  await expect(argvEditor).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expect(environmentEditor).toHaveAttribute(
-    "data-tooltip-sensitive",
-    "true",
-  );
-  await expect(argvEditor.locator("..")).toHaveAttribute(
-    "title",
-    /arguments are excluded/,
-  );
-  await expectNoPayloadTitles([argvSentinel, environmentSentinel]);
+  await expectControlDoesNotEcho(argvEditor, argvSentinel);
+  await expectControlDoesNotEcho(environmentEditor, environmentSentinel);
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
   const adapterRegistry = page.getByLabel("Network adapter definitions");
@@ -4724,25 +4688,31 @@ test("raw editors and delivery evidence keep payload data out of tooltip titles"
   });
   const adapterEditor = adapterDrawer.getByLabel("Status adapter command");
   await adapterEditor.fill(`/opt/operator/${adapterSentinel}`);
-  await expect(adapterEditor).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expect(adapterEditor.locator("..")).toHaveAttribute(
-    "title",
-    /arguments are excluded/,
-  );
-  await expectNoPayloadTitles([adapterSentinel]);
+  await expectControlDoesNotEcho(adapterEditor, adapterSentinel);
 
   await openConsoleSubpage(page, "Observability", "Event webhooks");
   const ruleGrid = page.getByLabel("Webhook rules data grid");
   await expect(ruleGrid).toContainText(fixtureDestination);
   await activate(ruleGrid.getByLabel(/Expand Webhook rules row/).first());
   await expect(ruleGrid).toContainText(fixtureBody);
-  await expectNoPayloadTitles([fixtureDestination, fixtureBody]);
+  const ruleTitles = await ruleGrid
+    .locator("[title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
+    );
+  expect(ruleTitles).toContain(fixtureDestination);
+  expect(ruleTitles).toContain(fixtureBody);
 
   await activate(page.getByRole("tab", { name: /Deliveries/ }));
   const deliveryGrid = page.getByLabel("Webhook delivery history data grid");
   await expect(deliveryGrid).toContainText(fixtureDestination);
   await expect(deliveryGrid).toContainText(fixtureDeliveryError);
-  await expectNoPayloadTitles([fixtureDestination, fixtureDeliveryError]);
+  const deliveryTitles = await deliveryGrid
+    .locator("[title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
+    );
+  expect(deliveryTitles).toContain(fixtureDeliveryError);
 });
 
 test("config bulk patch requires reviewed scope and privilege before apply", async ({
@@ -7959,7 +7929,12 @@ test("system suite config owns control-plane config and excludes per-VPS editors
     .click();
   const suiteToml = page.getByLabel("Suite config TOML");
   const originalSuiteToml = await suiteToml.inputValue();
+  await expect(suiteToml).not.toHaveAttribute("title", originalSuiteToml);
   await suiteToml.fill(`${originalSuiteToml}\n# operator maintenance note\n`);
+  await expect(suiteToml).not.toHaveAttribute(
+    "title",
+    `${originalSuiteToml}\n# operator maintenance note\n`,
+  );
   await expect(page.getByLabel("Suite config sticky save bar")).toContainText(
     "Advanced TOML text changed",
   );
@@ -7974,6 +7949,18 @@ test("system suite config owns control-plane config and excludes per-VPS editors
     .getByLabel("Suite config editor mode")
     .getByRole("button", { name: "Fields" })
     .click();
+  await sections.getByRole("button", { name: /Gateway/ }).click();
+  const apiUrl = page.getByLabel("API URL");
+  const apiUrlValue = await apiUrl.inputValue();
+  expect((await apiUrl.getAttribute("title")) ?? "").not.toContain(apiUrlValue);
+  await expect(
+    page
+      .locator(".systemConfigFieldRow", { has: apiUrl })
+      .locator(".systemConfigFieldMeta summary"),
+  ).toHaveAttribute(
+    "title",
+    new RegExp(apiUrlValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
   await expect(
     page.getByLabel("Suite config validation and save review"),
   ).toContainText("Edit");

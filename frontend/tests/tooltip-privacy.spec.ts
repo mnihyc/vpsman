@@ -50,7 +50,15 @@ test("does not promote hidden data-grid search metadata into titles", async ({
   expect(titles.join("\n")).not.toContain(hiddenSearchSentinel);
 });
 
-test("keeps command-bearing tooltip sources on static exclusion contracts", () => {
+test("keeps the tooltip foundation supplemental and preserves authored evidence", () => {
+  const decorator = source("useValueTooltips.ts");
+  expect(decorator).toContain("function isVisiblyShortened");
+  expect(decorator).toContain('style.textOverflow === "ellipsis"');
+  expect(decorator).not.toContain("\"input:not([type='hidden'])\"");
+  expect(decorator).not.toMatch(
+    /Activate |Current value:|(?:excluded|omitted) from (?:the )?tooltips?|\bfield\.|\bcolumn\./i,
+  );
+
   const grid = source("components/ConsoleDataGrid.tsx");
   const gridTooltipHelper = grid.slice(
     grid.indexOf("function columnTooltip"),
@@ -60,31 +68,46 @@ test("keeps command-bearing tooltip sources on static exclusion contracts", () =
   expect(gridTooltipHelper).not.toContain("sortValue");
 
   const confirmation = source("components/ConfirmationPrompt.tsx");
-  const confirmationTooltipHelper = confirmation.slice(
-    confirmation.indexOf("function confirmationItemTitle"),
+  expect(confirmation).not.toContain("confirmationItemTitle");
+  expect(confirmation).toContain(
+    'data-tooltip-sensitive={item.sensitive ? "true" : undefined}',
   );
-  const sensitiveGuard = confirmationTooltipHelper.indexOf("if (sensitive)");
-  const scalarFormatting = confirmationTooltipHelper.indexOf("String(value)");
-  expect(sensitiveGuard).toBeGreaterThanOrEqual(0);
-  expect(scalarFormatting).toBeGreaterThan(sensitiveGuard);
-  expect(confirmationTooltipHelper).toContain(
-    "its exact value is excluded from tooltips",
+  expect(confirmation).toContain(
+    'data-value-tooltip-skip={item.sensitive ? "true" : undefined}',
   );
+
+  for (const relativePath of [
+    "components/Metric.tsx",
+    "panels/HomeTelemetryPanel.tsx",
+    "panels/PreferencesPanel.tsx",
+    "panels/ReleaseStatusPanel.tsx",
+    "panels/TargetImpactPreview.tsx",
+    "panels/automation/RunbooksPanel.tsx",
+    "panels/observability/FleetMetricsPanel.tsx",
+    "panels/observability/ObservabilityDashboardsPanel.tsx",
+  ]) {
+    expect(source(relativePath)).not.toMatch(
+      /title=\{`\$\{(?:label|definition\.label)\}: \$\{(?:value|definition\.value)\}/,
+    );
+  }
 
   const access = source("panels/AccessPanel.tsx");
   expect(access).not.toContain("title={foregroundStartCommand}");
+  expect(access).not.toContain("title={installCommand}");
   expect(access).toContain(
-    'title="Foreground agent start command. Exact command content is excluded from tooltips."',
+    'title="Paste-ready install command containing the one-time private key; copy it only into a trusted shell."',
+  );
+  expect(access).toContain(
+    'title="Foreground command for a staged unprivileged installation."',
   );
 
   const dispatch = source("panels/JobDispatchPanel.tsx");
-  expect(dispatch).not.toMatch(/label:\s*"Command argv",\s*title:\s*command/);
   expect(dispatch).toMatch(
     /label:\s*"Command argv",\s*sensitive:\s*true,\s*value:\s*command/,
   );
 });
 
-test("keeps Suite Config endpoint values visible but out of tooltips", async ({
+test("keeps editable Suite Config values out of input titles", async ({
   page,
 }) => {
   const credentialUrl =
@@ -102,59 +125,49 @@ test("keeps Suite Config endpoint values visible but out of tooltips", async ({
   await endpointInput.fill(credentialUrl);
 
   await expect(endpointInput).toHaveValue(credentialUrl);
-  await expect(endpointInput).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expect(endpointInput).toHaveAttribute("data-value-tooltip-skip", "true");
-  await expect(endpointInput).toHaveAttribute(
+  await expect(endpointInput).not.toHaveAttribute(
     "title",
-    "API URL endpoint field. Exact URL content is excluded from tooltips.",
+    /credential-bearing-url-sentinel/,
   );
   await expect(
     endpointField.getByRole("button", { name: "Reset current" }),
-  ).toHaveAttribute("title", /exact URL content is excluded from tooltips/i);
+  ).toHaveAttribute("title", "Reset API URL to the loaded value.");
   await expect(
     endpointField.getByRole("button", { name: "Use default" }),
-  ).toHaveAttribute("title", /exact URL content is excluded from tooltips/i);
+  ).toHaveAttribute(
+    "title",
+    "Use the inherited default for API URL; removes the explicit value.",
+  );
 
-  await expect
-    .poll(async () =>
-      endpointField.locator("[title]").evaluateAll((elements) =>
-        elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
-      ),
-    )
-    .not.toContain(credentialUrl);
   const endpointTitles = await endpointField
     .locator("[title]")
     .evaluateAll((elements) =>
       elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
     );
   expect(endpointTitles).not.toContain("credential-bearing-url-sentinel");
-  expect(endpointTitles).not.toContain("http://api:8080");
+  expect(endpointTitles).toContain("http://api:8080");
 
   const ordinaryField = page.locator(".systemConfigFieldRow", {
     has: page.getByLabel("Gateway ID"),
   });
   const ordinaryInput = ordinaryField.getByLabel("Gateway ID");
-  await expect(ordinaryInput).toHaveAttribute(
-    "title",
-    "Gateway ID: compose-gateway.",
-  );
+  await expect(ordinaryInput).not.toHaveAttribute("title", /compose-gateway/);
 
   const websocketCredentialUrl =
     "wss://tooltip-user:websocket-url-sentinel@example.invalid/events";
   await ordinaryInput.fill(websocketCredentialUrl);
   await expect(ordinaryInput).toHaveValue(websocketCredentialUrl);
-  await expect(ordinaryInput).toHaveAttribute(
-    "data-tooltip-sensitive",
-    "true",
+  await expect(ordinaryInput).not.toHaveAttribute(
+    "title",
+    /websocket-url-sentinel/,
   );
-  await expect(ordinaryInput).toHaveAttribute("data-value-tooltip-skip", "true");
   const ordinaryTitles = await ordinaryField
     .locator("[title]")
     .evaluateAll((elements) =>
       elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
     );
   expect(ordinaryTitles).not.toContain("websocket-url-sentinel");
-  expect(ordinaryTitles).not.toContain("compose-gateway");
+  expect(ordinaryTitles).toContain("compose-gateway");
 
   await sections.getByRole("button", { name: /API/ }).click();
   const gatewayControlField = page.locator(".systemConfigFieldRow", {
@@ -166,21 +179,21 @@ test("keeps Suite Config endpoint values visible but out of tooltips", async ({
   await expect(gatewayControlInput).toHaveValue(
     "unix:/var/lib/vpsman/gateway-control.sock",
   );
-  await expect(gatewayControlInput).toHaveAttribute(
-    "data-tooltip-sensitive",
-    "true",
+  await expect(gatewayControlInput).not.toHaveAttribute(
+    "title",
+    /unix:\/var\/lib\/vpsman\/gateway-control\.sock/,
   );
   const gatewayControlTitles = await gatewayControlField
     .locator("[title]")
     .evaluateAll((elements) =>
       elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
     );
-  expect(gatewayControlTitles).not.toContain(
+  expect(gatewayControlTitles).toContain(
     "unix:/var/lib/vpsman/gateway-control.sock",
   );
 });
 
-test("keeps retained external errors visible without promoting them into titles", async ({
+test("reveals a retained external error only when its visible value is shortened", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -225,116 +238,160 @@ test("keeps retained external errors visible without promoting them into titles"
   const grid = page.getByLabel("Backup policy records data grid");
   const visibleError = grid.getByText(externalErrorSentinel, { exact: true });
   await expect(visibleError).toBeVisible();
-  const protectedResult = visibleError.locator("..");
-  await expect(protectedResult).toHaveAttribute("data-tooltip-sensitive", "true");
-  await expect(protectedResult).toHaveAttribute(
-    "data-value-tooltip-skip",
-    "true",
-  );
+  const result = visibleError.locator("..");
+  await expect(result).not.toHaveAttribute("data-tooltip-sensitive", "true");
+  await expect(result).not.toHaveAttribute("data-value-tooltip-skip", "true");
   await expect
-    .poll(async () =>
-      page.locator("[title]").evaluateAll(
-        (elements, sentinel) =>
-          elements.some((element) =>
-            (element.getAttribute("title") ?? "").includes(sentinel),
-          ),
-        externalErrorSentinel,
+    .poll(() =>
+      visibleError.evaluate(
+        (element) => element.scrollWidth > element.clientWidth + 1,
       ),
     )
-    .toBe(false);
+    .toBe(true);
+  await expect(visibleError).toHaveAttribute("title", externalErrorSentinel);
+  await expect
+    .poll(async () =>
+      page
+        .locator("[title]")
+        .evaluateAll(
+          (elements, sentinel) =>
+            elements.some((element) =>
+              (element.getAttribute("title") ?? "").includes(sentinel),
+            ),
+          externalErrorSentinel,
+        ),
+    )
+    .toBe(true);
 });
 
-test("keeps raw error and log tooltip sites on static exclusion boundaries", () => {
+test("exposes API-authorized operational diagnostics in semantic titles", () => {
   const actionFeedback = source("components/ActionFeedback.tsx");
-  expect(actionFeedback).not.toContain("title={`${tone} feedback: ${message}`}");
-  expect(actionFeedback).toContain('data-tooltip-sensitive="true"');
-  expect(actionFeedback).toContain('title={toneTitle[tone]}');
+  expect(actionFeedback).not.toContain("title=");
+  expect(actionFeedback).not.toContain("data-tooltip-sensitive");
+  expect(actionFeedback).not.toContain("data-value-tooltip-skip");
 
-  const supervisor = source(
-    "panels/jobs/ProcessSupervisorInventoryPanel.tsx",
-  );
-  expect(supervisor).not.toMatch(/title=\{row\.(?:stdout|stderr)_log/);
-  expect(supervisor).toContain(
-    'data-tooltip-sensitive={row.stdout_log ? "true" : undefined}',
-  );
-  expect(supervisor).toContain(
-    'data-value-tooltip-skip={row.stderr_log ? "true" : undefined}',
-  );
+  const supervisor = source("panels/jobs/ProcessSupervisorInventoryPanel.tsx");
+  expect(supervisor).not.toContain("Retained stdout log content");
+  expect(supervisor).not.toContain("Retained stderr log content");
 
   const hostServices = source("panels/jobs/HostServicesPanel.tsx");
-  expect(hostServices).not.toContain("title={service.state_reason");
   expect(hostServices).toContain(
-    "Exact provider diagnostic content is excluded from tooltips.",
+    "Provider diagnostic: ${service.state_reason}",
+  );
+  expect(hostServices).toMatch(
+    /title=\{[\s\S]{0,120}service\.state_reason[\s\S]{0,120}Provider diagnostic/,
   );
 
   const execution = source("components/ExecutionResultPanel.tsx");
-  expect(execution).not.toContain("<span title={group.reason}>");
-  expect(execution).toMatch(
-    /data-tooltip-sensitive="true"[\s\S]{0,100}data-value-tooltip-skip="true"[\s\S]{0,180}\{group\.reason\}/,
-  );
+  expect(execution).toContain("<span>{group.reason}</span>");
 
   const portForwarding = source("panels/topology/PortForwardingPanel.tsx");
-  expect(portForwarding).not.toContain("title={rule.configuration_error}");
-  expect(portForwarding).not.toContain(
-    "title: corruptDelete.configuration_error",
-  );
-  expect(portForwarding).not.toContain("title={mappingPreview.error}");
+  expect(portForwarding).toContain("{rule.configuration_error}");
+  expect(portForwarding).toContain("title={mappingPreview.error}");
   expect(portForwarding).toMatch(
-    /label: "Configuration error",\s*sensitive: true,\s*value: corruptDelete\.configuration_error/,
+    /label: "Configuration error",\s*value: corruptDelete\.configuration_error/,
   );
 
   const topology = source("panels/TopologyPanel.tsx");
-  expect(topology).not.toContain("title={plan.configuration_error}");
-  expect(topology).toMatch(
-    /data-tooltip-sensitive="true"[\s\S]{0,100}data-value-tooltip-skip="true"[\s\S]{0,600}\{plan\.configuration_error\}/,
+  expect(topology).toContain("{plan.configuration_error}");
+  expect(topology).toContain(
+    "Runtime configuration error: ${runtimeConfig.error}",
   );
 
   const pingTargets = source("panels/observability/PingTargetsPanel.tsx");
-  expect(pingTargets).not.toContain("<span title={evidence.title}>");
-  expect(pingTargets).toContain("tooltipSensitive: true");
-  expect(pingTargets).toContain('tooltipSensitive: state === "failed"');
+  expect(pingTargets).toContain("<span title={evidence.title}>");
+  expect(pingTargets).not.toContain("tooltipSensitive");
 
-  const configurationSources = source(
-    "panels/ConfigurationSourcesPanel.tsx",
-  );
-  expect(configurationSources).not.toContain(
-    "title={source.runtime_sync.reason}",
-  );
+  const configurationSources = source("panels/ConfigurationSourcesPanel.tsx");
+  expect(configurationSources).toContain("${source.runtime_sync.reason}");
+  expect(configurationSources).not.toContain('data-tooltip-sensitive="true"');
 
   const multiFile = source("panels/jobs/MultiFileActionsPanel.tsx");
-  expect(multiFile).not.toContain(
-    "title={group.detail || group.reason || group.label}",
-  );
-  expect(multiFile).toContain(
-    "Exact per-target detail is excluded from tooltips.",
-  );
+  expect(multiFile).toContain("{group.reason || group.label}");
+  expect(multiFile).toContain("{group.preview}");
 
   const monitoringDetail = source("panels/VpsMonitoringDetailPanel.tsx");
-  expect(monitoringDetail).not.toContain("title={target.reason || undefined}");
-  expect(monitoringDetail).toContain(
-    "Exact probe diagnostic content is excluded from tooltips.",
-  );
+  expect(monitoringDetail).toContain("diagnostic: ${target.reason}");
 
   const topologyPanel = source("panels/TopologyPanel.tsx");
-  expect(topologyPanel).not.toMatch(/title:[^\n]*reachability_reason/);
-  expect(topologyPanel).not.toContain("readableTelemetryToken(reason)");
+  expect(topologyPanel).toContain(
+    "Left probe diagnostic: ${edge.left_reachability_reason}",
+  );
+  expect(topologyPanel).toContain(
+    "Right probe diagnostic: ${edge.right_reachability_reason}",
+  );
 
   const topologyGraph = source("panels/topology/TopologyGraphPanel.tsx");
-  expect(topologyGraph).not.toMatch(
-    /endpointReachabilityDetail\([\s\S]{0,250}reachability_reason/,
-  );
+  expect(topologyGraph).toContain("edge.left_reachability_reason");
+  expect(topologyGraph).toContain("diagnostic: ${reason}");
+
+  for (const diagnosticSurface of [
+    hostServices,
+    topology,
+    pingTargets,
+    configurationSources,
+    monitoringDetail,
+    topologyGraph,
+  ]) {
+    expect(diagnosticSurface).not.toMatch(
+      /(?:excluded|omitted) from (?:the )?tooltips?/i,
+    );
+  }
 
   const backupHistory = source("panels/backups/BackupHistoryTables.tsx");
+  expect(backupHistory).toContain("detail: policy.last_error");
   expect(backupHistory).not.toContain("title: policy.last_error");
-  expect(backupHistory).toContain(
-    'data-tooltip-sensitive={policy.last_error ? "true" : undefined}',
-  );
 
   const jobs = source("panels/JobsPanel.tsx");
-  expect(jobs).not.toContain(
-    "<small title={schedule?.cadence_error ?? undefined}>",
+  expect(jobs).toContain("? schedule.cadence_error");
+  expect(jobs).toContain('{group.preview || "No preview"}');
+
+  const schedules = source("panels/SchedulesPanel.tsx");
+  expect(schedules).toContain(
+    "Operation evidence:\\n${JSON.stringify(operation, null, 2)}",
   );
-  expect(jobs).toMatch(
-    /data-value-tooltip-skip=\{\s*schedule\?\.cadence_error \? "true" : undefined\s*\}/,
+  expect(schedules).toContain(
+    '"Command and arguments submitted by each scheduled run."',
   );
+  expect(schedules).not.toContain("title={commandText || undefined}");
+
+  const runbooks = source("panels/automation/RunbooksPanel.tsx");
+  expect(runbooks).toContain(
+    "Operation evidence:\\n${JSON.stringify(runbook.template.operation, null, 2)}",
+  );
+
+  const rollouts = source("panels/automation/RolloutsPanel.tsx");
+  expect(rollouts).toContain('className="truncateValue"');
+  expect(rollouts).toContain('{target.message ?? "-"}');
+
+  const operationControls = source("panels/jobs/JobOperationControls.tsx");
+  expect(operationControls).toContain(
+    'title="Command and arguments used to start the managed process."',
+  );
+  expect(operationControls).toContain(
+    'title="HTTPS URL of version.json used to select the architecture-specific agent artifact."',
+  );
+  expect(operationControls).not.toContain(
+    "title={supervisorArgv || undefined}",
+  );
+  expect(operationControls).not.toContain(
+    "title={updateCheckVersionUrl || undefined}",
+  );
+
+  for (const evidenceSurface of [
+    supervisor,
+    hostServices,
+    execution,
+    multiFile,
+    backupHistory,
+    jobs,
+    schedules,
+    runbooks,
+    rollouts,
+    operationControls,
+  ]) {
+    expect(evidenceSurface).not.toMatch(
+      /(?:excluded|omitted) from (?:the )?tooltips?/i,
+    );
+  }
 });

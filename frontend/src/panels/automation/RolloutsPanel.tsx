@@ -754,12 +754,8 @@ function RolloutDetail({
           <span
             className="truncateValue"
             data-tooltip-empty-reason={
-              target.message ? undefined : "This rollout target has no result message yet"
-            }
-            data-value-tooltip-skip="true"
-            title={
               target.message
-                ? "Latest rollout result; exact agent content is excluded from tooltips"
+                ? undefined
                 : "This rollout target has no result message yet"
             }
           >
@@ -793,7 +789,9 @@ function RolloutDetail({
             <button
               className="secondaryAction compactAction"
               data-tooltip-disabled-reason={
-                pending ? "A rollout control action is already in progress" : undefined
+                pending
+                  ? "A rollout control action is already in progress"
+                  : undefined
               }
               disabled={pending}
               onClick={onPause}
@@ -807,7 +805,9 @@ function RolloutDetail({
             <button
               className="primaryAction compactAction"
               data-tooltip-disabled-reason={
-                pending ? "A rollout control action is already in progress" : undefined
+                pending
+                  ? "A rollout control action is already in progress"
+                  : undefined
               }
               disabled={pending}
               onClick={onResume}
@@ -821,7 +821,9 @@ function RolloutDetail({
             <button
               className="dangerAction compactAction"
               data-tooltip-disabled-reason={
-                pending ? "A rollout control action is already in progress" : undefined
+                pending
+                  ? "A rollout control action is already in progress"
+                  : undefined
               }
               disabled={pending}
               onClick={onAbort}

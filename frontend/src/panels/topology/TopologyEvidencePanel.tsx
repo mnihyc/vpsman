@@ -410,9 +410,7 @@ export function TopologyEvidencePanel({
           className="fleetMetricsAdvancedFilters"
           title="Restrict retained network evidence by plan, endpoint, source, measurement, health, or text"
         >
-          <summary
-            title={`${activeEvidenceFilters} advanced network evidence filter${activeEvidenceFilters === 1 ? "" : "s"} active`}
-          >
+          <summary>
             <SlidersHorizontal size={14} />
             <span>Advanced filters</span>
             {activeEvidenceFilters > 0 ? <b>{activeEvidenceFilters}</b> : null}
@@ -684,13 +682,9 @@ export function TopologyEvidencePanel({
                   className="historyRow topologyEvidenceGrid"
                   key={row.id}
                   role="row"
-                  title={`${row.planName}: ${row.signalLabel}; cost ${row.metric}; approval ${row.target}; latest ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}`}
+                  title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}. Health: ${row.signalLabel}; ${row.healthDetail}. Cost: ${row.metric}; ${row.metricDetail}. Approval: ${row.target}; ${row.targetDetail}. Latest: ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}.`}
                 >
-                  <span
-                    className="historyPrimary"
-                    role="cell"
-                    title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}`}
-                  >
+                  <span className="historyPrimary" role="cell">
                     <EvidenceMobileLabel>OSPF update plan</EvidenceMobileLabel>
                     <strong>{row.planName}</strong>
                     <small>{row.interfaceName}</small>
@@ -700,25 +694,16 @@ export function TopologyEvidencePanel({
                     <EvidenceMobileLabel>Health</EvidenceMobileLabel>
                     <span
                       className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                      title={row.healthDetail}
                     >
                       {row.signalLabel}
                     </span>
                   </span>
-                  <span
-                    className="topologyMetric"
-                    role="cell"
-                    title={`Cost ${row.metric}; ${row.metricDetail}`}
-                  >
+                  <span className="topologyMetric" role="cell">
                     <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span
-                    className="topologyMetric"
-                    role="cell"
-                    title={`Approval ${row.target}; ${row.targetDetail}`}
-                  >
+                  <span className="topologyMetric" role="cell">
                     <EvidenceMobileLabel>Approval</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
@@ -749,13 +734,9 @@ export function TopologyEvidencePanel({
                   className="historyRow topologyEvidenceGrid"
                   key={row.id}
                   role="row"
-                  title={`${row.planName}: ${row.signalLabel}; cost ${row.metric}; evidence ${row.target}; latest ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}`}
+                  title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}. Health: ${row.signalLabel}; ${row.healthDetail}. Cost: ${row.metric}; ${row.metricDetail}. Evidence: ${row.target}; ${row.targetDetail}. Latest: ${row.latestObservedAt ? formatFullTime(row.latestObservedAt) : "not reported"}.`}
                 >
-                  <span
-                    className="historyPrimary"
-                    role="cell"
-                    title={`${row.planName}; interface ${row.interfaceName}; confidence ${row.confidence}`}
-                  >
+                  <span className="historyPrimary" role="cell">
                     <EvidenceMobileLabel>
                       OSPF recommendation
                     </EvidenceMobileLabel>
@@ -767,25 +748,16 @@ export function TopologyEvidencePanel({
                     <EvidenceMobileLabel>Health</EvidenceMobileLabel>
                     <span
                       className={`status ${topologyObservationStateBadgeClass(row.signalStatus)}`}
-                      title={row.healthDetail}
                     >
                       {row.signalLabel}
                     </span>
                   </span>
-                  <span
-                    className="topologyMetric"
-                    role="cell"
-                    title={`Cost ${row.metric}; ${row.metricDetail}`}
-                  >
+                  <span className="topologyMetric" role="cell">
                     <EvidenceMobileLabel>Cost</EvidenceMobileLabel>
                     <strong>{row.metric}</strong>
                     <small>{row.metricDetail}</small>
                   </span>
-                  <span
-                    className="topologyMetric"
-                    role="cell"
-                    title={`Evidence ${row.target}; ${row.targetDetail}`}
-                  >
+                  <span className="topologyMetric" role="cell">
                     <EvidenceMobileLabel>Evidence</EvidenceMobileLabel>
                     <strong>{row.target}</strong>
                     <small>{row.targetDetail}</small>
@@ -849,12 +821,9 @@ export function TopologyEvidencePanel({
                   key={group.key}
                   title={`${group.label}: ${group.detail}`}
                 >
-                  <span
-                    className="latencyCurveTitle"
-                    title={`${group.label}: ${group.detail}`}
-                  >
-                    <strong title={group.label}>{group.label}</strong>
-                    <small title={group.detail}>{group.detail}</small>
+                  <span className="latencyCurveTitle">
+                    <strong>{group.label}</strong>
+                    <small>{group.detail}</small>
                   </span>
                   <div
                     className="latencyCurve compact"
@@ -1029,13 +998,9 @@ export function TopologyEvidencePanel({
                 className="historyRow topologyEvidenceGrid"
                 key={row.job.id}
                 role="row"
-                title={`${humanStatus(row.job.command_type)}: ${signalLabel}; ${row.metric}; ${row.target}; created ${formatFullTime(row.job.created_at)}`}
+                title={`${humanStatus(row.job.command_type)} job ${row.job.id}. Signal: ${signalLabel}. Metric: ${row.metric}; ${row.metricDetail}. Target: ${row.target}; ${row.targetDetail}. Created: ${formatFullTime(row.job.created_at)}.`}
               >
-                <span
-                  className="historyPrimary"
-                  role="cell"
-                  title={`${humanStatus(row.job.command_type)} job ${row.job.id}`}
-                >
+                <span className="historyPrimary" role="cell">
                   <EvidenceMobileLabel>Command</EvidenceMobileLabel>
                   <strong>{humanStatus(row.job.command_type)}</strong>
                   <small>job {shortId(row.job.id)}</small>
@@ -1053,28 +1018,16 @@ export function TopologyEvidencePanel({
                 </span>
                 <span className="topologyEvidenceStatusCell" role="cell">
                   <EvidenceMobileLabel>Signal</EvidenceMobileLabel>
-                  <span
-                    className={`status ${evidenceStatusBadgeClass(row)}`}
-                    data-value-tooltip="true"
-                    title={signalLabel}
-                  >
+                  <span className={`status ${evidenceStatusBadgeClass(row)}`}>
                     {signalLabel}
                   </span>
                 </span>
-                <span
-                  className="topologyMetric"
-                  role="cell"
-                  title={`${row.metric}; ${row.metricDetail}`}
-                >
+                <span className="topologyMetric" role="cell">
                   <EvidenceMobileLabel>Metric</EvidenceMobileLabel>
                   <strong>{row.metric}</strong>
                   <small>{row.metricDetail}</small>
                 </span>
-                <span
-                  className="topologyMetric"
-                  role="cell"
-                  title={`${row.target}; ${row.targetDetail}`}
-                >
+                <span className="topologyMetric" role="cell">
                   <EvidenceMobileLabel>Target</EvidenceMobileLabel>
                   <strong>{row.target}</strong>
                   <small>{row.targetDetail}</small>

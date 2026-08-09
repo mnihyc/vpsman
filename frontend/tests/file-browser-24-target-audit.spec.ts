@@ -1,6 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installConsoleApiMock } from "./support/consoleLayoutFixtures";
-import { activate, openConsoleSubpage, unlockPrivilegeFromTop } from "./support/consoleNavigation";
+import {
+  activate,
+  openConsoleSubpage,
+  unlockPrivilegeFromTop,
+} from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
@@ -28,10 +32,7 @@ test("VPS combobox keyboard navigation stays on visible options", async ({
     await target.press("ArrowDown");
   }
   const selectedOption = options.getByRole("option").nth(14);
-  await expect(selectedOption).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(selectedOption).toHaveAttribute("aria-selected", "true");
   const [menuBox, optionBox] = await Promise.all([
     options.boundingBox(),
     selectedOption.boundingBox(),
@@ -46,11 +47,21 @@ test("VPS combobox keyboard navigation stays on visible options", async ({
   await expect(target).toHaveValue(/edge-us-14/);
 });
 
-test("bulk file operations remain scannable with 24 VPS targets", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "bulk file operations are a dense desktop panel");
+test("bulk file operations remain scannable with 24 VPS targets", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk file operations are a dense desktop panel",
+  );
 
   await page.goto("/");
-  await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "vpsman.multiFile.selectorExpression",
+      "provider:alpha && country:US",
+    ),
+  );
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await expect(page.getByRole("heading", { name: "Bulk files" })).toBeVisible();
   await unlockPrivilege(page);
@@ -59,17 +70,29 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await expect(localPreview).toContainText("edge-us-00");
   await activate(localPreview.getByRole("button", { name: "Show 16 more" }));
   await expect(localPreview).toContainText("edge-us-23");
-  await expect(localPreview.getByRole("button", { name: "Show fewer" })).toBeVisible();
+  await expect(
+    localPreview.getByRole("button", { name: "Show fewer" }),
+  ).toBeVisible();
 
   await activate(page.getByRole("button", { name: "Refresh scope" }));
   await expect(page.getByText("24 VPSs resolved")).toBeVisible();
   const preflight = page.getByLabel("Bulk file preflight checks");
-  await expect(preflight).toContainText("24 resolved (22 online, 1 stale, 1 unavailable)");
-  await expect(page.getByLabel("Bulk file live match summary")).toContainText("24 matched · 22 ready · 1 stale excluded from ready · 1 unavailable blocked");
-  await expect(page.getByLabel("Bulk file attention targets")).toContainText("edge-us-22");
-  await expect(page.getByLabel("Bulk file attention targets")).toContainText("edge-us-23");
+  await expect(preflight).toContainText(
+    "24 resolved (22 online, 1 stale, 1 unavailable)",
+  );
+  await expect(page.getByLabel("Bulk file live match summary")).toContainText(
+    "24 matched · 22 ready · 1 stale excluded from ready · 1 unavailable blocked",
+  );
+  await expect(page.getByLabel("Bulk file attention targets")).toContainText(
+    "edge-us-22",
+  );
+  await expect(page.getByLabel("Bulk file attention targets")).toContainText(
+    "edge-us-23",
+  );
   await expect(preflight).toContainText("384.0 MiB");
-  await expect(preflight).toContainText("Stale agents may still reject with a command-version mismatch");
+  await expect(preflight).toContainText(
+    "Stale agents may still reject with a command-version mismatch",
+  );
   const serverPreview = page.getByLabel("Bulk file server VPS preview");
   await expect(serverPreview).toContainText("edge-us-00");
   await activate(serverPreview.getByRole("button", { name: "Show 16 more" }));
@@ -82,71 +105,184 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({ page 
   await activate(page.getByRole("button", { name: "Run download" }));
   await expect(page.getByText("Confirm bulk file operation")).toBeVisible();
   await expect(page.getByText("Download files on 24 VPSs")).toBeVisible();
-  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
+  await activate(
+    page
+      .getByLabel("Confirm bulk file operation")
+      .getByRole("button", { name: "Download files" }),
+  );
   const resultPanel = page.getByLabel("Execution result");
   await expect(resultPanel).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "targets" }).filter({ hasText: "24/24" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "in progress" }).filter({ hasText: "0" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "reported" }).filter({ hasText: "24" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "completed" }).filter({ hasText: "22" })).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "targets" })
+      .filter({ hasText: "24/24" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "in progress" })
+      .filter({ hasText: "0" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "reported" })
+      .filter({ hasText: "24" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "completed" })
+      .filter({ hasText: "22" }),
+  ).toBeVisible();
 
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "unsuccessful" }).filter({ hasText: "2" })).toBeVisible();
-  await expect(resultPanel.locator(".executionResultStats span").filter({ hasText: "pre-run unavailable" }).filter({ hasText: "1" })).toBeVisible();
+  await expect(
+    page.locator(".bulkSummaryList summary").filter({ hasText: "22 VPSs" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "unsuccessful" })
+      .filter({ hasText: "2" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel
+      .locator(".executionResultStats span")
+      .filter({ hasText: "pre-run unavailable" })
+      .filter({ hasText: "1" }),
+  ).toBeVisible();
   await expect(resultPanel).toContainText("pre-run unavailable 1");
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "stale" })).toBeVisible();
-  await expect(page.locator(".bulkSummaryList summary").filter({ hasText: "1 VPS" }).filter({ hasText: "offline" })).toBeVisible();
-  await expect(resultPanel.getByText("partial success: 22 completed, 2 unsuccessful", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .locator(".bulkSummaryList summary")
+      .filter({ hasText: "1 VPS" })
+      .filter({ hasText: "stale" }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".bulkSummaryList summary")
+      .filter({ hasText: "1 VPS" })
+      .filter({ hasText: "offline" }),
+  ).toBeVisible();
+  await expect(
+    resultPanel.getByText("partial success: 22 completed, 2 unsuccessful", {
+      exact: true,
+    }),
+  ).toBeVisible();
   const postRun = page.getByLabel("Bulk file post-run handling");
   await expect(postRun).toContainText("2 VPSs retry candidates");
   await expect(postRun).toContainText("22 downloadable");
   await expect(postRun).toContainText("1 pre-run unavailable");
   const reasons = resultPanel.getByLabel("Failed target reasons");
-  await expect(reasons.getByText("stale: file download command_version mismatch", { exact: true })).toBeVisible();
-  await expect(reasons.getByText("agent offline", { exact: true })).toBeVisible();
+  const staleReason = reasons.getByText(
+    "stale: file download command_version mismatch",
+    { exact: true },
+  );
+  await expect(staleReason).toBeVisible();
+  await expect(staleReason).not.toHaveAttribute("title");
+  await expect(
+    reasons.getByText("agent offline", { exact: true }),
+  ).toBeVisible();
   await expect(reasons.getByText("edge-us-22", { exact: true })).toBeVisible();
   await expect(page.getByText("Same hierarchy and content")).toBeVisible();
   await expect(page.getByText("Same hash")).toBeVisible();
   await expect(page.getByText("Content preview")).toBeVisible();
-  await expect(page.locator(".bulkEvidenceBox").getByText("88888888")).toBeVisible();
-  await expect(page.locator(".bulkEvidenceBox").getByText("directory · nginx.tar · application/x-tar")).toBeVisible();
-  await expect(page.getByText("edge-us-23", { exact: true }).first()).toBeVisible();
-  await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-23" }).first()).toHaveAttribute("title", "a0000023-target-23");
-  await expect(page.locator(".bulkSummaryClients span").filter({ hasText: "edge-us-23_a0000023" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Download Archive" })).toHaveCount(1);
+  await expect(
+    page.locator(".bulkEvidenceBox").getByText("88888888"),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".bulkEvidenceBox")
+      .getByText("directory · nginx.tar · application/x-tar"),
+  ).toBeVisible();
+  await expect(
+    page.getByText("edge-us-23", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator(".bulkSummaryClients span")
+      .filter({ hasText: "edge-us-23" })
+      .first(),
+  ).toHaveAttribute("title", "a0000023-target-23");
+  await expect(
+    page
+      .locator(".bulkSummaryClients span")
+      .filter({ hasText: "edge-us-23_a0000023" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Download Archive" }),
+  ).toHaveCount(1);
 
   const layout = await collectLayoutSignals(page, ".multiFilePanel");
   expect(layout.horizontalOverflowPx).toBeLessThanOrEqual(1);
   expect(layout.clippedControls).toEqual([]);
   expect(layout.overlaps).toEqual([]);
-  await page.screenshot({ fullPage: true, path: testInfo.outputPath("bulk-24-summary.png") });
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("bulk-24-summary.png"),
+  });
 });
 
-test("bulk download summary distinguishes file and hierarchy discrepancies", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.includes("mobile"), "bulk file operations are a dense desktop panel");
+test("bulk download summary distinguishes file and hierarchy discrepancies", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "bulk file operations are a dense desktop panel",
+  );
 
   await page.goto("/");
-  await page.evaluate(() => localStorage.setItem("vpsman.multiFile.selectorExpression", "provider:alpha && country:US"));
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "vpsman.multiFile.selectorExpression",
+      "provider:alpha && country:US",
+    ),
+  );
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await unlockPrivilege(page);
   await activate(page.getByRole("button", { name: "Refresh scope" }));
 
   await page.getByLabel("Bulk file path").fill("/same-tree-diff/");
   await activate(page.getByRole("button", { name: "Run download" }));
-  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
+  await activate(
+    page
+      .getByLabel("Confirm bulk file operation")
+      .getByRole("button", { name: "Download files" }),
+  );
   await expect(page.getByText("File content differs")).toBeVisible();
-  await expect(page.getByText("Hierarchy matches; differing files are listed by relative path.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Hierarchy matches; differing files are listed by relative path.",
+    ),
+  ).toBeVisible();
   await expect(page.getByText("sites/app.conf")).toBeVisible();
-  await expect(page.getByText("edge-us-21", { exact: true }).first()).toBeVisible();
-  await page.screenshot({ fullPage: true, path: testInfo.outputPath("bulk-same-tree-diff.png") });
+  await expect(
+    page.getByText("edge-us-21", { exact: true }).first(),
+  ).toBeVisible();
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("bulk-same-tree-diff.png"),
+  });
 
   await page.getByLabel("Bulk file path").fill("/different-tree/");
   await activate(page.getByRole("button", { name: "Run download" }));
-  await activate(page.getByLabel("Confirm bulk file operation").getByRole("button", { name: "Download files" }));
+  await activate(
+    page
+      .getByLabel("Confirm bulk file operation")
+      .getByRole("button", { name: "Download files" }),
+  );
   await expect(page.getByText("Hierarchy differs")).toBeVisible();
-  await expect(page.getByText("Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Directory tree is not consistent across targets; compare hierarchy before trusting content hashes.",
+    ),
+  ).toBeVisible();
   await expect(page.getByText("File content differs")).toHaveCount(0);
-  await page.screenshot({ fullPage: true, path: testInfo.outputPath("bulk-hierarchy-diff.png") });
+  await page.screenshot({
+    fullPage: true,
+    path: testInfo.outputPath("bulk-hierarchy-diff.png"),
+  });
 });
 
 async function installTwentyFourTargetFileMock(page: Page) {
@@ -169,7 +305,11 @@ async function installTwentyFourTargetFileMock(page: Page) {
       display_name: `edge-us-${String(index).padStart(2, "0")}`,
       id: `a${String(index).padStart(7, "0")}-target-${String(index).padStart(2, "0")}`,
       last_seen_at:
-        index < 22 ? "2026-06-27T08:00:00.000Z" : index === 22 ? "2026-06-26T08:00:00.000Z" : null,
+        index < 22
+          ? "2026-06-27T08:00:00.000Z"
+          : index === 22
+            ? "2026-06-26T08:00:00.000Z"
+            : null,
       status: index === 22 ? "stale" : index === 23 ? "offline" : "online",
       tags: ["provider:alpha", "country:US", "edge"],
     }));
@@ -177,8 +317,16 @@ async function installTwentyFourTargetFileMock(page: Page) {
     const jobTargets: Record<string, unknown[]> = {};
     let counter = 0;
     const jsonResponse = (body: unknown) =>
-      Promise.resolve(new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json" }, status: 200 }));
-    const readJsonBody = async (input: RequestInfo | URL, init?: RequestInit) => {
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }),
+      );
+    const readJsonBody = async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
       if (typeof init?.body === "string") {
         return JSON.parse(init.body);
       }
@@ -214,14 +362,35 @@ async function installTwentyFourTargetFileMock(page: Page) {
     const outputReads: Record<string, number> = {};
     const manifestEntries = (sha256Hex: string) => [
       { kind: "directory", path: "sites" },
-      { kind: "file", path: "sites/app.conf", sha256_hex: sha256Hex, size_bytes: 12 },
+      {
+        kind: "file",
+        path: "sites/app.conf",
+        sha256_hex: sha256Hex,
+        size_bytes: 12,
+      },
     ];
-    const downloadStatus = (operationPath: string, index: number, data: string) => {
-      const variant = operationPath.includes("same-tree-diff") && index >= 12 ? "changed" : "base";
-      const hierarchyVariant = operationPath.includes("different-tree") && index >= 12 ? "other-tree" : "base-tree";
+    const downloadStatus = (
+      operationPath: string,
+      index: number,
+      data: string,
+    ) => {
+      const variant =
+        operationPath.includes("same-tree-diff") && index >= 12
+          ? "changed"
+          : "base";
+      const hierarchyVariant =
+        operationPath.includes("different-tree") && index >= 12
+          ? "other-tree"
+          : "base-tree";
       const fileHash = variant === "changed" ? "d".repeat(64) : "c".repeat(64);
-      const hierarchyHash = hierarchyVariant === "other-tree" ? "e".repeat(64) : "b".repeat(64);
-      const contentHash = hierarchyVariant === "other-tree" ? "f".repeat(64) : variant === "changed" ? "9".repeat(64) : "8".repeat(64);
+      const hierarchyHash =
+        hierarchyVariant === "other-tree" ? "e".repeat(64) : "b".repeat(64);
+      const contentHash =
+        hierarchyVariant === "other-tree"
+          ? "f".repeat(64)
+          : variant === "changed"
+            ? "9".repeat(64)
+            : "8".repeat(64);
       return {
         archive: true,
         content_manifest_sha256_hex: contentHash,
@@ -230,9 +399,18 @@ async function installTwentyFourTargetFileMock(page: Page) {
         file_count: 1,
         filename: "nginx.tar",
         hierarchy_sha256_hex: hierarchyHash,
-        manifest_entries: hierarchyVariant === "other-tree"
-          ? [{ kind: "directory", path: "conf" }, { kind: "file", path: "conf/app.conf", sha256_hex: fileHash, size_bytes: 12 }]
-          : manifestEntries(fileHash),
+        manifest_entries:
+          hierarchyVariant === "other-tree"
+            ? [
+                { kind: "directory", path: "conf" },
+                {
+                  kind: "file",
+                  path: "conf/app.conf",
+                  sha256_hex: fileHash,
+                  size_bytes: 12,
+                },
+              ]
+            : manifestEntries(fileHash),
         manifest_entry_count: 2,
         manifest_truncated: false,
         path: operationPath,
@@ -246,7 +424,12 @@ async function installTwentyFourTargetFileMock(page: Page) {
     };
     const matchingTargets = (selectorExpression?: string) => {
       const selector = selectorExpression?.toLocaleLowerCase() ?? "";
-      if (!selector || selector === "id:*" || selector.includes("provider:alpha") || selector.includes("country:us")) {
+      if (
+        !selector ||
+        selector === "id:*" ||
+        selector.includes("provider:alpha") ||
+        selector.includes("country:us")
+      ) {
         return agents;
       }
       return [];
@@ -256,14 +439,19 @@ async function installTwentyFourTargetFileMock(page: Page) {
       const url = input instanceof Request ? input.url : String(input);
       const requestUrl = new URL(url, window.location.href);
       const pathname = requestUrl.pathname;
-      const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
 
       if (pathname === "/api/v1/agents" && method === "GET") {
         return jsonResponse(agents);
       }
       if (pathname === "/api/v1/bulk/resolve" && method === "POST") {
         const body = await readJsonBody(input, init);
-        const targets = matchingTargets((body as { selector_expression?: string } | null)?.selector_expression);
+        const targets = matchingTargets(
+          (body as { selector_expression?: string } | null)
+            ?.selector_expression,
+        );
         return jsonResponse({
           target_count: targets.length,
           targets,
@@ -271,10 +459,17 @@ async function installTwentyFourTargetFileMock(page: Page) {
       }
       if (pathname === "/api/v1/jobs" && method === "POST") {
         const body = await readJsonBody(input, init);
-        const operation = (body as { operation?: { type?: string; path?: string } } | null)?.operation;
+        const operation = (
+          body as { operation?: { type?: string; path?: string } } | null
+        )?.operation;
         if (operation?.type === "file_download") {
-          const targets = matchingTargets((body as { selector_expression?: string } | null)?.selector_expression);
-          const outputTargets = targets.filter((agent) => agent.status === "online");
+          const targets = matchingTargets(
+            (body as { selector_expression?: string } | null)
+              ?.selector_expression,
+          );
+          const outputTargets = targets.filter(
+            (agent) => agent.status === "online",
+          );
           const jobId = `99999999-8888-4777-9666-${String(counter).padStart(12, "0")}`;
           counter += 1;
           jobOutputs[jobId] = outputTargets.flatMap((agent, index) => {
@@ -293,7 +488,13 @@ async function installTwentyFourTargetFileMock(page: Page) {
               {
                 client_id: agent.id,
                 created_at: "2026-06-02T10:11:00Z",
-                data_base64: statusOutputBody(downloadStatus(operation.path ?? "/var/log/nginx/", index, data)),
+                data_base64: statusOutputBody(
+                  downloadStatus(
+                    operation.path ?? "/var/log/nginx/",
+                    index,
+                    data,
+                  ),
+                ),
                 done: true,
                 exit_code: 0,
                 job_id: jobId,
@@ -306,15 +507,26 @@ async function installTwentyFourTargetFileMock(page: Page) {
           jobTargets[jobId] = targets.map((agent) => ({
             client_id: agent.id,
             completed_at: "2026-06-02T10:11:00Z",
-            exit_code: outputIds.has(agent.id) ? 0 : agent.status === "stale" ? 2 : null,
+            exit_code: outputIds.has(agent.id)
+              ? 0
+              : agent.status === "stale"
+                ? 2
+                : null,
             job_id: jobId,
             message: outputIds.has(agent.id)
               ? "completed"
               : agent.status === "stale"
                 ? "stale: file download command_version mismatch"
                 : "agent offline",
-            started_at: outputIds.has(agent.id) || agent.status === "stale" ? "2026-06-02T10:10:59Z" : null,
-            status: outputIds.has(agent.id) ? "completed" : agent.status === "stale" ? "failed" : "control_timeout",
+            started_at:
+              outputIds.has(agent.id) || agent.status === "stale"
+                ? "2026-06-02T10:10:59Z"
+                : null,
+            status: outputIds.has(agent.id)
+              ? "completed"
+              : agent.status === "stale"
+                ? "failed"
+                : "control_timeout",
           }));
           return jsonResponse({
             target_count: targets.length,
@@ -351,9 +563,16 @@ async function installTwentyFourTargetFileMock(page: Page) {
           has_more: false,
         });
       }
-      const bundleMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)\/outputs\/download-bundle$/);
+      const bundleMatch = pathname.match(
+        /^\/api\/v1\/jobs\/([^/]+)\/outputs\/download-bundle$/,
+      );
       if (bundleMatch && method === "GET" && jobOutputs[bundleMatch[1]]) {
-        return Promise.resolve(new Response(new TextEncoder().encode("server-side tar bundle"), { headers: { "Content-Type": "application/x-tar" }, status: 200 }));
+        return Promise.resolve(
+          new Response(new TextEncoder().encode("server-side tar bundle"), {
+            headers: { "Content-Type": "application/x-tar" },
+            status: 200,
+          }),
+        );
       }
       return previousFetch(input, init);
     };
@@ -380,20 +599,34 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
       );
     };
     const label = (element: Element) => ({
-      className: element instanceof HTMLElement ? String(element.className) : "",
+      className:
+        element instanceof HTMLElement ? String(element.className) : "",
       tagName: element.tagName.toLowerCase(),
-      text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 96),
+      text: (element.textContent ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 96),
     });
-    const controls = Array.from(scope.querySelectorAll("button, input, select, textarea, summary, .bulkSummaryList details, .searchExpressionInput")).filter(visible);
+    const controls = Array.from(
+      scope.querySelectorAll(
+        "button, input, select, textarea, summary, .bulkSummaryList details, .searchExpressionInput",
+      ),
+    ).filter(visible);
     const clippedControls = controls
       .filter((element) => {
         if (!(element instanceof HTMLElement)) {
           return false;
         }
-        if (element.tagName.toLowerCase() === "input" && element.getAttribute("type") === "file") {
+        if (
+          element.tagName.toLowerCase() === "input" &&
+          element.getAttribute("type") === "file"
+        ) {
           return false;
         }
-        return element.scrollWidth - element.clientWidth > 2 || element.scrollHeight - element.clientHeight > 2;
+        return (
+          element.scrollWidth - element.clientWidth > 2 ||
+          element.scrollHeight - element.clientHeight > 2
+        );
       })
       .map(label)
       .slice(0, 8);
@@ -403,21 +636,36 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
       const left = leftElement.getBoundingClientRect();
       for (let cursor = index + 1; cursor < controls.length; cursor += 1) {
         const rightElement = controls[cursor];
-        if (leftElement.contains(rightElement) || rightElement.contains(leftElement)) {
+        if (
+          leftElement.contains(rightElement) ||
+          rightElement.contains(leftElement)
+        ) {
           continue;
         }
         const right = rightElement.getBoundingClientRect();
         const area =
-          Math.max(0, Math.min(left.right, right.right) - Math.max(left.left, right.left)) *
-          Math.max(0, Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top));
+          Math.max(
+            0,
+            Math.min(left.right, right.right) - Math.max(left.left, right.left),
+          ) *
+          Math.max(
+            0,
+            Math.min(left.bottom, right.bottom) - Math.max(left.top, right.top),
+          );
         if (area > 32) {
-          overlaps.push({ area: Math.round(area), left: label(leftElement), right: label(rightElement) });
+          overlaps.push({
+            area: Math.round(area),
+            left: label(leftElement),
+            right: label(rightElement),
+          });
         }
       }
     }
     return {
       clippedControls,
-      horizontalOverflowPx: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      horizontalOverflowPx:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
       overlaps: overlaps.slice(0, 8),
     };
   }, scopeSelector);

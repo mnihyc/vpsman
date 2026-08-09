@@ -407,7 +407,9 @@ export function AgentUpdateReleasesPanel({
           <span className="releaseActionStack">
             <button
               className="secondaryAction compactAction"
-              data-tooltip-disabled-reason={startUpdateDisabledReason ?? undefined}
+              data-tooltip-disabled-reason={
+                startUpdateDisabledReason ?? undefined
+              }
               disabled={Boolean(startUpdateDisabledReason)}
               onClick={() =>
                 onOpenDispatchPreset({
@@ -578,11 +580,13 @@ export function AgentUpdateReleasesPanel({
             <div className="releaseFormSectionHeader">
               <strong>Primary artifact</strong>
             </div>
-            <label className="wideField">
+            <label
+              className="wideField"
+              title="Artifact URL downloaded for this agent release."
+            >
               <span>Artifact URL</span>
               <input
                 aria-label="Release artifact URL"
-                data-value-tooltip-skip="true"
                 onChange={(event) => setReleaseArtifactUrl(event.target.value)}
                 placeholder="https://updates.example/vpsman-agent-linux-x86_64"
                 value={releaseArtifactUrl}
@@ -612,11 +616,13 @@ export function AgentUpdateReleasesPanel({
             <div className="releaseFormSectionHeader">
               <strong>Rollback artifact</strong>
             </div>
-            <label className="wideField">
+            <label
+              className="wideField"
+              title="Artifact URL used to roll back this agent release."
+            >
               <span>Rollback URL</span>
               <input
                 aria-label="Rollback artifact URL"
-                data-value-tooltip-skip="true"
                 onChange={(event) => setRollbackArtifactUrl(event.target.value)}
                 placeholder="https://updates.example/vpsman-agent-previous"
                 value={rollbackArtifactUrl}

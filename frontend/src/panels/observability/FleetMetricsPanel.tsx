@@ -654,10 +654,10 @@ function MetricTile({
   value: string;
 }) {
   return (
-    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
-      <span title={label}>{label}</span>
-      <strong title={`${label}: ${value}`}>{value}</strong>
-      <small title={detail}>{detail}</small>
+    <div className="metricCard">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
     </div>
   );
 }
@@ -667,19 +667,10 @@ function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
     ? " in the loaded operations page"
     : "";
   return (
-    <div
-      className="observabilityGroupTile"
-      title={`${cluster.kind} group ${cluster.label}: ${cluster.online}/${cluster.total} online`}
-    >
-      <span title={`Grouping dimension: ${cluster.kind}`}>{cluster.kind}</span>
-      <strong title={`Group value: ${cluster.label}`}>{cluster.label}</strong>
-      <small
-        title={
-          cluster.kind === "date"
-            ? `${cluster.total} network samples in this date group`
-            : `${cluster.online} of ${cluster.total} VPSs online in this group`
-        }
-      >
+    <div className="observabilityGroupTile">
+      <span>{cluster.kind}</span>
+      <strong>{cluster.label}</strong>
+      <small>
         {cluster.kind === "date"
           ? `${cluster.total} network samples, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} running jobs${boundedSuffix}`
           : `${cluster.online}/${cluster.total} online, ${cluster.offline} offline, ${cluster.stale} stale, ${cluster.revoked} access revoked, ${formatLowerBoundCount(cluster.warnings, cluster.counts_truncated)} alerts${boundedSuffix}, ${formatLowerBoundCount(cluster.running_jobs, cluster.counts_truncated)} active job assignments${boundedSuffix}`}
@@ -744,15 +735,10 @@ function WarningDefinitionStrip({
       aria-label="Fleet metrics availability definitions"
     >
       {definitions.map((definition) => (
-        <div
-          key={definition.label}
-          title={`${definition.label}: ${definition.value}. ${definition.detail}`}
-        >
-          <span title={definition.label}>{definition.label}</span>
-          <strong title={`${definition.label}: ${definition.value}`}>
-            {definition.value}
-          </strong>
-          <small title={definition.detail}>{definition.detail}</small>
+        <div key={definition.label}>
+          <span>{definition.label}</span>
+          <strong>{definition.value}</strong>
+          <small>{definition.detail}</small>
         </div>
       ))}
     </div>

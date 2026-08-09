@@ -1,4 +1,6 @@
-import { expect, test,
+import {
+  expect,
+  test,
   type Locator,
   type Page,
   type TestInfo,
@@ -13,17 +15,18 @@ const portForwardRuleIds = {
   publicWeb: "4f000000-0000-4000-8000-000000000001",
   stagedSsh: "4f000000-0000-4000-8000-000000000003",
   retiredDns: "4f000000-0000-4000-8000-000000000004",
-  } as const;
+} as const;
 
 function portForwardGrid(page: Page): Locator {
   return page.getByLabel("Port-forward rules data grid");
 }
 
 function portForwardRecord(
-  page: Page, testInfo: TestInfo,
+  page: Page,
+  testInfo: TestInfo,
   id: string,
   name: string,
-  ): Locator {
+): Locator {
   const grid = portForwardGrid(page);
   return testInfo.project.name.startsWith("mobile")
     ? grid.getByLabel(`Port-forward rules mobile card ${id}`)
@@ -145,6 +148,14 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
     .click();
   await editor.getByLabel("Name", { exact: true }).fill("Internal application");
   await editor.getByRole("button", { name: "Both" }).click();
+  await editor.getByLabel("Incoming ports").fill("not-a-port");
+  await editor.getByLabel("Target ports").fill("80");
+  const mappingError = editor.locator(".portMappingPreview.invalid span");
+  await expect(mappingError).toBeVisible();
+  await expect(mappingError).toHaveAttribute(
+    "title",
+    (await mappingError.textContent())?.trim() ?? "",
+  );
   await editor.getByLabel("Incoming ports").fill("8080,10000-10010");
   await editor.getByLabel("Target ports").fill("80,20000-20010");
   await editor.getByLabel("Target IP or hostname").fill("app.internal");

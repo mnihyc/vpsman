@@ -4039,7 +4039,7 @@ fn parse_vps_rule_value_with_legacy_selector_support(
                 raw: raw.to_string(),
                 json: json!({"day": day}),
                 display: if day == -1 {
-                    "No reset".to_string()
+                    "-".to_string()
                 } else {
                     format!("{day} UTC")
                 },

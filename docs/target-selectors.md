@@ -209,6 +209,25 @@ recorded as `webhook.legacy_manual_dispatch_events_skipped` audit entries.
 Template placeholders include `{vps.name}`, `{vps.display_name}`, `{vps.id}`,
 `{vps.status}`, `{vps.tags}`, `{event.kind}`, `{event.id}`, `{rule.id}`, and
 `{rule.name}`. When multiple VPSs match, values are joined with spaces.
+Template comments put `{#` and `#}` on their own lines around a block. Comment
+contents are not parsed or rendered, so one block can hold complete alternative
+templates without leaving blank lines in the delivered message. Copy an example
+outside the block to activate it. For example:
+
+```text
+{#
+Alert: [{alert.severity}] {alert.title} on {vps.display_name} ({event.id})
+Traffic threshold: {vps.display_name} used {traffic.cycle_percent}% in {policy.name}; source rule {policy_rule.name}
+Resource threshold: [{alert.severity}] {alert.title} on {vps.display_name}; condition {policy_rule.condition_expression}
+VPS status event: [{event.kind}] {vps.display_name} is {vps.status}
+Interval fleet summary: [{event.kind}] {matched_vps.length} VPSs: {matched_vps.map(vps.name).join(", ")}
+#}
+[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}
+```
+
+The `alert`, `policy`, `policy_rule`, and `traffic` roots are populated for
+`alert.policy_reached` deliveries. Other event types may omit roots that do not
+apply; missing values render as empty text.
 
 Webhook targets use HTTPS by default. At delivery time, every DNS answer must
 be a public unicast address; private, loopback, link-local, multicast,

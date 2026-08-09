@@ -415,9 +415,9 @@ async function openFleetFromDashboard(page: import("@playwright/test").Page) {
   ).toBeVisible();
 }
 
-test("exposes safe semantic hover titles without leaking sensitive values", async ({
+test("keeps tooltips supplemental and reveals only genuinely shortened values", async ({
   page,
-}, testInfo) => {
+}) => {
   await page.goto("/");
   await waitForConsoleShell(page);
   await openConsoleSubpage(page, "Fleet", "Instances");
@@ -430,297 +430,176 @@ test("exposes safe semantic hover titles without leaking sensitive values", asyn
     "Skip the console navigation and move focus to the current page content.",
   );
 
-  const fleetGrid = page.getByLabel("VPS instance records data grid");
   await page.evaluate(() => {
+    const fixtures = document.createElement("section");
+    fixtures.dataset.testTooltipFixtures = "true";
+
+    const privateKeyField = document.createElement("label");
+    privateKeyField.title = "One-time agent identity private key.";
     const input = document.createElement("input");
     input.setAttribute("aria-label", "Agent identity private key");
     input.dataset.testTooltipProbe = "true";
     input.value = "a".repeat(64);
-    document.body.append(input);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    privateKeyField.append(input);
+    fixtures.append(privateKeyField);
 
     const select = document.createElement("select");
     select.setAttribute("aria-label", "Review density");
     select.dataset.testTooltipSelect = "true";
     select.append(new Option("Comfortable", "comfortable", true, true));
-    document.body.append(select);
+    fixtures.append(select);
 
     const action = document.createElement("button");
     action.dataset.testTooltipAction = "true";
     action.textContent = "Retry evidence";
-    document.body.append(action);
+    fixtures.append(action);
 
     const disabled = document.createElement("button");
     disabled.dataset.testTooltipDisabled = "true";
-    disabled.dataset.tooltipDisabledReason = "Select one VPS to retry evidence.";
+    disabled.dataset.tooltipDisabledReason =
+      "Select one VPS to retry evidence.";
     disabled.disabled = true;
     disabled.textContent = "Retry";
-    document.body.append(disabled);
+    fixtures.append(disabled);
 
     const empty = document.createElement("span");
-    empty.className = "status";
     empty.dataset.testTooltipEmpty = "true";
     empty.dataset.tooltipEmptyReason = "Latency has not been reported.";
     empty.textContent = "-";
-    document.body.append(empty);
+    fixtures.append(empty);
 
     const authored = document.createElement("button");
     authored.dataset.testTooltipAuthored = "true";
     authored.title = "Existing operator guidance.";
     authored.textContent = "Preserve title";
-    document.body.append(authored);
+    fixtures.append(authored);
 
     const totp = document.createElement("input");
     totp.autocomplete = "one-time-code";
     totp.dataset.testTooltipTotp = "true";
     totp.value = "123456";
-    document.body.append(totp);
-    totp.dispatchEvent(new Event("input", { bubbles: true }));
+    fixtures.append(totp);
 
-    const protectedOuter = document.createElement("div");
-    protectedOuter.className = "metricCard";
-    protectedOuter.dataset.testTooltipProtectedOuter = "true";
-    const protectedParent = document.createElement("div");
-    protectedParent.className = "vpsFactRow";
-    protectedParent.dataset.testTooltipProtectedParent = "true";
-    protectedParent.setAttribute("aria-label", "Protected share reference");
-    const protectedValue = document.createElement("span");
-    protectedValue.className = "status";
-    protectedValue.dataset.testTooltipProtectedValue = "true";
-    protectedValue.dataset.valueTooltipSkip = "true";
-    protectedValue.textContent =
-      "https://operator.invalid/share?access_token=skipped-descendant-sentinel";
-    protectedParent.append(protectedValue);
-    protectedOuter.append(protectedParent);
-    document.body.append(protectedOuter);
+    const formatField = document.createElement("label");
+    formatField.title = "Selector accepts tag:value or id:value expressions.";
+    const formatInput = document.createElement("input");
+    formatInput.dataset.testTooltipFormatInput = "true";
+    formatInput.placeholder = "tag:edge or id:vps-id";
+    formatField.append(formatInput);
+    fixtures.append(formatField);
 
-    const dynamicAction = document.createElement("button");
-    dynamicAction.dataset.testTooltipDynamic = "true";
-    dynamicAction.textContent = "First dynamic action";
-    document.body.append(dynamicAction);
+    const textarea = document.createElement("textarea");
+    textarea.dataset.testTooltipFreeform = "true";
+    textarea.value = "freeform-tooltip-secret-sentinel";
+    fixtures.append(textarea);
 
-    const numericInput = document.createElement("input");
-    numericInput.type = "number";
-    numericInput.setAttribute("aria-label", "Retention days");
-    numericInput.dataset.testTooltipNumeric = "true";
-    numericInput.value = "14";
-    document.body.append(numericInput);
+    const clipped = document.createElement("span");
+    clipped.className = "gridCellContent";
+    clipped.dataset.testTooltipClipped = "true";
+    clipped.style.display = "block";
+    clipped.style.width = "72px";
+    clipped.style.overflow = "hidden";
+    clipped.style.textOverflow = "ellipsis";
+    clipped.style.whiteSpace = "nowrap";
+    clipped.textContent = "Complete retained diagnostic evidence";
+    fixtures.append(clipped);
 
-    const placeholderInput = document.createElement("input");
-    placeholderInput.setAttribute("aria-label", "Selector expression");
-    placeholderInput.dataset.testTooltipPlaceholder = "true";
-    placeholderInput.placeholder = "tag:edge or id:vps-id";
-    document.body.append(placeholderInput);
-
-    const dashInput = document.createElement("input");
-    dashInput.setAttribute("aria-label", "Billing renewal");
-    dashInput.dataset.testTooltipDash = "true";
-    dashInput.value = "-";
-    document.body.append(dashInput);
-
-    const freeform = document.createElement("textarea");
-    freeform.setAttribute("aria-label", "Operator notes");
-    freeform.dataset.testTooltipFreeform = "true";
-    freeform.value = "freeform-tooltip-secret-sentinel";
-    document.body.append(freeform);
-
-    const unsafeEmpty = document.createElement("span");
-    unsafeEmpty.className = "status";
-    unsafeEmpty.dataset.testTooltipUnsafeEmpty = "true";
-    unsafeEmpty.setAttribute(
-      "aria-label",
-      "https://credential-user:empty-label-sentinel@example.invalid/",
-    );
-    unsafeEmpty.textContent = "-";
-    document.body.append(unsafeEmpty);
-
-    const protectedText = document.createElement("div");
-    protectedText.className = "metricCard";
-    protectedText.dataset.testTooltipHiddenDescendants = "true";
-    protectedText.append("Visible total 42");
-    const hiddenKinds = [
-      ["srOnly", "sr-only-secret-sentinel"],
-      ["visuallyHidden", "visually-hidden-secret-sentinel"],
-      ["", "aria-hidden-secret-sentinel"],
-    ] as const;
-    hiddenKinds.forEach(([className, value], index) => {
-      const hidden = document.createElement("span");
-      hidden.className = `${className} status`.trim();
-      hidden.dataset.testTooltipHiddenKind = String(index);
-      if (index === 2) hidden.setAttribute("aria-hidden", "true");
-      hidden.textContent = value;
-      protectedText.append(hidden);
-    });
-    document.body.append(protectedText);
-
-    const iconAction = document.createElement("button");
-    iconAction.dataset.testTooltipIconAction = "true";
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("aria-hidden", "true");
-    const hiddenIconText = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "text",
-    );
-    hiddenIconText.textContent = "icon-secret-sentinel";
-    icon.append(hiddenIconText);
-    iconAction.append(icon, "Visible icon action");
-    document.body.append(iconAction);
+    const unclipped = document.createElement("span");
+    unclipped.className = "gridCellContent";
+    unclipped.dataset.testTooltipUnclipped = "true";
+    unclipped.style.display = "block";
+    unclipped.style.width = "400px";
+    unclipped.style.overflow = "hidden";
+    unclipped.style.textOverflow = "ellipsis";
+    unclipped.style.whiteSpace = "nowrap";
+    unclipped.textContent = "Fully visible";
+    fixtures.append(unclipped);
 
     const authoredLifecycle = document.createElement("button");
     authoredLifecycle.dataset.testTooltipAuthoredLifecycle = "true";
     authoredLifecycle.textContent = "Lifecycle action";
-    document.body.append(authoredLifecycle);
+    fixtures.append(authoredLifecycle);
+
+    document.body.append(fixtures);
   });
   await expect(
     page.locator('input[data-test-tooltip-probe="true"]'),
   ).not.toHaveAttribute("title", /.+/);
-  await expect(page.locator('[data-test-tooltip-select="true"]')).toHaveAttribute(
-    "title",
-    "Review density: Comfortable.",
-  );
-  await expect(page.locator('[data-test-tooltip-action="true"]')).toHaveAttribute(
-    "title",
-    "Activate Retry evidence.",
-  );
-  await expect(page.locator('[data-test-tooltip-disabled="true"]')).toHaveAttribute(
-    "title",
-    "Select one VPS to retry evidence.",
-  );
-  await expect(page.locator('[data-test-tooltip-empty="true"]')).toHaveAttribute(
-    "title",
-    "Latency has not been reported.",
-  );
-  await expect(page.locator('[data-test-tooltip-authored="true"]')).toHaveAttribute(
-    "title",
-    "Existing operator guidance.",
-  );
-  await expect(page.locator('[data-test-tooltip-totp="true"]')).not.toHaveAttribute(
-    "title",
-    /123456/,
-  );
-  const protectedValue = page.locator(
-    '[data-test-tooltip-protected-value="true"]',
-  );
-  await expect(protectedValue).not.toHaveAttribute("title", /.+/);
   await expect(
-    page.locator('[data-test-tooltip-protected-parent="true"]'),
-  ).toHaveAttribute("title", "Current value: Protected share reference.");
+    page.locator('[data-test-tooltip-probe="true"]').locator(".."),
+  ).toHaveAttribute("title", "One-time agent identity private key.");
   await expect(
-    page.locator('[data-test-tooltip-protected-outer="true"]'),
+    page.locator('[data-test-tooltip-select="true"]'),
   ).not.toHaveAttribute("title", /.+/);
-  await expect
-    .poll(() =>
-      protectedValue.evaluate((element) => {
-        const protectedText = element.textContent ?? "";
-        const leakingAncestorTitles: string[] = [];
-        let ancestor = element.parentElement;
-        while (ancestor) {
-          if (ancestor.title.includes(protectedText)) {
-            leakingAncestorTitles.push(ancestor.title);
-          }
-          ancestor = ancestor.parentElement;
-        }
-        return leakingAncestorTitles;
-      }),
-    )
-    .toEqual([]);
-
-  const dynamicAction = page.locator('[data-test-tooltip-dynamic="true"]');
-  await expect(dynamicAction).toHaveAttribute(
-    "title",
-    "Activate First dynamic action.",
-  );
-  await dynamicAction.evaluate((element) => {
-    element.textContent = "Second dynamic action";
-  });
-  await expect(dynamicAction).toHaveAttribute(
-    "title",
-    "Activate Second dynamic action.",
-  );
-  await expect(page.locator('[data-test-tooltip-numeric="true"]')).toHaveAttribute(
-    "title",
-    "Retention days: 14.",
-  );
   await expect(
-    page.locator('[data-test-tooltip-placeholder="true"]'),
+    page.locator('[data-test-tooltip-action="true"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect(
+    page.locator('[data-test-tooltip-disabled="true"]'),
+  ).toHaveAttribute("title", "Select one VPS to retry evidence.");
+  await expect(
+    page.locator('[data-test-tooltip-empty="true"]'),
+  ).toHaveAttribute("title", "Latency has not been reported.");
+  await expect(
+    page.locator('[data-test-tooltip-authored="true"]'),
+  ).toHaveAttribute("title", "Existing operator guidance.");
+  await expect(
+    page.locator('[data-test-tooltip-totp="true"]'),
+  ).not.toHaveAttribute("title", /123456/);
+  await expect(
+    page.locator('[data-test-tooltip-format-input="true"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await expect(
+    page.locator('[data-test-tooltip-format-input="true"]').locator(".."),
   ).toHaveAttribute(
     "title",
-    "Selector expression accepted format: tag:edge or id:vps-id.",
-  );
-  await expect(page.locator('[data-test-tooltip-dash="true"]')).toHaveAttribute(
-    "title",
-    "Billing renewal has no available value.",
+    "Selector accepts tag:value or id:value expressions.",
   );
   await expect(
     page.locator('[data-test-tooltip-freeform="true"]'),
-  ).toHaveAttribute(
-    "title",
-    "Operator notes; current multiline content is excluded from tooltips.",
-  );
-  await expect(
-    page.locator('[data-test-tooltip-unsafe-empty="true"]'),
-  ).toHaveAttribute("title", "This value has no available value.");
+  ).not.toHaveAttribute("title", /.+/);
 
-  const hiddenDescendants = page.locator(
-    '[data-test-tooltip-hidden-descendants="true"]',
-  );
-  await expect(hiddenDescendants).toHaveAttribute(
+  const clipped = page.locator('[data-test-tooltip-clipped="true"]');
+  await expect(clipped).toHaveAttribute(
     "title",
-    "Current value: Visible total 42.",
+    "Complete retained diagnostic evidence",
+  );
+  await clipped.evaluate((element) => {
+    element.title = "Operator-authored diagnostic context.";
+  });
+  await expect(clipped).toHaveAttribute(
+    "title",
+    "Operator-authored diagnostic context.",
+  );
+  await expect(clipped).not.toHaveAttribute("data-value-tooltip", "true");
+  await clipped.evaluate((element) => {
+    element.textContent = "Short";
+  });
+  await expect(clipped).toHaveAttribute(
+    "title",
+    "Operator-authored diagnostic context.",
   );
   await expect(
-    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="0"]'),
+    page.locator('[data-test-tooltip-unclipped="true"]'),
   ).not.toHaveAttribute("title", /.+/);
-  await expect(
-    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="1"]'),
-  ).not.toHaveAttribute("title", /.+/);
-  await expect(
-    hiddenDescendants.locator('[data-test-tooltip-hidden-kind="2"]'),
-  ).not.toHaveAttribute("title", /.+/);
-  await expect(page.locator('[data-test-tooltip-icon-action="true"]')).toHaveAttribute(
+  await clipped.evaluate((element) => {
+    element.removeAttribute("title");
+  });
+  await expect(clipped).not.toHaveAttribute("title", /.+/);
+  await clipped.evaluate((element) => {
+    element.textContent = "Complete retained diagnostic evidence";
+  });
+  await expect(clipped).toHaveAttribute(
     "title",
-    "Activate Visible icon action.",
-  );
-  expect(
-    await page.locator("[title]").evaluateAll((elements) =>
-      elements.map((element) => element.getAttribute("title") ?? "").join("\n"),
-    ),
-  ).not.toMatch(
-    /sr-only-secret-sentinel|visually-hidden-secret-sentinel|aria-hidden-secret-sentinel|icon-secret-sentinel|freeform-tooltip-secret-sentinel|empty-label-sentinel/,
-  );
-
-  await dynamicAction.evaluate((element) => {
-    element.dataset.valueTooltipSkip = "true";
-  });
-  await expect(dynamicAction).not.toHaveAttribute("title", /.+/);
-  await dynamicAction.evaluate((element) => {
-    delete element.dataset.valueTooltipSkip;
-  });
-  await expect(dynamicAction).toHaveAttribute(
-    "title",
-    "Activate Second dynamic action.",
-  );
-  await dynamicAction.evaluate((element) => {
-    element.dataset.tooltipSensitive = "true";
-  });
-  await expect(dynamicAction).not.toHaveAttribute("title", /.+/);
-  await dynamicAction.evaluate((element) => {
-    delete element.dataset.tooltipSensitive;
-  });
-  await expect(dynamicAction).toHaveAttribute(
-    "title",
-    "Activate Second dynamic action.",
+    "Complete retained diagnostic evidence",
   );
 
   const authoredLifecycle = page.locator(
     '[data-test-tooltip-authored-lifecycle="true"]',
   );
-  await expect(authoredLifecycle).toHaveAttribute(
-    "title",
-    "Activate Lifecycle action.",
-  );
+  await expect(authoredLifecycle).not.toHaveAttribute("title", /.+/);
   await authoredLifecycle.evaluate((element) => {
-    element.title = "Activate Lifecycle action.";
+    element.title = "First authored lifecycle title.";
   });
   await expect(authoredLifecycle).not.toHaveAttribute(
     "data-value-tooltip",
@@ -728,13 +607,6 @@ test("exposes safe semantic hover titles without leaking sensitive values", asyn
   );
   await authoredLifecycle.evaluate((element) => {
     element.textContent = "Changed lifecycle action";
-  });
-  await expect(authoredLifecycle).toHaveAttribute(
-    "title",
-    "Activate Lifecycle action.",
-  );
-  await authoredLifecycle.evaluate((element) => {
-    element.title = "First authored lifecycle title.";
   });
   await expect(authoredLifecycle).toHaveAttribute(
     "title",
@@ -754,56 +626,19 @@ test("exposes safe semantic hover titles without leaking sensitive values", asyn
   await authoredLifecycle.evaluate((element) => {
     element.removeAttribute("title");
   });
-  await expect(authoredLifecycle).toHaveAttribute(
-    "title",
-    "Activate Changed lifecycle action.",
-  );
-  await expect(authoredLifecycle).toHaveAttribute(
-    "data-value-tooltip",
-    "true",
-  );
-  if (testInfo.project.name.includes("mobile")) {
-    const mobilePageSelector = page.getByRole("combobox", {
-      name: "Console page",
-      exact: true,
-    });
-    await expect(mobilePageSelector).toHaveAttribute(
-      "title",
-      /Fleet \/ Instances/,
-    );
-    await mobilePageSelector.focus();
-    await expect(mobilePageSelector).toBeFocused();
-    await expect
-      .poll(() =>
-        page
-          .locator(".mobilePageMenu")
-          .evaluate((element) => getComputedStyle(element).boxShadow),
-      )
-      .not.toBe("none");
-    const mobileCard = fleetGrid.getByLabel(
-      "VPS instance records mobile card agent-sfo-01",
-    );
-    await expect(mobileCard.locator(".gridMobilePrimary")).toHaveAttribute(
-      "title",
-      /edge-sfo-01/,
-    );
-    await expect(
-      mobileCard.locator(".gridMobileFieldValue").first(),
-    ).toHaveAttribute("title", /.+/);
-    return;
-  }
+  await expect(authoredLifecycle).not.toHaveAttribute("title", /.+/);
 
-  const edgeRow = fleetGrid
-    .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
-    .first();
-  await expect(
-    edgeRow.locator(".gridCellContent", { hasText: "edge-sfo-01" }).first(),
-  ).toHaveAttribute("title", /edge-sfo-01/);
-  const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
-  await fleetSearch.fill("edge-sfo-01");
-  await expect(fleetSearch).toHaveAttribute(
-    "title",
-    "Search fleet: edge-sfo-01.",
+  const fixtureTitles = await page
+    .locator('[data-test-tooltip-fixtures="true"] [title]')
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? ""),
+    );
+  expect(fixtureTitles.join("\n")).not.toMatch(
+    /^(?:Activate|Current value:)|(?:excluded|omitted) from (?:the )?tooltips?|\b(?:field|column)\.$/i,
+  );
+  expect(fixtureTitles.join("\n")).not.toContain("123456");
+  expect(fixtureTitles.join("\n")).not.toContain(
+    "freeform-tooltip-secret-sentinel",
   );
 });
 
@@ -1461,9 +1296,7 @@ test(
       ".fleetInstancesPanel > .actionFeedbackWarning",
     );
     await expect(partial).toContainText("Deleted 1 of 2 selected VPSs");
-    await expect(partial).toContainText(
-      "core-fra-02 (ra02) (agent-fra-02)",
-    );
+    await expect(partial).toContainText("core-fra-02 (ra02) (agent-fra-02)");
     await expect(partial).toContainText("Fixture refused the VPS deletion");
 
     const deleteRequests = await page.evaluate(() => {
@@ -1759,7 +1592,9 @@ test("reviews notification and webhook queue mutations before commit", async ({
   await activate(reviewCleanup);
   const cleanupPrompt = page.getByLabel("Delete webhook delivery history");
   await expect(cleanupPrompt).toBeVisible();
-  await expect(cleanupPrompt.getByTitle(new RegExp("9".repeat(64)))).toBeVisible();
+  await expect(
+    cleanupPrompt.getByTitle(new RegExp("9".repeat(64))),
+  ).toBeVisible();
   await activate(
     cleanupPrompt.getByRole("button", {
       name: "Delete retained history",
@@ -2255,10 +2090,10 @@ test(
       .first()
       .locator(".vpsMonitorTraffic");
     await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText(
-      "Traffic · No reset",
+      "Traffic",
     );
-    await expect(traffic.locator(":scope > small")).toContainText(
-      "Accumulated total · No reset",
+    await expect(traffic.locator(":scope > small")).not.toContainText(
+      "No reset",
     );
     await expect(traffic).not.toContainText("Reset time unavailable");
   },
@@ -2409,7 +2244,7 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
   );
   await expect(vpsRuleTextbox(editor, "Reset day")).toHaveAttribute(
     "title",
-    /-1 for no reset/,
+    /-1 to accumulate totals continuously/,
   );
   await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("3TB");
   await expect(vpsRuleTextbox(editor, "Interfaces / selectors")).toHaveValue(
@@ -4884,6 +4719,10 @@ test("accepts server-valid leap-day, named, and extended cadences without treati
   await page
     .getByLabel("Schedule job template")
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
+  await expect(page.getByLabel("Schedule job argv")).toHaveAttribute(
+    "title",
+    /Operation evidence:[\s\S]*"argv": \[[\s\S]*"uptime"/,
+  );
   await page.getByLabel("Schedule target expression").fill("country:US");
 
   const cronInput = page.getByLabel("Schedule cron expression");
@@ -5538,6 +5377,12 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   ).toHaveValue(
     "/opt/operator/tunnel-adapter\nstart\n--interface\n{interface}\n--kind\n{kind}\n--remote-underlay\n{remote_underlay}\n--local-address\n{local_address}/{prefix_len}\n--remote-address\n{remote_address}",
   );
+  await expect(
+    drawer.getByLabel("Start adapter command", { exact: true }),
+  ).toHaveAttribute(
+    "title",
+    "/opt/operator/tunnel-adapter\nstart\n--interface\n{interface}\n--kind\n{kind}\n--remote-underlay\n{remote_underlay}\n--local-address\n{local_address}/{prefix_len}\n--remote-address\n{remote_address}",
+  );
   await expect(drawer.getByLabel("Status adapter command")).toHaveValue(
     "/opt/operator/tunnel-adapter\nstatus\n--interface\n{interface}",
   );
@@ -5550,6 +5395,10 @@ test("authors adapter definitions with the exact alternative lifecycle contract"
   await drawer
     .getByLabel("Status adapter command")
     .fill("/opt/operator/tunnel-adapter\nstatus");
+  await expect(drawer.getByLabel("Status adapter command")).toHaveAttribute(
+    "title",
+    "/opt/operator/tunnel-adapter\nstatus",
+  );
   await drawer
     .getByLabel("Restart adapter command")
     .fill("/opt/operator/tunnel-adapter\nrestart");
@@ -5786,6 +5635,10 @@ test("renders patch generators and submits explicit runtime config patch modes",
     /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
   );
   const validGeneratorValues = await generatorValues.inputValue();
+  await expect(generatorValues).toHaveAttribute(
+    "title",
+    "JSON values matched against the selected patch generator schema.",
+  );
   await bulk
     .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-sfo-01");
@@ -5794,6 +5647,7 @@ test("renders patch generators and submits explicit runtime config patch modes",
   ).toBeVisible();
   await page.keyboard.press("Enter");
   await generatorValues.fill("{");
+  await expect(generatorValues).not.toHaveAttribute("title", "{");
   await activate(bulk.getByRole("button", { name: "Preview changes" }));
   await expect(
     page.locator(
@@ -5805,10 +5659,15 @@ test("renders patch generators and submits explicit runtime config patch modes",
   ).toBeVisible();
   await generatorValues.fill(validGeneratorValues);
   await activate(bulk.getByRole("button", { name: "Preview changes" }));
-  await expect(
-    bulk.getByLabel("Rendered bulk runtime config patch TOML"),
-  ).toHaveValue(
+  const renderedPatch = bulk.getByLabel(
+    "Rendered bulk runtime config patch TOML",
+  );
+  await expect(renderedPatch).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
+  );
+  await expect(renderedPatch).toHaveAttribute(
+    "title",
+    "Server-rendered TOML patch that will be reviewed before dispatch.",
   );
   await expect(bulk.getByText("1 VPS verified")).toBeVisible();
   await expect(bulk.getByLabel("Bulk patch change summary")).toContainText(
@@ -5898,6 +5757,10 @@ test("uses an exact VPS combobox for single config jobs", async ({
   await expect(configEditor).toHaveValue(
     /unmanaged_version_url = "https:\/\/github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json"/,
   );
+  await expect(configEditor).not.toHaveAttribute(
+    "title",
+    /client_id = "agent-fra-02"/,
+  );
   await expect(
     page.getByText(
       "This immutable redacted base is the guard for the one-VPS patch.",
@@ -5906,9 +5769,14 @@ test("uses an exact VPS combobox for single config jobs", async ({
   await expect(page.getByLabel("One-VPS config override guard")).toContainText(
     "Current base",
   );
-  await page
-    .getByLabel("One-VPS runtime config override TOML")
-    .fill("[update]\nunmanaged_enabled = true\n");
+  const overrideEditor = page.getByLabel(
+    "One-VPS runtime config override TOML",
+  );
+  await overrideEditor.fill("[update]\nunmanaged_enabled = true\n");
+  await expect(overrideEditor).not.toHaveAttribute(
+    "title",
+    "[update]\nunmanaged_enabled = true\n",
+  );
   await expect(page.getByLabel("One-VPS config override guard")).toContainText(
     "update",
   );
@@ -6170,10 +6038,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
   );
   await expect(
     inspector.getByRole("button", { name: "Copy", exact: true }),
-  ).toHaveAttribute(
-    "title",
-    "Copy the one-time private key to the clipboard; key content is excluded from tooltips.",
-  );
+  ).toHaveAttribute("title", "Copy the one-time private key to the clipboard.");
+  await expect(
+    inspector.getByLabel("Agent identity private key"),
+  ).toHaveAttribute("title", "One-time agent identity private key.");
   await inspector
     .getByLabel("Agent identity display name")
     .fill("edge-tokyo-04");
@@ -6229,6 +6097,10 @@ test("registers VPS identities and revokes current keys from the access panel", 
   );
   const installCommandText =
     (await installCommand.locator("pre code").textContent()) ?? "";
+  await expect(installCommand.locator("pre")).toHaveAttribute(
+    "title",
+    installCommandText,
+  );
   await expect(installCommand).toContainText("VPSMAN_AGENT_RELEASE='latest'");
   await expect(installCommand).toContainText("VPSMAN_INSTALL_MODE='root'");
   await expect(installCommand).toContainText(
@@ -7120,7 +6992,8 @@ test("shows topology network evidence, speed metrics, and probe latency history"
     .locator(".status");
   for (let index = 0; index < (await commandSignals.count()); index += 1) {
     const signal = commandSignals.nth(index);
-    expect(await signal.getAttribute("title")).toContain(
+    const evidenceRow = signal.locator("xpath=ancestor::*[@role='row'][1]");
+    expect(await evidenceRow.getAttribute("title")).toContain(
       await signal.innerText(),
     );
   }

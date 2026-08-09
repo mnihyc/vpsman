@@ -54,24 +54,11 @@ export function TargetImpactPreview({
     <section
       className="targetImpactPreview"
       aria-label={title}
-      title={`${title}: ${
-        targets.length === 0
-          ? emptyText
-          : `${targets.length} target${targets.length === 1 ? "" : "s"} for ${operationLabel(mode)}`
-      }`}
+      title="Capability preflight groups the reviewed VPS targets by readiness and privilege requirements."
     >
-      <div
-        className="targetImpactHeader"
-        title="Capability preflight for the exact selected VPS set"
-      >
-        <strong title={title}>{title}</strong>
-        <span
-          title={
-            targets.length === 0
-              ? emptyText
-              : `${targets.length} selected targets for ${operationLabel(mode)}`
-          }
-        >
+      <div className="targetImpactHeader">
+        <strong>{title}</strong>
+        <span>
           {targets.length === 0
             ? emptyText
             : `${targets.length} target${targets.length === 1 ? "" : "s"} / ${operationLabel(mode)}`}
@@ -85,17 +72,10 @@ export function TargetImpactPreview({
               key={group.key}
               title={impactGroupTitle(group, mode, unavailableLabel)}
             >
-              <div
-                className="targetImpactGroupHeader"
-                title={impactGroupTitle(group, mode, unavailableLabel)}
-              >
+              <div className="targetImpactGroupHeader">
                 {impactIcon(group.key)}
-                <strong
-                  title={`${group.agents.length} targets in this capability group`}
-                >
-                  {group.agents.length}
-                </strong>
-                <span title={impactGroupTitle(group, mode, unavailableLabel)}>
+                <strong>{group.agents.length}</strong>
+                <span>
                   {group.key === "unavailable" ? unavailableLabel : group.label}
                 </span>
               </div>

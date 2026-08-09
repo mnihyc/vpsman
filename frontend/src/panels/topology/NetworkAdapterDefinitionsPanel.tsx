@@ -347,10 +347,17 @@ export function NetworkAdapterDefinitionsPanel({
             tone="danger"
           />
           <div className="formRow">
-            <label>
+            <label
+              title={
+                editor?.mode === "edit"
+                  ? "Adapter purpose is immutable after creation; create another definition for a different purpose"
+                  : "Choose whether this adapter manages a tunnel runtime or routing cost"
+              }
+            >
               <span>Purpose</span>
               <select
                 aria-label="Adapter purpose"
+                data-tooltip-disabled-reason="Adapter purpose is immutable after creation; create another definition for a different purpose."
                 disabled={editor?.mode === "edit"}
                 onChange={(event) => {
                   const nextKind = event.target.value as NetworkAdapterKind;
@@ -359,11 +366,6 @@ export function NetworkAdapterDefinitionsPanel({
                     setDefinition(defaultAdapterDefinition(nextKind));
                   });
                 }}
-                title={
-                  editor?.mode === "edit"
-                    ? "Adapter purpose is immutable after creation; create another definition for a different purpose"
-                    : "Choose whether this adapter manages a tunnel runtime or routing cost"
-                }
                 value={kind}
               >
                 <option value="runtime_tunnel">Tunnel runtime</option>
@@ -510,7 +512,7 @@ function AdapterCommandFields({
         return (
           <div className="compactForm" key={field}>
             <label
-              title={`${label} adapter command editor; arguments are excluded from tooltips`}
+              title={`Configure the ${label.toLowerCase()} adapter command arguments.`}
             >
               <span>
                 {label}
@@ -518,7 +520,6 @@ function AdapterCommandFields({
               </span>
               <textarea
                 aria-label={`${label} adapter command`}
-                data-tooltip-sensitive="true"
                 onChange={(event) => {
                   const argv = lines(event.target.value);
                   const next = { ...definition };

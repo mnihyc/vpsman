@@ -9,9 +9,15 @@ import {
   Server,
   Tags,
 } from "lucide-react";
-import { ConsoleActionDrawer, ConsoleStatusBadge } from "../components/ConsoleLayout";
+import {
+  ConsoleActionDrawer,
+  ConsoleStatusBadge,
+} from "../components/ConsoleLayout";
 import { ActionFeedback } from "../components/ActionFeedback";
-import { TimeSeriesChart, type TimeSeriesChartLine } from "../components/TimeSeriesChart";
+import {
+  TimeSeriesChart,
+  type TimeSeriesChartLine,
+} from "../components/TimeSeriesChart";
 import { VpsCombobox } from "../components/VpsCombobox";
 import { consolePalette, dashboardChartColors } from "../colorPalette";
 import {
@@ -77,22 +83,34 @@ type DrawerState = {
   title: string;
 };
 
-const resourceMetricOptions: Array<{ value: DashboardResourceMetric; label: string }> = [
+const resourceMetricOptions: Array<{
+  value: DashboardResourceMetric;
+  label: string;
+}> = [
   { label: "CPU", value: "cpu_load" },
   { label: "Memory", value: "memory_used" },
   { label: "Disk", value: "disk_free" },
 ];
-const trafficSortOptions: Array<{ value: DashboardTrafficSort; label: string }> = [
+const trafficSortOptions: Array<{
+  value: DashboardTrafficSort;
+  label: string;
+}> = [
   { label: "Total", value: "total" },
   { label: "RX", value: "rx" },
   { label: "TX", value: "tx" },
 ];
-const pointDensityOptions: Array<{ value: DashboardPointDensity; label: string }> = [
+const pointDensityOptions: Array<{
+  value: DashboardPointDensity;
+  label: string;
+}> = [
   { label: "Compact", value: "compact" },
   { label: "Balanced", value: "balanced" },
   { label: "Dense", value: "dense" },
 ];
-const refreshIntervalOptions: Array<{ value: DashboardRefreshIntervalSecs; label: string }> = [
+const refreshIntervalOptions: Array<{
+  value: DashboardRefreshIntervalSecs;
+  label: string;
+}> = [
   { label: "5s", value: 5 },
   { label: "30s", value: 30 },
   { label: "1m", value: 60 },
@@ -122,9 +140,15 @@ export function HomeTelemetryPanel({
     subpage: "instances",
     view: "Fleet",
   };
-  const windowOptions = overview?.available_filters.windows.map((option) => option.value) ?? dashboardWindowOptions;
-  const groupOptions = overview?.available_filters.group_by_options ?? fallbackGroupOptions();
-  const scopeOptions = dashboardScopeValueOptions(preferences.scopeKind, overview);
+  const windowOptions =
+    overview?.available_filters.windows.map((option) => option.value) ??
+    dashboardWindowOptions;
+  const groupOptions =
+    overview?.available_filters.group_by_options ?? fallbackGroupOptions();
+  const scopeOptions = dashboardScopeValueOptions(
+    preferences.scopeKind,
+    overview,
+  );
   const customRangeActive = Boolean(preferences.startAt.trim());
   const selectedScopeLabel = dashboardScopeLabel(preferences, overview);
   const selectedGroupLabel = groupLabel(preferences.groupBy);
@@ -192,7 +216,10 @@ export function HomeTelemetryPanel({
     }),
     [network?.points],
   );
-  const networkPeak = useMemo(() => maxNetworkPoint(network?.points ?? []), [network?.points]);
+  const networkPeak = useMemo(
+    () => maxNetworkPoint(network?.points ?? []),
+    [network?.points],
+  );
   const trafficChart = useMemo(
     () => trafficChartData(visibleTrafficSeries, preferences.trafficSort),
     [preferences.trafficSort, visibleTrafficSeries],
@@ -213,7 +240,13 @@ export function HomeTelemetryPanel({
   }
 
   return (
-    <section className={drawer ? "workspace dashboardWorkspace" : "workspace singleColumn dashboardWorkspace"}>
+    <section
+      className={
+        drawer
+          ? "workspace dashboardWorkspace"
+          : "workspace singleColumn dashboardWorkspace"
+      }
+    >
       <div className="workspaceStack">
         <div className="dashboardToolbar">
           <div>
@@ -233,7 +266,9 @@ export function HomeTelemetryPanel({
                 name="home-refresh-interval"
                 onChange={(event) =>
                   onPreferencesChange({
-                    refreshIntervalSecs: Number(event.target.value) as DashboardRefreshIntervalSecs,
+                    refreshIntervalSecs: Number(
+                      event.target.value,
+                    ) as DashboardRefreshIntervalSecs,
                   })
                 }
                 value={preferences.refreshIntervalSecs}
@@ -250,7 +285,9 @@ export function HomeTelemetryPanel({
                 <button
                   aria-label={dashboardWindowAccessibleLabel(option)}
                   aria-pressed={!customRangeActive && window === option}
-                  className={!customRangeActive && window === option ? "active" : ""}
+                  className={
+                    !customRangeActive && window === option ? "active" : ""
+                  }
                   key={option}
                   onClick={() => onWindowChange(option)}
                   title={dashboardWindowAccessibleLabel(option)}
@@ -263,7 +300,9 @@ export function HomeTelemetryPanel({
             <button
               className="secondaryAction compactAction"
               data-tooltip-disabled-reason={
-                loading ? "A dashboard refresh is already in progress" : undefined
+                loading
+                  ? "A dashboard refresh is already in progress"
+                  : undefined
               }
               disabled={loading}
               onClick={onRefresh}
@@ -276,14 +315,22 @@ export function HomeTelemetryPanel({
           </div>
         </div>
 
-        <div className="dashboardControlBar" aria-label="Home statistic controls">
+        <div
+          className="dashboardControlBar"
+          aria-label="Home statistic controls"
+        >
           <label>
             <span>Group by</span>
             <select
               aria-label="Home group by"
               id="home-group-by"
               name="home-group-by"
-              onChange={(event) => onPreferencesChange({ groupBy: event.target.value as DashboardPreferences["groupBy"] })}
+              onChange={(event) =>
+                onPreferencesChange({
+                  groupBy: event.target
+                    .value as DashboardPreferences["groupBy"],
+                })
+              }
               value={preferences.groupBy}
             >
               {groupOptions.map((option) => (
@@ -355,7 +402,9 @@ export function HomeTelemetryPanel({
                 aria-label="Home scope value"
                 id="home-scope-value"
                 name="home-scope-value"
-                onChange={(event) => onPreferencesChange({ scopeValue: event.target.value })}
+                onChange={(event) =>
+                  onPreferencesChange({ scopeValue: event.target.value })
+                }
                 value={preferences.scopeValue}
               >
                 <option value="">Select {preferences.scopeKind}</option>
@@ -373,7 +422,11 @@ export function HomeTelemetryPanel({
               aria-label="Home start date"
               id="home-start-date"
               name="home-start-date"
-              onChange={(event) => onPreferencesChange({ startAt: dateTimeLocalToIso(event.target.value) })}
+              onChange={(event) =>
+                onPreferencesChange({
+                  startAt: dateTimeLocalToIso(event.target.value),
+                })
+              }
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.startAt)}
             />
@@ -384,7 +437,11 @@ export function HomeTelemetryPanel({
               aria-label="Home end date"
               id="home-end-date"
               name="home-end-date"
-              onChange={(event) => onPreferencesChange({ endAt: dateTimeLocalToIso(event.target.value) })}
+              onChange={(event) =>
+                onPreferencesChange({
+                  endAt: dateTimeLocalToIso(event.target.value),
+                })
+              }
               type="datetime-local"
               value={isoToDateTimeLocal(preferences.endAt)}
             />
@@ -410,11 +467,17 @@ export function HomeTelemetryPanel({
           tone="danger"
         />
 
-        <section className="dashboardSection" aria-labelledby="dashboard-operations-title">
+        <section
+          className="dashboardSection"
+          aria-labelledby="dashboard-operations-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="dashboard-operations-title">Operational Health</h2>
-              <span>Fleet reachability, active alerts, queued operations, and backup posture.</span>
+              <span>
+                Fleet reachability, active alerts, queued operations, and backup
+                posture.
+              </span>
             </div>
             {summary && (
               <ConsoleStatusBadge
@@ -442,12 +505,32 @@ export function HomeTelemetryPanel({
                     "Online, offline, stale, and access-revoked status across VPS clients.",
                   drilldown: fallbackDrilldown,
                   metrics: [
-                    { label: "Online", tone: "ok", value: String(summary?.online ?? 0) },
+                    {
+                      label: "Online",
+                      tone: "ok",
+                      value: String(summary?.online ?? 0),
+                    },
                     { label: "Total", value: String(summary?.total ?? 0) },
-                    { label: "Offline", tone: summary?.offline ? "neutral" : "ok", value: String(summary?.offline ?? 0) },
-                    { label: "Stale", tone: summary?.stale ? "warning" : "ok", value: String(summary?.stale ?? 0) },
-                    { label: "Access revoked", tone: summary?.revoked ? "warning" : "ok", value: String(summary?.revoked ?? 0) },
-                    { label: "Warnings", tone: summary?.warnings ? "warning" : "ok", value: String(summary?.warnings ?? 0) },
+                    {
+                      label: "Offline",
+                      tone: summary?.offline ? "neutral" : "ok",
+                      value: String(summary?.offline ?? 0),
+                    },
+                    {
+                      label: "Stale",
+                      tone: summary?.stale ? "warning" : "ok",
+                      value: String(summary?.stale ?? 0),
+                    },
+                    {
+                      label: "Access revoked",
+                      tone: summary?.revoked ? "warning" : "ok",
+                      value: String(summary?.revoked ?? 0),
+                    },
+                    {
+                      label: "Warnings",
+                      tone: summary?.warnings ? "warning" : "ok",
+                      value: String(summary?.warnings ?? 0),
+                    },
                   ],
                   title: "Fleet health",
                 })
@@ -460,7 +543,11 @@ export function HomeTelemetryPanel({
                   ? "warning"
                   : "ok"
               }
-              value={summary ? `${onlinePercent(summary.online, summary.total)}%` : "No data"}
+              value={
+                summary
+                  ? `${onlinePercent(summary.online, summary.total)}%`
+                  : "No data"
+              }
             />
             <HomeMetricCard
               detail={`${operations?.critical_alerts ?? 0} critical, ${operations?.warning_alerts ?? 0} warning`}
@@ -468,17 +555,41 @@ export function HomeTelemetryPanel({
               label="Active alerts"
               onClick={() =>
                 openDrawer({
-                  description: "Open fleet alerts generated from agent, resource, backup, update, and network state.",
-                  drilldown: { label: "Review alerts", query: null, subpage: "alerts", view: "Fleet" },
+                  description:
+                    "Open fleet alerts generated from agent, resource, backup, update, and network state.",
+                  drilldown: {
+                    label: "Review alerts",
+                    query: null,
+                    subpage: "alerts",
+                    view: "Fleet",
+                  },
                   metrics: [
-                    { label: "Active", tone: operations?.active_alerts ? "warning" : "ok", value: String(operations?.active_alerts ?? 0) },
-                    { label: "Critical", tone: operations?.critical_alerts ? "critical" : "ok", value: String(operations?.critical_alerts ?? 0) },
-                    { label: "Warning", tone: operations?.warning_alerts ? "warning" : "ok", value: String(operations?.warning_alerts ?? 0) },
+                    {
+                      label: "Active",
+                      tone: operations?.active_alerts ? "warning" : "ok",
+                      value: String(operations?.active_alerts ?? 0),
+                    },
+                    {
+                      label: "Critical",
+                      tone: operations?.critical_alerts ? "critical" : "ok",
+                      value: String(operations?.critical_alerts ?? 0),
+                    },
+                    {
+                      label: "Warning",
+                      tone: operations?.warning_alerts ? "warning" : "ok",
+                      value: String(operations?.warning_alerts ?? 0),
+                    },
                   ],
                   title: "Active alerts",
                 })
               }
-              tone={operations && operations.critical_alerts > 0 ? "critical" : operations && operations.warning_alerts > 0 ? "warning" : "ok"}
+              tone={
+                operations && operations.critical_alerts > 0
+                  ? "critical"
+                  : operations && operations.warning_alerts > 0
+                    ? "warning"
+                    : "ok"
+              }
               value={String(operations?.active_alerts ?? 0)}
             />
             <HomeMetricCard
@@ -487,9 +598,21 @@ export function HomeTelemetryPanel({
               label="Running jobs"
               onClick={() =>
                 openDrawer({
-                  description: "Jobs still active in the control plane dispatch lifecycle.",
-                  drilldown: { label: "Open job history", query: null, subpage: "history", view: "Jobs" },
-                  metrics: [{ label: "Running", tone: operations?.running_jobs ? "info" : "ok", value: String(operations?.running_jobs ?? 0) }],
+                  description:
+                    "Jobs still active in the control plane dispatch lifecycle.",
+                  drilldown: {
+                    label: "Open job history",
+                    query: null,
+                    subpage: "history",
+                    view: "Jobs",
+                  },
+                  metrics: [
+                    {
+                      label: "Running",
+                      tone: operations?.running_jobs ? "info" : "ok",
+                      value: String(operations?.running_jobs ?? 0),
+                    },
+                  ],
                   title: "Running jobs",
                 })
               }
@@ -502,17 +625,37 @@ export function HomeTelemetryPanel({
               label="Backup posture"
               onClick={() =>
                 openDrawer({
-                  description: "Recent backup requests and artifact metadata state for the selected time range.",
-                  drilldown: { label: "Open backup requests", query: null, subpage: "requests", view: "Backups" },
+                  description:
+                    "Recent backup requests and artifact metadata state for the selected time range.",
+                  drilldown: {
+                    label: "Open backup requests",
+                    query: null,
+                    subpage: "requests",
+                    view: "Backups",
+                  },
                   metrics: [
-                    { label: "Pending", tone: operations?.backup_pending ? "info" : "neutral", value: String(operations?.backup_pending ?? 0) },
-                    { label: "Completed", tone: "ok", value: String(operations?.backup_completed ?? 0) },
-                    { label: "Failed", tone: operations?.backup_failed ? "critical" : "ok", value: String(operations?.backup_failed ?? 0) },
+                    {
+                      label: "Pending",
+                      tone: operations?.backup_pending ? "info" : "neutral",
+                      value: String(operations?.backup_pending ?? 0),
+                    },
+                    {
+                      label: "Completed",
+                      tone: "ok",
+                      value: String(operations?.backup_completed ?? 0),
+                    },
+                    {
+                      label: "Failed",
+                      tone: operations?.backup_failed ? "critical" : "ok",
+                      value: String(operations?.backup_failed ?? 0),
+                    },
                   ],
                   title: "Backup posture",
                 })
               }
-              tone={operations && operations.backup_failed > 0 ? "critical" : "ok"}
+              tone={
+                operations && operations.backup_failed > 0 ? "critical" : "ok"
+              }
               value={`${operations?.backup_completed ?? 0}/${(operations?.backup_completed ?? 0) + (operations?.backup_pending ?? 0)}`}
             />
             <HomeMetricCard
@@ -521,12 +664,29 @@ export function HomeTelemetryPanel({
               label="Network activity"
               onClick={() =>
                 openDrawer({
-                  description: "Latest observed per-interface receive and transmit rate totals.",
-                  drilldown: { label: "Inspect network evidence", query: null, subpage: "evidence", view: "Network" },
+                  description:
+                    "Latest observed per-interface receive and transmit rate totals.",
+                  drilldown: {
+                    label: "Inspect network evidence",
+                    query: null,
+                    subpage: "evidence",
+                    view: "Network",
+                  },
                   metrics: [
-                    { label: "Inbound", tone: "info", value: formatByteRateFromBitsPerSecond(network?.rx_bps) },
-                    { label: "Outbound", tone: "info", value: formatByteRateFromBitsPerSecond(network?.tx_bps) },
-                    { label: "Top clients", value: String(network?.top_clients.length ?? 0) },
+                    {
+                      label: "Inbound",
+                      tone: "info",
+                      value: formatByteRateFromBitsPerSecond(network?.rx_bps),
+                    },
+                    {
+                      label: "Outbound",
+                      tone: "info",
+                      value: formatByteRateFromBitsPerSecond(network?.tx_bps),
+                    },
+                    {
+                      label: "Top clients",
+                      value: String(network?.top_clients.length ?? 0),
+                    },
                   ],
                   title: "Network activity",
                 })
@@ -539,22 +699,37 @@ export function HomeTelemetryPanel({
           </div>
         </section>
 
-        <section className="dashboardSection" aria-labelledby="dashboard-resources-title">
+        <section
+          className="dashboardSection"
+          aria-labelledby="dashboard-resources-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="dashboard-resources-title">Resource Usage</h2>
               <span>
-                {resourceCurve?.sampled_clients ?? resources?.sampled_clients ?? 0} VPS plotted by {resourceMetricTitle(preferences.resourceMetric)}
-                {resourceCurve?.excluded_clients ? `; ${resourceCurve.excluded_clients} excluded by preference` : ""}
+                {resourceCurve?.sampled_clients ??
+                  resources?.sampled_clients ??
+                  0}{" "}
+                VPS plotted by {resourceMetricTitle(preferences.resourceMetric)}
+                {resourceCurve?.excluded_clients
+                  ? `; ${resourceCurve.excluded_clients} excluded by preference`
+                  : ""}
               </span>
             </div>
-            <div className="dashboardSectionTools" aria-label="Resource usage metric">
+            <div
+              className="dashboardSectionTools"
+              aria-label="Resource usage metric"
+            >
               {resourceMetricOptions.map((option) => (
                 <button
                   aria-pressed={preferences.resourceMetric === option.value}
-                  className={preferences.resourceMetric === option.value ? "active" : ""}
+                  className={
+                    preferences.resourceMetric === option.value ? "active" : ""
+                  }
                   key={option.value}
-                  onClick={() => onPreferencesChange({ resourceMetric: option.value })}
+                  onClick={() =>
+                    onPreferencesChange({ resourceMetric: option.value })
+                  }
                   title={resourceMetricDefinition(option.value)}
                   type="button"
                 >
@@ -566,18 +741,35 @@ export function HomeTelemetryPanel({
           <div className="dashboardNetworkPanel resourceCurvePanel">
             <div className="dashboardCurveCard">
               <div className="dashboardChartHeader">
-                <span>{resourceMetricTitle(preferences.resourceMetric)} by VPS</span>
+                <span>
+                  {resourceMetricTitle(preferences.resourceMetric)} by VPS
+                </span>
                 <button
                   className="secondaryAction compactAction"
                   onClick={() =>
                     openDrawer({
                       description: `Top ${resourceCurve?.top_limit ?? 0} VPS for ${resourceMetricTitle(preferences.resourceMetric)} over the selected time range.`,
                       metrics: [
-                        { label: "Sampled VPS", value: String(resourceCurve?.sampled_clients ?? 0) },
-                        { label: "Excluded VPS", value: String(resourceCurve?.excluded_clients ?? 0) },
-                        { label: "Fleet CPU average", value: formatLoad(resources?.cpu_load_avg) },
-                        { label: "Fleet memory used", value: formatPercent(resources?.memory_used_ratio) },
-                        { label: "Fleet disk free", value: formatPercent(resources?.disk_free_ratio) },
+                        {
+                          label: "Sampled VPS",
+                          value: String(resourceCurve?.sampled_clients ?? 0),
+                        },
+                        {
+                          label: "Excluded VPS",
+                          value: String(resourceCurve?.excluded_clients ?? 0),
+                        },
+                        {
+                          label: "Fleet CPU average",
+                          value: formatLoad(resources?.cpu_load_avg),
+                        },
+                        {
+                          label: "Fleet memory used",
+                          value: formatPercent(resources?.memory_used_ratio),
+                        },
+                        {
+                          label: "Fleet disk free",
+                          value: formatPercent(resources?.disk_free_ratio),
+                        },
                       ],
                       title: `${resourceMetricTitle(preferences.resourceMetric)} curves`,
                     })
@@ -591,14 +783,17 @@ export function HomeTelemetryPanel({
                 className="observabilityMetricDefinition"
                 title={resourceMetricDefinition(preferences.resourceMetric)}
               >
-                Metric definition: {resourceMetricDefinition(preferences.resourceMetric)}
+                Metric definition:{" "}
+                {resourceMetricDefinition(preferences.resourceMetric)}
               </p>
               <TimeSeriesChart
                 ariaLabel="Resource usage curve"
                 emptyLabel="No resource telemetry after current filters and exclusions"
                 lines={resourceChart.lines}
                 times={resourceChart.times}
-                valueFormatter={(value) => formatResourceValue(preferences.resourceMetric, value)}
+                valueFormatter={(value) =>
+                  formatResourceValue(preferences.resourceMetric, value)
+                }
               />
             </div>
             <div className="dashboardTopClients">
@@ -615,11 +810,40 @@ export function HomeTelemetryPanel({
                       description: `${series.points.length} resource samples for ${series.client_id}.`,
                       drilldown: series.drilldown,
                       metrics: [
-                        { label: "Current", value: formatResourceValue(preferences.resourceMetric, series.current) },
-                        { label: resourcePeakLabel(preferences.resourceMetric), value: formatResourceValue(preferences.resourceMetric, series.peak) },
-                        { label: "Warning", tone: "warning", value: formatResourceValue(preferences.resourceMetric, series.warning_threshold) },
-                        { label: "Critical", tone: "critical", value: formatResourceValue(preferences.resourceMetric, series.critical_threshold) },
-                        { label: "Direction", value: series.threshold_direction },
+                        {
+                          label: "Current",
+                          value: formatResourceValue(
+                            preferences.resourceMetric,
+                            series.current,
+                          ),
+                        },
+                        {
+                          label: resourcePeakLabel(preferences.resourceMetric),
+                          value: formatResourceValue(
+                            preferences.resourceMetric,
+                            series.peak,
+                          ),
+                        },
+                        {
+                          label: "Warning",
+                          tone: "warning",
+                          value: formatResourceValue(
+                            preferences.resourceMetric,
+                            series.warning_threshold,
+                          ),
+                        },
+                        {
+                          label: "Critical",
+                          tone: "critical",
+                          value: formatResourceValue(
+                            preferences.resourceMetric,
+                            series.critical_threshold,
+                          ),
+                        },
+                        {
+                          label: "Direction",
+                          value: series.threshold_direction,
+                        },
                       ],
                       title: series.label,
                     })
@@ -628,28 +852,45 @@ export function HomeTelemetryPanel({
                 >
                   <span>
                     <strong>{series.label}</strong>
-                    <small>{resourcePeakLabel(preferences.resourceMetric)} {formatResourceValue(preferences.resourceMetric, series.peak)}</small>
+                    <small>
+                      {resourcePeakLabel(preferences.resourceMetric)}{" "}
+                      {formatResourceValue(
+                        preferences.resourceMetric,
+                        series.peak,
+                      )}
+                    </small>
                   </span>
-                  <b>{formatResourceValue(preferences.resourceMetric, series.current)}</b>
+                  <b>
+                    {formatResourceValue(
+                      preferences.resourceMetric,
+                      series.current,
+                    )}
+                  </b>
                 </button>
               ))}
             </div>
           </div>
         </section>
 
-        <section className="dashboardSection" aria-labelledby="dashboard-network-title">
+        <section
+          className="dashboardSection"
+          aria-labelledby="dashboard-network-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="dashboard-network-title">Network</h2>
               <span>
-                Rate is an interval average from interface-counter deltas; Traffic is byte volume over the selected range.
+                Rate is an interval average from interface-counter deltas;
+                Traffic is byte volume over the selected range.
               </span>
             </div>
             <div className="dashboardHeaderTools">
               <div className="dashboardSectionTools" aria-label="Network view">
                 <button
                   aria-pressed={preferences.networkView === "speed"}
-                  className={preferences.networkView === "speed" ? "active" : ""}
+                  className={
+                    preferences.networkView === "speed" ? "active" : ""
+                  }
                   onClick={() => onPreferencesChange({ networkView: "speed" })}
                   type="button"
                 >
@@ -657,21 +898,32 @@ export function HomeTelemetryPanel({
                 </button>
                 <button
                   aria-pressed={preferences.networkView === "traffic"}
-                  className={preferences.networkView === "traffic" ? "active" : ""}
-                  onClick={() => onPreferencesChange({ networkView: "traffic" })}
+                  className={
+                    preferences.networkView === "traffic" ? "active" : ""
+                  }
+                  onClick={() =>
+                    onPreferencesChange({ networkView: "traffic" })
+                  }
                   type="button"
                 >
                   Traffic
                 </button>
               </div>
               {preferences.networkView === "traffic" && (
-                <div className="dashboardSectionTools" aria-label="Traffic sort">
+                <div
+                  className="dashboardSectionTools"
+                  aria-label="Traffic sort"
+                >
                   {trafficSortOptions.map((option) => (
                     <button
                       aria-pressed={preferences.trafficSort === option.value}
-                      className={preferences.trafficSort === option.value ? "active" : ""}
+                      className={
+                        preferences.trafficSort === option.value ? "active" : ""
+                      }
                       key={option.value}
-                      onClick={() => onPreferencesChange({ trafficSort: option.value })}
+                      onClick={() =>
+                        onPreferencesChange({ trafficSort: option.value })
+                      }
                       type="button"
                     >
                       {option.label}
@@ -680,7 +932,9 @@ export function HomeTelemetryPanel({
                 </div>
               )}
             </div>
-            <ConsoleStatusBadge tone={network?.points.length ? "info" : "neutral"}>
+            <ConsoleStatusBadge
+              tone={network?.points.length ? "info" : "neutral"}
+            >
               {preferences.networkView === "speed"
                 ? `${network?.points.length ?? 0} rate points`
                 : `${network?.traffic_top_clients.length ?? 0} traffic clients`}
@@ -697,11 +951,32 @@ export function HomeTelemetryPanel({
                       onClick={() =>
                         openDrawer({
                           description: `Aggregated receive and transmit rate history for the selected time range. ${INTERFACE_RATE_DEFINITION}`,
-                          drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
+                          drilldown: {
+                            label: "Open network evidence",
+                            query: null,
+                            subpage: "evidence",
+                            view: "Network",
+                          },
                           metrics: [
-                            { label: "Inbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(network?.rx_bps) },
-                            { label: "Outbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(network?.tx_bps) },
-                            { label: "Peak bucket", value: formatByteRateFromBitsPerSecond(networkPeak) },
+                            {
+                              label: "Inbound avg",
+                              tone: "info",
+                              value: formatByteRateFromBitsPerSecond(
+                                network?.rx_bps,
+                              ),
+                            },
+                            {
+                              label: "Outbound avg",
+                              tone: "info",
+                              value: formatByteRateFromBitsPerSecond(
+                                network?.tx_bps,
+                              ),
+                            },
+                            {
+                              label: "Peak bucket",
+                              value:
+                                formatByteRateFromBitsPerSecond(networkPeak),
+                            },
                           ],
                           title: "Network rate",
                         })
@@ -725,21 +1000,50 @@ export function HomeTelemetryPanel({
                     <span>{visibleRateClients.length} visible</span>
                   </div>
                   {visibleRateClients.map((client) => (
-                    <button className="dashboardClientRow" key={client.client_id} onClick={() => openDrawer({
-                      description: `${client.interfaces.length} observed interface${client.interfaces.length === 1 ? "" : "s"}.`,
-                      drilldown: client.drilldown,
-                      metrics: [
-                        { label: "Inbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(client.rx_bps) },
-                        { label: "Outbound avg", tone: "info", value: formatByteRateFromBitsPerSecond(client.tx_bps) },
-                        { label: "Interfaces", value: client.interfaces.join(", ") || "No interfaces" },
-                      ],
-                      title: client.label,
-                    })} type="button">
+                    <button
+                      className="dashboardClientRow"
+                      key={client.client_id}
+                      onClick={() =>
+                        openDrawer({
+                          description: `${client.interfaces.length} observed interface${client.interfaces.length === 1 ? "" : "s"}.`,
+                          drilldown: client.drilldown,
+                          metrics: [
+                            {
+                              label: "Inbound avg",
+                              tone: "info",
+                              value: formatByteRateFromBitsPerSecond(
+                                client.rx_bps,
+                              ),
+                            },
+                            {
+                              label: "Outbound avg",
+                              tone: "info",
+                              value: formatByteRateFromBitsPerSecond(
+                                client.tx_bps,
+                              ),
+                            },
+                            {
+                              label: "Interfaces",
+                              value:
+                                client.interfaces.join(", ") || "No interfaces",
+                            },
+                          ],
+                          title: client.label,
+                        })
+                      }
+                      type="button"
+                    >
                       <span>
                         <strong>{client.label}</strong>
-                        <small>{client.interfaces.join(", ") || client.client_id}</small>
+                        <small>
+                          {client.interfaces.join(", ") || client.client_id}
+                        </small>
                       </span>
-                      <b>{formatByteRateFromBitsPerSecond(client.rx_bps + client.tx_bps)}</b>
+                      <b>
+                        {formatByteRateFromBitsPerSecond(
+                          client.rx_bps + client.tx_bps,
+                        )}
+                      </b>
                     </button>
                   ))}
                 </div>
@@ -753,12 +1057,33 @@ export function HomeTelemetryPanel({
                       className="secondaryAction compactAction"
                       onClick={() =>
                         openDrawer({
-                          description: "Traffic curves plot accumulated bytes by VPS for the selected time range.",
-                          drilldown: { label: "Open network evidence", query: null, subpage: "evidence", view: "Network" },
+                          description:
+                            "Traffic curves plot accumulated bytes by VPS for the selected time range.",
+                          drilldown: {
+                            label: "Open network evidence",
+                            query: null,
+                            subpage: "evidence",
+                            view: "Network",
+                          },
                           metrics: [
-                            { label: "Rank metric", value: trafficSortLabel(preferences.trafficSort) },
-                            { label: "Traffic VPS", value: String(trafficClients.length) },
-                            { label: "Total traffic", value: formatBytes(trafficClients.reduce((sum, client) => sum + client.rx_bytes + client.tx_bytes, 0)) },
+                            {
+                              label: "Rank metric",
+                              value: trafficSortLabel(preferences.trafficSort),
+                            },
+                            {
+                              label: "Traffic VPS",
+                              value: String(trafficClients.length),
+                            },
+                            {
+                              label: "Total traffic",
+                              value: formatBytes(
+                                trafficClients.reduce(
+                                  (sum, client) =>
+                                    sum + client.rx_bytes + client.tx_bytes,
+                                  0,
+                                ),
+                              ),
+                            },
                           ],
                           title: "Network traffic",
                         })
@@ -790,9 +1115,22 @@ export function HomeTelemetryPanel({
                           description: `${client.interfaces.join(", ") || client.client_id}`,
                           drilldown: client.drilldown,
                           metrics: [
-                            { label: "RX traffic", tone: "info", value: formatBytes(client.rx_bytes) },
-                            { label: "TX traffic", tone: "info", value: formatBytes(client.tx_bytes) },
-                            { label: "Total traffic", value: formatBytes(client.rx_bytes + client.tx_bytes) },
+                            {
+                              label: "RX traffic",
+                              tone: "info",
+                              value: formatBytes(client.rx_bytes),
+                            },
+                            {
+                              label: "TX traffic",
+                              tone: "info",
+                              value: formatBytes(client.tx_bytes),
+                            },
+                            {
+                              label: "Total traffic",
+                              value: formatBytes(
+                                client.rx_bytes + client.tx_bytes,
+                              ),
+                            },
                           ],
                           title: client.label,
                         })
@@ -801,9 +1139,15 @@ export function HomeTelemetryPanel({
                     >
                       <span>
                         <strong>{client.label}</strong>
-                        <small>{client.interfaces.join(", ") || client.client_id}</small>
+                        <small>
+                          {client.interfaces.join(", ") || client.client_id}
+                        </small>
                       </span>
-                      <b>{formatBytes(trafficValue(client, preferences.trafficSort))}</b>
+                      <b>
+                        {formatBytes(
+                          trafficValue(client, preferences.trafficSort),
+                        )}
+                      </b>
                     </button>
                   ))}
                 </div>
@@ -812,16 +1156,28 @@ export function HomeTelemetryPanel({
           </div>
         </section>
 
-        <section className="dashboardSection" aria-labelledby="dashboard-clusters-title">
+        <section
+          className="dashboardSection"
+          aria-labelledby="dashboard-clusters-title"
+        >
           <div className="dashboardSectionHeader">
             <div>
               <h2 id="dashboard-clusters-title">Grouped Statistics</h2>
-              <span>{groupDescription(preferences.groupBy, overview?.scope.label ?? "All VPS")}</span>
+              <span>
+                {groupDescription(
+                  preferences.groupBy,
+                  overview?.scope.label ?? "All VPS",
+                )}
+              </span>
             </div>
           </div>
           <div className="dashboardClusterGrid">
             {(overview?.label_clusters ?? []).map((cluster) => (
-              <ClusterButton cluster={cluster} key={`${cluster.kind}-${cluster.label}`} onOpen={openDrawer} />
+              <ClusterButton
+                cluster={cluster}
+                key={`${cluster.kind}-${cluster.label}`}
+                onOpen={openDrawer}
+              />
             ))}
           </div>
         </section>
@@ -829,81 +1185,97 @@ export function HomeTelemetryPanel({
         {operations &&
           (visibleRecentAlerts.length > 0 ||
             visibleDegradedAgents.length > 0) && (
-          <section className="dashboardSection dashboardLists" aria-label="Operational lists">
-            <div>
-              <h2>Recent Alerts</h2>
-              <div className="dashboardList">
-                {visibleRecentAlerts.map((alert) => (
-                  <button
-                    className="dashboardListRow"
-                    key={alert.id}
-                    onClick={() =>
-                      openDrawer({
-                        description: `${alert.category} observed ${formatCompactTime(alert.observed_at)}`,
-                        drilldown: alert.drilldown,
-                        metrics: [
-                          { label: "Severity", tone: severityTone(alert.severity), value: alert.severity },
-                          { label: "Category", value: alert.category },
-                          { label: "Client", value: alert.client_label ? `${alert.client_label} / ${alert.client_id}` : alert.client_id ?? "Fleet scope" },
-                        ],
-                        title: alert.client_label ? `${alert.client_label}: ${alert.title}` : alert.title,
-                      })
-                    }
-                    type="button"
-                  >
-                    <ConsoleStatusBadge tone={severityTone(alert.severity)}>{alert.severity}</ConsoleStatusBadge>
-                    <span className="dashboardAlertText">
-                      <strong>{alert.client_label ?? "Fleet"}</strong>
-                      <small>{alert.title}</small>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <h2>Degraded VPS</h2>
-              <div className="dashboardList">
-                {visibleDegradedAgents.map((agent) => {
-                  const status = agentStatusPresentation(agent.status);
-                  return (
+            <section
+              className="dashboardSection dashboardLists"
+              aria-label="Operational lists"
+            >
+              <div>
+                <h2>Recent Alerts</h2>
+                <div className="dashboardList">
+                  {visibleRecentAlerts.map((alert) => (
                     <button
                       className="dashboardListRow"
-                      key={agent.client_id}
+                      key={alert.id}
                       onClick={() =>
                         openDrawer({
-                          description:
-                            agent.status.trim().toLowerCase() === "revoked"
-                              ? ACCESS_REVOKED_RECOVERY_DETAIL
-                              : agent.tags.join(", ") || agent.client_id,
-                          drilldown: agent.drilldown,
+                          description: `${alert.category} observed ${formatCompactTime(alert.observed_at)}`,
+                          drilldown: alert.drilldown,
                           metrics: [
                             {
-                              label: "Status",
-                              tone: status.tone,
-                              value: status.label,
+                              label: "Severity",
+                              tone: severityTone(alert.severity),
+                              value: alert.severity,
                             },
+                            { label: "Category", value: alert.category },
                             {
-                              emptyReason: "This VPS has no assigned tags",
-                              label: "Tags",
-                              value: agent.tags.join(", ") || "-",
+                              label: "Client",
+                              value: alert.client_label
+                                ? `${alert.client_label} / ${alert.client_id}`
+                                : (alert.client_id ?? "Fleet scope"),
                             },
                           ],
-                          title: agent.label,
+                          title: alert.client_label
+                            ? `${alert.client_label}: ${alert.title}`
+                            : alert.title,
                         })
                       }
                       type="button"
                     >
-                      <ConsoleStatusBadge tone={status.tone}>
-                        {status.label}
+                      <ConsoleStatusBadge tone={severityTone(alert.severity)}>
+                        {alert.severity}
                       </ConsoleStatusBadge>
-                      <span>{agent.label}</span>
+                      <span className="dashboardAlertText">
+                        <strong>{alert.client_label ?? "Fleet"}</strong>
+                        <small>{alert.title}</small>
+                      </span>
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
               </div>
-            </div>
-          </section>
-        )}
+              <div>
+                <h2>Degraded VPS</h2>
+                <div className="dashboardList">
+                  {visibleDegradedAgents.map((agent) => {
+                    const status = agentStatusPresentation(agent.status);
+                    return (
+                      <button
+                        className="dashboardListRow"
+                        key={agent.client_id}
+                        onClick={() =>
+                          openDrawer({
+                            description:
+                              agent.status.trim().toLowerCase() === "revoked"
+                                ? ACCESS_REVOKED_RECOVERY_DETAIL
+                                : agent.tags.join(", ") || agent.client_id,
+                            drilldown: agent.drilldown,
+                            metrics: [
+                              {
+                                label: "Status",
+                                tone: status.tone,
+                                value: status.label,
+                              },
+                              {
+                                emptyReason: "This VPS has no assigned tags",
+                                label: "Tags",
+                                value: agent.tags.join(", ") || "-",
+                              },
+                            ],
+                            title: agent.label,
+                          })
+                        }
+                        type="button"
+                      >
+                        <ConsoleStatusBadge tone={status.tone}>
+                          {status.label}
+                        </ConsoleStatusBadge>
+                        <span>{agent.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </section>
+          )}
       </div>
 
       <ConsoleActionDrawer
@@ -913,7 +1285,9 @@ export function HomeTelemetryPanel({
             <button
               aria-label={drawer.drilldown.label}
               className="primaryAction"
-              onClick={() => onNavigate(drawer.drilldown as DashboardDrilldownRecord)}
+              onClick={() =>
+                onNavigate(drawer.drilldown as DashboardDrilldownRecord)
+              }
               type="button"
             >
               <ArrowRight size={16} />
@@ -932,12 +1306,18 @@ export function HomeTelemetryPanel({
               data-tooltip-empty-reason={metric.emptyReason}
               key={metric.label}
               title={`${metric.label}: ${
-                metric.value === "-" ? metric.emptyReason ?? "No value is available" : metric.value
+                metric.value === "-"
+                  ? (metric.emptyReason ?? "No value is available")
+                  : metric.value
               }`}
             >
               <span>{metric.label}</span>
               <strong>{metric.value}</strong>
-              {metric.tone && <ConsoleStatusBadge tone={metric.tone}>{metric.tone}</ConsoleStatusBadge>}
+              {metric.tone && (
+                <ConsoleStatusBadge tone={metric.tone}>
+                  {metric.tone}
+                </ConsoleStatusBadge>
+              )}
             </div>
           ))}
         </div>
@@ -965,7 +1345,6 @@ function HomeMetricCard({
     <button
       className={`dashboardMetricCard ${tone}`}
       onClick={onClick}
-      title={`${label}: ${value}. ${detail}`}
       type="button"
     >
       <span className="dashboardMetricIcon">{icon}</span>
@@ -987,7 +1366,11 @@ function ClusterButton({
 }) {
   return (
     <button
-      className={cluster.kind === "all" ? "dashboardClusterCard aggregate" : "dashboardClusterCard"}
+      className={
+        cluster.kind === "all"
+          ? "dashboardClusterCard aggregate"
+          : "dashboardClusterCard"
+      }
       onClick={() =>
         onOpen({
           description: cluster.query ?? "All VPS clients in the current fleet.",
@@ -998,38 +1381,84 @@ function ClusterButton({
       }
       type="button"
     >
-      <span className="dashboardMetricIcon"><Tags size={18} /></span>
+      <span className="dashboardMetricIcon">
+        <Tags size={18} />
+      </span>
       <span>
         <small>{cluster.kind}</small>
         <strong>{cluster.label}</strong>
         <em>{clusterSummary(cluster)}</em>
       </span>
-      <b title={`${cluster.warnings} open alerts`}>
-        {cluster.warnings} alerts
-      </b>
+      <b title={`${cluster.warnings} open alerts`}>{cluster.warnings} alerts</b>
     </button>
   );
 }
 
-function clusterDrawerMetrics(cluster: DashboardLabelClusterRecord): DrawerMetric[] {
+function clusterDrawerMetrics(
+  cluster: DashboardLabelClusterRecord,
+): DrawerMetric[] {
   if (cluster.kind === "date") {
     return [
       { label: "Telemetry samples", value: String(cluster.total) },
       { label: "Completed backups", tone: "ok", value: String(cluster.online) },
-      { label: "Pending backups", tone: cluster.stale ? "info" : "neutral", value: String(cluster.stale) },
-      { label: "Alerts", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
-      { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-      { label: "Avg network rate", tone: "info", value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+      {
+        label: "Pending backups",
+        tone: cluster.stale ? "info" : "neutral",
+        value: String(cluster.stale),
+      },
+      {
+        label: "Alerts",
+        tone: cluster.warnings ? "warning" : "ok",
+        value: String(cluster.warnings),
+      },
+      {
+        label: "Running jobs",
+        tone: cluster.running_jobs ? "info" : "neutral",
+        value: String(cluster.running_jobs),
+      },
+      {
+        label: "Avg network rate",
+        tone: "info",
+        value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps),
+      },
     ];
   }
   return [
-    { label: "Online", tone: "ok", value: `${cluster.online}/${cluster.total}` },
-    { label: "Offline", tone: cluster.offline ? "neutral" : "ok", value: String(cluster.offline) },
-    { label: "Access revoked", tone: cluster.revoked ? "warning" : "ok", value: String(cluster.revoked) },
-    { label: "Stale", tone: cluster.stale ? "warning" : "ok", value: String(cluster.stale) },
-    { label: "Warnings", tone: cluster.warnings ? "warning" : "ok", value: String(cluster.warnings) },
-    { label: "Running jobs", tone: cluster.running_jobs ? "info" : "neutral", value: String(cluster.running_jobs) },
-    { label: "Avg network rate", tone: "info", value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps) },
+    {
+      label: "Online",
+      tone: "ok",
+      value: `${cluster.online}/${cluster.total}`,
+    },
+    {
+      label: "Offline",
+      tone: cluster.offline ? "neutral" : "ok",
+      value: String(cluster.offline),
+    },
+    {
+      label: "Access revoked",
+      tone: cluster.revoked ? "warning" : "ok",
+      value: String(cluster.revoked),
+    },
+    {
+      label: "Stale",
+      tone: cluster.stale ? "warning" : "ok",
+      value: String(cluster.stale),
+    },
+    {
+      label: "Warnings",
+      tone: cluster.warnings ? "warning" : "ok",
+      value: String(cluster.warnings),
+    },
+    {
+      label: "Running jobs",
+      tone: cluster.running_jobs ? "info" : "neutral",
+      value: String(cluster.running_jobs),
+    },
+    {
+      label: "Avg network rate",
+      tone: "info",
+      value: formatByteRateFromBitsPerSecond(cluster.rx_bps + cluster.tx_bps),
+    },
   ];
 }
 
@@ -1040,14 +1469,28 @@ function clusterSummary(cluster: DashboardLabelClusterRecord): string {
   return `${cluster.online}/${cluster.total} online · ${cluster.offline} offline · ${cluster.stale} stale · ${cluster.revoked} access revoked`;
 }
 
-function maxNetworkPoint(points: Array<{ rx_bps: number; tx_bps: number }>): number {
-  return Math.max(1, ...points.map((point) => Math.max(point.rx_bps, point.tx_bps, point.rx_bps + point.tx_bps)));
+function maxNetworkPoint(
+  points: Array<{ rx_bps: number; tx_bps: number }>,
+): number {
+  return Math.max(
+    1,
+    ...points.map((point) =>
+      Math.max(point.rx_bps, point.tx_bps, point.rx_bps + point.tx_bps),
+    ),
+  );
 }
 
-function resourceChartData(series: DashboardResourceSeriesRecord[]): { lines: TimeSeriesChartLine[]; times: string[] } {
-  const times = sortedUniqueTimes(series.flatMap((entry) => entry.points.map((point) => point.bucket_start)));
+function resourceChartData(series: DashboardResourceSeriesRecord[]): {
+  lines: TimeSeriesChartLine[];
+  times: string[];
+} {
+  const times = sortedUniqueTimes(
+    series.flatMap((entry) => entry.points.map((point) => point.bucket_start)),
+  );
   const lines = series.map((entry, index) => {
-    const points = new Map(entry.points.map((point) => [point.bucket_start, point.value]));
+    const points = new Map(
+      entry.points.map((point) => [point.bucket_start, point.value]),
+    );
     return {
       color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
@@ -1061,9 +1504,16 @@ function trafficChartData(
   series: DashboardTrafficSeriesRecord[],
   sort: DashboardTrafficSort,
 ): { lines: TimeSeriesChartLine[]; times: string[] } {
-  const times = sortedUniqueTimes(series.flatMap((entry) => entry.points.map((point) => point.bucket_start)));
+  const times = sortedUniqueTimes(
+    series.flatMap((entry) => entry.points.map((point) => point.bucket_start)),
+  );
   const lines = series.map((entry, index) => {
-    const points = new Map(entry.points.map((point) => [point.bucket_start, trafficPointValue(point, sort)]));
+    const points = new Map(
+      entry.points.map((point) => [
+        point.bucket_start,
+        trafficPointValue(point, sort),
+      ]),
+    );
     return {
       color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
@@ -1074,7 +1524,9 @@ function trafficChartData(
 }
 
 function sortedUniqueTimes(times: string[]): string[] {
-  return Array.from(new Set(times)).sort((left, right) => Date.parse(left) - Date.parse(right));
+  return Array.from(new Set(times)).sort(
+    (left, right) => Date.parse(left) - Date.parse(right),
+  );
 }
 
 function onlinePercent(online: number, total: number): number {
@@ -1082,14 +1534,21 @@ function onlinePercent(online: number, total: number): number {
 }
 
 function formatLoad(value: number | null | undefined): string {
-  return value === null || value === undefined ? "No data" : value.toFixed(value >= 10 ? 0 : 2);
+  return value === null || value === undefined
+    ? "No data"
+    : value.toFixed(value >= 10 ? 0 : 2);
 }
 
 function formatPercent(value: number | null | undefined): string {
-  return value === null || value === undefined ? "No data" : `${Math.round(value * 100)}%`;
+  return value === null || value === undefined
+    ? "No data"
+    : `${Math.round(value * 100)}%`;
 }
 
-function formatResourceValue(metric: DashboardResourceMetric, value: number | null | undefined): string {
+function formatResourceValue(
+  metric: DashboardResourceMetric,
+  value: number | null | undefined,
+): string {
   if (value === null || value === undefined) {
     return "No data";
   }
@@ -1111,14 +1570,20 @@ function resourcePeakLabel(metric: DashboardResourceMetric): string {
   return metric === "disk_free" ? "Lowest" : "Peak";
 }
 
-function sortTrafficClients(clients: DashboardTrafficClientRecord[], sort: DashboardTrafficSort): DashboardTrafficClientRecord[] {
+function sortTrafficClients(
+  clients: DashboardTrafficClientRecord[],
+  sort: DashboardTrafficSort,
+): DashboardTrafficClientRecord[] {
   return [...clients].sort((left, right) => {
     const valueDiff = trafficValue(right, sort) - trafficValue(left, sort);
     return valueDiff || left.label.localeCompare(right.label);
   });
 }
 
-function trafficValue(client: DashboardTrafficClientRecord, sort: DashboardTrafficSort): number {
+function trafficValue(
+  client: DashboardTrafficClientRecord,
+  sort: DashboardTrafficSort,
+): number {
   if (sort === "rx") {
     return client.rx_bytes;
   }
@@ -1142,7 +1607,9 @@ function trafficPointValue(
 }
 
 function trafficSortLabel(sort: DashboardTrafficSort): string {
-  return trafficSortOptions.find((option) => option.value === sort)?.label ?? "Total";
+  return (
+    trafficSortOptions.find((option) => option.value === sort)?.label ?? "Total"
+  );
 }
 
 function formatBytes(value: number): string {
@@ -1162,10 +1629,16 @@ function formatBytes(value: number): string {
 }
 
 function groupLabel(value: DashboardPreferences["groupBy"]): string {
-  return fallbackGroupOptions().find((option) => option.value === value)?.label ?? value;
+  return (
+    fallbackGroupOptions().find((option) => option.value === value)?.label ??
+    value
+  );
 }
 
-function groupDescription(value: DashboardPreferences["groupBy"], scopeLabel: string): string {
+function groupDescription(
+  value: DashboardPreferences["groupBy"],
+  scopeLabel: string,
+): string {
   switch (value) {
     case "labels":
       return `${scopeLabel} grouped by provider, country, and custom tags, followed by full aggregation.`;
@@ -1186,17 +1659,51 @@ function groupDescription(value: DashboardPreferences["groupBy"], scopeLabel: st
 
 function fallbackGroupOptions() {
   return [
-    { description: "Provider, country, and custom tags together", label: "Labels", value: "labels" },
-    { description: "Non-provider and non-country tags", label: "Custom tags", value: "tags" },
-    { description: "country:* tag distribution", label: "Countries", value: "countries" },
-    { description: "provider:* tag distribution", label: "Providers", value: "providers" },
-    { description: "One group per VPS in the selected scope", label: "VPS clients", value: "clients" },
-    { description: "Online, offline, and stale client states", label: "Status", value: "status" },
-    { description: "Time buckets across the selected range", label: "Date buckets", value: "date" },
-  ] satisfies Array<{ description: string; label: string; value: DashboardPreferences["groupBy"] }>;
+    {
+      description: "Provider, country, and custom tags together",
+      label: "Labels",
+      value: "labels",
+    },
+    {
+      description: "Non-provider and non-country tags",
+      label: "Custom tags",
+      value: "tags",
+    },
+    {
+      description: "country:* tag distribution",
+      label: "Countries",
+      value: "countries",
+    },
+    {
+      description: "provider:* tag distribution",
+      label: "Providers",
+      value: "providers",
+    },
+    {
+      description: "One group per VPS in the selected scope",
+      label: "VPS clients",
+      value: "clients",
+    },
+    {
+      description: "Online, offline, and stale client states",
+      label: "Status",
+      value: "status",
+    },
+    {
+      description: "Time buckets across the selected range",
+      label: "Date buckets",
+      value: "date",
+    },
+  ] satisfies Array<{
+    description: string;
+    label: string;
+    value: DashboardPreferences["groupBy"];
+  }>;
 }
 
-function severityTone(value: string): "critical" | "warning" | "ok" | "info" | "neutral" {
+function severityTone(
+  value: string,
+): "critical" | "warning" | "ok" | "info" | "neutral" {
   if (value === "critical") {
     return "critical";
   }

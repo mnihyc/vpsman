@@ -763,19 +763,15 @@ export function PublicMonitoringSharePage({
               aria-label="Shared fleet current totals"
             >
               {fleetSnapshot.locations ? (
-                <span title="Distinct locations disclosed by this Shared view">
-                  <small title="Distinct shared VPS locations">Locations</small>
-                  <strong
-                    title={`${fleetSnapshot.locations.values.length} distinct shared locations`}
-                  >
-                    {fleetSnapshot.locations.values.length}
-                  </strong>
-                  <em
-                    title={formatPublicLocationSummary(
-                      fleetSnapshot.locations.values,
-                      fleetSnapshot.locations.unspecified,
-                    )}
-                  >
+                <span
+                  title={`Locations disclosed by this Shared view: ${fleetSnapshot.locations.values.length}. ${formatPublicLocationSummary(
+                    fleetSnapshot.locations.values,
+                    fleetSnapshot.locations.unspecified,
+                  )}`}
+                >
+                  <small>Locations</small>
+                  <strong>{fleetSnapshot.locations.values.length}</strong>
+                  <em>
                     {formatPublicLocationSummary(
                       fleetSnapshot.locations.values,
                       fleetSnapshot.locations.unspecified,
@@ -784,18 +780,14 @@ export function PublicMonitoringSharePage({
                 </span>
               ) : null}
               {fleetSnapshot.network ? (
-                <span title="Aggregate current receive and transmit rates from fresh shared interface evidence">
-                  <small title="Aggregate shared receive and transmit rates">
-                    Realtime speed
-                  </small>
-                  <strong
-                    title={`Receive rate ${formatOptionalRate(fleetSnapshot.network.rxBps)}`}
-                  >
+                <span
+                  title={`Aggregate current rates from fresh shared interface evidence. RX ${formatOptionalRate(fleetSnapshot.network.rxBps)}; TX ${formatOptionalRate(fleetSnapshot.network.txBps)}; ${fleetSnapshot.network.freshCount} VPSs have fresh evidence`}
+                >
+                  <small>Realtime speed</small>
+                  <strong>
                     ↓ {formatOptionalRate(fleetSnapshot.network.rxBps)}
                   </strong>
-                  <em
-                    title={`Transmit rate ${formatOptionalRate(fleetSnapshot.network.txBps)}; ${fleetSnapshot.network.freshCount} VPSs have fresh evidence`}
-                  >
+                  <em>
                     ↑ {formatOptionalRate(fleetSnapshot.network.txBps)} ·{" "}
                     {fleetSnapshot.network.freshCount} fresh
                     {cardsComplete ? "" : " · partial"}
@@ -803,28 +795,20 @@ export function PublicMonitoringSharePage({
                 </span>
               ) : null}
               {fleetSnapshot.traffic ? (
-                <span title="Aggregate configured traffic accounting, including reset cycles and no-reset totals">
-                  <small title="Aggregate shared traffic accounting">
-                    Traffic
-                  </small>
-                  <strong
-                    title={
-                      fleetSnapshot.traffic.count > 0
-                        ? `${formatBytes(fleetSnapshot.traffic.bytes)} across ${fleetSnapshot.traffic.count} configured VPSs`
-                        : "No configured traffic accounting; - is shown"
-                    }
-                  >
+                <span
+                  title={
+                    fleetSnapshot.traffic.count > 0
+                      ? `Aggregate configured traffic accounting across reset cycles and accumulated totals: ${formatBytes(fleetSnapshot.traffic.bytes)} across ${fleetSnapshot.traffic.count} VPSs`
+                      : "No VPS in this Shared view has configured traffic accounting"
+                  }
+                >
+                  <small>Traffic</small>
+                  <strong>
                     {fleetSnapshot.traffic.count > 0
                       ? formatBytes(fleetSnapshot.traffic.bytes)
                       : "-"}
                   </strong>
-                  <em
-                    title={
-                      fleetSnapshot.traffic.count > 0
-                        ? `${fleetSnapshot.traffic.count} VPSs have configured traffic accounting`
-                        : "No VPS in this view has configured traffic accounting"
-                    }
-                  >
+                  <em>
                     {fleetSnapshot.traffic.count > 0
                       ? `${fleetSnapshot.traffic.count} configured${cardsComplete ? "" : " · partial"}`
                       : "No configured accounting"}
@@ -1021,7 +1005,7 @@ function PublicMonitoringCardView({
         ) : null}
         <span>{card.display_name || "Unnamed VPS"}</span>
       </strong>
-      <small title={freshnessLabel}>{freshnessLabel}</small>
+      <small>{freshnessLabel}</small>
     </>
   );
   return (
@@ -1040,7 +1024,7 @@ function PublicMonitoringCardView({
         <div
           className="publicMonitoringIdentityContext"
           aria-label="Shared identity context"
-          title={identitySummary || "Identity context unavailable"}
+          title="Provider, region, country, and tags disclosed by this Shared view"
         >
           {identitySummary || "Identity context unavailable"}
         </div>
@@ -1188,6 +1172,7 @@ function PublicMonitoringCardView({
 
       {visibility?.ping ? (
         <PublicPingRow
+          density={density}
           history={card.primary_ping_history ?? []}
           ping={card.primary_ping}
         />
@@ -1197,7 +1182,7 @@ function PublicMonitoringCardView({
         <div
           className="publicMonitoringWarnings"
           role="status"
-          title={warnings.join("; ")}
+          title="Derived from current shared resource, network, traffic, and Ping evidence"
         >
           <strong>Needs attention</strong>
           <span>{warnings.join(" · ")}</span>
@@ -1283,11 +1268,11 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
         title="Traffic is shared, but current traffic configuration and accounting evidence are unavailable"
       >
         <div className="publicMonitoringTrafficHeading">
-          <small className="vpsMonitorRowHeading" title="Traffic unavailable">
+          <small className="vpsMonitorRowHeading">
             <strong>Traffic</strong>
           </small>
           <span className="vpsMonitorRowEvidence">
-            <strong title="Current traffic evidence is unavailable">-</strong>
+            <strong>-</strong>
           </span>
         </div>
         <span
@@ -1312,19 +1297,23 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
   const cycleSummary = traffic.configured ? trafficCycleSummary(traffic) : "";
   const resetContext = traffic.configured
     ? traffic.reset_day === -1
-      ? "No reset"
+      ? null
       : traffic.cycle_end
         ? formatTrafficReset(traffic.cycle_end)
         : null
     : null;
   const trafficDetail = traffic.configured
-    ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day === -1 ? " · accumulated total; no reset" : traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
+    ? `RX ${formatOptionalBytes(traffic.diagnostic_rx_bytes)} · TX ${formatOptionalBytes(traffic.diagnostic_tx_bytes)}${problem ? ` · ${problem}` : traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`
     : "Authoritative traffic accounting is not configured for this VPS.";
+  const trafficRowTitle =
+    quotaState === "unlimited"
+      ? `${trafficDetail} Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from an empty track.`
+      : trafficDetail;
   return (
     <div
       aria-label={`Traffic: ${traffic.configured ? "configured" : "unconfigured"}`}
       className={`publicMonitoringTraffic ${safeClassToken(traffic.state)}${traffic.configured ? "" : " unconfigured"}${resetContext ? " contextual" : ""}${problem ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " overQuota" : ""}`}
-      title={trafficDetail}
+      title={trafficRowTitle}
     >
       <div className="publicMonitoringTrafficHeading">
         <small
@@ -1348,11 +1337,9 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
             </span>
           ) : null}
           {cycleSummary ? (
-            <strong title={cycleSummary}>{cycleSummary}</strong>
+            <strong>{cycleSummary}</strong>
           ) : (
-            <strong title="Traffic accounting is unconfigured">
-              Unconfigured
-            </strong>
+            <strong>Unconfigured</strong>
           )}
         </span>
       </div>
@@ -1365,7 +1352,6 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
           aria-valuetext={formatPercent(quotaPercent)}
           className="vpsMonitorMetricTrack"
           role="meter"
-          title={`${formatPercent(quotaPercent)} of the limiting traffic quota has been used`}
         >
           <span style={{ width: `${fill}%` }} />
         </span>
@@ -1373,7 +1359,6 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
         <span
           aria-label="Traffic quota is unlimited"
           className="vpsMonitorMetricTrack unlimitedTrafficTrack"
-          title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from an empty track"
         >
           <span />
         </span>
@@ -1394,15 +1379,17 @@ function PublicTrafficRow({ traffic }: { traffic?: PublicTrafficMetric }) {
           <span />
         </span>
       )}
-      <small title={trafficDetail}>{trafficDetail}</small>
+      <small>{trafficDetail}</small>
     </div>
   );
 }
 
 function PublicPingRow({
+  density,
   history,
   ping,
 }: {
+  density: Density;
   history: PublicPingPoint[];
   ping?: PublicPingMetric;
 }) {
@@ -1411,18 +1398,14 @@ function PublicPingRow({
       <div
         className="publicMonitoringPing missing"
         aria-label="Primary Ping unconfigured"
-        title="No primary Ping target is configured for this VPS"
+        title="No primary Ping target is configured for this VPS; configure and share one to show latency, loss, and history."
       >
         <Radio aria-hidden="true" size={14} />
-        <small
-          className="vpsMonitorRowHeading"
-          title="Primary Ping target is unconfigured"
-        >
+        <small className="vpsMonitorRowHeading">
           <strong>Ping</strong> · Unconfigured
         </small>
-        <span title="Configure and share a primary Ping target to show latency and loss">
-          -
-        </span>
+        <span>-</span>
+        <MiniSparkline label="Primary Ping history" tone="ping" values={[]} />
       </div>
     );
   }
@@ -1449,19 +1432,16 @@ function PublicPingRow({
       title={`${ping.target_name}: ${presentedDetail}; ${statusDetail}`}
     >
       <Radio aria-hidden="true" size={14} />
-      <small
-        className="vpsMonitorRowHeading"
-        title={`Ping · ${ping.target_name}`}
-      >
+      <small className="vpsMonitorRowHeading">
         <strong>Ping</strong> · {ping.target_name}
       </small>
-      <span title={presentedDetail}>{presentedDetail}</span>
+      <span>{presentedDetail}</span>
       <MiniSparkline
         label={`${ping.target_name} latency history`}
         tone="ping"
         values={historyValues(history, (point) => point.latency_avg_ms)}
       />
-      <small title={statusDetail}>{statusDetail}</small>
+      {density === "comfortable" ? <small>{statusDetail}</small> : null}
     </div>
   );
 }
@@ -2221,7 +2201,7 @@ function PublicMonitoringKpiStrip({
     trafficTotal >= 0
   ) {
     facts.push({
-      detail: `${trafficCycleSummary(traffic)}${traffic.reset_day === -1 ? " · accumulated total; no reset" : traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`,
+      detail: `${trafficCycleSummary(traffic)}${traffic.reset_day !== -1 && traffic.cycle_end ? ` · resets ${formatCompactTime(traffic.cycle_end)}` : ""}`,
       kind: "traffic",
       label: "Traffic",
       value: formatBytes(trafficTotal),
@@ -2266,11 +2246,7 @@ function PublicMonitoringKpiStrip({
       className="publicMonitoringKpiStrip"
     >
       {facts.map((fact) => (
-        <span
-          data-fact-kind={fact.kind}
-          key={fact.label}
-          title={`${fact.value}. ${fact.detail}`}
-        >
+        <span data-fact-kind={fact.kind} key={fact.label} title={fact.detail}>
           <small className="publicMonitoringKpiLabel">
             <b>{fact.label}</b>
             {fact.context ? <span> · {fact.context}</span> : null}
@@ -2417,13 +2393,10 @@ function PublicMonitoringInformationGroups({
           key={group.label}
           title={`${group.label} information shared for this VPS`}
         >
-          <h3 title={`${group.label} information`}>{group.label}</h3>
+          <h3>{group.label}</h3>
           <dl>
             {group.facts.map((fact) => (
-              <div
-                key={fact.label}
-                title={`${fact.label}: ${fact.value}. ${fact.title ?? "Shared current evidence"}`}
-              >
+              <div key={fact.label} title={fact.title}>
                 <dt>{fact.label}</dt>
                 <dd>{fact.value}</dd>
               </div>
@@ -2459,7 +2432,7 @@ function PublicTrafficCycle({
         : "-";
   const cycleWindow =
     traffic.reset_day === -1
-      ? "Accumulated total · No reset"
+      ? "Accumulated total"
       : traffic.cycle_start && traffic.cycle_end
         ? `${formatCompactTime(traffic.cycle_start)} – ${formatCompactTime(traffic.cycle_end)}`
         : "Current accounting cycle";
@@ -2474,10 +2447,10 @@ function PublicTrafficCycle({
     >
       <div className="dashboardWidgetHeader publicMonitoringTrafficCycleHeader">
         <div>
-          <strong title={cycleWindow}>
-            {traffic.reset_day === -1 ? "Traffic · No reset" : "Traffic cycle"}
+          <strong>
+            {traffic.reset_day === -1 ? "Traffic" : "Traffic cycle"}
           </strong>
-          <small title={cycleWindow}>{cycleWindow}</small>
+          <small>{cycleWindow}</small>
         </div>
         {traffic.port_speed ? (
           <span
@@ -2517,6 +2490,7 @@ function PublicTrafficCycle({
       {quotaPercent !== null ? (
         <div
           className={`vpsMonitoringTrafficProgress${overQuota ? " overLimit" : ""}`}
+          title={`${formatPercent(quotaPercent)} of the limiting traffic quota has been used`}
         >
           <span
             aria-label={`${formatPercent(quotaPercent)} of the limiting traffic quota used`}
@@ -2526,7 +2500,6 @@ function PublicTrafficCycle({
             aria-valuetext={formatPercent(quotaPercent)}
             className="vpsMonitoringTrafficTrack"
             role="progressbar"
-            title={`${formatPercent(quotaPercent)} of the limiting traffic quota has been used`}
           >
             <i style={{ width: `${fill}%` }} />
           </span>
@@ -2534,11 +2507,13 @@ function PublicTrafficCycle({
           <small>{overQuota ? "Quota exceeded" : "Limit used"}</small>
         </div>
       ) : quotaState === "unlimited" ? (
-        <div className="vpsMonitoringTrafficProgress unlimited">
+        <div
+          className="vpsMonitoringTrafficProgress unlimited"
+          title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from empty progress"
+        >
           <span
             aria-label="Traffic quota is unlimited"
             className="vpsMonitoringTrafficTrack unlimitedTrafficTrack"
-            title="Traffic is accumulated without a finite quota; blue blocks distinguish unlimited accounting from empty progress"
           >
             <i />
           </span>
@@ -2626,17 +2601,7 @@ function PublicChart({
     >
       <div className="dashboardWidgetHeader">
         <h3 title={`${label} retained shared monitoring chart`}>{label}</h3>
-        {summary ? (
-          <small
-            title={
-              summary === "-"
-                ? emptyLabel
-                : `${label} current summary: ${summary}`
-            }
-          >
-            {summary}
-          </small>
-        ) : null}
+        {summary ? <small>{summary}</small> : null}
       </div>
       <TimeSeriesChart
         allowNoVisibleSeries={allowNoVisibleSeries}
@@ -2658,10 +2623,9 @@ function SummaryFact({ label, value }: { label: string; value: number }) {
   return (
     <span
       className={`publicMonitoringSummaryFact ${label.toLocaleLowerCase()}`}
-      title={`${label}: ${value}`}
     >
-      <strong title={`${value} ${label.toLocaleLowerCase()}`}>{value}</strong>
-      <small title={label}>{label}</small>
+      <strong>{value}</strong>
+      <small>{label}</small>
     </span>
   );
 }

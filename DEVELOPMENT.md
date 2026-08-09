@@ -45,6 +45,24 @@ Every update must keep these boundaries explicit:
   update every memory and PostgreSQL producer together.
 - Daily operator paths remain concise. A correctness fix must not add routine
   prompts, concepts, or controls that operators do not need.
+- Preserve every accepted visible interaction, density rule, layout boundary,
+  label, state treatment, and evidence path unless the requested change names
+  it. Before changing UI behavior, compare the affected surface with the
+  current implementation and verify the requested delta in both relevant
+  densities and real-data states; never use an adjacent cleanup to implicitly
+  redesign or revert a working behavior.
+- A tooltip is supplemental hover/focus information. It must add meaning that
+  is not already visible: a definition, accepted format, disabled/empty reason,
+  or the full exact API evidence hidden by truncation. Never echo an already
+  visible field value, invent generic `Activate`/`Current value`/`field`/`column`
+  prose, or replace authorized evidence with frontend redaction boilerplate.
+  API access control is the authorization boundary. Locally entered password,
+  TOTP, vault, salt, signing-secret, and private-key values are the sole input
+  hygiene exception: their tooltip may explain purpose but must never contain
+  the entered secret. An exact value may be used as a tooltip only when the
+  rendered value is visibly omitted or ellipsized; otherwise attach the
+  supplemental tooltip to the semantic header, parent, or container rather
+  than echoing the value on its own element.
 - Keep provider integrations behind explicit product-owned adapter definitions
   or configuration presets. Do not add
   third-party services, bots, scanners, dependencies, CI jobs, or release

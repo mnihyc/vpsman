@@ -187,7 +187,10 @@ export function RunbooksPanel({
         <div className="runbookSummary" aria-label="Runbook catalog summary">
           <RunbookMetric
             label="Runbooks"
-            value={formatLowerBoundCount(runbooks.length, commandTemplatesTruncated)}
+            value={formatLowerBoundCount(
+              runbooks.length,
+              commandTemplatesTruncated,
+            )}
             detail={
               commandTemplatesTruncated
                 ? "template-backed operations in loaded templates"
@@ -196,7 +199,10 @@ export function RunbooksPanel({
           />
           <RunbookMetric
             label="Ready"
-            value={formatLowerBoundCount(dispatchableCount, commandTemplatesTruncated)}
+            value={formatLowerBoundCount(
+              dispatchableCount,
+              commandTemplatesTruncated,
+            )}
             detail={
               commandTemplatesTruncated
                 ? "dispatchable operations in loaded templates"
@@ -205,7 +211,10 @@ export function RunbooksPanel({
           />
           <RunbookMetric
             label="Custom"
-            value={formatLowerBoundCount(customCount, commandTemplatesTruncated)}
+            value={formatLowerBoundCount(
+              customCount,
+              commandTemplatesTruncated,
+            )}
             detail={
               commandTemplatesTruncated
                 ? "operator-defined entries in loaded templates"
@@ -276,8 +285,7 @@ export function RunbooksPanel({
                   <div>
                     <h3>{runbook.template.name}</h3>
                     <span
-                      data-value-tooltip-skip="true"
-                      title="Reviewed runbook operation summary; command content is excluded from tooltips"
+                      title={`Operation evidence:\n${JSON.stringify(runbook.template.operation, null, 2)}`}
                     >
                       {runbook.operationSummary}
                     </span>
@@ -476,7 +484,7 @@ function RunbookMetric({
   value: string;
 }) {
   return (
-    <div className="runbookMetric" title={`${label}: ${value}. ${detail}`}>
+    <div className="runbookMetric">
       <small>{label}</small>
       <strong>{value}</strong>
       <span>{detail}</span>

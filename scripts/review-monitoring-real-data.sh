@@ -9,7 +9,7 @@ SEED_SQL="$ROOT_DIR/scripts/fixtures/review-monitoring-real-data-seed.sql"
 REFRESH_SQL="$ROOT_DIR/scripts/fixtures/review-monitoring-real-data-refresh.sql"
 PLAYWRIGHT_SPEC="$ROOT_DIR/frontend/tests/monitoring-real-data-review.spec.ts"
 STATE_VERSION="1"
-EXPECTED_CLIENT_COUNT=7
+EXPECTED_CLIENT_COUNT=8
 
 run_id=""
 container_name=""
@@ -317,6 +317,10 @@ verify_stack() {
     .total == $expected
     and (.items | length) == $expected
     and any(.items[]; .client.display_name == "Total quota · Monthly")
+    and any(.items[];
+      .client.display_name == "Traffic quota exceeded"
+      and .traffic.cycle_percent == 120
+      and .traffic.total_bytes == 12000000000)
     and any(.items[]; .client.display_name == "RX quota · Annual")
     and any(.items[]; .traffic.reset_day == -1)
     and any(.items[]; .network_rate_expected == false)
@@ -337,6 +341,10 @@ verify_stack() {
     .total == $expected
     and (.cards | length) == $expected
     and .share.visibility.billing == true
+    and any(.cards[];
+      .display_name == "Traffic quota exceeded"
+      and .traffic.cycle_percent == 120
+      and .traffic.total_bytes == 12000000000)
     and any(.cards[]; .billing.period_code? == "y" and .billing.cycle? == "15-06")
     and any(.cards[]; .traffic.reset_day? == -1)
     and any(.cards[]; .traffic.configured == false)
@@ -389,9 +397,9 @@ verify_stack() {
     .clients == $expected
     and .resource_points >= ($expected * 16)
     and .raw_samples >= ($expected * 16)
-    and .network_rate_points >= (5 * 16)
-    and .traffic_samples >= 13
-    and .ping_points >= (2 * 16)
+    and .network_rate_points >= (6 * 16)
+    and .traffic_samples >= 16
+    and .ping_points >= (3 * 16)
     and .shares == 2
   ' <<<"$db_counts_json" >/dev/null || die "database fixture count check failed"
 }
@@ -461,6 +469,7 @@ write_manifest() {
       },
       fixture_scenarios: [
         "total quota",
+        "traffic quota exceeded with yellow progress",
         "RX-only quota with diagnostic TX",
         "TX-only unlimited quota with diagnostic RX",
         "unconfigured traffic",

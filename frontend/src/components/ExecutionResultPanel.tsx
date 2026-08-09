@@ -95,26 +95,45 @@ export function ExecutionResultPanel({
           </div>
         )}
       </div>
-      <div className="executionResultStats" title="Execution outcome counts for the reviewed operation.">
-        <span title={hasMultipleJobs ? `${jobCount} target-specific jobs.` : `Job ${progress.jobId}.`}>
+      <div
+        className="executionResultStats"
+        title="Execution outcome counts for the reviewed operation."
+      >
+        <span
+          title={
+            hasMultipleJobs
+              ? `${jobCount} target-specific jobs.`
+              : `Job ${progress.jobId}.`
+          }
+        >
           <strong>
             {hasMultipleJobs ? jobCount : shortId(progress.jobId)}
           </strong>
           {hasMultipleJobs ? "jobs" : "job"}
         </span>
-        <span title={`${progress.terminal} of ${progress.total} target actions reached a terminal state.`}>
-          <strong>{progress.terminal}/{progress.total}</strong>
+        <span
+          title={`${progress.terminal} of ${progress.total} target actions reached a terminal state.`}
+        >
+          <strong>
+            {progress.terminal}/{progress.total}
+          </strong>
           {hasMultipleJobs ? "target actions" : "targets"}
         </span>
-        <span title={`${progress.in_progress} target actions remain in progress.`}>
+        <span
+          title={`${progress.in_progress} target actions remain in progress.`}
+        >
           <strong>{progress.in_progress}</strong>
           in progress
         </span>
-        <span title={`${progress.retrieved} target actions have reported retained evidence.`}>
+        <span
+          title={`${progress.retrieved} target actions have reported retained evidence.`}
+        >
           <strong>{progress.retrieved}</strong>
           reported
         </span>
-        <span title={`${progress.completed} target actions completed successfully.`}>
+        <span
+          title={`${progress.completed} target actions completed successfully.`}
+        >
           <strong>{progress.completed}</strong>
           completed
         </span>
@@ -122,11 +141,15 @@ export function ExecutionResultPanel({
           <strong>{progress.skipped}</strong>
           skipped
         </span>
-        <span title={`${progress.unavailable} targets were unavailable before execution.`}>
+        <span
+          title={`${progress.unavailable} targets were unavailable before execution.`}
+        >
           <strong>{progress.unavailable}</strong>
           pre-run unavailable
         </span>
-        <span title={`${progress.unsuccessful} target actions were unsuccessful.`}>
+        <span
+          title={`${progress.unsuccessful} target actions were unsuccessful.`}
+        >
           <strong>{progress.unsuccessful}</strong>
           unsuccessful
         </span>
@@ -138,7 +161,11 @@ export function ExecutionResultPanel({
   );
 }
 
-export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] }) {
+export function FailureReasonGroups({
+  reasons,
+}: {
+  reasons: BulkFailureReason[];
+}) {
   const groups = groupFailureReasons(reasons);
   if (groups.length === 0) {
     return null;
@@ -151,13 +178,7 @@ export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] 
         return (
           <div className="executionFailureReason" key={group.reason}>
             <strong>{group.targets.length} unsuccessful</strong>
-            <span
-              data-tooltip-sensitive="true"
-              data-value-tooltip-skip="true"
-              title="The failure reason is shown here; exact external error content is excluded from tooltips."
-            >
-              {group.reason}
-            </span>
+            <span>{group.reason}</span>
             <small title={group.targets.join("\n")}>
               {visibleTargets.join(", ")}
               {more > 0 ? `, +${more} more` : ""}
@@ -169,7 +190,9 @@ export function FailureReasonGroups({ reasons }: { reasons: BulkFailureReason[] 
   );
 }
 
-function groupFailureReasons(reasons: BulkFailureReason[]): Array<{ reason: string; targets: string[] }> {
+function groupFailureReasons(
+  reasons: BulkFailureReason[],
+): Array<{ reason: string; targets: string[] }> {
   const groups = new Map<string, string[]>();
   for (const failure of reasons) {
     const reason =
@@ -182,5 +205,9 @@ function groupFailureReasons(reasons: BulkFailureReason[]): Array<{ reason: stri
   }
   return Array.from(groups.entries())
     .map(([reason, targets]) => ({ reason, targets }))
-    .sort((left, right) => right.targets.length - left.targets.length || left.reason.localeCompare(right.reason));
+    .sort(
+      (left, right) =>
+        right.targets.length - left.targets.length ||
+        left.reason.localeCompare(right.reason),
+    );
 }

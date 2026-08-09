@@ -55,6 +55,13 @@ FROM (
             '203.0.113.11'
         ),
         (
+            'review-traffic-exceeded',
+            'Traffic quota exceeded',
+            18,
+            '88888888-8888-4888-8888-888888888888',
+            '203.0.113.18'
+        ),
+        (
             'review-rx-yearly',
             'RX quota · Annual',
             12,
@@ -140,6 +147,8 @@ FROM (
     VALUES
         ('review-total-monthly', 'country:SG'),
         ('review-total-monthly', 'region:sin'),
+        ('review-traffic-exceeded', 'country:JP'),
+        ('review-traffic-exceeded', 'region:nrt'),
         ('review-rx-yearly', 'country:DE'),
         ('review-rx-yearly', 'region:fra'),
         ('review-tx-unlimited', 'country:US'),
@@ -210,6 +219,30 @@ VALUES
         'billing.cycle',
         '14',
         '{"display":"14"}'::jsonb,
+        'review_fixture',
+        now()
+    ),
+    (
+        'review-traffic-exceeded',
+        'traffic.reset_day',
+        '1',
+        '{"day":1}'::jsonb,
+        'review_fixture',
+        now()
+    ),
+    (
+        'review-traffic-exceeded',
+        'traffic.selectors',
+        'eth0',
+        '{"selectors":[{"source":"host","interface":"eth0","direction":"total","canonical":"eth0"}]}'::jsonb,
+        'review_fixture',
+        now()
+    ),
+    (
+        'review-traffic-exceeded',
+        'traffic.quota.total',
+        '10 GB',
+        '{"bytes":10000000000}'::jsonb,
         'review_fixture',
         now()
     ),
@@ -415,6 +448,12 @@ VALUES
     (
         '20000000-0000-4000-8000-000000000001',
         'review-total-monthly',
+        true,
+        now()
+    ),
+    (
+        '20000000-0000-4000-8000-000000000001',
+        'review-traffic-exceeded',
         true,
         now()
     ),

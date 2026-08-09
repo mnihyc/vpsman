@@ -147,16 +147,15 @@ export function AuthPanel({
             <span className="authHeaderSubtitle">
               {authHeaderSubtitle(mode)}
             </span>
-            <div className="authModeSummary" id="auth-mode-summary">
-              <span
-                className="authStatePill"
-                title={`Authentication state: ${authModeSummaryTitle(mode)}.`}
-              >
+            <div
+              className="authModeSummary"
+              id="auth-mode-summary"
+              title="Whether this control plane needs first-run operator bootstrap or accepts existing operator credentials."
+            >
+              <span className="authStatePill">
                 {authModeSummaryTitle(mode)}
               </span>
-              <span title={authModeSummaryDetail(mode)}>
-                {authModeSummaryDetail(mode)}
-              </span>
+              <span>{authModeSummaryDetail(mode)}</span>
             </div>
           </div>
         </div>

@@ -36,13 +36,8 @@ export function ConsoleDetailPanel({
   }, []);
 
   return (
-    <section
-      className="consoleDetailPanel"
-      ref={panelRef}
-      tabIndex={-1}
-      title="Expanded record details and contextual actions."
-    >
-      <div className="consoleDetailPanelHeader" title="Detail title and context.">
+    <section className="consoleDetailPanel" ref={panelRef} tabIndex={-1}>
+      <div className="consoleDetailPanelHeader">
         <span>
           <strong>{title}</strong>
           {description && <small>{description}</small>}

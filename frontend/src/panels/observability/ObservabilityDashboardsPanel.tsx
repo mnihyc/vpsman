@@ -983,17 +983,10 @@ function GroupDashboard({
         <div
           className="groupDashboardTile"
           key={`${cluster.kind}:${cluster.label}`}
-          title={`${cluster.kind || "group"} ${cluster.label || "Unnamed group"}: ${cluster.total} retained records`}
         >
-          <span title={`Grouping dimension: ${cluster.kind || "group"}`}>
-            {cluster.kind || "group"}
-          </span>
-          <strong title={`Group value: ${cluster.label || "Unnamed group"}`}>
-            {cluster.label || "Unnamed group"}
-          </strong>
-          <small
-            title={`${cluster.total} retained records; ${cluster.online} online or completed; ${cluster.stale} stale or other backup records`}
-          >
+          <span>{cluster.kind || "group"}</span>
+          <strong>{cluster.label || "Unnamed group"}</strong>
+          <small>
             {cluster.kind === "date" ? (
               <>
                 {countPhrase(cluster.total, "network sample")} ·{" "}
@@ -1418,29 +1411,25 @@ function MetricTile({
   value: string;
 }) {
   return (
-    <div className="metricCard" title={`${label}: ${value}. ${detail}`}>
-      <span title={label}>{label}</span>
-      <strong title={`${label}: ${value}`}>{value}</strong>
-      <small title={detail}>{detail}</small>
+    <div className="metricCard">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{detail}</small>
     </div>
   );
 }
 
 function WidgetHeader({ detail, title }: { detail: string; title: string }) {
   return (
-    <div className="dashboardWidgetHeader" title={`${title}: ${detail}`}>
-      <strong title={title}>{title}</strong>
-      <small title={detail}>{detail}</small>
+    <div className="dashboardWidgetHeader">
+      <strong>{title}</strong>
+      <small>{detail}</small>
     </div>
   );
 }
 
 function WidgetEmpty({ label }: { label: string }) {
-  return (
-    <div className="dashboardWidgetEmpty" title={label}>
-      {label}
-    </div>
-  );
+  return <div className="dashboardWidgetEmpty">{label}</div>;
 }
 
 function presetIcon(id: DashboardPresetId) {

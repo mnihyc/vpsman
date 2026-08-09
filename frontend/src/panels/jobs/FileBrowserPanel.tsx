@@ -24,7 +24,14 @@ import { javascript } from "@codemirror/lang-javascript";
 import { markdown } from "@codemirror/lang-markdown";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { DEFAULT_MAX_JOB_TIMEOUT_SECS } from "../../jobMaxTimeout";
@@ -50,7 +57,10 @@ import {
   type FileBrowserEntry,
 } from "../../fileBrowser";
 import { base64ToBytes, parseFileMode } from "../../fileTransfer";
-import { buildPrivilegeForJobOperation, type PrivilegeMaterial } from "../../privilege";
+import {
+  buildPrivilegeForJobOperation,
+  type PrivilegeMaterial,
+} from "../../privilege";
 import { selectorExpressionForClientIds } from "../../searchExpression";
 import { targetRecordTerminal } from "../../bulkJobProgress";
 import { scrollIntoViewWithMotion } from "../../motion";
@@ -66,7 +76,12 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
 } from "../../types";
-import { formatTime, formatVpsName, runPanelAction, shortId } from "../../utils";
+import {
+  formatTime,
+  formatVpsName,
+  runPanelAction,
+  shortId,
+} from "../../utils";
 
 const STORAGE_KEY = "vpsman.fileBrowser.state";
 const DEFAULT_MODE = "0644";
@@ -90,7 +105,13 @@ type PendingConfirmation = {
   title: string;
 };
 
-type FileCommandPopover = "chmod" | "chown" | "create" | "rename" | "upload" | null;
+type FileCommandPopover =
+  | "chmod"
+  | "chown"
+  | "create"
+  | "rename"
+  | "upload"
+  | null;
 type BrowserClipboard = { intent: "copy" | "move"; path: string } | null;
 type DirectoryEvidence = {
   limit: number;
@@ -141,15 +162,29 @@ export function FileBrowserPanel({
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const saved = readBrowserState();
-  const [targetClientId, setTargetClientId] = useState(saved.targetClientId || agents[0]?.id || "");
+  const [targetClientId, setTargetClientId] = useState(
+    saved.targetClientId || agents[0]?.id || "",
+  );
   const [pathInput, setPathInput] = useState(saved.path || "/");
-  const [currentPath, setCurrentPath] = useState(safeNormalizeAbsolutePath(saved.path || "/"));
+  const [currentPath, setCurrentPath] = useState(
+    safeNormalizeAbsolutePath(saved.path || "/"),
+  );
   const [showHidden, setShowHidden] = useState(saved.showHidden);
-  const [entriesByPath, setEntriesByPath] = useState<Record<string, FileBrowserEntry[]>>({});
-  const [directoryEvidenceByPath, setDirectoryEvidenceByPath] = useState<Record<string, DirectoryEvidence>>({});
-  const [metadataByPath, setMetadataByPath] = useState<Record<string, FileBrowserEntry>>({});
-  const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({ "/": true });
-  const [selectedPath, setSelectedPath] = useState(safeNormalizeAbsolutePath(saved.path || "/"));
+  const [entriesByPath, setEntriesByPath] = useState<
+    Record<string, FileBrowserEntry[]>
+  >({});
+  const [directoryEvidenceByPath, setDirectoryEvidenceByPath] = useState<
+    Record<string, DirectoryEvidence>
+  >({});
+  const [metadataByPath, setMetadataByPath] = useState<
+    Record<string, FileBrowserEntry>
+  >({});
+  const [expandedPaths, setExpandedPaths] = useState<Record<string, boolean>>({
+    "/": true,
+  });
+  const [selectedPath, setSelectedPath] = useState(
+    safeNormalizeAbsolutePath(saved.path || "/"),
+  );
   const [editorPath, setEditorPath] = useState<string | null>(null);
   const [editorContent, setEditorContent] = useState("");
   const [editorSavedContent, setEditorSavedContent] = useState("");
@@ -159,12 +194,16 @@ export function FileBrowserPanel({
   const [editorDiscardPromptOpen, setEditorDiscardPromptOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
-  const [staleDirectoryPath, setStaleDirectoryPath] = useState<string | null>(null);
+  const [staleDirectoryPath, setStaleDirectoryPath] = useState<string | null>(
+    null,
+  );
   const [pending, setPending] = useState(false);
   const [lastPayloadHash, setLastPayloadHash] = useState<string | null>(null);
-  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] =
+    useState<PendingConfirmation | null>(null);
   const [activeCommand, setActiveCommand] = useState<FileCommandPopover>(null);
-  const [browserClipboard, setBrowserClipboard] = useState<BrowserClipboard>(null);
+  const [browserClipboard, setBrowserClipboard] =
+    useState<BrowserClipboard>(null);
   const [newName, setNewName] = useState("");
   const [createType, setCreateType] = useState<"directory" | "file">("file");
   const [createMode, setCreateMode] = useState(DEFAULT_MODE);
@@ -176,13 +215,16 @@ export function FileBrowserPanel({
   const [chownOwner, setChownOwner] = useState("");
   const [chownGroup, setChownGroup] = useState("");
   const [uploadMode, setUploadMode] = useState(DEFAULT_MODE);
-  const [uploadExistingPolicy, setUploadExistingPolicy] = useState<FileExistingPolicy>("skip");
-  const [uploadOwnershipPolicy, setUploadOwnershipPolicy] = useState<FileOwnershipPolicy>("fail");
+  const [uploadExistingPolicy, setUploadExistingPolicy] =
+    useState<FileExistingPolicy>("skip");
+  const [uploadOwnershipPolicy, setUploadOwnershipPolicy] =
+    useState<FileOwnershipPolicy>("fail");
   const [uploadOwner, setUploadOwner] = useState("");
   const [uploadGroup, setUploadGroup] = useState("");
   const [uploadDestination, setUploadDestination] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [transferHandoffHint, setTransferHandoffHint] = useState<TransferHandoffHint | null>(null);
+  const [transferHandoffHint, setTransferHandoffHint] =
+    useState<TransferHandoffHint | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const editorPaneRef = useRef<HTMLElement | null>(null);
   const commandPopoverRef = useRef<HTMLElement | null>(null);
@@ -192,9 +234,12 @@ export function FileBrowserPanel({
     [agents, targetClientId],
   );
   const selectedEntry = metadataByPath[selectedPath];
-  const locationCommandDisabled = !selectedEntry || pending || !privilegeMaterial;
-  const selectedDownloadDisabled = !selectedEntry || pending || !privilegeMaterial;
-  const selectedPathCommandDisabled = !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
+  const locationCommandDisabled =
+    !selectedEntry || pending || !privilegeMaterial;
+  const selectedDownloadDisabled =
+    !selectedEntry || pending || !privilegeMaterial;
+  const selectedPathCommandDisabled =
+    !selectedEntry || selectedPath === "/" || pending || !privilegeMaterial;
   const locationCommandDisabledReason = pending
     ? "A remote file operation is already running."
     : !privilegeMaterial
@@ -237,16 +282,23 @@ export function FileBrowserPanel({
       transfer.status === "completed" &&
       transfer.handoff_available,
   ).length;
-  const staleMessage = staleDirectoryPath ? `Directory ${staleDirectoryPath} changed; refresh to update listing` : null;
+  const staleMessage = staleDirectoryPath
+    ? `Directory ${staleDirectoryPath} changed; refresh to update listing`
+    : null;
   const typedPathChanged = pathInput.trim() !== currentPath;
-  const pathRefreshTarget = typedPathChanged ? pathInput : staleDirectoryPath ?? pathInput;
-  const targetSummary = selectedAgent ? `target ${targetNameId(selectedAgent)}` : "No target VPS";
+  const pathRefreshTarget = typedPathChanged
+    ? pathInput
+    : (staleDirectoryPath ?? pathInput);
+  const targetSummary = selectedAgent
+    ? `target ${targetNameId(selectedAgent)}`
+    : "No target VPS";
   const summary = privilegeMaterial
     ? currentDirectoryEvidence
       ? `${targetSummary} · ${currentEntries.length} ${currentEntries.length === 1 ? "entry" : "entries"} loaded`
       : `${targetSummary} · directory not loaded`
     : `${targetSummary} · unlock to read remote files`;
-  const fileBrowserFeedbackMessage = actionError ?? actionMessage ?? staleMessage;
+  const fileBrowserFeedbackMessage =
+    actionError ?? actionMessage ?? staleMessage;
   const fileBrowserFeedbackTone = actionError
     ? "danger"
     : pending
@@ -254,8 +306,13 @@ export function FileBrowserPanel({
       : staleMessage
         ? "warning"
         : "success";
-  const selectedDownloadLabel = downloadActionLabel(selectedEntry, selectedPath);
-  const editorStateText = editorPath ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}` : "Select a text file to edit";
+  const selectedDownloadLabel = downloadActionLabel(
+    selectedEntry,
+    selectedPath,
+  );
+  const editorStateText = editorPath
+    ? `${editorContent.length} chars${editorDirty ? " · unsaved" : ""}`
+    : "Select a text file to edit";
   const editorStatusText = editorStateText;
   const fileEditorEmptyState = !selectedAgent
     ? {
@@ -329,7 +386,13 @@ export function FileBrowserPanel({
           : `VPS ${removedClientId} is no longer available. Cached file evidence was cleared.`
         : null,
     );
-  }, [agents, currentPath, editorDirty, fleetEvidenceAvailable, targetClientId]);
+  }, [
+    agents,
+    currentPath,
+    editorDirty,
+    fleetEvidenceAvailable,
+    targetClientId,
+  ]);
 
   useEffect(() => {
     writeBrowserState({ path: currentPath, targetClientId, showHidden });
@@ -452,7 +515,10 @@ export function FileBrowserPanel({
     setTransferHandoffHint(null);
   }
 
-  async function runFileJob(operation: JobOperation, options: { expectedType?: string } = {}) {
+  async function runFileJob(
+    operation: JobOperation,
+    options: { expectedType?: string } = {},
+  ) {
     if (!selectedAgent) {
       throw new Error("Choose a target VPS before running a file operation.");
     }
@@ -518,10 +584,20 @@ export function FileBrowserPanel({
     });
   }
 
-  async function fetchDirectory(path: string, announce = true, preserveSelection = false) {
+  async function fetchDirectory(
+    path: string,
+    announce = true,
+    preserveSelection = false,
+  ) {
     const normalized = normalizeAbsolutePath(path);
     const { outputs } = await runFileJob(
-      { type: "file_list_dir", path: normalized, offset: 0, limit: FILE_BROWSER_LIST_LIMIT, show_hidden: showHidden },
+      {
+        type: "file_list_dir",
+        path: normalized,
+        offset: 0,
+        limit: FILE_BROWSER_LIST_LIMIT,
+        show_hidden: showHidden,
+      },
       { expectedType: "file_list_dir" },
     );
     const status = parseFileListStatus(outputs);
@@ -532,7 +608,8 @@ export function FileBrowserPanel({
     setPathInput(status.path);
     setSelectedPath((current) =>
       preserveSelection &&
-      (current === status.path || status.entries.some((entry) => entry.path === current))
+      (current === status.path ||
+        status.entries.some((entry) => entry.path === current))
         ? current
         : status.path,
     );
@@ -589,7 +666,9 @@ export function FileBrowserPanel({
       }
       return next;
     });
-    setStaleDirectoryPath((current) => (current === status.path ? null : current));
+    setStaleDirectoryPath((current) =>
+      current === status.path ? null : current,
+    );
     if (status.status && status.status !== "completed") {
       throw new Error(fileListStatusError(status));
     }
@@ -597,7 +676,9 @@ export function FileBrowserPanel({
       const totalText = status.truncated_by_scan_cap
         ? `${status.visible_entries_scanned ?? status.scanned_entries ?? status.entries.length}+ scanned`
         : String(status.total_entries ?? status.entries.length);
-      setActionMessage(`Loaded ${status.entries.length}/${totalText} entries from ${status.path}`);
+      setActionMessage(
+        `Loaded ${status.entries.length}/${totalText} entries from ${status.path}`,
+      );
     }
   }
 
@@ -634,7 +715,10 @@ export function FileBrowserPanel({
       setEditorConflictDetected(false);
       setEditorDiscardPromptOpen(false);
       setSelectedPath(status.path);
-      setMetadataByPath((current) => ({ ...current, [status.path]: status.metadata }));
+      setMetadataByPath((current) => ({
+        ...current,
+        [status.path]: status.metadata,
+      }));
       setActionMessage(`Opened ${status.path}`);
     });
   }
@@ -666,7 +750,10 @@ export function FileBrowserPanel({
     }
   }
 
-  async function executeConfirmedOperation(operation: JobOperation, refreshPath?: string) {
+  async function executeConfirmedOperation(
+    operation: JobOperation,
+    refreshPath?: string,
+  ) {
     setPending(true);
     setActionError(null);
     try {
@@ -720,7 +807,9 @@ export function FileBrowserPanel({
           if (!entries) {
             return current;
           }
-          const nextEntries = entries.some((candidate) => candidate.path === entry.path)
+          const nextEntries = entries.some(
+            (candidate) => candidate.path === entry.path,
+          )
             ? entries.map((candidate) =>
                 candidate.path === entry.path ? entry : candidate,
               )
@@ -772,7 +861,8 @@ export function FileBrowserPanel({
       ) {
         setEditorConflictDetected(true);
       }
-      const affectedDirectory = refreshPath ?? parentPath(operationTargetPath(operation));
+      const affectedDirectory =
+        refreshPath ?? parentPath(operationTargetPath(operation));
       let refreshWarning: string | null = null;
       setStaleDirectoryPath(affectedDirectory);
       try {
@@ -803,7 +893,9 @@ export function FileBrowserPanel({
       title,
       detail,
       refreshPath,
-      selectorExpression: selectedAgent ? selectorExpressionForClientIds([selectedAgent.id]) : "",
+      selectorExpression: selectedAgent
+        ? selectorExpressionForClientIds([selectedAgent.id])
+        : "",
       target: selectedAgent,
     });
   }
@@ -847,7 +939,10 @@ export function FileBrowserPanel({
         setActionError("Enter a new file name");
         return;
       }
-      const destination = joinPath(selectedEntry?.is_dir ? selectedPath : currentPath, name);
+      const destination = joinPath(
+        selectedEntry?.is_dir ? selectedPath : currentPath,
+        name,
+      );
       const operation = await buildWriteTextOperation({
         content: createContent,
         create: true,
@@ -855,7 +950,12 @@ export function FileBrowserPanel({
         path: destination,
         policy: "fail",
       });
-      confirmOperation(operation, "Write text", `Write text to ${destination} on ${selectedAgent ? targetNameId(selectedAgent) : "selected VPS"}.`, parentPath(destination));
+      confirmOperation(
+        operation,
+        "Write text",
+        `Write text to ${destination} on ${selectedAgent ? targetNameId(selectedAgent) : "selected VPS"}.`,
+        parentPath(destination),
+      );
     } catch (error) {
       reportActionError(error);
     }
@@ -868,9 +968,18 @@ export function FileBrowserPanel({
         setActionError("Enter a new folder name");
         return;
       }
-      const destination = joinPath(selectedEntry?.is_dir ? selectedPath : currentPath, name);
+      const destination = joinPath(
+        selectedEntry?.is_dir ? selectedPath : currentPath,
+        name,
+      );
       confirmOperation(
-        { type: "file_mkdir", path: destination, mode: parseMode(createMode || DEFAULT_DIR_MODE), recursive, policy: "fail" },
+        {
+          type: "file_mkdir",
+          path: destination,
+          mode: parseMode(createMode || DEFAULT_DIR_MODE),
+          recursive,
+          policy: "fail",
+        },
         "Create folder",
         `Create ${destination}${recursive ? " and missing parents" : ""}.`,
         parentPath(destination),
@@ -894,9 +1003,21 @@ export function FileBrowserPanel({
         setActionError("Choose a file or folder to rename");
         return;
       }
-      const newPath = normalizeAbsolutePath(renamePathValue || joinPath(parentPath(selectedPath), `${fileName(selectedPath)}-renamed`));
+      const newPath = normalizeAbsolutePath(
+        renamePathValue ||
+          joinPath(
+            parentPath(selectedPath),
+            `${fileName(selectedPath)}-renamed`,
+          ),
+      );
       confirmOperation(
-        { type: "file_rename", path: selectedPath, new_path: newPath, overwrite: false, policy: "fail" },
+        {
+          type: "file_rename",
+          path: selectedPath,
+          new_path: newPath,
+          overwrite: false,
+          policy: "fail",
+        },
         "Rename path",
         `Rename ${selectedPath} to ${newPath}.`,
         parentPath(selectedPath),
@@ -966,7 +1087,9 @@ export function FileBrowserPanel({
 
   function copyForPaste(path: string, intent: "copy" | "move") {
     setBrowserClipboard({ path, intent });
-    setActionMessage(`${intent === "copy" ? "Copied" : "Marked to move"} ${path}`);
+    setActionMessage(
+      `${intent === "copy" ? "Copied" : "Marked to move"} ${path}`,
+    );
   }
 
   function pasteInto(path: string) {
@@ -974,8 +1097,12 @@ export function FileBrowserPanel({
       setActionError("Copy or move a file/folder first");
       return;
     }
-    const destinationFolder = metadataByPath[path]?.is_dir || path === "/" ? path : parentPath(path);
-    const destination = joinPath(destinationFolder, fileName(browserClipboard.path));
+    const destinationFolder =
+      metadataByPath[path]?.is_dir || path === "/" ? path : parentPath(path);
+    const destination = joinPath(
+      destinationFolder,
+      fileName(browserClipboard.path),
+    );
     const operation: JobOperation =
       browserClipboard.intent === "copy"
         ? {
@@ -987,7 +1114,13 @@ export function FileBrowserPanel({
             overwrite: false,
             policy: "fail",
           }
-        : { type: "file_rename", path: browserClipboard.path, new_path: destination, overwrite: false, policy: "fail" };
+        : {
+            type: "file_rename",
+            path: browserClipboard.path,
+            new_path: destination,
+            overwrite: false,
+            policy: "fail",
+          };
     confirmOperation(
       operation,
       browserClipboard.intent === "copy" ? "Paste copy" : "Paste move",
@@ -1011,12 +1144,17 @@ export function FileBrowserPanel({
             : destinationInput
           : joinPath(folder, file.name),
       );
-      const operation = await buildUploadOperation(file, destination, uploadMode, {
-        existingPolicy: uploadExistingPolicy,
-        owner: uploadOwner.trim() || null,
-        group: uploadGroup.trim() || null,
-        ownershipPolicy: uploadOwnershipPolicy,
-      });
+      const operation = await buildUploadOperation(
+        file,
+        destination,
+        uploadMode,
+        {
+          existingPolicy: uploadExistingPolicy,
+          owner: uploadOwner.trim() || null,
+          group: uploadGroup.trim() || null,
+          ownershipPolicy: uploadOwnershipPolicy,
+        },
+      );
       confirmOperation(
         operation,
         "Upload file",
@@ -1032,7 +1170,8 @@ export function FileBrowserPanel({
     if (!path) {
       return;
     }
-    const entry = metadataByPath[path] ?? (path === "/" ? rootEntry() : undefined);
+    const entry =
+      metadataByPath[path] ?? (path === "/" ? rootEntry() : undefined);
     await runPanelAction(setPending, setActionError, async () => {
       const operation: JobOperation = {
         type: "file_download",
@@ -1066,7 +1205,10 @@ export function FileBrowserPanel({
     setSelectedPath(entry.path);
     if (entry.is_dir) {
       if (entriesByPath[entry.path]) {
-        setExpandedPaths((current) => ({ ...current, [entry.path]: !current[entry.path] }));
+        setExpandedPaths((current) => ({
+          ...current,
+          [entry.path]: !current[entry.path],
+        }));
         setCurrentPath(entry.path);
         setPathInput(entry.path);
         return;
@@ -1140,7 +1282,12 @@ export function FileBrowserPanel({
                     ? "Choose one VPS before browsing remote files."
                     : undefined
           }
-          disabled={pending || currentPath === "/" || !privilegeMaterial || !selectedAgent}
+          disabled={
+            pending ||
+            currentPath === "/" ||
+            !privilegeMaterial ||
+            !selectedAgent
+          }
           onClick={() => void loadDirectory(parentPath(currentPath))}
           title="Parent directory"
           type="button"
@@ -1185,13 +1332,19 @@ export function FileBrowserPanel({
           value={pathInput}
         />
         <label className="inlineCheck tightCheck">
-          <input checked={showHidden} onChange={(event) => setShowHidden(event.target.checked)} type="checkbox" />
+          <input
+            checked={showHidden}
+            onChange={(event) => setShowHidden(event.target.checked)}
+            type="checkbox"
+          />
           <span>Hidden</span>
         </label>
         <button
           className="secondaryAction"
           data-tooltip-disabled-reason={
-            selectedPath ? undefined : "Select a file or directory before copying its path."
+            selectedPath
+              ? undefined
+              : "Select a file or directory before copying its path."
           }
           disabled={!selectedPath}
           onClick={copySelectedPath}
@@ -1204,7 +1357,9 @@ export function FileBrowserPanel({
           <button
             className="secondaryAction"
             data-tooltip-disabled-reason={
-              selectedPath ? undefined : "Select a file or directory before opening bulk file operations."
+              selectedPath
+                ? undefined
+                : "Select a file or directory before opening bulk file operations."
             }
             disabled={!selectedPath}
             onClick={() => onOpenMultiFiles(selectedPath)}
@@ -1216,10 +1371,15 @@ export function FileBrowserPanel({
         )}
       </div>
 
-      <div className="fileBrowserStateStrip" aria-label="File browser directory state">
+      <div
+        className="fileBrowserStateStrip"
+        aria-label="File browser directory state"
+      >
         <span>
           <strong>Target</strong>
-          <small title={selectedAgent?.id}>{selectedAgent ? targetNameId(selectedAgent) : "No VPS selected"}</small>
+          <small title={selectedAgent?.id}>
+            {selectedAgent ? targetNameId(selectedAgent) : "No VPS selected"}
+          </small>
         </span>
         <span>
           <strong>Path</strong>
@@ -1227,7 +1387,12 @@ export function FileBrowserPanel({
         </span>
         <span>
           <strong>Entries</strong>
-          <small>{directoryEntrySummary(currentEntries.length, currentDirectoryEvidence)}</small>
+          <small>
+            {directoryEntrySummary(
+              currentEntries.length,
+              currentDirectoryEvidence,
+            )}
+          </small>
         </span>
         <span>
           <strong>Scan</strong>
@@ -1343,11 +1508,20 @@ export function FileBrowserPanel({
                 <div className="fileEditorActions">
                   <label>
                     <span>Mode</span>
-                    <input onChange={(event) => setEditorMode(event.target.value)} value={editorMode} />
+                    <input
+                      onChange={(event) => setEditorMode(event.target.value)}
+                      value={editorMode}
+                    />
                   </label>
                   <button
-                    aria-label={editorConflictDetected ? "Review overwrite" : "Review save"}
-                    className={editorConflictDetected ? "dangerAction" : "primaryAction"}
+                    aria-label={
+                      editorConflictDetected
+                        ? "Review overwrite"
+                        : "Review save"
+                    }
+                    className={
+                      editorConflictDetected ? "dangerAction" : "primaryAction"
+                    }
                     data-tooltip-disabled-reason={
                       pending
                         ? "A remote file operation is already running."
@@ -1359,7 +1533,12 @@ export function FileBrowserPanel({
                               ? "The editor has no unsaved changes."
                               : undefined
                     }
-                    disabled={!editorDirty || pending || !privilegeMaterial || !selectedAgent}
+                    disabled={
+                      !editorDirty ||
+                      pending ||
+                      !privilegeMaterial ||
+                      !selectedAgent
+                    }
                     onClick={() => void saveEditor(editorConflictDetected)}
                     title={
                       editorConflictDetected
@@ -1404,11 +1583,18 @@ export function FileBrowserPanel({
           <div className="sectionSubheader">
             <div>
               <h3>Actions</h3>
-              <span title={selectedAgent?.id}>{selectedAgent ? targetNameId(selectedAgent) : "No VPS selected"}</span>
+              <span title={selectedAgent?.id}>
+                {selectedAgent
+                  ? targetNameId(selectedAgent)
+                  : "No VPS selected"}
+              </span>
             </div>
           </div>
           <div className="fileActionStack">
-            <div className="fileDetailsToolbar" aria-label="Selected file actions">
+            <div
+              className="fileDetailsToolbar"
+              aria-label="Selected file actions"
+            >
               <button
                 aria-label={selectedDownloadLabel}
                 className="fileActionButton"
@@ -1427,7 +1613,9 @@ export function FileBrowserPanel({
                 data-tooltip-disabled-reason={locationCommandDisabledReason}
                 disabled={locationCommandDisabled}
                 onClick={() => {
-                  const folder = selectedEntry?.is_dir ? selectedPath : currentPath;
+                  const folder = selectedEntry?.is_dir
+                    ? selectedPath
+                    : currentPath;
                   setUploadDestination(
                     uploadFile
                       ? joinPath(folder, uploadFile.name)
@@ -1443,23 +1631,63 @@ export function FileBrowserPanel({
                 <Upload size={15} />
                 <span>Upload</span>
               </button>
-              <button aria-label="Move or rename selected" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("rename")} title="Move or rename selected" type="button">
+              <button
+                aria-label="Move or rename selected"
+                className="fileActionButton"
+                data-tooltip-disabled-reason={selectedPathCommandDisabledReason}
+                disabled={selectedPathCommandDisabled}
+                onClick={() => setActiveCommand("rename")}
+                title="Move or rename selected"
+                type="button"
+              >
                 <Scissors size={15} />
                 <span>Move</span>
               </button>
-              <button aria-label="Create file or folder" className="fileActionButton" data-tooltip-disabled-reason={locationCommandDisabledReason} disabled={locationCommandDisabled} onClick={() => setActiveCommand("create")} title="Create file or folder" type="button">
+              <button
+                aria-label="Create file or folder"
+                className="fileActionButton"
+                data-tooltip-disabled-reason={locationCommandDisabledReason}
+                disabled={locationCommandDisabled}
+                onClick={() => setActiveCommand("create")}
+                title="Create file or folder"
+                type="button"
+              >
                 <FilePlus2 size={15} />
                 <span>Create</span>
               </button>
-              <button aria-label="Change selected permissions" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chmod")} title="Change selected permissions" type="button">
+              <button
+                aria-label="Change selected permissions"
+                className="fileActionButton"
+                data-tooltip-disabled-reason={selectedPathCommandDisabledReason}
+                disabled={selectedPathCommandDisabled}
+                onClick={() => setActiveCommand("chmod")}
+                title="Change selected permissions"
+                type="button"
+              >
                 <ShieldCheck size={15} />
                 <span>Permissions</span>
               </button>
-              <button aria-label="Change selected owner or group" className="fileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => setActiveCommand("chown")} title="Change selected owner or group" type="button">
+              <button
+                aria-label="Change selected owner or group"
+                className="fileActionButton"
+                data-tooltip-disabled-reason={selectedPathCommandDisabledReason}
+                disabled={selectedPathCommandDisabled}
+                onClick={() => setActiveCommand("chown")}
+                title="Change selected owner or group"
+                type="button"
+              >
                 <UserRound size={15} />
                 <span>Owner</span>
               </button>
-              <button aria-label="Review delete selected" className="fileActionButton dangerFileActionButton" data-tooltip-disabled-reason={selectedPathCommandDisabledReason} disabled={selectedPathCommandDisabled} onClick={() => deleteSelected()} title="Review delete selected" type="button">
+              <button
+                aria-label="Review delete selected"
+                className="fileActionButton dangerFileActionButton"
+                data-tooltip-disabled-reason={selectedPathCommandDisabledReason}
+                disabled={selectedPathCommandDisabled}
+                onClick={() => deleteSelected()}
+                title="Review delete selected"
+                type="button"
+              >
                 <Trash2 size={15} />
                 <span>Delete</span>
               </button>
@@ -1480,22 +1708,33 @@ export function FileBrowserPanel({
             </details>
 
             {(transferHandoffHint || relatedTransfers.length > 0) && (
-              <section className="fileTransferHandoffPanel" aria-label="File transfer output">
+              <section
+                className="fileTransferHandoffPanel"
+                aria-label="File transfer output"
+              >
                 <div>
                   <strong>Transfer output</strong>
                   <span title={transferReferencePath}>
-                    {transferHandoffText(transferHandoffHint, relatedTransfers.length, handoffReadyCount)}
+                    {transferHandoffText(
+                      transferHandoffHint,
+                      relatedTransfers.length,
+                      handoffReadyCount,
+                    )}
                   </span>
                 </div>
                 {transferHandoffHint && (
                   <dl>
                     <div>
                       <dt>Target</dt>
-                      <dd title={transferHandoffHint.targetClientId}>{transferHandoffHint.targetLabel}</dd>
+                      <dd title={transferHandoffHint.targetClientId}>
+                        {transferHandoffHint.targetLabel}
+                      </dd>
                     </div>
                     <div>
                       <dt>Path</dt>
-                      <dd title={transferHandoffHint.path}>{transferHandoffHint.path}</dd>
+                      <dd title={transferHandoffHint.path}>
+                        {transferHandoffHint.path}
+                      </dd>
                     </div>
                     <div>
                       <dt>Output</dt>
@@ -1517,11 +1756,25 @@ export function FileBrowserPanel({
             )}
 
             {activeCommand === "upload" && (
-              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
+              <section
+                className="fileCommandPopover"
+                ref={commandPopoverRef}
+                tabIndex={-1}
+              >
                 <div className="fileCommandHeader">
                   <strong>Upload file</strong>
-                  <span title={selectedEntry?.is_dir ? selectedPath : currentPath}>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
-                  <button aria-label="Close upload form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close upload form" type="button">
+                  <span
+                    title={selectedEntry?.is_dir ? selectedPath : currentPath}
+                  >
+                    {selectedEntry?.is_dir ? selectedPath : currentPath}
+                  </span>
+                  <button
+                    aria-label="Close upload form"
+                    className="iconButton"
+                    onClick={() => setActiveCommand(null)}
+                    title="Close upload form"
+                    type="button"
+                  >
                     <X size={14} />
                   </button>
                 </div>
@@ -1534,7 +1787,9 @@ export function FileBrowserPanel({
                       setUploadFile(file);
                       if (file) {
                         setUploadDestination((current) =>
-                          current.endsWith("/") ? `${current}${file.name}` : current,
+                          current.endsWith("/")
+                            ? `${current}${file.name}`
+                            : current,
                         );
                       }
                     }}
@@ -1545,7 +1800,9 @@ export function FileBrowserPanel({
                   <span>Destination</span>
                   <input
                     aria-label="Upload destination"
-                    onChange={(event) => setUploadDestination(event.target.value)}
+                    onChange={(event) =>
+                      setUploadDestination(event.target.value)
+                    }
                     title="Absolute destination path. A trailing slash appends the selected file name."
                     value={uploadDestination}
                   />
@@ -1553,11 +1810,22 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <label>
                     <span>Mode</span>
-                    <input aria-label="Upload mode" onChange={(event) => setUploadMode(event.target.value)} value={uploadMode} />
+                    <input
+                      aria-label="Upload mode"
+                      onChange={(event) => setUploadMode(event.target.value)}
+                      value={uploadMode}
+                    />
                   </label>
                   <label>
                     <span>Existing file</span>
-                    <select onChange={(event) => setUploadExistingPolicy(event.target.value as FileExistingPolicy)} value={uploadExistingPolicy}>
+                    <select
+                      onChange={(event) =>
+                        setUploadExistingPolicy(
+                          event.target.value as FileExistingPolicy,
+                        )
+                      }
+                      value={uploadExistingPolicy}
+                    >
                       <option value="skip">Skip</option>
                       <option value="replace">Replace</option>
                     </select>
@@ -1566,16 +1834,31 @@ export function FileBrowserPanel({
                 <div className="fileActionGrid">
                   <label>
                     <span>Owner</span>
-                    <input aria-label="Upload owner" onChange={(event) => setUploadOwner(event.target.value)} value={uploadOwner} />
+                    <input
+                      aria-label="Upload owner"
+                      onChange={(event) => setUploadOwner(event.target.value)}
+                      value={uploadOwner}
+                    />
                   </label>
                   <label>
                     <span>Group</span>
-                    <input aria-label="Upload group" onChange={(event) => setUploadGroup(event.target.value)} value={uploadGroup} />
+                    <input
+                      aria-label="Upload group"
+                      onChange={(event) => setUploadGroup(event.target.value)}
+                      value={uploadGroup}
+                    />
                   </label>
                 </div>
                 <label>
                   <span>Missing owner/group</span>
-                  <select onChange={(event) => setUploadOwnershipPolicy(event.target.value as FileOwnershipPolicy)} value={uploadOwnershipPolicy}>
+                  <select
+                    onChange={(event) =>
+                      setUploadOwnershipPolicy(
+                        event.target.value as FileOwnershipPolicy,
+                      )
+                    }
+                    value={uploadOwnershipPolicy}
+                  >
                     <option value="fail">Fail</option>
                     <option value="ignore">Ignore chown</option>
                   </select>
@@ -1604,11 +1887,25 @@ export function FileBrowserPanel({
             )}
 
             {activeCommand === "create" && (
-              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
+              <section
+                className="fileCommandPopover"
+                ref={commandPopoverRef}
+                tabIndex={-1}
+              >
                 <div className="fileCommandHeader">
                   <strong>Create file or folder</strong>
-                  <span title={selectedEntry?.is_dir ? selectedPath : currentPath}>{selectedEntry?.is_dir ? selectedPath : currentPath}</span>
-                  <button aria-label="Close create form" className="iconButton" onClick={resetCreateComposer} title="Close create form" type="button">
+                  <span
+                    title={selectedEntry?.is_dir ? selectedPath : currentPath}
+                  >
+                    {selectedEntry?.is_dir ? selectedPath : currentPath}
+                  </span>
+                  <button
+                    aria-label="Close create form"
+                    className="iconButton"
+                    onClick={resetCreateComposer}
+                    title="Close create form"
+                    type="button"
+                  >
                     <X size={14} />
                   </button>
                 </div>
@@ -1628,12 +1925,20 @@ export function FileBrowserPanel({
                     <span>Type</span>
                     <select
                       onChange={(event) => {
-                        const nextType = event.target.value as "directory" | "file";
+                        const nextType = event.target.value as
+                          | "directory"
+                          | "file";
                         setCreateType(nextType);
-                        if (nextType === "directory" && createMode === DEFAULT_MODE) {
+                        if (
+                          nextType === "directory" &&
+                          createMode === DEFAULT_MODE
+                        ) {
                           setCreateMode(DEFAULT_DIR_MODE);
                         }
-                        if (nextType === "file" && createMode === DEFAULT_DIR_MODE) {
+                        if (
+                          nextType === "file" &&
+                          createMode === DEFAULT_DIR_MODE
+                        ) {
                           setCreateMode(DEFAULT_MODE);
                         }
                         setActionError(null);
@@ -1646,21 +1951,33 @@ export function FileBrowserPanel({
                   </label>
                   <label>
                     <span>Mode</span>
-                    <input onChange={(event) => setCreateMode(event.target.value)} value={createMode} />
+                    <input
+                      onChange={(event) => setCreateMode(event.target.value)}
+                      value={createMode}
+                    />
                   </label>
                 </div>
                 {createType === "file" && (
-                  <label title="New file content is intentionally omitted from tooltips because it may contain sensitive values.">
+                  <label title="Text written to the new remote file.">
                     <span>Content</span>
-                    <textarea aria-label="New file text content" data-value-tooltip-skip="true" onChange={(event) => {
-                      setCreateContent(event.target.value);
-                      setActionError(null);
-                    }} rows={7} value={createContent} />
+                    <textarea
+                      aria-label="New file text content"
+                      onChange={(event) => {
+                        setCreateContent(event.target.value);
+                        setActionError(null);
+                      }}
+                      rows={7}
+                      value={createContent}
+                    />
                   </label>
                 )}
                 {createType === "directory" && (
                   <label className="inlineCheck actionCheck">
-                    <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
+                    <input
+                      checked={recursive}
+                      onChange={(event) => setRecursive(event.target.checked)}
+                      type="checkbox"
+                    />
                     <span>Create parents</span>
                   </label>
                 )}
@@ -1678,22 +1995,44 @@ export function FileBrowserPanel({
                     }
                     disabled={pending || !privilegeMaterial || !newName.trim()}
                     onClick={() => void submitCreate()}
-                    title={newName.trim() ? "Review the exact create operation" : "Enter a name first"}
+                    title={
+                      newName.trim()
+                        ? "Review the exact create operation"
+                        : "Enter a name first"
+                    }
                     type="button"
                   >
-                    {createType === "file" ? <FilePlus2 size={14} /> : <FolderPlus size={14} />}
-                    <span>{createType === "file" ? "Review file write" : "Review folder create"}</span>
+                    {createType === "file" ? (
+                      <FilePlus2 size={14} />
+                    ) : (
+                      <FolderPlus size={14} />
+                    )}
+                    <span>
+                      {createType === "file"
+                        ? "Review file write"
+                        : "Review folder create"}
+                    </span>
                   </button>
                 </div>
               </section>
             )}
 
             {activeCommand === "rename" && (
-              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
+              <section
+                className="fileCommandPopover"
+                ref={commandPopoverRef}
+                tabIndex={-1}
+              >
                 <div className="fileCommandHeader">
                   <strong>Move or rename</strong>
                   <span title={selectedPath}>{selectedPath}</span>
-                  <button aria-label="Close move form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close move form" type="button">
+                  <button
+                    aria-label="Close move form"
+                    className="iconButton"
+                    onClick={() => setActiveCommand(null)}
+                    title="Close move form"
+                    type="button"
+                  >
                     <X size={14} />
                   </button>
                 </div>
@@ -1701,7 +2040,14 @@ export function FileBrowserPanel({
                   <span>Destination</span>
                   <input
                     onChange={(event) => setRenamePathValue(event.target.value)}
-                    placeholder={selectedPath ? joinPath(parentPath(selectedPath), `${fileName(selectedPath)}-renamed`) : "/path"}
+                    placeholder={
+                      selectedPath
+                        ? joinPath(
+                            parentPath(selectedPath),
+                            `${fileName(selectedPath)}-renamed`,
+                          )
+                        : "/path"
+                    }
                     value={renamePathValue}
                   />
                 </label>
@@ -1729,20 +2075,37 @@ export function FileBrowserPanel({
             )}
 
             {activeCommand === "chmod" && (
-              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
+              <section
+                className="fileCommandPopover"
+                ref={commandPopoverRef}
+                tabIndex={-1}
+              >
                 <div className="fileCommandHeader">
                   <strong>Change permissions</strong>
                   <span title={selectedPath}>{selectedPath}</span>
-                  <button aria-label="Close permission form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close permission form" type="button">
+                  <button
+                    aria-label="Close permission form"
+                    className="iconButton"
+                    onClick={() => setActiveCommand(null)}
+                    title="Close permission form"
+                    type="button"
+                  >
                     <X size={14} />
                   </button>
                 </div>
                 <label>
                   <span>Mode</span>
-                  <input onChange={(event) => setChmodMode(event.target.value)} value={chmodMode} />
+                  <input
+                    onChange={(event) => setChmodMode(event.target.value)}
+                    value={chmodMode}
+                  />
                 </label>
                 <label className="inlineCheck actionCheck">
-                  <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
+                  <input
+                    checked={recursive}
+                    onChange={(event) => setRecursive(event.target.checked)}
+                    type="checkbox"
+                  />
                   <span>Recursive</span>
                 </label>
                 <div className="fileCommandActions">
@@ -1766,26 +2129,46 @@ export function FileBrowserPanel({
             )}
 
             {activeCommand === "chown" && (
-              <section className="fileCommandPopover" ref={commandPopoverRef} tabIndex={-1}>
+              <section
+                className="fileCommandPopover"
+                ref={commandPopoverRef}
+                tabIndex={-1}
+              >
                 <div className="fileCommandHeader">
                   <strong>Change owner/group</strong>
                   <span title={selectedPath}>{selectedPath}</span>
-                  <button aria-label="Close owner form" className="iconButton" onClick={() => setActiveCommand(null)} title="Close owner form" type="button">
+                  <button
+                    aria-label="Close owner form"
+                    className="iconButton"
+                    onClick={() => setActiveCommand(null)}
+                    title="Close owner form"
+                    type="button"
+                  >
                     <X size={14} />
                   </button>
                 </div>
                 <div className="fileActionGrid">
                   <label>
                     <span>Owner</span>
-                    <input onChange={(event) => setChownOwner(event.target.value)} value={chownOwner} />
+                    <input
+                      onChange={(event) => setChownOwner(event.target.value)}
+                      value={chownOwner}
+                    />
                   </label>
                   <label>
                     <span>Group</span>
-                    <input onChange={(event) => setChownGroup(event.target.value)} value={chownGroup} />
+                    <input
+                      onChange={(event) => setChownGroup(event.target.value)}
+                      value={chownGroup}
+                    />
                   </label>
                 </div>
                 <label className="inlineCheck actionCheck">
-                  <input checked={recursive} onChange={(event) => setRecursive(event.target.checked)} type="checkbox" />
+                  <input
+                    checked={recursive}
+                    onChange={(event) => setRecursive(event.target.checked)}
+                    type="checkbox"
+                  />
                   <span>Recursive</span>
                 </label>
                 <div className="fileCommandActions">
@@ -1811,7 +2194,9 @@ export function FileBrowserPanel({
               <dl className="fileMetadataList">
                 <div>
                   <dt>Name</dt>
-                  <dd title={selectedEntry.path}>{selectedEntry.name || fileName(selectedEntry.path)}</dd>
+                  <dd title={selectedEntry.path}>
+                    {selectedEntry.name || fileName(selectedEntry.path)}
+                  </dd>
                 </div>
                 <div>
                   <dt>Type</dt>
@@ -1831,7 +2216,11 @@ export function FileBrowserPanel({
                 </div>
                 <div>
                   <dt>Modified</dt>
-                  <dd>{formatTime(new Date(selectedEntry.mtime_unix * 1000).toISOString())}</dd>
+                  <dd>
+                    {formatTime(
+                      new Date(selectedEntry.mtime_unix * 1000).toISOString(),
+                    )}
+                  </dd>
                 </div>
               </dl>
             )}
@@ -1840,15 +2229,26 @@ export function FileBrowserPanel({
       </div>
 
       <ConfirmationPrompt
-        confirmLabel={pendingConfirmation ? fileConfirmationConfirmLabel(pendingConfirmation.operation) : "Run file operation"}
-        detail={pendingConfirmation ? fileConfirmationDetail(pendingConfirmation) : ""}
-        items={pendingConfirmation ? fileConfirmationItems(pendingConfirmation) : []}
+        confirmLabel={
+          pendingConfirmation
+            ? fileConfirmationConfirmLabel(pendingConfirmation.operation)
+            : "Run file operation"
+        }
+        detail={
+          pendingConfirmation ? fileConfirmationDetail(pendingConfirmation) : ""
+        }
+        items={
+          pendingConfirmation ? fileConfirmationItems(pendingConfirmation) : []
+        }
         onCancel={() => setPendingConfirmation(null)}
         onConfirm={() => {
           const confirmation = pendingConfirmation;
           setPendingConfirmation(null);
           if (confirmation) {
-            void executeConfirmedOperation(confirmation.operation, confirmation.refreshPath);
+            void executeConfirmedOperation(
+              confirmation.operation,
+              confirmation.refreshPath,
+            );
           }
         }}
         open={pendingConfirmation !== null}
@@ -1878,13 +2278,20 @@ export function FileBrowserPanel({
   );
 }
 
-function fileListStatusError(status: { path: string; reason?: string | null; status?: string }): string {
+function fileListStatusError(status: {
+  path: string;
+  reason?: string | null;
+  status?: string;
+}): string {
   const statusLabel = status.status?.replace(/_/g, " ") || "blocked";
   const reason = status.reason?.replace(/_/g, " ");
   return `${statusLabel.charAt(0).toUpperCase()}${statusLabel.slice(1)} loading ${status.path}${reason ? `: ${reason}` : ""}`;
 }
 
-function directoryEntrySummary(loadedCount: number, evidence: DirectoryEvidence | null): string {
+function directoryEntrySummary(
+  loadedCount: number,
+  evidence: DirectoryEvidence | null,
+): string {
   if (!evidence) {
     return "Not loaded";
   }
@@ -1898,7 +2305,9 @@ function directoryEntrySummary(loadedCount: number, evidence: DirectoryEvidence 
   return `${loadedCount} of ${total} entries`;
 }
 
-function sortFileBrowserEntries(entries: FileBrowserEntry[]): FileBrowserEntry[] {
+function sortFileBrowserEntries(
+  entries: FileBrowserEntry[],
+): FileBrowserEntry[] {
   return [...entries].sort(
     (left, right) =>
       Number(right.is_dir) - Number(left.is_dir) ||
@@ -1912,10 +2321,16 @@ function directoryScanSummary(evidence: DirectoryEvidence | null): string {
     return "No scan evidence";
   }
   if (evidence.status && evidence.status !== "completed") {
-    return evidence.reason?.replace(/_/g, " ") ?? evidence.status.replace(/_/g, " ");
+    return (
+      evidence.reason?.replace(/_/g, " ") ?? evidence.status.replace(/_/g, " ")
+    );
   }
   if (evidence.truncated_by_scan_cap) {
-    const scanned = evidence.visible_entries_scanned ?? evidence.scanned_entries ?? evidence.total_entries ?? 0;
+    const scanned =
+      evidence.visible_entries_scanned ??
+      evidence.scanned_entries ??
+      evidence.total_entries ??
+      0;
     const cap = evidence.scan_cap_entries ?? evidence.limit;
     return `${scanned} scanned, capped at ${cap}`;
   }
@@ -1940,12 +2355,20 @@ function transferHandoffText(
 }
 
 function transferHandoffOutputLabel(hint: TransferHandoffHint): string {
-  const kind = hint.sourceKind ? hint.sourceKind.replace(/_/g, " ") : "download";
-  const size = typeof hint.sizeBytes === "number" ? formatBytes(hint.sizeBytes) : "size not reported";
+  const kind = hint.sourceKind
+    ? hint.sourceKind.replace(/_/g, " ")
+    : "download";
+  const size =
+    typeof hint.sizeBytes === "number"
+      ? formatBytes(hint.sizeBytes)
+      : "size not reported";
   return `${kind}, ${size}`;
 }
 
-function downloadActionLabel(entry: FileBrowserEntry | undefined, path: string): string {
+function downloadActionLabel(
+  entry: FileBrowserEntry | undefined,
+  path: string,
+): string {
   if (path === "/" || entry?.is_dir) {
     return "Download folder as archive";
   }
@@ -1955,7 +2378,10 @@ function downloadActionLabel(entry: FileBrowserEntry | undefined, path: string):
   return "Download selected";
 }
 
-function downloadCompletionMessage(entry: FileBrowserEntry | undefined, path: string): string {
+function downloadCompletionMessage(
+  entry: FileBrowserEntry | undefined,
+  path: string,
+): string {
   if (path === "/" || entry?.is_dir) {
     return `Downloaded archive for ${path}`;
   }
@@ -1970,7 +2396,9 @@ function entryTypeLabel(entry: FileBrowserEntry): string {
     return "File";
   }
   if (entry.is_symlink) {
-    return entry.symlink_target ? `Symlink to ${entry.symlink_target}` : "Symlink";
+    return entry.symlink_target
+      ? `Symlink to ${entry.symlink_target}`
+      : "Symlink";
   }
   return entry.file_type.replace(/_/g, " ");
 }
@@ -2012,7 +2440,9 @@ function TreeNode({
   onSelectPath: (path: string) => void;
   path: string;
   selectedPath: string;
-  setExpandedPaths: (updater: (current: Record<string, boolean>) => Record<string, boolean>) => void;
+  setExpandedPaths: (
+    updater: (current: Record<string, boolean>) => Record<string, boolean>,
+  ) => void;
 }) {
   const entry = metadataByPath[path] ?? rootEntry();
   const children = entriesByPath[path] ?? [];
@@ -2023,7 +2453,9 @@ function TreeNode({
         <ContextMenu.Trigger asChild>
           <button
             aria-selected={selectedPath === path}
-            className={selectedPath === path ? "fileTreeRow selected" : "fileTreeRow"}
+            className={
+              selectedPath === path ? "fileTreeRow selected" : "fileTreeRow"
+            }
             onClick={() => onSelectPath(path)}
             onDoubleClick={() => onOpenEntry(entry)}
             style={{ paddingLeft: `${8 + depth * 16}px` }}
@@ -2034,11 +2466,17 @@ function TreeNode({
                 className="fileTreeExpander"
                 onClick={(event) => {
                   event.stopPropagation();
-                  if (!open && !Object.prototype.hasOwnProperty.call(entriesByPath, path)) {
+                  if (
+                    !open &&
+                    !Object.prototype.hasOwnProperty.call(entriesByPath, path)
+                  ) {
                     onOpenEntry(entry);
                     return;
                   }
-                  setExpandedPaths((current) => ({ ...current, [path]: !open }));
+                  setExpandedPaths((current) => ({
+                    ...current,
+                    [path]: !open,
+                  }));
                 }}
               >
                 {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
@@ -2048,7 +2486,9 @@ function TreeNode({
             )}
             {entry.is_dir ? <Folder size={15} /> : <File size={15} />}
             <span>{path === "/" ? "/" : fileName(path)}</span>
-            <small>{entry.is_dir ? "dir" : formatBytes(entry.size_bytes)}</small>
+            <small>
+              {entry.is_dir ? "dir" : formatBytes(entry.size_bytes)}
+            </small>
           </button>
         </ContextMenu.Trigger>
         <ContextMenu.Portal>
@@ -2057,34 +2497,64 @@ function TreeNode({
             collisionPadding={12}
             loop
           >
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onOpenEntry(entry)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onOpenEntry(entry)}
+            >
               {entry.is_dir ? "Open folder" : "Open editor"}
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onDownload(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onDownload(path)}
+            >
               {downloadActionLabel(entry, path)}
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => void navigator.clipboard?.writeText(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => void navigator.clipboard?.writeText(path)}
+            >
               Copy path
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "copy")}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onCopyIntent(path, "copy")}
+            >
               Copy file/folder
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onCopyIntent(path, "move")}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onCopyIntent(path, "move")}
+            >
               Move file/folder
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onPaste(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onPaste(path)}
+            >
               Review paste into this folder
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onRename(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onRename(path)}
+            >
               Rename
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onChmod(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onChmod(path)}
+            >
               Change permissions
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem" onSelect={() => onChown(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem"
+              onSelect={() => onChown(path)}
+            >
               Change owner/group
             </ContextMenu.Item>
-            <ContextMenu.Item className="contextMenuItem danger" onSelect={() => onDelete(path)}>
+            <ContextMenu.Item
+              className="contextMenuItem danger"
+              onSelect={() => onDelete(path)}
+            >
               Review delete path
             </ContextMenu.Item>
           </ContextMenu.Content>
@@ -2092,11 +2562,12 @@ function TreeNode({
       </ContextMenu.Root>
       {entry.is_dir && open && (
         <div role="group">
-          {children.length === 0 && Object.prototype.hasOwnProperty.call(entriesByPath, path) && (
-            <div className="fileTreeEmpty" role="status">
-              No entries under {path}
-            </div>
-          )}
+          {children.length === 0 &&
+            Object.prototype.hasOwnProperty.call(entriesByPath, path) && (
+              <div className="fileTreeEmpty" role="status">
+                No entries under {path}
+              </div>
+            )}
           {children.map((child) => (
             <TreeNode
               depth={depth + 1}
@@ -2236,10 +2707,7 @@ async function waitForOutputs(
       } catch {
         // Report the terminal target evidence below when output remains absent.
       }
-      if (
-        !expectedType ||
-        parseLatestFileStatus(last, expectedType)
-      ) {
+      if (!expectedType || parseLatestFileStatus(last, expectedType)) {
         return last;
       }
       throw new Error(
@@ -2273,10 +2741,15 @@ function concatenateStdout(outputs: JobOutputRecord[]): Uint8Array {
 }
 
 function arrayBufferForBytes(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
 }
 
-function reviewedTextContent(operation: Extract<JobOperation, { type: "file_write_text" }>): string {
+function reviewedTextContent(
+  operation: Extract<JobOperation, { type: "file_write_text" }>,
+): string {
   return new TextDecoder().decode(base64ToBytes(operation.content_base64));
 }
 
@@ -2295,14 +2768,18 @@ function actionErrorMessage(error: unknown): string {
 }
 
 function isFileChangedConflict(message: string): boolean {
-  return message.toLocaleLowerCase().includes("file changed since it was opened");
+  return message
+    .toLocaleLowerCase()
+    .includes("file changed since it was opened");
 }
 
-function isUnprotectedTextOverwrite(operation: JobOperation | undefined): boolean {
+function isUnprotectedTextOverwrite(
+  operation: JobOperation | undefined,
+): boolean {
   return Boolean(
     operation?.type === "file_write_text" &&
-      !operation.create &&
-      !operation.expected_sha256_hex,
+    !operation.create &&
+    !operation.expected_sha256_hex,
   );
 }
 
@@ -2372,21 +2849,29 @@ function fileConfirmationDetail(confirmation: PendingConfirmation): string {
   return `${detail || fileOperationSummary(confirmation.operation)}${policy ? ` ${policy}` : ""}`;
 }
 
-function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label: string; value: ReactNode }> {
+function fileConfirmationItems(
+  confirmation: PendingConfirmation,
+): Array<{ label: string; value: ReactNode }> {
   const operation = confirmation.operation;
   const items: Array<{ label: string; value: ReactNode }> = [
     {
       label: "Selector",
       value: confirmation.selectorExpression || (
-        <span data-tooltip-empty-reason="This single-VPS file operation does not use a selector expression.">-</span>
+        <span data-tooltip-empty-reason="This single-VPS file operation does not use a selector expression.">
+          -
+        </span>
       ),
     },
     {
       label: "Target VPS",
       value: confirmation.target ? (
-        <span title={confirmation.target.id}>{targetNameId(confirmation.target)}</span>
+        <span title={confirmation.target.id}>
+          {targetNameId(confirmation.target)}
+        </span>
       ) : (
-        <span data-tooltip-empty-reason="No target VPS is attached to this review.">-</span>
+        <span data-tooltip-empty-reason="No target VPS is attached to this review.">
+          -
+        </span>
       ),
     },
     { label: "Operation", value: fileOperationSummary(operation) },
@@ -2411,21 +2896,39 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
     });
   }
   if ("expected_sha256_hex" in operation && operation.expected_sha256_hex) {
-    items.push({ label: "Expected hash", value: shortId(operation.expected_sha256_hex) });
+    items.push({
+      label: "Expected hash",
+      value: shortId(operation.expected_sha256_hex),
+    });
   }
   if ("sha256_hex" in operation && operation.sha256_hex) {
     items.push({ label: "SHA256", value: shortId(operation.sha256_hex) });
   }
   if ("recursive" in operation) {
-    items.push({ label: "Recursive", value: operation.recursive ? "Include child paths" : "This path only" });
+    items.push({
+      label: "Recursive",
+      value: operation.recursive ? "Include child paths" : "This path only",
+    });
   }
   if ("follow_symlinks" in operation) {
-    items.push({ label: "Symlinks", value: operation.follow_symlinks ? "Follow targets" : "Do not follow" });
+    items.push({
+      label: "Symlinks",
+      value: operation.follow_symlinks ? "Follow targets" : "Do not follow",
+    });
   }
   if ("overwrite" in operation) {
-    items.push({ label: "Overwrite", value: operation.overwrite ? "May overwrite destination" : "Destination must be new" });
+    items.push({
+      label: "Overwrite",
+      value: operation.overwrite
+        ? "May overwrite destination"
+        : "Destination must be new",
+    });
   }
-  if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
+  if (
+    "policy" in operation &&
+    (typeof operation.policy === "string" ||
+      typeof operation.policy === "undefined")
+  ) {
     items.push({
       label: "Policy",
       value: isUnprotectedTextOverwrite(operation)
@@ -2434,10 +2937,16 @@ function fileConfirmationItems(confirmation: PendingConfirmation): Array<{ label
     });
   }
   if ("existing_policy" in operation) {
-    items.push({ label: "Existing file", value: existingFilePolicyLabel(operation.existing_policy ?? "skip") });
+    items.push({
+      label: "Existing file",
+      value: existingFilePolicyLabel(operation.existing_policy ?? "skip"),
+    });
   }
   if ("ownership_policy" in operation) {
-    items.push({ label: "Owner/group", value: ownerGroupConfirmationValue(operation) });
+    items.push({
+      label: "Owner/group",
+      value: ownerGroupConfirmationValue(operation),
+    });
   }
   return items;
 }
@@ -2454,7 +2963,10 @@ function fileConfirmationPolicyText(operation: JobOperation): string {
       ? `${fileActionPolicyLabel(operation.policy ?? "fail")}.`
       : "This overwrite is not protected by a base hash and replaces the newer remote contents.";
   }
-  if (operation.type === "file_push" || operation.type === "file_push_chunked") {
+  if (
+    operation.type === "file_push" ||
+    operation.type === "file_push_chunked"
+  ) {
     return `${existingFilePolicyLabel(operation.existing_policy ?? "skip")}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`;
   }
   if (operation.type === "file_rename") {
@@ -2463,7 +2975,11 @@ function fileConfirmationPolicyText(operation: JobOperation): string {
   if (operation.type === "file_copy") {
     return `${fileActionPolicyLabel(operation.policy ?? "fail")}; destination ${operation.overwrite ? "files may be overwritten; directories are merged" : "must not already exist"}.`;
   }
-  if ("policy" in operation && (typeof operation.policy === "string" || typeof operation.policy === "undefined")) {
+  if (
+    "policy" in operation &&
+    (typeof operation.policy === "string" ||
+      typeof operation.policy === "undefined")
+  ) {
     return `${fileActionPolicyLabel(operation.policy ?? "fail")}.`;
   }
   return "";
@@ -2498,14 +3014,20 @@ function ownershipPolicyLabel(policy: FileOwnershipPolicy): string {
   }
 }
 
-function ownerGroupConfirmationValue(operation: Extract<JobOperation, { type: "file_chown" | "file_push" | "file_push_chunked" }>): ReactNode {
+function ownerGroupConfirmationValue(
+  operation: Extract<
+    JobOperation,
+    { type: "file_chown" | "file_push" | "file_push_chunked" }
+  >,
+): ReactNode {
   const owner = operation.owner ?? operation.uid ?? "-";
   const group = operation.group ?? operation.gid ?? "-";
   return (
     <span
       title={`Owner ${owner === "-" ? "not specified" : owner}; group ${group === "-" ? "not specified" : group}; ${ownershipPolicyLabel(operation.ownership_policy ?? "fail")}.`}
     >
-      {owner}:{group} · {ownershipPolicyLabel(operation.ownership_policy ?? "fail")}
+      {owner}:{group} ·{" "}
+      {ownershipPolicyLabel(operation.ownership_policy ?? "fail")}
     </span>
   );
 }
@@ -2525,7 +3047,8 @@ function textDiffPreview(before: string, after: string): string {
   while (
     suffix + prefix < beforeLines.length &&
     suffix + prefix < afterLines.length &&
-    beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+    beforeLines[beforeLines.length - 1 - suffix] ===
+      afterLines[afterLines.length - 1 - suffix]
   ) {
     suffix += 1;
   }
@@ -2538,7 +3061,8 @@ function textDiffPreview(before: string, after: string): string {
     ...removed.slice(0, 4).map((line) => `- ${line || "(blank line)"}`),
     ...added.slice(0, 4).map((line) => `+ ${line || "(blank line)"}`),
   ];
-  const hiddenLines = Math.max(0, removed.length - 4) + Math.max(0, added.length - 4);
+  const hiddenLines =
+    Math.max(0, removed.length - 4) + Math.max(0, added.length - 4);
   if (hiddenLines > 0) {
     body.push(`... ${hiddenLines} more changed lines`);
   }
@@ -2608,7 +3132,8 @@ function formatMode(mode: number): string {
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`;
+  if (value < 1024 * 1024 * 1024)
+    return `${(value / 1024 / 1024).toFixed(1)} MiB`;
   return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`;
 }
 
@@ -2625,11 +3150,14 @@ function saveBlob(blob: Blob, name: string) {
 
 function readBrowserState(): BrowserState {
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as Partial<BrowserState> & { selectedClientId?: string };
+    const parsed = JSON.parse(
+      localStorage.getItem(STORAGE_KEY) ?? "{}",
+    ) as Partial<BrowserState> & { selectedClientId?: string };
     const targetClientId =
       typeof parsed.targetClientId === "string" && parsed.targetClientId.trim()
         ? parsed.targetClientId.trim()
-        : typeof parsed.selectedClientId === "string" && parsed.selectedClientId.trim()
+        : typeof parsed.selectedClientId === "string" &&
+            parsed.selectedClientId.trim()
           ? parsed.selectedClientId.trim()
           : typeof parsed.targetExpression === "string"
             ? clientIdFromLegacyFileSelector(parsed.targetExpression)
@@ -2638,7 +3166,10 @@ function readBrowserState(): BrowserState {
       path: typeof parsed.path === "string" ? parsed.path : "/",
       showHidden: Boolean(parsed.showHidden),
       targetClientId,
-      targetExpression: typeof parsed.targetExpression === "string" ? parsed.targetExpression : undefined,
+      targetExpression:
+        typeof parsed.targetExpression === "string"
+          ? parsed.targetExpression
+          : undefined,
     };
   } catch {
     return { path: "/", showHidden: false, targetClientId: "" };

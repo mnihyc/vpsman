@@ -13,33 +13,15 @@ const toneClass: Record<ActionFeedbackTone, string> = {
   warning: "actionFeedbackWarning",
 };
 
-const toneTitle: Record<ActionFeedbackTone, string> = {
-  danger:
-    "Action error feedback. Exact server detail is displayed here and excluded from tooltips.",
-  info:
-    "Action information. Exact detail is displayed here and excluded from tooltips.",
-  progress:
-    "Action progress feedback. Exact detail is displayed here and excluded from tooltips.",
-  success:
-    "Action success feedback. Exact detail is displayed here and excluded from tooltips.",
-  warning:
-    "Action warning feedback. Exact server detail is displayed here and excluded from tooltips.",
-};
-
-export const ActionFeedback = forwardRef<HTMLDivElement, {
-  className?: string;
-  id?: string;
-  message: string | null | undefined;
-  tone?: ActionFeedbackTone;
-}>(function ActionFeedback(
+export const ActionFeedback = forwardRef<
+  HTMLDivElement,
   {
-    className,
-    id,
-    message,
-    tone = "info",
-  },
-  ref,
-) {
+    className?: string;
+    id?: string;
+    message: string | null | undefined;
+    tone?: ActionFeedbackTone;
+  }
+>(function ActionFeedback({ className, id, message, tone = "info" }, ref) {
   if (!message) {
     return null;
   }
@@ -49,12 +31,9 @@ export const ActionFeedback = forwardRef<HTMLDivElement, {
     <div
       aria-live={ariaLive}
       className={`authNotice actionFeedback ${toneClass[tone]}${className ? ` ${className}` : ""}`}
-      data-tooltip-sensitive="true"
-      data-value-tooltip-skip="true"
       id={id}
       ref={ref}
       role={role}
-      title={toneTitle[tone]}
     >
       <span>{message}</span>
     </div>

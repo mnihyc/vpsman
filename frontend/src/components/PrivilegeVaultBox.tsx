@@ -197,31 +197,21 @@ export function PrivilegeVaultBox({
 
   const stateGrid = (
     <div className="privilegeStateGrid" aria-label="Privilege vault state">
-      <span>
+      <span title="Whether request-bound privilege assertions are currently available in this browser session.">
         <small>State</small>
-        <strong title={`Privilege state: ${privilegeStatus}.`}>
-          {privilegeStatus}
-        </strong>
+        <strong>{privilegeStatus}</strong>
       </span>
-      <span>
+      <span title="Where the locally unlocked signing capability can be reused.">
         <small>Unlock scope</small>
-        <strong title={`Privilege unlock scope: ${unlockScope}.`}>
-          {unlockScope}
-        </strong>
+        <strong>{unlockScope}</strong>
       </span>
-      <span>
+      <span title="When the current browser-local privilege unlock expires.">
         <small>Unlocked until</small>
-        <strong title={`Privilege remains unlocked: ${unlockedUntil}.`}>
-          {unlockedUntil}
-        </strong>
+        <strong>{unlockedUntil}</strong>
       </span>
-      <span>
+      <span title="Whether encrypted privilege material is stored locally for a later browser unlock.">
         <small>{showHandoffState ? "Saved unlock" : "Local vault"}</small>
-        <strong
-          title={`${showHandoffState ? "Saved unlock" : "Local vault"}: ${localVaultState}.`}
-        >
-          {localVaultState}
-        </strong>
+        <strong>{localVaultState}</strong>
       </span>
     </div>
   );

@@ -26,10 +26,7 @@ import { ActionFeedback } from "../components/ActionFeedback";
 import { FRONTEND_BUILD_NUMBER } from "../buildInfo";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { DEFAULT_OPERATOR_PREFERENCES } from "../utils";
-import {
-  defaultFleetTagVisible,
-  fleetTagVisible,
-} from "../tagDisplay";
+import { defaultFleetTagVisible, fleetTagVisible } from "../tagDisplay";
 import type { OperatorPreferences, OperatorView, TagView } from "../types";
 
 type PreferencesPanelProps = {
@@ -307,462 +304,482 @@ export function PreferencesPanel({
               description="Personal operator presentation choices. These do not change fleet behavior or another operator's console."
               title="Personal display preferences"
             >
-            <PreferenceGroup
-              description="Controls how VPS labels are rendered in tables, drawers, and action previews."
-              icon={<ServerCog size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  vps_name_display_mode:
-                    DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode,
-                })
-              }
-              resetDisabled={
-                draft.vps_name_display_mode ===
-                DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode
-              }
-              scope="Personal"
-              title="VPS name format"
-            >
-              <label>
-                <span>Name display</span>
-                <select
-                  name="vps_name_display_mode"
-                  value={draft.vps_name_display_mode}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      vps_name_display_mode:
-                        event.target.value === "name" ? "name" : "name_id_suffix",
-                    }))
-                  }
-                >
-                  <option value="name_id_suffix">
-                    Name with client ID suffix
-                  </option>
-                  <option value="name">Name only</option>
-                </select>
-              </label>
-            </PreferenceGroup>
+              <PreferenceGroup
+                description="Controls how VPS labels are rendered in tables, drawers, and action previews."
+                icon={<ServerCog size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    vps_name_display_mode:
+                      DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode,
+                  })
+                }
+                resetDisabled={
+                  draft.vps_name_display_mode ===
+                  DEFAULT_OPERATOR_PREFERENCES.vps_name_display_mode
+                }
+                scope="Personal"
+                title="VPS name format"
+              >
+                <label>
+                  <span>Name display</span>
+                  <select
+                    name="vps_name_display_mode"
+                    value={draft.vps_name_display_mode}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        vps_name_display_mode:
+                          event.target.value === "name"
+                            ? "name"
+                            : "name_id_suffix",
+                      }))
+                    }
+                  >
+                    <option value="name_id_suffix">
+                      Name with client ID suffix
+                    </option>
+                    <option value="name">Name only</option>
+                  </select>
+                </label>
+              </PreferenceGroup>
 
-            <PreferenceGroup
-              description="Country columns show a compact flag icon plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
-              icon={<Flag size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  show_country_flags:
-                    DEFAULT_OPERATOR_PREFERENCES.show_country_flags,
-                })
-              }
-              resetDisabled={
-                draft.show_country_flags ===
-                DEFAULT_OPERATOR_PREFERENCES.show_country_flags
-              }
-              scope="Personal"
-              title="Country flags"
-            >
-              <label className="checkLine inlineCheck">
-                <input
-                  checked={draft.show_country_flags}
-                  name="show_country_flags"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      show_country_flags: event.target.checked,
-                    }))
-                  }
-                  type="checkbox"
-                />
-                <span>Show flag next to country code</span>
-              </label>
-            </PreferenceGroup>
+              <PreferenceGroup
+                description="Country columns show a compact flag icon plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
+                icon={<Flag size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    show_country_flags:
+                      DEFAULT_OPERATOR_PREFERENCES.show_country_flags,
+                  })
+                }
+                resetDisabled={
+                  draft.show_country_flags ===
+                  DEFAULT_OPERATOR_PREFERENCES.show_country_flags
+                }
+                scope="Personal"
+                title="Country flags"
+              >
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={draft.show_country_flags}
+                    name="show_country_flags"
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        show_country_flags: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  <span>Show flag next to country code</span>
+                </label>
+              </PreferenceGroup>
 
-            <PreferenceGroup
-              description="Controls which registry tags render inside the Fleet Tags column for this operator."
-              icon={<Tags size={18} />}
-              onReset={resetFleetTagVisibility}
-              resetDisabled={
-                Object.keys(draft.fleet_tag_visibility_overrides).length === 0
-              }
-              scope="Personal"
-              title="Fleet tag visibility"
-            >
-              <div className="preferenceTagVisibilityToolbar">
-                <input
-                  aria-label="Filter Fleet tag visibility"
-                  name="fleet_tag_visibility_filter"
-                  onChange={(event) => setTagVisibilityFilter(event.target.value)}
-                  placeholder="Filter tags"
-                  value={tagVisibilityFilter}
-                />
-                <button
-                  className="secondaryAction compactAction"
-                  data-tooltip-disabled-reason="Fleet tag visibility already uses its default settings."
-                  disabled={
-                    Object.keys(draft.fleet_tag_visibility_overrides).length === 0
-                  }
-                  onClick={resetFleetTagVisibility}
-                  type="button"
-                >
-                  <RotateCcw size={14} />
-                  <span>Reset</span>
-                </button>
-              </div>
-              <div className="preferenceHint">
-                <strong>{visibleFleetTagCount} shown</strong>
-                <span>{tags.length - visibleFleetTagCount} hidden</span>
-              </div>
-              {tags.length === 0 ? (
+              <PreferenceGroup
+                description="Controls which registry tags render inside the Fleet Tags column for this operator."
+                icon={<Tags size={18} />}
+                onReset={resetFleetTagVisibility}
+                resetDisabled={
+                  Object.keys(draft.fleet_tag_visibility_overrides).length === 0
+                }
+                scope="Personal"
+                title="Fleet tag visibility"
+              >
+                <div className="preferenceTagVisibilityToolbar">
+                  <input
+                    aria-label="Filter Fleet tag visibility"
+                    name="fleet_tag_visibility_filter"
+                    onChange={(event) =>
+                      setTagVisibilityFilter(event.target.value)
+                    }
+                    placeholder="Filter tags"
+                    value={tagVisibilityFilter}
+                  />
+                  <button
+                    className="secondaryAction compactAction"
+                    data-tooltip-disabled-reason="Fleet tag visibility already uses its default settings."
+                    disabled={
+                      Object.keys(draft.fleet_tag_visibility_overrides)
+                        .length === 0
+                    }
+                    onClick={resetFleetTagVisibility}
+                    type="button"
+                  >
+                    <RotateCcw size={14} />
+                    <span>Reset</span>
+                  </button>
+                </div>
                 <div className="preferenceHint">
-                  <strong>No registry tags</strong>
-                  <span>Create tags before setting Fleet column visibility.</span>
+                  <strong>{visibleFleetTagCount} shown</strong>
+                  <span>{tags.length - visibleFleetTagCount} hidden</span>
                 </div>
-              ) : (
-                <div className="preferenceTagVisibilityList">
-                  {filteredVisibilityTags.map((tag) => {
-                    const checked = fleetTagVisible(
-                      tag.name,
-                      draft.fleet_tag_visibility_overrides,
-                    );
-                    const defaultVisible = defaultFleetTagVisible(tag.name);
-                    return (
-                      <label className="tagVisibilityLine" key={tag.name}>
-                        <input
-                          checked={checked}
-                          name="fleet_tag_visibility"
-                          onChange={(event) =>
-                            setFleetTagVisibility(tag.name, event.target.checked)
-                          }
-                          type="checkbox"
-                        />
-                        <span className="tags">
-                          <em>{tag.name}</em>
-                        </span>
-                        <small>
-                          {tag.clients.length} VPS
-                          {tag.clients.length === 1 ? "" : "s"} / default{" "}
-                          {defaultVisible ? "shown" : "hidden"}
-                        </small>
-                      </label>
-                    );
-                  })}
-                  {filteredVisibilityTags.length === 0 && (
-                    <div className="preferenceHint">
-                      <strong>No matching tags</strong>
-                      <span>{tagVisibilityFilter.trim()}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </PreferenceGroup>
+                {tags.length === 0 ? (
+                  <div className="preferenceHint">
+                    <strong>No registry tags</strong>
+                    <span>
+                      Create tags before setting Fleet column visibility.
+                    </span>
+                  </div>
+                ) : (
+                  <div className="preferenceTagVisibilityList">
+                    {filteredVisibilityTags.map((tag) => {
+                      const checked = fleetTagVisible(
+                        tag.name,
+                        draft.fleet_tag_visibility_overrides,
+                      );
+                      const defaultVisible = defaultFleetTagVisible(tag.name);
+                      return (
+                        <label className="tagVisibilityLine" key={tag.name}>
+                          <input
+                            checked={checked}
+                            name="fleet_tag_visibility"
+                            onChange={(event) =>
+                              setFleetTagVisibility(
+                                tag.name,
+                                event.target.checked,
+                              )
+                            }
+                            type="checkbox"
+                          />
+                          <span className="tags">
+                            <em>{tag.name}</em>
+                          </span>
+                          <small>
+                            {tag.clients.length} VPS
+                            {tag.clients.length === 1 ? "" : "s"} / default{" "}
+                            {defaultVisible ? "shown" : "hidden"}
+                          </small>
+                        </label>
+                      );
+                    })}
+                    {filteredVisibilityTags.length === 0 && (
+                      <div className="preferenceHint">
+                        <strong>No matching tags</strong>
+                        <span>{tagVisibilityFilter.trim()}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </PreferenceGroup>
 
-            <PreferenceGroup
-              description="Times remain ISO UTC in the API; this only changes how the console renders timestamps."
-              icon={<TimerReset size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  timezone: DEFAULT_OPERATOR_PREFERENCES.timezone,
-                })
-              }
-              resetDisabled={draft.timezone === DEFAULT_OPERATOR_PREFERENCES.timezone}
-              scope="Personal"
-              title="Timezone"
-            >
-              <label>
-                <span>Display timezone</span>
-                <input
-                  aria-describedby={
-                    timezoneValidationError
-                      ? DRAFT_VALIDATION_ERROR_ID
-                      : undefined
-                  }
-                  aria-invalid={Boolean(timezoneValidationError)}
-                  list="operator-timezones"
-                  name="timezone"
-                  placeholder={browserTimezone}
-                  value={draft.timezone ?? ""}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      timezone: event.target.value.trim()
-                        ? event.target.value
-                        : null,
-                    }))
-                  }
-                />
-                <datalist id="operator-timezones">
-                  {COMMON_TIMEZONES.map((timezone) => (
-                    <option key={timezone} value={timezone} />
-                  ))}
-                </datalist>
-              </label>
-              <div className="preferenceHint">
-                <strong>
-                  {draft.timezone ? draft.timezone : "Browser timezone"}
-                </strong>
-                <span>{timezonePreview}</span>
-              </div>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Language is stored with the operator profile for future localization. English is the current console language."
-              icon={<Languages size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  language: DEFAULT_OPERATOR_PREFERENCES.language,
-                })
-              }
-              resetDisabled={draft.language === DEFAULT_OPERATOR_PREFERENCES.language}
-              scope="Personal"
-              title="Language"
-            >
-              <label>
-                <span>Console language</span>
-                <select
-                  name="language"
-                  value={draft.language}
-                  onChange={() =>
-                    setDraft((current) => ({
-                      ...current,
-                      language: "en",
-                    }))
-                  }
-                >
-                  <option value="en">English</option>
-                </select>
-              </label>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Choose how left-sidebar subpanels open before any local manual expand/collapse overrides."
-              icon={<LayoutPanelTop size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  sidebar_subpanel_default:
-                    DEFAULT_OPERATOR_PREFERENCES.sidebar_subpanel_default,
-                })
-              }
-              resetDisabled={
-                draft.sidebar_subpanel_default ===
-                DEFAULT_OPERATOR_PREFERENCES.sidebar_subpanel_default
-              }
-              scope="Personal"
-              title="Sidebar subpanels"
-            >
-              <label>
-                <span>Default expansion</span>
-                <select
-                  name="sidebar_subpanel_default"
-                  value={draft.sidebar_subpanel_default}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      sidebar_subpanel_default:
-                        event.target.value === "all" ? "all" : "active",
-                    }))
-                  }
-                >
-                  <option value="active">Active section expanded</option>
-                  <option value="all">All sections expanded</option>
-                </select>
-              </label>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Choose whether reviewed action prompts stay inline in the page or open as overlay dialogs. This is a personal display preference; it does not weaken required review, privilege, or audit workflows."
-              icon={<LayoutPanelTop size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  review_prompt_mode:
-                    DEFAULT_OPERATOR_PREFERENCES.review_prompt_mode,
-                })
-              }
-              resetDisabled={
-                draft.review_prompt_mode ===
-                DEFAULT_OPERATOR_PREFERENCES.review_prompt_mode
-              }
-              scope="Personal"
-              title="Review prompts"
-            >
-              <label>
-                <span>Prompt display</span>
-                <select
-                  aria-label="Review prompt display mode"
-                  name="review_prompt_mode"
-                  value={draft.review_prompt_mode}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      review_prompt_mode:
-                        event.target.value === "overlay" ? "overlay" : "inline",
-                    }))
-                  }
-                >
-                  <option value="inline">Inline in page</option>
-                  <option value="overlay">Overlay dialog</option>
-                </select>
-              </label>
-              <div className="preferenceHint preferenceHintStack">
-                <strong>
-                  {draft.review_prompt_mode === "overlay"
-                    ? "Overlay dialog"
-                    : "Inline in page"}
-                </strong>
-                <span>
-                  Inline keeps the review beside the form. Overlay brings the
-                  frozen review snapshot to the front when the page is dense.
-                </span>
-              </div>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Controls how bulk job result groups are compared before individual target output chunks are shown."
-              icon={<ListChecks size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  bulk_output_compare_mode:
-                    DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode,
-                })
-              }
-              resetDisabled={
-                draft.bulk_output_compare_mode ===
-                DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode
-              }
-              scope="Personal"
-              title="Bulk execution summaries"
-            >
-              <label>
-                <span>Default comparison</span>
-                <select
-                  aria-label="Bulk output comparison default"
-                  name="bulk_output_compare_mode"
-                  value={draft.bulk_output_compare_mode}
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      bulk_output_compare_mode:
-                        event.target.value === "text" ? "text" : "binary",
-                    }))
-                  }
-                >
-                  <option value="binary">Binary exact</option>
-                  <option value="text">Text normalized</option>
-                </select>
-              </label>
-              <div className="preferenceHint preferenceHintStack">
-                <strong>
-                  {draft.bulk_output_compare_mode === "text"
-                    ? "Text normalized"
-                    : "Binary exact"}
-                </strong>
-                <span>
-                  Binary exact compares bytes and is safest for security,
-                  checksums, generated files, and command output where
-                  whitespace matters. Text normalized is only for human log
-                  review when line endings and trailing whitespace are noise.
-                </span>
-              </div>
-            </PreferenceGroup>
-
-            <PreferenceGroup
-              description="Controls this operator's Home resource/network curve ranking and exclusions. Fleet-wide observability policy belongs in shared system settings, not here."
-              icon={<Activity size={18} />}
-              onReset={() =>
-                resetDraftPatch({
-                  dashboard_curve_exclusions:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
-                  dashboard_network_top_limit:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit,
-                  dashboard_resource_top_limit:
-                    DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
-                })
-              }
-              resetDisabled={
-                draft.dashboard_network_top_limit ===
-                  DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit &&
-                draft.dashboard_resource_top_limit ===
-                  DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit &&
-                draft.dashboard_curve_exclusions.length === 0
-              }
-              scope="Personal"
-              title="Home chart presentation"
-            >
-              <div className="preferenceInlineControls">
+              <PreferenceGroup
+                description="Times remain ISO UTC in the API; this only changes how the console renders timestamps."
+                icon={<TimerReset size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    timezone: DEFAULT_OPERATOR_PREFERENCES.timezone,
+                  })
+                }
+                resetDisabled={
+                  draft.timezone === DEFAULT_OPERATOR_PREFERENCES.timezone
+                }
+                scope="Personal"
+                title="Timezone"
+              >
                 <label>
-                  <span>Resource top count</span>
-                  <select
-                    aria-label="Resource curve top count"
-                    name="dashboard_resource_top_limit"
-                    value={draft.dashboard_resource_top_limit}
+                  <span>Display timezone</span>
+                  <input
+                    aria-describedby={
+                      timezoneValidationError
+                        ? DRAFT_VALIDATION_ERROR_ID
+                        : undefined
+                    }
+                    aria-invalid={Boolean(timezoneValidationError)}
+                    list="operator-timezones"
+                    name="timezone"
+                    placeholder={browserTimezone}
+                    value={draft.timezone ?? ""}
                     onChange={(event) =>
                       setDraft((current) => ({
                         ...current,
-                        dashboard_resource_top_limit: Number(event.target.value),
+                        timezone: event.target.value.trim()
+                          ? event.target.value
+                          : null,
+                      }))
+                    }
+                  />
+                  <datalist id="operator-timezones">
+                    {COMMON_TIMEZONES.map((timezone) => (
+                      <option key={timezone} value={timezone} />
+                    ))}
+                  </datalist>
+                </label>
+                <div className="preferenceHint">
+                  <strong>
+                    {draft.timezone ? draft.timezone : "Browser timezone"}
+                  </strong>
+                  <span>{timezonePreview}</span>
+                </div>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Language is stored with the operator profile for future localization. English is the current console language."
+                icon={<Languages size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    language: DEFAULT_OPERATOR_PREFERENCES.language,
+                  })
+                }
+                resetDisabled={
+                  draft.language === DEFAULT_OPERATOR_PREFERENCES.language
+                }
+                scope="Personal"
+                title="Language"
+              >
+                <label>
+                  <span>Console language</span>
+                  <select
+                    name="language"
+                    value={draft.language}
+                    onChange={() =>
+                      setDraft((current) => ({
+                        ...current,
+                        language: "en",
                       }))
                     }
                   >
-                    {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
-                      <option key={value} value={value}>
-                        {value}
-                      </option>
-                    ))}
+                    <option value="en">English</option>
                   </select>
                 </label>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Choose how left-sidebar subpanels open before any local manual expand/collapse overrides."
+                icon={<LayoutPanelTop size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    sidebar_subpanel_default:
+                      DEFAULT_OPERATOR_PREFERENCES.sidebar_subpanel_default,
+                  })
+                }
+                resetDisabled={
+                  draft.sidebar_subpanel_default ===
+                  DEFAULT_OPERATOR_PREFERENCES.sidebar_subpanel_default
+                }
+                scope="Personal"
+                title="Sidebar subpanels"
+              >
                 <label>
-                  <span>Network top count</span>
+                  <span>Default expansion</span>
                   <select
-                    aria-label="Network top count"
-                    name="dashboard_network_top_limit"
-                    value={draft.dashboard_network_top_limit}
+                    name="sidebar_subpanel_default"
+                    value={draft.sidebar_subpanel_default}
                     onChange={(event) =>
                       setDraft((current) => ({
                         ...current,
-                        dashboard_network_top_limit: Number(event.target.value),
+                        sidebar_subpanel_default:
+                          event.target.value === "all" ? "all" : "active",
                       }))
                     }
                   >
-                    {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
-                      <option key={value} value={value}>
-                        {value}
-                      </option>
-                    ))}
+                    <option value="active">Active section expanded</option>
+                    <option value="all">All sections expanded</option>
                   </select>
                 </label>
-              </div>
-              <label>
-                <span>Curve exclusions</span>
-                <textarea
-                  aria-label="Home telemetry curve exclusions"
-                  name="dashboard_curve_exclusions"
-                  onChange={(event) =>
-                    setDraft((current) => ({
-                      ...current,
-                      dashboard_curve_exclusions: splitCurveExclusions(
-                        event.target.value,
-                      ),
-                    }))
-                  }
-                  placeholder={
-                    "provider:test\ncountry:lab\nname:lab\nid:agent-dev-"
-                  }
-                  rows={5}
-                  value={draft.dashboard_curve_exclusions.join("\n")}
-                />
-              </label>
-              <div className="preferenceHint">
-                <strong>
-                  {
-                    normalizeCurveExclusions(draft.dashboard_curve_exclusions)
-                      .length
-                  }{" "}
-                  exclusions
-                </strong>
-                <span>
-                  Applied before this operator's top-N resource and network
-                  curves are selected.
-                </span>
-              </div>
-            </PreferenceGroup>
-          </PreferenceSection>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Choose whether reviewed action prompts stay inline in the page or open as overlay dialogs. This is a personal display preference; it does not weaken required review, privilege, or audit workflows."
+                icon={<LayoutPanelTop size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    review_prompt_mode:
+                      DEFAULT_OPERATOR_PREFERENCES.review_prompt_mode,
+                  })
+                }
+                resetDisabled={
+                  draft.review_prompt_mode ===
+                  DEFAULT_OPERATOR_PREFERENCES.review_prompt_mode
+                }
+                scope="Personal"
+                title="Review prompts"
+              >
+                <label>
+                  <span>Prompt display</span>
+                  <select
+                    aria-label="Review prompt display mode"
+                    name="review_prompt_mode"
+                    value={draft.review_prompt_mode}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        review_prompt_mode:
+                          event.target.value === "overlay"
+                            ? "overlay"
+                            : "inline",
+                      }))
+                    }
+                  >
+                    <option value="inline">Inline in page</option>
+                    <option value="overlay">Overlay dialog</option>
+                  </select>
+                </label>
+                <div className="preferenceHint preferenceHintStack">
+                  <strong>
+                    {draft.review_prompt_mode === "overlay"
+                      ? "Overlay dialog"
+                      : "Inline in page"}
+                  </strong>
+                  <span>
+                    Inline keeps the review beside the form. Overlay brings the
+                    frozen review snapshot to the front when the page is dense.
+                  </span>
+                </div>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Controls how bulk job result groups are compared before individual target output chunks are shown."
+                icon={<ListChecks size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    bulk_output_compare_mode:
+                      DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode,
+                  })
+                }
+                resetDisabled={
+                  draft.bulk_output_compare_mode ===
+                  DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode
+                }
+                scope="Personal"
+                title="Bulk execution summaries"
+              >
+                <label>
+                  <span>Default comparison</span>
+                  <select
+                    aria-label="Bulk output comparison default"
+                    name="bulk_output_compare_mode"
+                    value={draft.bulk_output_compare_mode}
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        bulk_output_compare_mode:
+                          event.target.value === "text" ? "text" : "binary",
+                      }))
+                    }
+                  >
+                    <option value="binary">Binary exact</option>
+                    <option value="text">Text normalized</option>
+                  </select>
+                </label>
+                <div className="preferenceHint preferenceHintStack">
+                  <strong>
+                    {draft.bulk_output_compare_mode === "text"
+                      ? "Text normalized"
+                      : "Binary exact"}
+                  </strong>
+                  <span>
+                    Binary exact compares bytes and is safest for security,
+                    checksums, generated files, and command output where
+                    whitespace matters. Text normalized is only for human log
+                    review when line endings and trailing whitespace are noise.
+                  </span>
+                </div>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Controls this operator's Home resource/network curve ranking and exclusions. Fleet-wide observability policy belongs in shared system settings, not here."
+                icon={<Activity size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    dashboard_curve_exclusions:
+                      DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
+                    dashboard_network_top_limit:
+                      DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit,
+                    dashboard_resource_top_limit:
+                      DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
+                  })
+                }
+                resetDisabled={
+                  draft.dashboard_network_top_limit ===
+                    DEFAULT_OPERATOR_PREFERENCES.dashboard_network_top_limit &&
+                  draft.dashboard_resource_top_limit ===
+                    DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit &&
+                  draft.dashboard_curve_exclusions.length === 0
+                }
+                scope="Personal"
+                title="Home chart presentation"
+              >
+                <div className="preferenceInlineControls">
+                  <label>
+                    <span>Resource top count</span>
+                    <select
+                      aria-label="Resource curve top count"
+                      name="dashboard_resource_top_limit"
+                      value={draft.dashboard_resource_top_limit}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          dashboard_resource_top_limit: Number(
+                            event.target.value,
+                          ),
+                        }))
+                      }
+                    >
+                      {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span>Network top count</span>
+                    <select
+                      aria-label="Network top count"
+                      name="dashboard_network_top_limit"
+                      value={draft.dashboard_network_top_limit}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          dashboard_network_top_limit: Number(
+                            event.target.value,
+                          ),
+                        }))
+                      }
+                    >
+                      {DASHBOARD_TOP_LIMIT_OPTIONS.map((value) => (
+                        <option key={value} value={value}>
+                          {value}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  <span>Curve exclusions</span>
+                  <textarea
+                    aria-label="Home telemetry curve exclusions"
+                    name="dashboard_curve_exclusions"
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        dashboard_curve_exclusions: splitCurveExclusions(
+                          event.target.value,
+                        ),
+                      }))
+                    }
+                    placeholder={
+                      "provider:test\ncountry:lab\nname:lab\nid:agent-dev-"
+                    }
+                    rows={5}
+                    value={draft.dashboard_curve_exclusions.join("\n")}
+                  />
+                </label>
+                <div className="preferenceHint">
+                  <strong>
+                    {
+                      normalizeCurveExclusions(draft.dashboard_curve_exclusions)
+                        .length
+                    }{" "}
+                    exclusions
+                  </strong>
+                  <span>
+                    Applied before this operator's top-N resource and network
+                    curves are selected.
+                  </span>
+                </div>
+              </PreferenceGroup>
+            </PreferenceSection>
           )}
 
           {activeScope === "browser" && (
@@ -770,39 +787,39 @@ export function PreferencesPanel({
               description="Browser-only state that affects this device, not the operator record or other consoles."
               title="Local browser state"
             >
-            <PreferenceGroup
-              description="Clears browser-only console state such as Home telemetry selectors, saved fleet views, table layout, paging, column visibility, and expanded panels."
-              icon={<Trash2 size={18} />}
-              scope="Browser"
-              title="Local console selections"
-            >
-              <div className="preferenceResetRow">
-                <div className="preferenceHint preferenceHintStack">
-                  <strong>
-                    Server preferences, signed-in session, and Privilege Vault
-                    are preserved.
-                  </strong>
-                  <span>
-                    After clearing, this page reloads and reads default local
-                    selections without changing route.
-                  </span>
+              <PreferenceGroup
+                description="Clears browser-only console state such as Home telemetry selectors, saved fleet views, table layout, paging, column visibility, and expanded panels."
+                icon={<Trash2 size={18} />}
+                scope="Browser"
+                title="Local console selections"
+              >
+                <div className="preferenceResetRow">
+                  <div className="preferenceHint preferenceHintStack">
+                    <strong>
+                      Server preferences, signed-in session, and Privilege Vault
+                      are preserved.
+                    </strong>
+                    <span>
+                      After clearing, this page reloads and reads default local
+                      selections without changing route.
+                    </span>
+                  </div>
+                  <button
+                    className="secondaryAction"
+                    onClick={resetLocalSelections}
+                    type="button"
+                  >
+                    <Trash2 size={18} />
+                    <span>Clear local selections</span>
+                  </button>
                 </div>
-                <button
-                  className="secondaryAction"
-                  onClick={resetLocalSelections}
-                  type="button"
-                >
-                  <Trash2 size={18} />
-                  <span>Clear local selections</span>
-                </button>
-              </div>
-              <ActionFeedback
-                className="localActionFeedback preferencesSelectionActionFeedback"
-                message={localSelectionMessage}
-                tone="success"
-              />
-            </PreferenceGroup>
-          </PreferenceSection>
+                <ActionFeedback
+                  className="localActionFeedback preferencesSelectionActionFeedback"
+                  message={localSelectionMessage}
+                  tone="success"
+                />
+              </PreferenceGroup>
+            </PreferenceSection>
           )}
 
           {activeScope === "system" && (
@@ -972,7 +989,6 @@ function PreferenceScopeTile({
       aria-pressed={active}
       className={`preferenceScopeTile ${active ? "active" : ""}`}
       onClick={onSelect}
-      title={`${label}: ${value}. ${detail}`}
       type="button"
     >
       <small>{label}</small>
@@ -1061,9 +1077,11 @@ function preferenceChangedCount(
   draft: OperatorPreferences,
   saved: OperatorPreferences,
 ): number {
-  return (Object.keys(DEFAULT_OPERATOR_PREFERENCES) as Array<
-    keyof OperatorPreferences
-  >).filter((key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
+  return (
+    Object.keys(DEFAULT_OPERATOR_PREFERENCES) as Array<
+      keyof OperatorPreferences
+    >
+  ).filter((key) => JSON.stringify(draft[key]) !== JSON.stringify(saved[key]))
     .length;
 }
 

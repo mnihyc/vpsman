@@ -293,7 +293,7 @@ export function SchedulesPanel({
           ? "Enter a valid five-field UTC cron expression"
           : !selectorExpression.trim()
             ? "Enter a VPS selector expression"
-            : selectorParse.error ?? undefined;
+            : (selectorParse.error ?? undefined);
   const status = schedulesTruncated
     ? `${formatLowerBoundCount(schedules.length, true)} loaded schedules`
     : countPhrase(schedules.length, "schedule");
@@ -333,7 +333,11 @@ export function SchedulesPanel({
     },
     {
       label: "Operation",
-      title: "Reviewed scheduled operation; command content is excluded from tooltips",
+      title: operationEvidenceTitle(
+        pendingScheduleSnapshot?.operation ??
+          selectedTemplate?.operation ??
+          scheduleOperation,
+      ),
       value: pendingScheduleSnapshot
         ? (pendingScheduleSnapshot.selectedTemplateName ??
           operationSummary(pendingScheduleSnapshot.operation))
@@ -401,8 +405,10 @@ export function SchedulesPanel({
               className={
                 scheduleOperationInvalid(schedule) ? "status warn" : undefined
               }
-              data-value-tooltip-skip="true"
-              title="Scheduled operation summary; command content is excluded from tooltips"
+              title={operationEvidenceTitle(
+                schedule.operation,
+                schedule.operation_error,
+              )}
             >
               {scheduleOperationInvalid(schedule)
                 ? "Invalid saved operation"
@@ -1145,7 +1151,10 @@ export function SchedulesPanel({
       },
       {
         label: "Operation",
-        title: "Reviewed scheduled operation; command content is excluded from tooltips",
+        title: operationEvidenceTitle(
+          action.schedule.operation,
+          action.schedule.operation_error,
+        ),
         value: scheduleOperationInvalid(action.schedule)
           ? "Invalid saved operation · repair required"
           : `${operationSummary(action.schedule.operation)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
@@ -1623,7 +1632,13 @@ export function SchedulesPanel({
                 </small>
               )}
             </label>
-            <label>
+            <label
+              title={
+                selectedTemplate
+                  ? operationEvidenceTitle(selectedTemplate.operation)
+                  : "Command and arguments submitted by each scheduled run."
+              }
+            >
               <span>Command argv</span>
               <textarea
                 aria-label="Schedule job argv"
@@ -1632,7 +1647,6 @@ export function SchedulesPanel({
                     ? "The selected template supplies this operation"
                     : undefined
                 }
-                data-value-tooltip-skip="true"
                 disabled={selectedTemplate !== null}
                 onChange={(event) => setCommandText(event.target.value)}
                 rows={3}
@@ -1795,8 +1809,9 @@ export function SchedulesPanel({
                 ))}
               </div>
               <small
-                data-value-tooltip-skip="true"
-                title="Schedule target preview and operation summary; command content is excluded from tooltips"
+                title={operationEvidenceTitle(
+                  selectedTemplate?.operation ?? scheduleOperation,
+                )}
               >
                 {selectorExpression.trim()
                   ? `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save; `
@@ -1819,7 +1834,9 @@ export function SchedulesPanel({
                   <button
                     className="secondaryAction"
                     data-tooltip-disabled-reason={
-                      pending ? "A schedule change is already in progress" : undefined
+                      pending
+                        ? "A schedule change is already in progress"
+                        : undefined
                     }
                     disabled={pending}
                     onClick={resetScheduleComposer}
@@ -2367,8 +2384,10 @@ function ScheduleExpandedDetail({
       <span>
         <strong>Operation</strong>
         <span
-          data-value-tooltip-skip="true"
-          title="Scheduled operation summary; command content is excluded from tooltips"
+          title={operationEvidenceTitle(
+            schedule.operation,
+            schedule.operation_error,
+          )}
         >
           {scheduleOperationInvalid(schedule)
             ? "Invalid saved operation"
@@ -2663,6 +2682,17 @@ function operationSummary(operation: JobOperation | null): string {
     default:
       return operation.type;
   }
+}
+
+function operationEvidenceTitle(
+  operation: JobOperation | null,
+  error?: string | null,
+): string {
+  const errorEvidence = error ? `Operation error: ${error}. ` : "";
+  if (!operation) {
+    return `${errorEvidence}No operation is configured.`;
+  }
+  return `${errorEvidence}Operation evidence:\n${JSON.stringify(operation, null, 2)}`;
 }
 
 function vpsCountLabel(count: number): string {

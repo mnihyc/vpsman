@@ -344,6 +344,7 @@ export function TopologyGraphPanel({
           <div
             aria-label="Topology graph viewport"
             className="topologyGraphViewportControls"
+            title="Graph scale can be adjusted from 80% to 160%; Reset also clears panning."
           >
             <button
               aria-label="Zoom out topology graph"
@@ -393,9 +394,7 @@ export function TopologyGraphPanel({
               <ZoomIn size={15} />
               <span>Zoom in</span>
             </button>
-            <span title={`Topology graph zoom ${Math.round(graphZoom * 100)}%`}>
-              {Math.round(graphZoom * 100)}%
-            </span>
+            <span>{Math.round(graphZoom * 100)}%</span>
           </div>
         </div>
       )}
@@ -427,13 +426,10 @@ export function TopologyGraphPanel({
               <div
                 className={item.tone ? item.tone : undefined}
                 key={item.label}
-                title={`${item.label}: ${item.value}. ${item.detail}`}
               >
-                <span title={item.label}>{item.label}</span>
-                <strong title={`${item.label}: ${item.value}`}>
-                  {item.value}
-                </strong>
-                <p title={item.detail}>{item.detail}</p>
+                <span>{item.label}</span>
+                <strong>{item.value}</strong>
+                <p>{item.detail}</p>
               </div>
             ))}
           </div>
@@ -718,26 +714,7 @@ export function TopologyGraphPanel({
                 </span>
                 <span className="topologyMetric" data-label="Metric">
                   <strong>{edgeMetric(edge)}</strong>
-                  <small
-                    data-tooltip-sensitive={
-                      edgeAvailabilityReasons(edge).length > 0 ||
-                      edgeRuntimeReasons(edge).length > 0
-                        ? "true"
-                        : undefined
-                    }
-                    data-value-tooltip-skip={
-                      edgeAvailabilityReasons(edge).length > 0 ||
-                      edgeRuntimeReasons(edge).length > 0
-                        ? "true"
-                        : undefined
-                    }
-                    title={
-                      edgeAvailabilityReasons(edge).length > 0 ||
-                      edgeRuntimeReasons(edge).length > 0
-                        ? "Tunnel health detail is displayed here; exact runtime diagnostic content is excluded from tooltips."
-                        : undefined
-                    }
-                  >
+                  <small title={edgeHealthDiagnosticTitle(edge)}>
                     {edgeStatusDetail(edge)}
                   </small>
                 </span>
@@ -746,23 +723,7 @@ export function TopologyGraphPanel({
                     {humanStatus(edge.left_runtime_state)} /{" "}
                     {humanStatus(edge.right_runtime_state)}
                   </strong>
-                  <small
-                    data-tooltip-sensitive={
-                      edge.left_runtime_reason || edge.right_runtime_reason
-                        ? "true"
-                        : undefined
-                    }
-                    data-value-tooltip-skip={
-                      edge.left_runtime_reason || edge.right_runtime_reason
-                        ? "true"
-                        : undefined
-                    }
-                    title={
-                      edge.left_runtime_reason || edge.right_runtime_reason
-                        ? "Endpoint runtime detail is displayed here; exact provider diagnostic content is excluded from tooltips."
-                        : undefined
-                    }
-                  >
+                  <small title={endpointRuntimeTitle(edge)}>
                     {endpointRuntimeDetail(edge)}
                   </small>
                 </span>
@@ -1315,6 +1276,20 @@ function edgeRuntimeReasons(edge: TopologyGraphEdge): string[] {
   return Array.isArray(edge.runtime_reasons) ? edge.runtime_reasons : [];
 }
 
+function edgeHealthDiagnosticTitle(
+  edge: TopologyGraphEdge,
+): string | undefined {
+  const reasons = [
+    ...edgeAvailabilityReasons(edge).map(
+      (reason) => `Availability diagnostic: ${reason}`,
+    ),
+    ...edgeRuntimeReasons(edge).map(
+      (reason) => `Runtime diagnostic: ${reason}`,
+    ),
+  ];
+  return reasons.length > 0 ? reasons.join("; ") : undefined;
+}
+
 function humanStatus(value: string | null | undefined): string {
   return value ? readableTelemetryToken(value) : "Unknown";
 }
@@ -1416,7 +1391,27 @@ function edgeHoverDetail(
     edgeInlineMetric(edge),
     ospfCostSummary(edge),
     ospfCostReason(edge),
-  ].join("; ");
+    ...edgeAvailabilityReasons(edge).map(
+      (reason) => `availability diagnostic: ${reason}`,
+    ),
+    ...edgeRuntimeReasons(edge).map(
+      (reason) => `runtime diagnostic: ${reason}`,
+    ),
+    edge.left_runtime_reason
+      ? `left runtime diagnostic: ${edge.left_runtime_reason}`
+      : null,
+    edge.right_runtime_reason
+      ? `right runtime diagnostic: ${edge.right_runtime_reason}`
+      : null,
+    edge.left_reachability_reason
+      ? `left reachability diagnostic: ${edge.left_reachability_reason}`
+      : null,
+    edge.right_reachability_reason
+      ? `right reachability diagnostic: ${edge.right_reachability_reason}`
+      : null,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join("; ");
 }
 
 function endpointRuntimeDetail(edge: TopologyGraphEdge): string {
@@ -1432,6 +1427,18 @@ function endpointRuntimeDetail(edge: TopologyGraphEdge): string {
     : "no endpoint evidence";
 }
 
+function endpointRuntimeTitle(edge: TopologyGraphEdge): string | undefined {
+  const reasons = [
+    edge.left_runtime_reason
+      ? `Left runtime diagnostic: ${edge.left_runtime_reason}`
+      : null,
+    edge.right_runtime_reason
+      ? `Right runtime diagnostic: ${edge.right_runtime_reason}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  return reasons.length > 0 ? reasons.join("; ") : undefined;
+}
+
 function endpointReachabilitySummary(edge: TopologyGraphEdge): string {
   const left = humanStatus(edge.left_reachability_state);
   const right = humanStatus(edge.right_reachability_state);
@@ -1445,12 +1452,14 @@ function endpointReachabilityTitle(edge: TopologyGraphEdge): string {
     endpointReachabilityDetail(
       "Left",
       edge.left_reachability_state,
+      edge.left_reachability_reason,
       edge.left_reachability_source,
       edge.left_reachability_observed_at,
     ),
     endpointReachabilityDetail(
       "Right",
       edge.right_reachability_state,
+      edge.right_reachability_reason,
       edge.right_reachability_source,
       edge.right_reachability_observed_at,
     ),
@@ -1460,14 +1469,15 @@ function endpointReachabilityTitle(edge: TopologyGraphEdge): string {
 function endpointReachabilityDetail(
   label: string,
   state: string,
+  reason: string | null,
   source: string | null,
   observedAt: string | null,
 ): string {
   return [
     `${label}: ${humanStatus(state)}`,
+    reason ? `diagnostic: ${reason}` : null,
     source ? `${humanStatus(source)} source` : null,
     observedAt ? `observed ${formatFullTime(observedAt)}` : "not observed",
-    "exact probe diagnostic content excluded from tooltips",
   ]
     .filter(Boolean)
     .join(", ");

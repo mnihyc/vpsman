@@ -76,8 +76,7 @@ export function BackupHistoryTables({
 }) {
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
-  const migrationLinksTruncated =
-    migrationLinks.length >= HISTORY_DETAIL_LIMIT;
+  const migrationLinksTruncated = migrationLinks.length >= HISTORY_DETAIL_LIMIT;
   if (activeSubpage === "policies") {
     return (
       <BackupPoliciesTable
@@ -252,11 +251,7 @@ function BackupPoliciesTable({
       cell: (policy) => {
         const result = policyLastResult(policy);
         return (
-          <span
-            className="historyPrimary"
-            data-tooltip-sensitive={policy.last_error ? "true" : undefined}
-            data-value-tooltip-skip={policy.last_error ? "true" : undefined}
-          >
+          <span className="historyPrimary">
             <strong className={`status ${result.tone}`} title={result.title}>
               {result.label}
             </strong>
@@ -344,8 +339,8 @@ function BackupPoliciesTable({
               {policy.cadence_error
                 ? "Invalid cadence — edit required; automatic backups blocked"
                 : policy.enabled
-                ? `${policy.next_runs.length} next run${policy.next_runs.length === 1 ? "" : "s"} reported`
-                : "Paused; no scheduled runs dispatch"}
+                  ? `${policy.next_runs.length} next run${policy.next_runs.length === 1 ? "" : "s"} reported`
+                  : "Paused; no scheduled runs dispatch"}
             </span>
             <span>{policy.retention_days}d retention</span>
             <span>
@@ -1648,7 +1643,7 @@ function policyNextRunState(policy: BackupPolicyRecord): {
 function policyLastResult(policy: BackupPolicyRecord): {
   detail: string;
   label: string;
-  title: string;
+  title?: string;
   tone: "neutral" | "ok" | "warn";
 } {
   const cadenceError = policyCadenceErrorDetail(policy);
@@ -1664,8 +1659,6 @@ function policyLastResult(policy: BackupPolicyRecord): {
     return {
       detail: policy.last_error,
       label: "Failed",
-      title:
-        "The retained backup failure is shown here; its exact content is excluded from tooltips.",
       tone: "warn",
     };
   }
@@ -1714,9 +1707,7 @@ function policyState(policy: BackupPolicyRecord): {
   return { detail: "runs automatically", label: "Automatic", tone: "ok" };
 }
 
-function policyCadenceErrorDetail(
-  policy: BackupPolicyRecord,
-): string | null {
+function policyCadenceErrorDetail(policy: BackupPolicyRecord): string | null {
   if (!policy.cadence_error) {
     return null;
   }

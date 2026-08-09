@@ -281,10 +281,8 @@ export function TopologyOspfUpdateControls({
     {
       cell: (plan) => (
         <span className="historyPrimary">
-          <strong title={String(plan.recommended_ospf_cost)}>
-            {plan.recommended_ospf_cost}
-          </strong>
-          <small title={formatPlanDelta(plan)}>{formatPlanDelta(plan)}</small>
+          <strong>{plan.recommended_ospf_cost}</strong>
+          <small>{formatPlanDelta(plan)}</small>
         </span>
       ),
       header: "Recommendation",

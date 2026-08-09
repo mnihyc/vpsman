@@ -1184,12 +1184,12 @@ function TunnelPlansWorkspace({
               : `Latest average latency ${formatNetworkMeasurement(edge.latest_latency_avg_ms)} ms in the graph range`;
           return (
             <span className="historyPrimary" title={latencyTitle}>
-              <strong title={latencyTitle}>
+              <strong>
                 {edge?.latest_latency_avg_ms == null
                   ? "-"
                   : `${formatNetworkMeasurement(edge.latest_latency_avg_ms)} ms`}
               </strong>
-              <small title={latencyTitle}>
+              <small>
                 {edge?.latest_latency_avg_ms == null
                   ? "No reachability evidence"
                   : "Latest in graph range"}
@@ -1218,12 +1218,12 @@ function TunnelPlansWorkspace({
               : `Latest measured speed ${formatNetworkMeasurement(edge.latest_speed_mbps)} Mbps in the graph range`;
           return (
             <span className="historyPrimary" title={speedTitle}>
-              <strong title={speedTitle}>
+              <strong>
                 {edge?.latest_speed_mbps == null
                   ? "-"
                   : `${formatNetworkMeasurement(edge.latest_speed_mbps)} Mbps`}
               </strong>
-              <small title={speedTitle}>
+              <small>
                 {edge?.latest_speed_mbps == null
                   ? "No speed evidence"
                   : "Latest speed test in graph range"}
@@ -1446,7 +1446,11 @@ function TunnelPlansWorkspace({
           </div>
         </div>
         {tunnelPlanCorruptions.length > 0 && (
-          <div className="portForwardRemovalNotice" role="alert">
+          <div
+            className="portForwardRemovalNotice"
+            role="alert"
+            title="A stored tunnel plan that cannot be parsed must be removed and recreated before it can return to normal lifecycle management."
+          >
             <ShieldAlert size={17} />
             <div>
               <strong>
@@ -1454,12 +1458,7 @@ function TunnelPlansWorkspace({
                 {tunnelPlanCorruptions.length === 1 ? "" : "s"} need repair
               </strong>
               {tunnelPlanCorruptions.map((plan) => (
-                <div
-                  data-tooltip-sensitive="true"
-                  data-value-tooltip-skip="true"
-                  key={plan.id}
-                  title="The persisted tunnel-plan configuration error is shown here; its exact content is excluded from tooltips."
-                >
+                <div key={plan.id}>
                   {plan.name} · {plan.left_client_id} / {plan.right_client_id} ·
                   revision {plan.revision}: {plan.configuration_error}
                 </div>
@@ -2043,7 +2042,16 @@ function TunnelPlanDetails({
             machine-derived.
           </span>
         </div>
-        <label className="consoleField">
+        <label
+          className="consoleField"
+          title={
+            assessmentPending
+              ? "Wait for the current connectivity assessment save to finish"
+              : !plan.enabled
+                ? "Enable the tunnel plan before recording an operator connectivity assessment"
+                : "Choose whether connectivity remains machine-derived or carries an audited operator annotation"
+          }
+        >
           <span>Assessment</span>
           <select
             aria-label={`Connectivity assessment for ${plan.name}`}
@@ -2052,13 +2060,6 @@ function TunnelPlanDetails({
               setAssessment(event.target.value as TunnelConnectionAssessment);
               setAssessmentFeedback(null);
             }}
-            title={
-              assessmentPending
-                ? "Wait for the current connectivity assessment save to finish"
-                : !plan.enabled
-                  ? "Enable the tunnel plan before recording an operator connectivity assessment"
-                  : "Choose whether connectivity remains machine-derived or carries an audited operator annotation"
-            }
             value={assessment}
           >
             <option value="automatic">Automatic (measured)</option>
@@ -2067,10 +2068,18 @@ function TunnelPlanDetails({
           </select>
         </label>
         {assessment !== "automatic" && (
-          <label className="consoleField">
+          <label
+            className="consoleField"
+            title="Audited operator evidence for a display-only connectivity assessment; runtime and OSPF remain machine-derived."
+          >
             <span>Evidence note</span>
             <input
               aria-label={`Connectivity assessment note for ${plan.name}`}
+              data-tooltip-disabled-reason={
+                assessmentPending
+                  ? "Wait for the current connectivity assessment save to finish."
+                  : "Enable the tunnel plan before recording an operator evidence note."
+              }
               disabled={assessmentPending || !plan.enabled}
               maxLength={500}
               onChange={(event) => {
@@ -2078,14 +2087,6 @@ function TunnelPlanDetails({
                 setAssessmentFeedback(null);
               }}
               placeholder="e.g. application traffic verified; ICMP blocked"
-              title={
-                assessmentPending
-                  ? "Wait for the current connectivity assessment save to finish"
-                  : !plan.enabled
-                    ? "Enable the tunnel plan before recording an operator evidence note"
-                    : assessmentNote ||
-                      "Explain the operator evidence for this assessment"
-              }
               value={assessmentNote}
             />
           </label>
@@ -2390,14 +2391,8 @@ function TunnelPlanEvidenceDetails({
                 : "No latency samples exist in the selected range"
             }
           >
-            <strong title={`Latency evidence for ${plan.name}`}>Latency</strong>
-            <span
-              title={
-                latestReachability
-                  ? `Latest ${latestReachability.source} latency sample ${formatCompactTime(latestReachability.observed_at)}`
-                  : "No latency samples exist in the selected range"
-              }
-            >
+            <strong>Latency</strong>
+            <span>
               {latestReachability
                 ? `${latestReachability.source} · ${formatCompactTime(latestReachability.observed_at)}`
                 : "No samples"}
@@ -2427,16 +2422,8 @@ function TunnelPlanEvidenceDetails({
                 : "No speed-test samples exist in the selected range"
             }
           >
-            <strong title={`Speed-test evidence for ${plan.name}`}>
-              Speed test
-            </strong>
-            <span
-              title={
-                latestSpeed
-                  ? `Latest manual speed test ${formatCompactTime(latestSpeed.observed_at)}`
-                  : "No speed-test samples exist in the selected range"
-              }
-            >
+            <strong>Speed test</strong>
+            <span>
               {latestSpeed
                 ? `manual · ${formatCompactTime(latestSpeed.observed_at)}`
                 : "No samples"}
@@ -2950,7 +2937,14 @@ function TunnelPlanComposer({
         <fieldset className="topologyFormSection">
           <legend>Plan and endpoints</legend>
           <div className="topologyFormGrid threeColumn">
-            <Field label="Plan name">
+            <Field
+              label="Plan name"
+              tooltip={
+                existing
+                  ? "Plan identity is fixed; create a new declaration to use another name."
+                  : undefined
+              }
+            >
               <input
                 aria-label="Tunnel plan name"
                 maxLength={128}
@@ -2958,11 +2952,6 @@ function TunnelPlanComposer({
                 placeholder="edge-a-edge-b"
                 readOnly={Boolean(existing)}
                 required
-                title={
-                  existing
-                    ? "Plan identity is fixed; create a new declaration to use another name."
-                    : undefined
-                }
                 value={form.name}
               />
             </Field>
@@ -4131,7 +4120,13 @@ function AdapterDefinitionField({
   return (
     <div
       className="topologyField"
-      title="The adapter definition stores direct absolute argv. The agent never installs or edits the script."
+      title={
+        !clientId
+          ? `Select the endpoint VPS before choosing ${label.toLocaleLowerCase()}`
+          : domain !== "routing_cost" && definitions.length === 0
+            ? `No compatible ${label.toLocaleLowerCase()} definitions exist; create one first`
+            : `Choose the ${label.toLocaleLowerCase()} used by this endpoint. The definition stores direct absolute argv; the agent never installs or edits the script.`
+      }
     >
       <span>{label}</span>
       <div className="adapterDefinitionSelectRow">
@@ -4141,13 +4136,6 @@ function AdapterDefinitionField({
             !clientId || (domain !== "routing_cost" && definitions.length === 0)
           }
           onChange={(event) => onChange(event.target.value)}
-          title={
-            !clientId
-              ? `Select the endpoint VPS before choosing ${label.toLocaleLowerCase()}`
-              : domain !== "routing_cost" && definitions.length === 0
-                ? `No compatible ${label.toLocaleLowerCase()} definitions exist; create one first`
-                : `Choose the ${label.toLocaleLowerCase()} used by this endpoint`
-          }
           value={value}
         >
           <option value="">
@@ -4245,14 +4233,14 @@ function Metric({
     title ??
     (value === "-"
       ? `${label} is unavailable because no retained measurement was reported`
-      : `${label}: ${value}`);
+      : undefined);
   return (
     <span
       className={tone === "warning" ? "hasAttention" : undefined}
       title={semanticTitle}
     >
-      <small title={label}>{label}</small>
-      <strong title={semanticTitle}>{value}</strong>
+      <small>{label}</small>
+      <strong>{value}</strong>
     </span>
   );
 }
@@ -4292,22 +4280,16 @@ function PlanFact({
   return (
     <span
       title={
-        title ??
-        (value === "-"
+        value === "-"
           ? `${label} is not reported for this tunnel plan`
-          : `${label}: ${value}`)
+          : undefined
       }
     >
-      <small title={label}>{label}</small>
+      <small>{label}</small>
       <strong
         aria-label={title ? `${label}: ${title}` : undefined}
         tabIndex={title ? 0 : undefined}
-        title={
-          title ??
-          (value === "-"
-            ? `${label} is not reported for this tunnel plan`
-            : `${label}: ${value}`)
-        }
+        title={title}
       >
         {value}
       </strong>
@@ -4364,8 +4346,11 @@ function tunnelEndpointStateTitle(
     `Runtime config: ${tunnelRuntimeConfigLabel(runtimeConfig)}`,
     runtimeConfig.job_id ? `Job ${runtimeConfig.job_id}` : null,
     runtimeConfig.updated_at ? `Apply state ${runtimeConfig.updated_at}` : null,
-    runtimeConfig.error || reason
-      ? "Exact runtime diagnostic content is excluded from tooltips"
+    runtimeConfig.error
+      ? `Runtime configuration error: ${runtimeConfig.error}`
+      : null,
+    reason && reason !== runtimeConfig.error
+      ? `Endpoint runtime diagnostic: ${reason}`
       : null,
     observedAt ? `Observed ${observedAt}` : "No endpoint observation",
   ]
@@ -4442,7 +4427,7 @@ function tunnelConnectivityPresentation(
       label,
       statusClass:
         plan.connection_assessment === "connected" ? "info" : "warning",
-      title: `${label} assessed by ${actor}; ${plan.connection_assessment_note ? "an evidence note is retained, with its exact content excluded from tooltips" : "no evidence note is retained"}. Runtime reconciliation and automatic OSPF still use machine evidence.`,
+      title: `${label} assessed by ${actor}; ${plan.connection_assessment_note ? `evidence note: ${plan.connection_assessment_note}` : "no evidence note is retained"}. Runtime reconciliation and automatic OSPF still use machine evidence.`,
     };
   }
   const left = edge?.left_reachability_state ?? "unknown";
@@ -4452,8 +4437,10 @@ function tunnelConnectivityPresentation(
       detail: "Measured on both endpoints",
       label: "Reachable",
       statusClass: "ok",
-      title:
+      title: tunnelReachabilityTitle(
+        edge,
         "Both declared endpoints reported successful reachability evidence.",
+      ),
     };
   }
   if (left === "probe_failed" || right === "probe_failed") {
@@ -4462,16 +4449,20 @@ function tunnelConnectivityPresentation(
         detail: "Peer probe failed; not proof of disconnect",
         label: "Partially verified",
         statusClass: "warning",
-        title:
-          "One endpoint has positive reachability evidence while the peer probe failed. Exact probe diagnostic content is excluded from tooltips.",
+        title: tunnelReachabilityTitle(
+          edge,
+          "One endpoint has positive reachability evidence while the peer probe failed.",
+        ),
       };
     }
     return {
       detail: "Probe failed; not proof of disconnect",
       label: "Unverified",
       statusClass: "warning",
-      title:
-        "A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic. Exact probe diagnostic content is excluded from tooltips.",
+      title: tunnelReachabilityTitle(
+        edge,
+        "A configured reachability probe failed. ICMP or the selected probe may be blocked even when the tunnel carries traffic.",
+      ),
     };
   }
   if (left === "stale" || right === "stale") {
@@ -4484,7 +4475,10 @@ function tunnelConnectivityPresentation(
       detail: `${staleEndpoints.join(" and ")} endpoint evidence expired`,
       label: hasCurrentPeer ? "Partially verified" : "Stale",
       statusClass: "warning",
-      title: `The ${staleEndpoints.join(" and ")} endpoint's latest reachability sample exceeded its declared monitoring window. Exact probe diagnostic content is excluded from tooltips.`,
+      title: tunnelReachabilityTitle(
+        edge,
+        `The ${staleEndpoints.join(" and ")} endpoint's latest reachability sample exceeded its declared monitoring window.`,
+      ),
     };
   }
   if (left === "reachable" || right === "reachable") {
@@ -4492,8 +4486,10 @@ function tunnelConnectivityPresentation(
       detail: "One endpoint measured",
       label: "Partially verified",
       statusClass: "info",
-      title:
-        "Only one endpoint has positive reachability evidence. Exact probe diagnostic content is excluded from tooltips.",
+      title: tunnelReachabilityTitle(
+        edge,
+        "Only one endpoint has positive reachability evidence.",
+      ),
     };
   }
   if (left === "not_configured" && right === "not_configured") {
@@ -4501,17 +4497,38 @@ function tunnelConnectivityPresentation(
       detail: "No reachability probe configured",
       label: "Unverified",
       statusClass: "neutral",
-      title:
+      title: tunnelReachabilityTitle(
+        edge,
         "Runtime reconciliation remains visible, but neither endpoint has a configured reachability probe.",
+      ),
     };
   }
   return {
     detail: "Awaiting reachability evidence",
     label: "Unverified",
     statusClass: "neutral",
-    title:
-      "No current endpoint reachability evidence is available. Exact probe diagnostic content is excluded from tooltips.",
+    title: tunnelReachabilityTitle(
+      edge,
+      "No current endpoint reachability evidence is available.",
+    ),
   };
+}
+
+function tunnelReachabilityTitle(
+  edge: TopologyGraphEdge | undefined,
+  summary: string,
+): string {
+  const diagnostics = [
+    edge?.left_reachability_reason
+      ? `Left probe diagnostic: ${edge.left_reachability_reason}`
+      : null,
+    edge?.right_reachability_reason
+      ? `Right probe diagnostic: ${edge.right_reachability_reason}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  return diagnostics.length > 0
+    ? `${summary} ${diagnostics.join("; ")}.`
+    : summary;
 }
 
 function tunnelConnectionAssessmentError(error: unknown): string {

@@ -76,7 +76,7 @@ fn traffic_reset_day_accepts_explicit_no_reset_without_weakening_monthly_validat
     let no_reset = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "-1").unwrap();
     assert_eq!(no_reset.raw, "-1");
     assert_eq!(no_reset.json, json!({"day": -1}));
-    assert_eq!(no_reset.display, "No reset");
+    assert_eq!(no_reset.display, "-");
 
     let monthly = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "31").unwrap();
     assert_eq!(monthly.json, json!({"day": 31}));

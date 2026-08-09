@@ -633,39 +633,34 @@ export function FleetMonitorPanel({
           className="fleetMonitorSnapshot"
           aria-label={`${title} current totals`}
         >
-          <span>
-            <small title="Distinct configured VPS locations">Locations</small>
-            <strong title={`${fleetSnapshot.locations.length} locations`}>
-              {fleetSnapshot.locations.length}
-            </strong>
-            <em title={locationSummary}>{locationSummary}</em>
+          <span
+            title={`Configured locations: ${fleetSnapshot.locations.length}. ${locationSummary}`}
+          >
+            <small>Locations</small>
+            <strong>{fleetSnapshot.locations.length}</strong>
+            <em>{locationSummary}</em>
           </span>
-          <span>
-            <small title="Aggregate current receive and transmit rates from fresh selected interfaces">
-              Realtime speed
-            </small>
-            <strong title={rxSummary}>{rxSummary}</strong>
-            <em title={txSummary}>{txSummary}</em>
+          <span
+            title={`Aggregate current rates from fresh selected interfaces. RX ${rxSummary}; TX ${txSummary}`}
+          >
+            <small>Realtime speed</small>
+            <strong>{rxSummary}</strong>
+            <em>{txSummary}</em>
           </span>
-          <span>
-            <small title="Aggregate configured traffic accounting, including reset cycles and no-reset totals">
-              Traffic
-            </small>
+          <span
+            title={`Aggregate configured traffic accounting across reset cycles and accumulated totals. ${trafficTotal}; ${trafficSummary}`}
+          >
+            <small>Traffic</small>
             <strong
               data-tooltip-empty-reason={
                 fleetSnapshot.trafficCount === 0
                   ? "No VPS in this view has configured traffic accounting"
                   : undefined
               }
-              title={
-                fleetSnapshot.trafficCount > 0
-                  ? trafficTotal
-                  : "No VPS in this view has configured traffic accounting"
-              }
             >
               {trafficTotal}
             </strong>
-            <em title={trafficSummary}>{trafficSummary}</em>
+            <em>{trafficSummary}</em>
           </span>
         </div>
         <div className="fleetMonitorFilters" aria-label={`${title} filters`}>
@@ -963,6 +958,7 @@ export function VpsMonitorCard({
   const trafficConfigured = Boolean(
     traffic && traffic.selectors.length > 0 && traffic.reset_day !== null,
   );
+  const trafficUnconfigured = monitoringState === "ready" && !trafficConfigured;
   const trafficPercent =
     trafficConfigured && traffic?.cycle_percent !== null
       ? finiteMetric(traffic?.cycle_percent)
@@ -1036,21 +1032,33 @@ export function VpsMonitorCard({
   const trafficReset =
     trafficConfigured && traffic
       ? traffic.reset_day === -1
-        ? "No reset"
+        ? null
         : formatTrafficReset(traffic.cycle_end)
       : null;
-  const trafficHeadingContext =
-    density === "compact" || traffic?.reset_day === -1 ? trafficReset : null;
+  const trafficHeadingContext = density === "compact" ? trafficReset : null;
   const trafficHeading = `Traffic${trafficHeadingContext ? ` · ${trafficHeadingContext}` : ""}`;
   const trafficDetail =
     trafficConfigured && traffic
       ? (trafficProblem ??
         (traffic.reset_day === -1
-          ? "Accumulated total · No reset"
+          ? null
           : formatTrafficReset(traffic.cycle_end)))
       : null;
+  const trafficRowTitle =
+    monitoringState === "loading"
+      ? "Reading traffic configuration and current accounting evidence."
+      : monitoringState === "unavailable"
+        ? "Monitoring card evidence is unavailable; traffic configuration is not inferred."
+        : quotaState === "unlimited" && traffic
+          ? `${formatTrafficTitle(traffic)} Traffic quota is unlimited.`
+          : trafficConfigured && traffic
+            ? formatTrafficTitle(traffic)
+            : "Traffic accounting rules and reset cycle are not configured.";
   const pingHeadingContext = primaryPing?.target_name ?? null;
   const pingHeading = `Ping${pingHeadingContext ? ` · ${pingHeadingContext}` : ""}`;
+  const pingRowTitle = primaryPing
+    ? `${pingHeading}. ${pingEvidenceLabel}.${pingProblem ? ` ${pingProblem}.` : ""}${primaryPing.checked_at ? ` Checked ${formatTime(primaryPing.checked_at)}.` : ""}`
+    : "No primary Ping target is configured for this VPS.";
 
   const cardHeader = (
     <>
@@ -1243,7 +1251,8 @@ export function VpsMonitorCard({
         </span>
       </div>
       <div
-        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
+        className={`vpsMonitorTraffic${trafficHeadingContext ? " contextual" : ""}${trafficUnconfigured ? " unconfigured" : ""}${trafficWarning > 0 ? " warning" : ""}${quotaPercent !== null && quotaPercent > 100 ? " exceeded" : ""}`}
+        title={trafficRowTitle}
       >
         <span>
           <small
@@ -1251,7 +1260,7 @@ export function VpsMonitorCard({
             title={
               portSpeed
                 ? `${trafficHeading}; ${portSpeed.display} port capacity is a display value only—no shaping or enforcement is implied`
-                : trafficHeading
+                : undefined
             }
           >
             <strong>Traffic</strong>
@@ -1266,7 +1275,7 @@ export function VpsMonitorCard({
                 {portSpeed.display}
               </span>
             ) : null}
-            <strong title={trafficEvidenceLabel}>{trafficEvidenceLabel}</strong>
+            <strong>{trafficEvidenceLabel}</strong>
           </span>
         </span>
         <span
@@ -1291,28 +1300,16 @@ export function VpsMonitorCard({
           }
           className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}`}
           role={quotaPercent === null ? undefined : "meter"}
-          title={
-            monitoringState === "loading"
-              ? "Reading traffic configuration and current accounting evidence"
-              : monitoringState === "unavailable"
-                ? "Monitoring card evidence is unavailable; traffic configuration is not inferred"
-                : quotaState === "unlimited" && traffic
-                  ? `${formatTrafficTitle(traffic)} Traffic quota is unlimited.`
-                  : trafficConfigured && traffic
-                    ? formatTrafficTitle(traffic)
-                    : "Traffic accounting rules and reset cycle are not configured"
-          }
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
         </span>
         {trafficConfigured && traffic ? (
           <small
             className={trafficWarning > 0 ? "exceptionEvidence" : undefined}
-            title={`${traffic.reset_day === -1 ? "Accumulated" : "Current-cycle"} traffic: RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${trafficDetail ? ` ${trafficDetail}.` : ""}`}
           >
             ↓ {formatBytes(traffic.diagnostic_rx_bytes)} · ↑{" "}
             {formatBytes(traffic.diagnostic_tx_bytes)}
-            {density === "comfortable" || trafficWarning > 0
+            {trafficDetail && (density === "comfortable" || trafficWarning > 0)
               ? ` · ${trafficDetail}`
               : ""}
           </small>
@@ -1320,13 +1317,14 @@ export function VpsMonitorCard({
       </div>
       <div
         className={`vpsMonitorPing ${pingWarning >= 2 ? "failed" : pingWarning > 0 ? "stale" : (primaryPing?.state ?? "unconfigured")}`}
+        title={pingRowTitle}
       >
         <span>
-          <small className="vpsMonitorRowHeading" title={pingHeading}>
+          <small className="vpsMonitorRowHeading">
             <strong>Ping</strong>
             {pingHeadingContext ? ` · ${pingHeadingContext}` : ""}
           </small>
-          <strong title={pingEvidenceLabel}>{pingEvidenceLabel}</strong>
+          <strong>{pingEvidenceLabel}</strong>
         </span>
         <span className="vpsMonitorPingVisual" aria-hidden="true">
           <MiniSparkline
@@ -1335,11 +1333,8 @@ export function VpsMonitorCard({
             values={pingHistory}
           />
         </span>
-        {(density === "comfortable" || pingWarning > 0) && pingProblem ? (
-          <small
-            className={pingWarning > 0 ? "exceptionEvidence" : undefined}
-            title={pingProblem}
-          >
+        {density === "comfortable" && pingProblem ? (
+          <small className={pingWarning > 0 ? "exceptionEvidence" : undefined}>
             {pingProblem}
           </small>
         ) : null}
@@ -1493,12 +1488,12 @@ export function MonitorFact({
       className={`vpsMonitorFlowFact${stale ? " stale" : ""}`}
       title={title}
     >
-      <small title={label}>
+      <small>
         {icon}
         {icon ? " " : ""}
         {label}
       </small>
-      <strong title={title}>{value}</strong>
+      <strong>{value}</strong>
       {sparkline}
     </span>
   );
@@ -1662,9 +1657,9 @@ function MonitorSignal({
   value: string;
 }) {
   return (
-    <span className={`vpsMonitorSignal ${tone}`} title={`${label}: ${value}`}>
-      <span title={label}>{label}</span>
-      <strong title={value}>{value}</strong>
+    <span className={`vpsMonitorSignal ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
     </span>
   );
 }
@@ -2539,7 +2534,7 @@ function formatTrafficTitle(traffic: TrafficAccountingRecord) {
       : "";
   const window =
     traffic.reset_day === -1
-      ? "accumulated traffic with no reset"
+      ? "traffic accumulated across retained counter evidence"
       : "authoritative traffic-accounting cycle";
   return `${state} ${window}. RX ${formatBytes(traffic.diagnostic_rx_bytes)}; TX ${formatBytes(traffic.diagnostic_tx_bytes)}. Quota progress counts only the configured selector directions.${overage}`;
 }

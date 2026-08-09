@@ -60,12 +60,11 @@ export function TerminalOperationControls({
       </label>
       <label
         className="wideField"
-        title="Terminal arguments are entered here; their contents are intentionally omitted from tooltips because arguments may contain sensitive values."
+        title="Command and arguments used to open the terminal session."
       >
         <span>Argv</span>
         <textarea
           aria-label="Terminal argv"
-          data-value-tooltip-skip="true"
           onChange={(event) => setTerminalArgv(event.target.value)}
           rows={2}
           value={terminalArgv}
@@ -108,7 +107,9 @@ export function TerminalOperationControls({
           aria-label="Terminal idle timeout seconds"
           max={86400}
           min={10}
-          onChange={(event) => setTerminalIdleTimeoutSecs(Number(event.target.value))}
+          onChange={(event) =>
+            setTerminalIdleTimeoutSecs(Number(event.target.value))
+          }
           type="number"
           value={terminalIdleTimeoutSecs}
         />
@@ -119,7 +120,9 @@ export function TerminalOperationControls({
           aria-label="Terminal flow window bytes"
           max={1048576}
           min={4096}
-          onChange={(event) => setTerminalFlowWindowBytes(Number(event.target.value))}
+          onChange={(event) =>
+            setTerminalFlowWindowBytes(Number(event.target.value))
+          }
           type="number"
           value={terminalFlowWindowBytes}
         />
