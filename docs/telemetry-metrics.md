@@ -197,9 +197,15 @@ the end independently for each interface from its first retained live agent
 sample; an operator-supplied end could create a gap or overlap and is therefore
 not part of the command.
 
-The agent reads the retained five-minute, hourly, daily, monthly, and yearly
-vnStat JSON in one snapshot per interface. It also reads vnStat's effective
-calendar configuration once per import, so `MonthRotate`,
+The agent supports vnStat 2.0 and newer and reads the retained five-minute,
+hourly, daily, monthly, and yearly JSON in one snapshot per interface. For
+vnStat 2.0–2.9, whose JSON calendar fields do not include Unix timestamps, the
+agent reconstructs each timestamp from the reported date and time. Those
+versions report an interface's creation date without a time of day, so it is
+conservatively treated as midnight in vnStat's configured calendar mode;
+imported byte totals remain exact, but the first partial day can begin up to 24
+hours earlier than the interface was actually created. The agent also reads
+vnStat's effective calendar configuration once per import, so `MonthRotate`,
 `MonthRotateAffectsYears`, local-versus-UTC storage, and sparse trafficless
 periods are interpreted consistently with the source database. Monthly and
 yearly rows use their natural calendar boundaries rather than the next retained

@@ -65,10 +65,41 @@ enum RetainedResolution {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyDatePrecision {
+    Day,
+    Month,
+    Year,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IntervalCoverage {
     None,
     Partial,
     Full,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VnstatVersion {
+    major: u32,
+    minor: u32,
+}
+
+impl VnstatVersion {
+    #[cfg(test)]
+    const fn modern_json() -> Self {
+        Self {
+            major: 2,
+            minor: 10,
+        }
+    }
+
+    fn supports_unlimited_json_query(self) -> bool {
+        self.major > 2 || (self.major == 2 && self.minor >= 6)
+    }
+
+    fn allows_legacy_calendar_timestamps(self) -> bool {
+        self.major == 2 && self.minor < 10
+    }
 }
 
 impl CalendarResolution {
@@ -76,6 +107,13 @@ impl CalendarResolution {
         match self {
             Self::Month => "month",
             Self::Year => "year",
+        }
+    }
+
+    fn retained(self) -> RetainedResolution {
+        match self {
+            Self::Month => RetainedResolution::Month,
+            Self::Year => RetainedResolution::Year,
         }
     }
 }
@@ -123,8 +161,11 @@ async fn collect_vnstat_history(
     let collected_until_unix = floor_minute(now_unix);
     validate_request_at(input.interfaces, input.start_unix, now_unix)?;
     let executable = vnstat_executable()?;
+    let vnstat_version = run_vnstat_version(executable, input.cancel_token.clone()).await?;
     let calendar_config = run_vnstat_showconfig(executable, input.cancel_token.clone()).await?;
     tracing::debug!(
+        vnstat_major = vnstat_version.major,
+        vnstat_minor = vnstat_version.minor,
         month_rotate = calendar_config.month_rotate,
         month_rotate_affects_years = calendar_config.month_rotate_affects_years,
         use_utc = calendar_config.use_utc,
@@ -135,22 +176,34 @@ async fn collect_vnstat_history(
     let mut sources = Vec::new();
     let resolved_interfaces = if input.interfaces.is_empty() {
         input.cancel_token.check("network_traffic_import_vnstat")?;
-        let payload = run_vnstat_query(executable, None, input.cancel_token.clone()).await?;
+        let payload =
+            run_vnstat_query(executable, vnstat_version, None, input.cancel_token.clone()).await?;
         let (interfaces, discovered_sources, discovered_buckets) =
-            parse_discovered_vnstat_payload(&payload, input.start_unix, &calendar_config)?;
+            parse_discovered_vnstat_payload_for_version(
+                &payload,
+                input.start_unix,
+                &calendar_config,
+                vnstat_version,
+            )?;
         sources = discovered_sources;
         buckets = discovered_buckets;
         interfaces
     } else {
         for interface in input.interfaces {
             input.cancel_token.check("network_traffic_import_vnstat")?;
-            let payload =
-                run_vnstat_query(executable, Some(interface), input.cancel_token.clone()).await?;
+            let payload = run_vnstat_query(
+                executable,
+                vnstat_version,
+                Some(interface),
+                input.cancel_token.clone(),
+            )
+            .await?;
             append_parsed_interface(
                 &payload,
                 interface,
                 input.start_unix,
                 &calendar_config,
+                vnstat_version,
                 &mut buckets,
                 &mut sources,
             )?;
@@ -315,10 +368,29 @@ fn discover_vnstat_interfaces(payload: &Value) -> Result<Vec<String>> {
     Ok(interfaces.into_iter().collect())
 }
 
+#[cfg(test)]
 fn parse_discovered_vnstat_payload(
     payload: &Value,
     requested_start_unix: u64,
     calendar_config: &VnstatCalendarConfig,
+) -> Result<(
+    Vec<String>,
+    Vec<NetworkTrafficImportSource>,
+    Vec<NetworkTrafficImportBucket>,
+)> {
+    parse_discovered_vnstat_payload_for_version(
+        payload,
+        requested_start_unix,
+        calendar_config,
+        VnstatVersion::modern_json(),
+    )
+}
+
+fn parse_discovered_vnstat_payload_for_version(
+    payload: &Value,
+    requested_start_unix: u64,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
 ) -> Result<(
     Vec<String>,
     Vec<NetworkTrafficImportSource>,
@@ -333,6 +405,7 @@ fn parse_discovered_vnstat_payload(
             interface,
             requested_start_unix,
             calendar_config,
+            version,
             &mut buckets,
             &mut sources,
         )?;
@@ -345,11 +418,17 @@ fn append_parsed_interface(
     interface: &str,
     requested_start_unix: u64,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     buckets: &mut Vec<NetworkTrafficImportBucket>,
     sources: &mut Vec<NetworkTrafficImportSource>,
 ) -> Result<()> {
-    let (source, mut interface_buckets) =
-        parse_vnstat_payload(payload, interface, requested_start_unix, calendar_config)?;
+    let (source, mut interface_buckets) = parse_vnstat_payload_for_version(
+        payload,
+        interface,
+        requested_start_unix,
+        calendar_config,
+        version,
+    )?;
     anyhow::ensure!(
         interface_buckets.len() <= NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE,
         "vnstat history for {interface} exceeds the import bucket limit"
@@ -376,10 +455,11 @@ fn vnstat_executable() -> Result<&'static str> {
 
 async fn run_vnstat_query(
     executable: &str,
+    version: VnstatVersion,
     interface: Option<&str>,
     cancel_token: CommandCancelToken,
 ) -> Result<Value> {
-    let command = vnstat_query_command(executable, interface);
+    let command = vnstat_query_command(executable, version, interface);
     let output_limit = if interface.is_some() {
         VNSTAT_OUTPUT_LIMIT_BYTES
     } else {
@@ -387,6 +467,22 @@ async fn run_vnstat_query(
     };
     let output = run_vnstat_command(command, "query", output_limit, cancel_token).await?;
     serde_json::from_slice(&output).context("vnstat returned invalid JSON")
+}
+
+async fn run_vnstat_version(
+    executable: &str,
+    cancel_token: CommandCancelToken,
+) -> Result<VnstatVersion> {
+    let command = vnstat_version_command(executable);
+    let output = run_vnstat_command(
+        command,
+        "version query",
+        VNSTAT_CONFIG_OUTPUT_LIMIT_BYTES,
+        cancel_token,
+    )
+    .await?;
+    let output = std::str::from_utf8(&output).context("vnstat returned a non-UTF-8 version")?;
+    parse_vnstat_version(output)
 }
 
 async fn run_vnstat_showconfig(
@@ -440,9 +536,18 @@ async fn run_vnstat_command(
     }
 }
 
-fn vnstat_query_command(executable: &str, interface: Option<&str>) -> Command {
+fn vnstat_query_command(
+    executable: &str,
+    version: VnstatVersion,
+    interface: Option<&str>,
+) -> Command {
     let mut command = Command::new(executable);
-    command.arg("--json").arg("--limit").arg("0");
+    command.arg("--json");
+    if version.supports_unlimited_json_query() {
+        command.arg("--limit").arg("0");
+    } else {
+        command.arg("0");
+    }
     if let Some(interface) = interface {
         command.arg("--iface").arg(interface);
     }
@@ -450,10 +555,54 @@ fn vnstat_query_command(executable: &str, interface: Option<&str>) -> Command {
     command
 }
 
+fn vnstat_version_command(executable: &str) -> Command {
+    let mut command = Command::new(executable);
+    command.arg("--version").stdin(Stdio::null());
+    command
+}
+
 fn vnstat_showconfig_command(executable: &str) -> Command {
     let mut command = Command::new(executable);
     command.arg("--showconfig").stdin(Stdio::null());
     command
+}
+
+fn parse_vnstat_version(output: &str) -> Result<VnstatVersion> {
+    let raw_version = output
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some("vnStat"))
+                .then(|| fields.next())
+                .flatten()
+        })
+        .context("vnstat version output is missing its version number")?;
+    let mut components = raw_version.split('.');
+    let major = components
+        .next()
+        .context("vnstat version is missing its major component")?
+        .parse::<u32>()
+        .context("vnstat version has an invalid major component")?;
+    let minor_raw = components
+        .next()
+        .context("vnstat version is missing its minor component")?;
+    let minor_digits = minor_raw
+        .as_bytes()
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    anyhow::ensure!(
+        minor_digits > 0,
+        "vnstat version has an invalid minor component"
+    );
+    let minor = minor_raw[..minor_digits]
+        .parse::<u32>()
+        .context("vnstat version has an invalid minor component")?;
+    anyhow::ensure!(
+        major >= 2,
+        "vnStat {major}.{minor} is unsupported; vnStat 2.0 or newer is required"
+    );
+    Ok(VnstatVersion { major, minor })
 }
 
 fn parse_vnstat_showconfig(output: &str) -> Result<VnstatCalendarConfig> {
@@ -518,23 +667,40 @@ fn parse_vnstat_config_optional_u32(output: &str, key: &str) -> Result<Option<u3
     Ok(found)
 }
 
+#[cfg(test)]
 fn parse_vnstat_payload(
     payload: &Value,
     interface: &str,
     requested_start_unix: u64,
     calendar_config: &VnstatCalendarConfig,
 ) -> Result<(NetworkTrafficImportSource, Vec<NetworkTrafficImportBucket>)> {
+    parse_vnstat_payload_for_version(
+        payload,
+        interface,
+        requested_start_unix,
+        calendar_config,
+        VnstatVersion::modern_json(),
+    )
+}
+
+fn parse_vnstat_payload_for_version(
+    payload: &Value,
+    interface: &str,
+    requested_start_unix: u64,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
+) -> Result<(NetworkTrafficImportSource, Vec<NetworkTrafficImportBucket>)> {
     anyhow::ensure!(
         json_version_is_two(payload),
         "vnstat JSON version 2 is required"
     );
     let interface_payload = interface_payload(payload, interface)?;
-    let database_created_unix = nested_timestamp(interface_payload, "created")
-        .context("vnstat JSON is missing the interface creation timestamp")?;
+    let database_created_unix =
+        interface_created_timestamp(interface_payload, calendar_config.use_utc, version)?;
     let database_available_unix = ceil_minute(database_created_unix)
         .context("vnstat interface creation timestamp is too large")?;
-    let source_updated_unix = nested_timestamp(interface_payload, "updated")
-        .context("vnstat JSON is missing the interface update timestamp")?;
+    let source_updated_unix =
+        interface_updated_timestamp(interface_payload, calendar_config.use_utc, version)?;
     let source_cutoff_unix = floor_minute(source_updated_unix);
     let effective_start_unix = requested_start_unix.max(database_available_unix);
     anyhow::ensure!(
@@ -546,8 +712,10 @@ fn parse_vnstat_payload(
     parse_interval_rows(
         interface_payload,
         interface,
-        "fiveminute",
+        RetainedResolution::FiveMinute,
         300,
+        calendar_config,
+        version,
         database_available_unix,
         requested_start_unix,
         source_cutoff_unix,
@@ -556,8 +724,10 @@ fn parse_vnstat_payload(
     parse_interval_rows(
         interface_payload,
         interface,
-        "hour",
+        RetainedResolution::Hour,
         3_600,
+        calendar_config,
+        version,
         database_available_unix,
         requested_start_unix,
         source_cutoff_unix,
@@ -567,6 +737,7 @@ fn parse_vnstat_payload(
         interface_payload,
         interface,
         calendar_config,
+        version,
         database_available_unix,
         requested_start_unix,
         source_cutoff_unix,
@@ -577,6 +748,7 @@ fn parse_vnstat_payload(
         interface,
         CalendarResolution::Month,
         calendar_config,
+        version,
         database_available_unix,
         requested_start_unix,
         source_cutoff_unix,
@@ -587,6 +759,7 @@ fn parse_vnstat_payload(
         interface,
         CalendarResolution::Year,
         calendar_config,
+        version,
         database_available_unix,
         requested_start_unix,
         source_cutoff_unix,
@@ -597,6 +770,7 @@ fn parse_vnstat_payload(
             interface_payload,
             interface,
             calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -705,27 +879,69 @@ fn interface_payload<'a>(payload: &'a Value, interface: &str) -> Result<&'a Valu
         .with_context(|| format!("vnstat JSON is missing interface {interface}"))
 }
 
-fn nested_timestamp(payload: &Value, field: &str) -> Option<u64> {
-    payload
-        .get(field)
-        .and_then(|value| value.get("timestamp"))
-        .and_then(Value::as_u64)
+fn interface_created_timestamp(
+    interface_payload: &Value,
+    use_utc: bool,
+    version: VnstatVersion,
+) -> Result<u64> {
+    let created = interface_payload
+        .get("created")
+        .context("vnstat JSON is missing interface creation data")?;
+    if let Some(timestamp) = explicit_timestamp(created, "interface creation", version)? {
+        return Ok(timestamp);
+    }
+    // vnStat 2.0-2.9 reports only the creation date. Midnight in the configured
+    // database calendar is the narrowest representable approximation.
+    let date = legacy_date(created, LegacyDatePrecision::Day, "interface creation")?;
+    calendar_midnight_unix(date, use_utc)
+        .context("vnstat interface creation calendar midnight is invalid")
+}
+
+fn interface_updated_timestamp(
+    interface_payload: &Value,
+    use_utc: bool,
+    version: VnstatVersion,
+) -> Result<u64> {
+    let updated = interface_payload
+        .get("updated")
+        .context("vnstat JSON is missing interface update data")?;
+    if let Some(timestamp) = explicit_timestamp(updated, "interface update", version)? {
+        return Ok(timestamp);
+    }
+    legacy_minute_unix(updated, use_utc, "interface update")
+}
+
+fn explicit_timestamp(payload: &Value, label: &str, version: VnstatVersion) -> Result<Option<u64>> {
+    let Some(timestamp) = payload.get("timestamp") else {
+        anyhow::ensure!(
+            version.allows_legacy_calendar_timestamps(),
+            "vnstat {label} is missing its timestamp"
+        );
+        return Ok(None);
+    };
+    timestamp
+        .as_u64()
+        .with_context(|| format!("vnstat {label} timestamp is invalid"))
+        .map(Some)
 }
 
 fn parse_interval_rows(
     interface_payload: &Value,
     interface: &str,
-    field: &str,
+    resolution: RetainedResolution,
     nominal_duration_secs: u32,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
     buckets: &mut Vec<NetworkTrafficImportBucket>,
 ) -> Result<()> {
+    let field = resolution.field();
     let rows = traffic_rows(interface_payload, field)?;
     let mut seen = BTreeSet::new();
     for row in rows {
-        let start_unix = traffic_row_timestamp(row)?;
+        let start_unix = traffic_row_timestamp(row, resolution, calendar_config, version)?;
         anyhow::ensure!(
             seen.insert(start_unix),
             "vnstat {field} rows contain a duplicate timestamp"
@@ -751,6 +967,7 @@ fn parse_day_rows(
     interface_payload: &Value,
     interface: &str,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
@@ -758,7 +975,10 @@ fn parse_day_rows(
 ) -> Result<()> {
     let mut rows = traffic_rows(interface_payload, "day")?
         .iter()
-        .map(|row| traffic_row_timestamp(row).map(|timestamp| (timestamp, row)))
+        .map(|row| {
+            traffic_row_timestamp(row, RetainedResolution::Day, calendar_config, version)
+                .map(|timestamp| (timestamp, row))
+        })
         .collect::<Result<Vec<_>>>()?;
     rows.sort_by_key(|(timestamp, _)| *timestamp);
     anyhow::ensure!(
@@ -786,6 +1006,7 @@ fn synthesize_missing_trafficless_rows(
     interface_payload: &Value,
     interface: &str,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
@@ -812,6 +1033,7 @@ fn synthesize_missing_trafficless_rows(
             interface,
             CalendarResolution::Year,
             calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -822,6 +1044,7 @@ fn synthesize_missing_trafficless_rows(
             interface,
             CalendarResolution::Month,
             calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -831,6 +1054,7 @@ fn synthesize_missing_trafficless_rows(
             interface_payload,
             interface,
             calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -839,8 +1063,10 @@ fn synthesize_missing_trafficless_rows(
         RetainedResolution::Hour => synthesize_missing_fixed_rows(
             interface_payload,
             interface,
-            "hour",
+            RetainedResolution::Hour,
             3_600,
+            calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -849,8 +1075,10 @@ fn synthesize_missing_trafficless_rows(
         RetainedResolution::FiveMinute => synthesize_missing_fixed_rows(
             interface_payload,
             interface,
-            "fiveminute",
+            RetainedResolution::FiveMinute,
             300,
+            calendar_config,
+            version,
             database_available_unix,
             requested_start_unix,
             source_cutoff_unix,
@@ -865,6 +1093,7 @@ fn synthesize_missing_calendar_rows(
     interface: &str,
     resolution: CalendarResolution,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
@@ -874,13 +1103,17 @@ fn synthesize_missing_calendar_rows(
     let present_period_starts = rows
         .iter()
         .map(|row| {
-            calendar_period_bounds(traffic_row_timestamp(row)?, resolution, calendar_config)
-                .map(|(start, _)| start)
+            calendar_period_bounds(
+                traffic_row_timestamp(row, resolution.retained(), calendar_config, version)?,
+                resolution,
+                calendar_config,
+            )
+            .map(|(start, _)| start)
         })
         .collect::<Result<BTreeSet<_>>>()?;
     let first_label_unix = rows
         .iter()
-        .map(traffic_row_timestamp)
+        .map(|row| traffic_row_timestamp(row, resolution.retained(), calendar_config, version))
         .collect::<Result<Vec<_>>>()?
         .into_iter()
         .min()
@@ -926,6 +1159,7 @@ fn synthesize_missing_day_rows(
     interface_payload: &Value,
     interface: &str,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
@@ -933,7 +1167,7 @@ fn synthesize_missing_day_rows(
 ) -> Result<()> {
     let present_starts = traffic_rows(interface_payload, "day")?
         .iter()
-        .map(traffic_row_timestamp)
+        .map(|row| traffic_row_timestamp(row, RetainedResolution::Day, calendar_config, version))
         .collect::<Result<BTreeSet<_>>>()?;
     let mut period_start_unix = *present_starts
         .first()
@@ -960,16 +1194,19 @@ fn synthesize_missing_day_rows(
 fn synthesize_missing_fixed_rows(
     interface_payload: &Value,
     interface: &str,
-    field: &str,
+    resolution: RetainedResolution,
     duration_secs: u64,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
     buckets: &mut Vec<NetworkTrafficImportBucket>,
 ) -> Result<()> {
+    let field = resolution.field();
     let present_starts = traffic_rows(interface_payload, field)?
         .iter()
-        .map(traffic_row_timestamp)
+        .map(|row| traffic_row_timestamp(row, resolution, calendar_config, version))
         .collect::<Result<BTreeSet<_>>>()?;
     let mut period_start_unix = *present_starts
         .first()
@@ -1034,6 +1271,7 @@ fn parse_calendar_rows(
     interface: &str,
     resolution: CalendarResolution,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     requested_start_unix: u64,
     source_cutoff_unix: u64,
@@ -1042,7 +1280,10 @@ fn parse_calendar_rows(
     let field = resolution.field();
     let mut rows = traffic_rows(interface_payload, field)?
         .iter()
-        .map(|row| traffic_row_timestamp(row).map(|timestamp| (timestamp, row)))
+        .map(|row| {
+            traffic_row_timestamp(row, resolution.retained(), calendar_config, version)
+                .map(|timestamp| (timestamp, row))
+        })
         .collect::<Result<Vec<_>>>()?;
     rows.sort_by_key(|(timestamp, _)| *timestamp);
     anyhow::ensure!(
@@ -1072,6 +1313,7 @@ fn parse_calendar_rows(
                 interface_payload,
                 CalendarResolution::Year,
                 calendar_config,
+                version,
                 database_available_unix,
                 relevant_start_unix,
                 available_end_unix,
@@ -1109,6 +1351,7 @@ fn calendar_resolution_coverage(
     interface_payload: &Value,
     resolution: CalendarResolution,
     calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
     database_available_unix: u64,
     range_start_unix: u64,
     range_end_unix: u64,
@@ -1120,7 +1363,7 @@ fn calendar_resolution_coverage(
     let field = resolution.field();
     let mut labels = traffic_rows(interface_payload, field)?
         .iter()
-        .map(traffic_row_timestamp)
+        .map(|row| traffic_row_timestamp(row, resolution.retained(), calendar_config, version))
         .collect::<Result<Vec<_>>>()?;
     labels.sort_unstable();
     anyhow::ensure!(
@@ -1177,16 +1420,124 @@ fn traffic_rows<'a>(interface_payload: &'a Value, field: &str) -> Result<&'a [Va
         .unwrap_or_default())
 }
 
-fn traffic_row_timestamp(row: &Value) -> Result<u64> {
-    let start_unix = row
-        .get("timestamp")
-        .and_then(Value::as_u64)
-        .context("vnstat traffic row is missing timestamp")?;
+fn traffic_row_timestamp(
+    row: &Value,
+    resolution: RetainedResolution,
+    calendar_config: &VnstatCalendarConfig,
+    version: VnstatVersion,
+) -> Result<u64> {
+    let label = format!("{} traffic row", resolution.field());
+    let start_unix = if let Some(timestamp) = explicit_timestamp(row, &label, version)? {
+        timestamp
+    } else {
+        match resolution {
+            RetainedResolution::FiveMinute | RetainedResolution::Hour => {
+                legacy_minute_unix(row, calendar_config.use_utc, &label)?
+            }
+            RetainedResolution::Day => legacy_calendar_label_unix(
+                row,
+                LegacyDatePrecision::Day,
+                calendar_config.use_utc,
+                &label,
+            )?,
+            RetainedResolution::Month => legacy_calendar_label_unix(
+                row,
+                LegacyDatePrecision::Month,
+                calendar_config.use_utc,
+                &label,
+            )?,
+            RetainedResolution::Year => legacy_calendar_label_unix(
+                row,
+                LegacyDatePrecision::Year,
+                calendar_config.use_utc,
+                &label,
+            )?,
+        }
+    };
     anyhow::ensure!(
         start_unix % 60 == 0,
         "vnstat traffic timestamp is not minute aligned"
     );
     Ok(start_unix)
+}
+
+fn legacy_date(payload: &Value, precision: LegacyDatePrecision, label: &str) -> Result<NaiveDate> {
+    let date = payload
+        .get("date")
+        .and_then(Value::as_object)
+        .with_context(|| format!("vnstat {label} is missing a valid date"))?;
+    let year = date
+        .get("year")
+        .and_then(Value::as_i64)
+        .and_then(|year| i32::try_from(year).ok())
+        .with_context(|| format!("vnstat {label} date has an invalid year"))?;
+    let month = if precision == LegacyDatePrecision::Year {
+        1
+    } else {
+        legacy_u32_field(date, "month", label, "date")?
+    };
+    let day = if precision == LegacyDatePrecision::Day {
+        legacy_u32_field(date, "day", label, "date")?
+    } else {
+        1
+    };
+    NaiveDate::from_ymd_opt(year, month, day)
+        .with_context(|| format!("vnstat {label} date is invalid"))
+}
+
+fn legacy_u32_field(
+    payload: &serde_json::Map<String, Value>,
+    field: &str,
+    label: &str,
+    group: &str,
+) -> Result<u32> {
+    payload
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .with_context(|| format!("vnstat {label} {group} has an invalid {field}"))
+}
+
+fn legacy_minute_unix(payload: &Value, use_utc: bool, label: &str) -> Result<u64> {
+    if use_utc {
+        legacy_minute_unix_in_timezone(payload, &Utc, label)
+    } else {
+        legacy_minute_unix_in_timezone(payload, &Local, label)
+    }
+}
+
+fn legacy_minute_unix_in_timezone<Tz: TimeZone>(
+    payload: &Value,
+    timezone: &Tz,
+    label: &str,
+) -> Result<u64> {
+    let date = legacy_date(payload, LegacyDatePrecision::Day, label)?;
+    let time = payload
+        .get("time")
+        .and_then(Value::as_object)
+        .with_context(|| format!("vnstat {label} is missing a valid time"))?;
+    let hour = legacy_u32_field(time, "hour", label, "time")?;
+    let minute = legacy_u32_field(time, "minute", label, "time")?;
+    let calendar_minute = date
+        .and_hms_opt(hour, minute, 0)
+        .with_context(|| format!("vnstat {label} calendar minute is invalid"))?;
+    let timestamp = timezone
+        .from_local_datetime(&calendar_minute)
+        .single()
+        .with_context(|| format!("vnstat {label} calendar minute is ambiguous or unavailable"))?
+        .timestamp();
+    u64::try_from(timestamp).with_context(|| format!("vnstat {label} predates the Unix epoch"))
+}
+
+fn legacy_calendar_label_unix(
+    payload: &Value,
+    precision: LegacyDatePrecision,
+    use_utc: bool,
+    label: &str,
+) -> Result<u64> {
+    let date = legacy_date(payload, precision, label)?;
+    calendar_midnight_unix(date, use_utc)
+        .with_context(|| format!("vnstat {label} calendar midnight is invalid"))
 }
 
 fn calendar_period_bounds(

@@ -17,9 +17,122 @@ fn utc_unix(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32
     .unwrap()
 }
 
+fn local_unix(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> u64 {
+    u64::try_from(
+        Local
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .single()
+            .unwrap()
+            .timestamp(),
+    )
+    .unwrap()
+}
+
+const VNSTAT_2_0_TIMESTAMP_FREE_JSON: &str = r#"{
+  "vnstatversion": "2.0",
+  "jsonversion": "2",
+  "interfaces": [{
+    "name": "eth0",
+    "alias": "",
+    "created": {"date": {"year": 2024, "month": 1, "day": 15}},
+    "updated": {
+      "date": {"year": 2024, "month": 4, "day": 2},
+      "time": {"hour": 0, "minute": 0}
+    },
+    "traffic": {
+      "total": {"rx": 100000, "tx": 50000},
+      "fiveminute": [{
+        "id": 1,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "time": {"hour": 23, "minute": 50},
+        "rx": 305,
+        "tx": 105
+      }],
+      "hour": [{
+        "id": 2,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "time": {"hour": 22, "minute": 0},
+        "rx": 3601,
+        "tx": 1801
+      }],
+      "day": [{
+        "id": 3,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "rx": 86401,
+        "tx": 43201
+      }],
+      "month": [{
+        "id": 4,
+        "date": {"year": 2024, "month": 3},
+        "rx": 2678401,
+        "tx": 1339201
+      }],
+      "year": [{
+        "id": 5,
+        "date": {"year": 2024},
+        "rx": 8000001,
+        "tx": 4000001
+      }]
+    }
+  }]
+}"#;
+
+const VNSTAT_2_9_TIMESTAMP_FREE_JSON: &str = r#"{
+  "vnstatversion": "2.9",
+  "jsonversion": "2",
+  "interfaces": [{
+    "name": "ens3",
+    "alias": "uplink",
+    "created": {"date": {"year": 2024, "month": 1, "day": 15}},
+    "updated": {
+      "date": {"year": 2024, "month": 4, "day": 2},
+      "time": {"hour": 0, "minute": 0}
+    },
+    "traffic": {
+      "total": {"rx": 200000, "tx": 100000},
+      "fiveminute": [{
+        "id": 11,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "time": {"hour": 23, "minute": 50},
+        "rx": 306,
+        "tx": 106
+      }],
+      "hour": [{
+        "id": 12,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "time": {"hour": 22, "minute": 0},
+        "rx": 3602,
+        "tx": 1802
+      }],
+      "day": [{
+        "id": 13,
+        "date": {"year": 2024, "month": 4, "day": 1},
+        "rx": 86402,
+        "tx": 43202
+      }],
+      "month": [{
+        "id": 14,
+        "date": {"year": 2024, "month": 3},
+        "rx": 2678402,
+        "tx": 1339202
+      }],
+      "year": [{
+        "id": 15,
+        "date": {"year": 2024},
+        "rx": 8000002,
+        "tx": 4000002
+      }]
+    }
+  }]
+}"#;
+
+fn vnstat_version(minor: u32) -> VnstatVersion {
+    VnstatVersion { major: 2, minor }
+}
+
 #[test]
 fn vnstat_query_uses_the_supported_iface_flag() {
-    let command = vnstat_query_command("/usr/bin/vnstat", Some("eth0"));
+    let command = vnstat_query_command("/usr/bin/vnstat", vnstat_version(13), Some("eth0"));
     let args = command
         .as_std()
         .get_args()
@@ -31,8 +144,69 @@ fn vnstat_query_uses_the_supported_iface_flag() {
 }
 
 #[test]
+fn vnstat_query_selects_arguments_supported_by_each_v2_release_family() {
+    for minor in [0, 5] {
+        let command = vnstat_query_command("/usr/bin/vnstat", vnstat_version(minor), Some("eth0"));
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["--json", "0", "--iface", "eth0"]);
+    }
+
+    let legacy_all = vnstat_query_command("/usr/bin/vnstat", vnstat_version(0), None);
+    let legacy_all_args = legacy_all
+        .as_std()
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(legacy_all_args, ["--json", "0"]);
+
+    for minor in [6, 9, 10, 13] {
+        let command = vnstat_query_command("/usr/bin/vnstat", vnstat_version(minor), Some("eth0"));
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(args, ["--json", "--limit", "0", "--iface", "eth0"]);
+    }
+}
+
+#[test]
+fn parses_supported_vnstat_versions_and_rejects_v1() {
+    assert_eq!(
+        parse_vnstat_version("vnStat 2.0 by Teemu Toivola\n").unwrap(),
+        vnstat_version(0)
+    );
+    assert_eq!(
+        parse_vnstat_version("vnStat 2.9.1 by Teemu Toivola\n").unwrap(),
+        vnstat_version(9)
+    );
+    assert_eq!(
+        parse_vnstat_version("vnStat 2.13\nCopyright elsewhere\n").unwrap(),
+        vnstat_version(13)
+    );
+    assert!(parse_vnstat_version("vnStat 1.18 by Teemu Toivola\n").is_err());
+    assert!(parse_vnstat_version("vnStat unknown\n").is_err());
+}
+
+#[test]
+fn vnstat_version_query_uses_the_portable_version_flag() {
+    let command = vnstat_version_command("/usr/bin/vnstat");
+    let args = command
+        .as_std()
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(args, ["--version"]);
+}
+
+#[test]
 fn vnstat_all_interface_query_omits_iface_and_discovery_is_bounded_and_deduplicated() {
-    let command = vnstat_query_command("/usr/bin/vnstat", None);
+    let command = vnstat_query_command("/usr/bin/vnstat", vnstat_version(13), None);
     let args = command
         .as_std()
         .get_args()
@@ -180,6 +354,207 @@ TrafficlessEntries 1
         }
     );
     assert!(parse_vnstat_showconfig(missing_required).is_err());
+}
+
+#[test]
+fn parses_realistic_vnstat_2_0_timestamp_free_json_at_local_calendar_boundaries() {
+    let payload: Value = serde_json::from_str(VNSTAT_2_0_TIMESTAMP_FREE_JSON).unwrap();
+    let created = local_unix(2024, 1, 15, 0, 0);
+    let updated = local_unix(2024, 4, 2, 0, 0);
+
+    let (source, buckets) = parse_vnstat_payload_for_version(
+        &payload,
+        "eth0",
+        created,
+        &VnstatCalendarConfig::default(),
+        vnstat_version(0),
+    )
+    .unwrap();
+
+    assert_eq!(source.database_created_unix, Some(created));
+    assert_eq!(source.source_updated_unix, Some(updated));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 305 && bucket.start_unix == local_unix(2024, 4, 1, 23, 50)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 3_601 && bucket.start_unix == local_unix(2024, 4, 1, 22, 0)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 86_401 && bucket.start_unix == local_unix(2024, 4, 1, 0, 0)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 2_678_401 && bucket.start_unix == local_unix(2024, 3, 1, 0, 0)
+    }));
+    assert!(buckets
+        .iter()
+        .any(|bucket| { bucket.rx_bytes == 8_000_001 && bucket.start_unix == created }));
+}
+
+#[test]
+fn parses_realistic_vnstat_2_9_timestamp_free_json_with_rotated_utc_periods() {
+    let payload: Value = serde_json::from_str(VNSTAT_2_9_TIMESTAMP_FREE_JSON).unwrap();
+    let created = utc_unix(2024, 1, 15, 0, 0, 0);
+    let updated = utc_unix(2024, 4, 2, 0, 0, 0);
+    let config = VnstatCalendarConfig {
+        month_rotate: 7,
+        month_rotate_affects_years: true,
+        use_utc: true,
+        trafficless_entries: true,
+    };
+
+    let (source, buckets) =
+        parse_vnstat_payload_for_version(&payload, "ens3", created, &config, vnstat_version(9))
+            .unwrap();
+
+    assert_eq!(source.database_created_unix, Some(created));
+    assert_eq!(source.source_updated_unix, Some(updated));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 306 && bucket.start_unix == utc_unix(2024, 4, 1, 23, 50, 0)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 3_602 && bucket.start_unix == utc_unix(2024, 4, 1, 22, 0, 0)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 86_402 && bucket.start_unix == utc_unix(2024, 4, 1, 0, 0, 0)
+    }));
+    assert!(buckets.iter().any(|bucket| {
+        bucket.rx_bytes == 2_678_402 && bucket.start_unix == utc_unix(2024, 3, 7, 0, 0, 0)
+    }));
+    assert!(buckets
+        .iter()
+        .any(|bucket| { bucket.rx_bytes == 8_000_002 && bucket.start_unix == created }));
+}
+
+#[test]
+fn numeric_timestamps_take_precedence_over_legacy_calendar_fields() {
+    let created = utc_unix(2024, 1, 15, 12, 0, 31);
+    let available = ceil_minute(created).unwrap();
+    let row_start = utc_unix(2024, 1, 15, 12, 50, 0);
+    let updated = utc_unix(2024, 1, 15, 13, 0, 0);
+    let payload = serde_json::json!({
+        "vnstatversion": "2.10",
+        "jsonversion": "2",
+        "interfaces": [{
+            "name": "eth0",
+            "created": {
+                "date": {"year": 2000, "month": 1, "day": 1},
+                "timestamp": created
+            },
+            "updated": {
+                "date": {"year": 2000, "month": 1, "day": 1},
+                "time": {"hour": 0, "minute": 0},
+                "timestamp": updated
+            },
+            "traffic": {
+                "fiveminute": [{
+                    "date": {"year": 2000, "month": 1, "day": 1},
+                    "time": {"hour": 0, "minute": 0},
+                    "timestamp": row_start,
+                    "rx": 500,
+                    "tx": 250
+                }]
+            }
+        }]
+    });
+
+    let (source, buckets) = parse_vnstat_payload_for_version(
+        &payload,
+        "eth0",
+        available,
+        &utc_calendar_config(),
+        vnstat_version(10),
+    )
+    .unwrap();
+
+    assert_eq!(source.database_created_unix, Some(created));
+    assert_eq!(source.source_updated_unix, Some(updated));
+    assert_eq!(buckets.len(), 1);
+    assert_eq!(buckets[0].start_unix, row_start);
+}
+
+#[test]
+fn vnstat_2_10_and_newer_reject_timestamp_free_json() {
+    let payload: Value = serde_json::from_str(VNSTAT_2_9_TIMESTAMP_FREE_JSON).unwrap();
+    let error = parse_vnstat_payload_for_version(
+        &payload,
+        "ens3",
+        utc_unix(2024, 1, 15, 0, 0, 0),
+        &utc_calendar_config(),
+        vnstat_version(10),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("missing its timestamp"));
+}
+
+#[test]
+fn malformed_present_timestamp_does_not_fall_back_to_legacy_calendar_fields() {
+    let payload = serde_json::json!({
+        "vnstatversion": "2.9",
+        "jsonversion": "2",
+        "interfaces": [{
+            "name": "eth0",
+            "created": {
+                "date": {"year": 2024, "month": 1, "day": 15},
+                "timestamp": "1705276800"
+            },
+            "updated": {
+                "date": {"year": 2024, "month": 1, "day": 16},
+                "time": {"hour": 0, "minute": 0}
+            },
+            "traffic": {
+                "day": [{
+                    "date": {"year": 2024, "month": 1, "day": 15},
+                    "rx": 1,
+                    "tx": 2
+                }]
+            }
+        }]
+    });
+
+    assert!(parse_vnstat_payload_for_version(
+        &payload,
+        "eth0",
+        utc_unix(2024, 1, 15, 0, 0, 0),
+        &utc_calendar_config(),
+        vnstat_version(9),
+    )
+    .is_err());
+}
+
+#[test]
+fn legacy_calendar_parser_rejects_invalid_dates() {
+    let mut payload: Value = serde_json::from_str(VNSTAT_2_0_TIMESTAMP_FREE_JSON).unwrap();
+    payload["interfaces"][0]["traffic"]["day"][0]["date"] =
+        serde_json::json!({"year": 2024, "month": 2, "day": 30});
+    let created = local_unix(2024, 1, 15, 0, 0);
+
+    assert!(parse_vnstat_payload_for_version(
+        &payload,
+        "eth0",
+        created,
+        &VnstatCalendarConfig::default(),
+        vnstat_version(0),
+    )
+    .is_err());
+}
+
+#[test]
+fn legacy_local_minutes_reject_dst_gaps_and_overlaps() {
+    use chrono_tz::America::New_York;
+
+    let spring_gap = serde_json::json!({
+        "date": {"year": 2024, "month": 3, "day": 10},
+        "time": {"hour": 2, "minute": 30}
+    });
+    let fall_overlap = serde_json::json!({
+        "date": {"year": 2024, "month": 11, "day": 3},
+        "time": {"hour": 1, "minute": 30}
+    });
+
+    assert!(legacy_minute_unix_in_timezone(&spring_gap, &New_York, "test row").is_err());
+    assert!(legacy_minute_unix_in_timezone(&fall_overlap, &New_York, "test row").is_err());
 }
 
 #[test]
