@@ -61,6 +61,7 @@ const TRUNCATED_TEXT_SELECTOR = [
   ".fleetPolicyRows small",
   ".fleetPolicyRows strong",
   ".gridCellContent",
+  ".gridHeaderButton",
   ".gridMobilePrimary",
   ".gridMobileState",
   ".gridMobileFieldValue",
@@ -226,6 +227,18 @@ export function useValueTooltips() {
           return;
         }
 
+        if (
+          record.type === "attributes" &&
+          record.attributeName === "style" &&
+          (target.classList.contains("gridHeaderCell") ||
+            target.classList.contains("gridCell") ||
+            target.classList.contains("gridHeaderGroup") ||
+            target.classList.contains("gridBody"))
+        ) {
+          queueSubtree(target);
+          return;
+        }
+
         pendingElements.add(target);
         queueElementAndAncestors(target.parentElement);
       });
@@ -242,8 +255,10 @@ export function useValueTooltips() {
     window.addEventListener("resize", handleResize);
     observer.observe(document.body, {
       attributeFilter: [
+        "aria-disabled",
         "aria-hidden",
         "class",
+        "data-disabled",
         "data-tooltip-disabled-reason",
         "data-tooltip-empty-reason",
         "data-tooltip-sensitive",
@@ -297,7 +312,7 @@ function updateSemanticTitle(element: HTMLElement) {
   if (hasAuthoredTitle(element)) return;
 
   const disabledReason = element.dataset.tooltipDisabledReason?.trim();
-  if (disabledReason) {
+  if (disabledReason && elementIsDisabled(element)) {
     setGeneratedTitle(element, disabledReason);
     return;
   }
@@ -307,6 +322,14 @@ function updateSemanticTitle(element: HTMLElement) {
     return;
   }
   clearGeneratedTitle(element);
+}
+
+function elementIsDisabled(element: HTMLElement) {
+  return (
+    element.matches(":disabled") ||
+    element.getAttribute("aria-disabled") === "true" ||
+    element.hasAttribute("data-disabled")
+  );
 }
 
 function updateTruncatedTextTitle(element: HTMLElement) {

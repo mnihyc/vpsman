@@ -562,7 +562,7 @@ function PingHistory({
           >
             <span>
               <i style={{ background: target.color }} />
-              <strong title={target.name}>{target.name}</strong>
+              <strong className="truncateValue">{target.name}</strong>
               {target.primary ? <em>Primary</em> : null}
             </span>
             <ConsoleStatusBadge tone={pingStatusTone(target.status)}>

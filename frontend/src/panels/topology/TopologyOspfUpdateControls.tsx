@@ -273,6 +273,7 @@ export function TopologyOspfUpdateControls({
       ),
       header: "Current cost",
       id: "current_cost",
+      resizeMinSize: 112,
       searchValue: (plan) =>
         `${plan.left_current_ospf_cost ?? "unknown"} ${plan.right_current_ospf_cost ?? "unknown"} ${plan.left_ospf_status} ${plan.right_ospf_status}`,
       sortValue: (plan) =>

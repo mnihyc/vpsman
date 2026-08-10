@@ -66,11 +66,7 @@ export function BackupPolicyPruneForm({
           >
             <option value="">All policies</option>
             {policies.map((policy) => (
-              <option
-                key={policy.schedule_id}
-                title={policy.schedule_id}
-                value={policy.schedule_id}
-              >
+              <option key={policy.schedule_id} value={policy.schedule_id}>
                 {policy.name} ({shortId(policy.schedule_id)})
               </option>
             ))}

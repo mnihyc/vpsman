@@ -16,6 +16,7 @@ const portForwardRuleIds = {
   stagedSsh: "4f000000-0000-4000-8000-000000000003",
   retiredDns: "4f000000-0000-4000-8000-000000000004",
 } as const;
+const portForwardGridStorageKey = "vpsman.network.portForwardRules";
 
 function portForwardGrid(page: Page): Locator {
   return page.getByLabel("Port-forward rules data grid");
@@ -128,6 +129,8 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
   await expect(details).toContainText("Control desired");
   await expect(details).toContainText("Agent desired");
   await expect(details).toContainText("Observed table");
+  await expect(details).toContainText("Domain");
+  await expect(details).toContainText("app.internal");
   await details
     .getByRole("button", { name: "Close Port-forward rules row details" })
     .click();
@@ -189,7 +192,610 @@ test("port-forward registry, details, and reviewed create stay revision-bound", 
       ).__vpsmanTestRequests.portForwardRules,
   );
   expect(requests).toHaveLength(1);
-  expect(requests[0]).toMatchObject({ action: "create" });
+  expect(requests[0]).toMatchObject({
+    action: "create",
+    body: {
+      target_hostname: "app.internal",
+      target_ip: "10.20.0.21",
+    },
+  });
+});
+
+test("stored domains remain optional table fields and can be re-resolved from Edit", async ({
+  page,
+}, testInfo) => {
+  const grid = portForwardGrid(page);
+  const publicWebRow = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+
+  await grid.getByLabel("Port-forward rules search").fill("app.internal");
+  await expect(publicWebRow).toBeVisible();
+  await expect(
+    portForwardRecord(
+      page,
+      testInfo,
+      portForwardRuleIds.stagedSsh,
+      "Staged SSH alternate",
+    ),
+  ).toHaveCount(0);
+  await grid.getByLabel("Port-forward rules search").fill("");
+
+  if (!testInfo.project.name.startsWith("mobile")) {
+    await expect(
+      grid.getByRole("button", { name: "Domain", exact: true }),
+    ).toHaveCount(0);
+  }
+  await grid.getByLabel("Port-forward rules columns").click();
+  const hiddenDomainField = page.getByRole("menuitemcheckbox", {
+    name: /Domain.*hidden/i,
+  });
+  await expect(hiddenDomainField).toHaveAttribute("aria-checked", "false");
+  await hiddenDomainField.click();
+  await page.keyboard.press("Escape");
+
+  if (testInfo.project.name.startsWith("mobile")) {
+    await expect(publicWebRow).toContainText("Domain");
+  } else {
+    await expect(
+      grid.getByRole("button", { name: "Domain", exact: true }),
+    ).toBeVisible();
+  }
+  await expect(publicWebRow).toContainText("app.internal");
+
+  await invokePortForwardAction(page, testInfo, publicWebRow, "Clone");
+  let editor = page.locator(".portForwardEditor");
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "app.internal",
+  );
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "10.20.0.15",
+  );
+  await editor
+    .getByRole("button", { name: "Close port-forward editor" })
+    .click();
+
+  await invokePortForwardAction(page, testInfo, publicWebRow, "Edit");
+  editor = page.locator(".portForwardEditor");
+  const targetInput = editor.getByLabel("Target IP or hostname");
+  await expect(targetInput).toHaveValue("app.internal");
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "10.20.0.15",
+  );
+
+  await editor.getByRole("button", { name: "Resolve" }).click();
+  await expect(
+    editor.getByRole("button", { name: "Save changes" }),
+  ).toBeDisabled();
+  await editor
+    .getByRole("group", { name: "Resolved addresses" })
+    .getByRole("radio", { name: /2001:db8:20::21/ })
+    .check();
+  await editor.getByRole("button", { name: "Save changes" }).click();
+
+  const confirmation = page.getByLabel("Confirm rule update");
+  await expect(confirmation).toContainText("app.internal");
+  await expect(confirmation).toContainText("2001:db8:20::21");
+  await confirmation.getByRole("button", { name: "Save and apply" }).click();
+
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            portForwardRules: Array<{
+              action: string;
+              body: Record<string, unknown>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.portForwardRules,
+  );
+  expect(requests.find((request) => request.action === "update")).toMatchObject(
+    {
+      body: {
+        target_hostname: "app.internal",
+        target_ip: "2001:db8:20::21",
+      },
+    },
+  );
+});
+
+test("port-forward columns persist flexible desktop sizing without constraining mobile cards", async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name.startsWith("mobile");
+  let grid = portForwardGrid(page);
+
+  if (mobile) {
+    const firstCard = grid.getByLabel(
+      `Port-forward rules mobile card ${portForwardRuleIds.publicWeb}`,
+    );
+    await expect(firstCard).toBeVisible();
+    const baseline = await firstCard.evaluate((card) => {
+      const primary = card.querySelector<HTMLElement>(".gridMobilePrimary");
+      return {
+        cardWidth: card.getBoundingClientRect().width,
+        primaryWidth: primary?.getBoundingClientRect().width ?? 0,
+      };
+    });
+
+    await page.evaluate((storageKey) => {
+      const raw = window.localStorage.getItem(storageKey);
+      const preferences = raw
+        ? (JSON.parse(raw) as Record<string, unknown>)
+        : {};
+      window.localStorage.setItem(
+        storageKey,
+        JSON.stringify({
+          ...preferences,
+          columnSizing: {
+            ...((preferences.columnSizing as Record<string, number>) ?? {}),
+            rule: 72,
+          },
+        }),
+      );
+    }, portForwardGridStorageKey);
+    await page.reload();
+    await waitForConsoleShell(page);
+    await openConsoleSubpage(page, "Network", "Port forwards");
+
+    grid = portForwardGrid(page);
+    const persistedCard = grid.getByLabel(
+      `Port-forward rules mobile card ${portForwardRuleIds.publicWeb}`,
+    );
+    await expect(persistedCard).toBeVisible();
+    const persisted = await persistedCard.evaluate((card) => {
+      const primary = card.querySelector<HTMLElement>(".gridMobilePrimary");
+      return {
+        cardWidth: card.getBoundingClientRect().width,
+        primaryWidth: primary?.getBoundingClientRect().width ?? 0,
+      };
+    });
+
+    expect(persisted.cardWidth).toBeGreaterThan(250);
+    expect(persisted.primaryWidth).toBeGreaterThan(100);
+    expect(
+      Math.abs(persisted.cardWidth - baseline.cardWidth),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs(persisted.primaryWidth - baseline.primaryWidth),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      await page.evaluate(
+        (storageKey) =>
+          (
+            JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as {
+              columnSizing?: Record<string, number>;
+            }
+          ).columnSizing?.rule,
+        portForwardGridStorageKey,
+      ),
+    ).toBe(72);
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(1);
+    return;
+  }
+
+  const headerCells = grid.locator(".gridHeaderCell");
+  const ruleHeader = headerCells.filter({ hasText: "Rule / VPS" }).first();
+  await expect(ruleHeader).toBeVisible();
+  const ruleHeaderIndex = await ruleHeader.evaluate((header) =>
+    Array.from(header.parentElement?.children ?? []).indexOf(header),
+  );
+  expect(ruleHeaderIndex).toBe(2);
+
+  for (const structuralHeader of [headerCells.nth(0), headerCells.nth(1)]) {
+    await expect(structuralHeader.locator(".gridResizeHandle")).toHaveCount(0);
+    await expect(structuralHeader.locator(".gridDragHandle")).toHaveCount(0);
+    expect((await structuralHeader.boundingBox())?.width ?? 0).toBeCloseTo(
+      42,
+      0,
+    );
+  }
+
+  const resizeHandle = ruleHeader.locator(".gridResizeHandle");
+  await expect(resizeHandle).toBeVisible();
+  const initialHeaderBox = await ruleHeader.boundingBox();
+  const handleBox = await resizeHandle.boundingBox();
+  expect(initialHeaderBox).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+  if (!initialHeaderBox || !handleBox) return;
+
+  const handleCenterX = handleBox.x + handleBox.width / 2;
+  const handleCenterY = handleBox.y + handleBox.height / 2;
+  await page.mouse.move(handleCenterX, handleCenterY);
+  await page.mouse.down();
+  await page.mouse.move(
+    handleCenterX - Math.max(0, initialHeaderBox.width - 72),
+    handleCenterY,
+    { steps: 8 },
+  );
+  await page.mouse.up();
+
+  await expect
+    .poll(async () => (await ruleHeader.boundingBox())?.width ?? 0)
+    .toBeLessThanOrEqual(100);
+  const narrowHeaderBox = await ruleHeader.boundingBox();
+  expect(narrowHeaderBox).not.toBeNull();
+  expect(narrowHeaderBox?.width ?? 0).toBeGreaterThanOrEqual(64);
+  expect(narrowHeaderBox?.width ?? 0).toBeLessThan(180);
+
+  const firstDesktopRow = grid
+    .locator(".gridBody .gridRecord > [role=row]")
+    .first();
+  const ruleCell = firstDesktopRow.locator(".gridCell").nth(ruleHeaderIndex);
+  const narrowCellBox = await ruleCell.boundingBox();
+  expect(narrowCellBox).not.toBeNull();
+  expect(
+    Math.abs((narrowCellBox?.x ?? 0) - (narrowHeaderBox?.x ?? 0)),
+  ).toBeLessThanOrEqual(1);
+  expect(
+    Math.abs((narrowCellBox?.width ?? 0) - (narrowHeaderBox?.width ?? 0)),
+  ).toBeLessThanOrEqual(1);
+
+  await expect
+    .poll(() =>
+      page.evaluate((storageKey) => {
+        const width = (
+          JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as {
+            columnSizing?: Record<string, number>;
+          }
+        ).columnSizing?.rule;
+        return typeof width === "number" && width >= 64 && width <= 100;
+      }, portForwardGridStorageKey),
+    )
+    .toBe(true);
+  const storedRuleWidth = await page.evaluate(
+    (storageKey) =>
+      (
+        JSON.parse(window.localStorage.getItem(storageKey) ?? "{}") as {
+          columnSizing?: Record<string, number>;
+        }
+      ).columnSizing?.rule ?? 0,
+    portForwardGridStorageKey,
+  );
+  expect(storedRuleWidth).toBeGreaterThanOrEqual(64);
+
+  await page.reload();
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Network", "Port forwards");
+  grid = portForwardGrid(page);
+  const reloadedRuleHeader = grid
+    .locator(".gridHeaderCell", { hasText: "Rule / VPS" })
+    .first();
+  await expect(reloadedRuleHeader).toBeVisible();
+  const reloadedHeaderBox = await reloadedRuleHeader.boundingBox();
+  expect(reloadedHeaderBox).not.toBeNull();
+  expect(
+    Math.abs((reloadedHeaderBox?.width ?? 0) - storedRuleWidth),
+  ).toBeLessThanOrEqual(1);
+  expect(reloadedHeaderBox?.width ?? 0).toBeLessThan(180);
+  expect(
+    await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    ),
+  ).toBeLessThanOrEqual(1);
+});
+
+test("hostname re-resolution gates review until explicit candidate selection", async ({
+  page,
+}, testInfo) => {
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let releaseResolution = () => {};
+    const resolutionGate = new Promise<void>((resolve) => {
+      releaseResolution = resolve;
+    });
+    const state = window as unknown as {
+      __portForwardGatedResolutionStarted: boolean;
+      __releasePortForwardGatedResolution: () => void;
+    };
+    state.__portForwardGatedResolutionStarted = false;
+    state.__releasePortForwardGatedResolution = releaseResolution;
+
+    let gated = false;
+    window.fetch = async (input, init) => {
+      const requestUrl = input instanceof Request ? input.url : String(input);
+      const pathname = new URL(requestUrl, window.location.href).pathname;
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
+      if (
+        !gated &&
+        pathname === "/api/v1/network/resolve-hostname" &&
+        method === "POST"
+      ) {
+        gated = true;
+        state.__portForwardGatedResolutionStarted = true;
+        await resolutionGate;
+      }
+      return originalFetch(input, init);
+    };
+  });
+
+  const publicWebRow = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+  await invokePortForwardAction(page, testInfo, publicWebRow, "Edit");
+
+  const editor = page.locator(".portForwardEditor");
+  const save = editor.getByRole("button", { name: "Save changes" });
+  await expect(save).toBeEnabled();
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "10.20.0.15",
+  );
+
+  await editor.getByRole("button", { name: "Resolve" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __portForwardGatedResolutionStarted: boolean;
+            }
+          ).__portForwardGatedResolutionStarted,
+      ),
+    )
+    .toBe(true);
+
+  const resolvingSave = editor.getByRole("button", {
+    name: "Resolving hostname",
+  });
+  await expect(resolvingSave).toBeDisabled();
+  await expect(resolvingSave).toHaveAttribute("aria-busy", "true");
+  await expect(resolvingSave).toHaveAttribute(
+    "title",
+    "Wait for hostname resolution to finish before reviewing this rule, then select one resolved address",
+  );
+  await expect(editor.locator(".portMappingPreview")).toContainText(
+    "10.20.0.15",
+  );
+  await editor
+    .locator("form")
+    .evaluate((form: HTMLFormElement) => form.requestSubmit());
+  await expect(page.getByLabel("Confirm rule update")).toHaveCount(0);
+
+  await page.evaluate(() =>
+    (
+      window as unknown as {
+        __releasePortForwardGatedResolution: () => void;
+      }
+    ).__releasePortForwardGatedResolution(),
+  );
+
+  const candidates = editor.getByRole("group", {
+    name: "Resolved addresses",
+  });
+  await expect(candidates).toBeVisible();
+  await expect(save).toBeDisabled();
+  await expect(save).toHaveAttribute(
+    "title",
+    "Enter a literal target IP, or resolve and select a hostname result",
+  );
+  await expect(page.getByLabel("Confirm rule update")).toHaveCount(0);
+
+  await candidates.getByRole("radio", { name: /2001:db8:20::21/ }).check();
+  await expect(save).toBeEnabled();
+  await save.click();
+
+  const confirmation = page.getByLabel("Confirm rule update");
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation).toContainText("2001:db8:20::21");
+  await expect(
+    confirmation.getByText("10.20.0.15", { exact: true }),
+  ).toHaveCount(0);
+  await confirmation.getByRole("button", { name: "Save and apply" }).click();
+
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            portForwardRules: Array<{
+              action: string;
+              body: Record<string, unknown>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.portForwardRules,
+  );
+  expect(requests.filter((request) => request.action === "update")).toEqual([
+    expect.objectContaining({
+      body: expect.objectContaining({
+        target_hostname: "app.internal",
+        target_ip: "2001:db8:20::21",
+      }),
+    }),
+  ]);
+});
+
+test("replacing a stored domain with a literal IP clears the domain provenance", async ({
+  page,
+}, testInfo) => {
+  const publicWebRow = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+  await invokePortForwardAction(page, testInfo, publicWebRow, "Edit");
+
+  const editor = page.locator(".portForwardEditor");
+  const targetInput = editor.getByLabel("Target IP or hostname");
+  await expect(targetInput).toHaveValue("app.internal");
+  await targetInput.fill("192.0.2.44");
+  await expect(editor.getByRole("button", { name: "Resolve" })).toHaveCount(0);
+  await expect(
+    editor.getByRole("group", { name: "Resolved addresses" }),
+  ).toHaveCount(0);
+  await editor.getByRole("button", { name: "Save changes" }).click();
+
+  const confirmation = page.getByLabel("Confirm rule update");
+  await expect(confirmation).toContainText("192.0.2.44");
+  await expect(
+    confirmation.getByText("app.internal", { exact: true }),
+  ).toHaveCount(0);
+  await confirmation.getByRole("button", { name: "Save and apply" }).click();
+  await expect(editor).toBeHidden();
+
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            portForwardRules: Array<{
+              action: string;
+              body: Record<string, unknown>;
+            }>;
+          };
+        }
+      ).__vpsmanTestRequests.portForwardRules,
+  );
+  expect(requests.filter((request) => request.action === "update")).toEqual([
+    expect.objectContaining({
+      body: expect.objectContaining({
+        target_hostname: null,
+        target_ip: "192.0.2.44",
+      }),
+    }),
+  ]);
+});
+
+test("a late hostname resolution cannot overwrite a newly opened editor", async ({
+  page,
+}, testInfo) => {
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window);
+    let releaseResolution = () => {};
+    const resolutionGate = new Promise<void>((resolve) => {
+      releaseResolution = resolve;
+    });
+    const state = window as unknown as {
+      __portForwardResolutionStarted: boolean;
+      __portForwardResolutionSettled: boolean;
+      __releasePortForwardResolution: () => void;
+    };
+    state.__portForwardResolutionStarted = false;
+    state.__portForwardResolutionSettled = false;
+    state.__releasePortForwardResolution = releaseResolution;
+
+    let gated = false;
+    window.fetch = async (input, init) => {
+      const requestUrl = input instanceof Request ? input.url : String(input);
+      const pathname = new URL(requestUrl, window.location.href).pathname;
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
+      if (
+        !gated &&
+        pathname === "/api/v1/network/resolve-hostname" &&
+        method === "POST"
+      ) {
+        gated = true;
+        state.__portForwardResolutionStarted = true;
+        await resolutionGate;
+        const response = await originalFetch(input, init);
+        const originalJson = response.json.bind(response);
+        response.json = async () => {
+          const body = await originalJson();
+          window.setTimeout(() => {
+            state.__portForwardResolutionSettled = true;
+          }, 0);
+          return body;
+        };
+        return response;
+      }
+      return originalFetch(input, init);
+    };
+  });
+
+  const publicWebRow = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.publicWeb,
+    "Public web ingress",
+  );
+  await invokePortForwardAction(page, testInfo, publicWebRow, "Edit");
+  let editor = page.locator(".portForwardEditor");
+  await editor.getByRole("button", { name: "Resolve" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __portForwardResolutionStarted: boolean })
+            .__portForwardResolutionStarted,
+      ),
+    )
+    .toBe(true);
+  await editor
+    .getByRole("button", { name: "Close port-forward editor" })
+    .click();
+  if (testInfo.project.name.startsWith("mobile")) {
+    await publicWebRow.getByRole("checkbox").uncheck();
+  }
+
+  const stagedSshRow = portForwardRecord(
+    page,
+    testInfo,
+    portForwardRuleIds.stagedSsh,
+    "Staged SSH alternate",
+  );
+  await invokePortForwardAction(page, testInfo, stagedSshRow, "Edit");
+  editor = page.locator(".portForwardEditor");
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue(
+    "Staged SSH alternate",
+  );
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "10.30.0.8",
+  );
+
+  await page.evaluate(() =>
+    (
+      window as unknown as { __releasePortForwardResolution: () => void }
+    ).__releasePortForwardResolution(),
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as unknown as { __portForwardResolutionSettled: boolean })
+            .__portForwardResolutionSettled,
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => resolve()),
+        ),
+      ),
+  );
+
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue(
+    "Staged SSH alternate",
+  );
+  await expect(editor.getByLabel("Target IP or hostname")).toHaveValue(
+    "10.30.0.8",
+  );
+  await expect(
+    editor.getByRole("group", { name: "Resolved addresses" }),
+  ).toHaveCount(0);
 });
 
 test("unsupported agents allow disabled drafts but not enabled apply", async ({
@@ -218,6 +824,18 @@ test("unsupported agents allow disabled drafts but not enabled apply", async ({
   await editor.getByRole("button", { name: "Create rule" }).click();
   await expect(page.getByText("Rule created")).toBeVisible();
   await expect(page.getByText("Future service", { exact: true })).toBeVisible();
+  const requests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: { portForwardRules: unknown[] };
+        }
+      ).__vpsmanTestRequests.portForwardRules,
+  );
+  expect(requests[0]).toMatchObject({
+    action: "create",
+    body: { target_hostname: null, target_ip: "10.30.0.9" },
+  });
 });
 
 test("never-applied disabled drafts explain and complete immediate deletion", async ({
@@ -407,10 +1025,7 @@ test("mobile port-forward workflow has no page-level horizontal overflow", async
   const editor = page.locator(".portForwardEditor");
   await expect(editor).toBeVisible();
   const previewText = editor.locator(".portMappingPreview > span");
-  await expect(previewText).toHaveAttribute(
-    "title",
-    "Enter incoming and target ports to preview the exact mappings",
-  );
+  await expect(previewText).not.toHaveAttribute("title", /\S/);
   expect(
     await previewText.evaluate(
       (element) => element.scrollWidth - element.clientWidth,

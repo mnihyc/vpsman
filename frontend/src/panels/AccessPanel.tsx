@@ -657,6 +657,7 @@ export function AccessPanel({
           ) : (
             "no key"
           ),
+        resizeMinSize: 180,
         searchValue: (client) => client.current_public_key_sha256_hex ?? "",
         size: 180,
       },
@@ -702,6 +703,7 @@ export function AccessPanel({
             value={revocation.public_key_sha256_hex}
           />
         ),
+        resizeMinSize: 180,
         searchValue: (revocation) => revocation.public_key_sha256_hex,
         size: 180,
       },

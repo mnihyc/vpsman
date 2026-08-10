@@ -2060,12 +2060,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source = root.join("users.sh");
         std::fs::write(&source, "#!/bin/sh\nprintf 'custom-user tty1\\n'\n").unwrap();
-        make_executable(&source);
         let config = AgentConfig {
             execution: AgentExecutionConfig {
                 user_sessions_source: AgentUserSessionsSource::CustomCommand,
                 user_sessions_command: Some(RuntimeTunnelCommand {
-                    argv: vec![source.to_string_lossy().to_string()],
+                    argv: vec!["/bin/sh".to_string(), source.to_string_lossy().to_string()],
                     max_timeout_secs: 2,
                     max_output_bytes: 1024,
                 }),
@@ -2103,12 +2102,11 @@ mod tests {
             "#!/bin/sh\nprintf 'custom-user tty1\\n'\nexec 1>&-\nsleep 10\n",
         )
         .unwrap();
-        make_executable(&source);
         let config = AgentConfig {
             execution: AgentExecutionConfig {
                 user_sessions_source: AgentUserSessionsSource::CustomCommand,
                 user_sessions_command: Some(RuntimeTunnelCommand {
-                    argv: vec![source.to_string_lossy().to_string()],
+                    argv: vec!["/bin/sh".to_string(), source.to_string_lossy().to_string()],
                     max_timeout_secs: 1,
                     max_output_bytes: 1024,
                 }),
@@ -2164,12 +2162,15 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' '{\"processes\":[{\"pid\":2,\"ppid\":1,\"uid\":0,\"state\":\"S\",\"name\":\"small\",\"command\":\"small\",\"rss_kib\":10},{\"pid\":1,\"ppid\":0,\"uid\":0,\"state\":\"R\",\"name\":\"large\",\"command\":\"large\",\"rss_kib\":99}],\"truncated\":false}'\n",
         )
         .unwrap();
-        make_executable(&source);
         let config = AgentConfig {
             execution: AgentExecutionConfig {
                 process_inventory_source: AgentProcessInventorySource::CustomCommand,
                 process_inventory_command: Some(RuntimeTunnelCommand {
-                    argv: vec![source.to_string_lossy().to_string(), "{limit}".to_string()],
+                    argv: vec![
+                        "/bin/sh".to_string(),
+                        source.to_string_lossy().to_string(),
+                        "{limit}".to_string(),
+                    ],
                     max_timeout_secs: 2,
                     max_output_bytes: 4096,
                 }),
@@ -2210,12 +2211,11 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' '{\"processes\":[]}'\nexec 1>&-\nsleep 10\n",
         )
         .unwrap();
-        make_executable(&source);
         let config = AgentConfig {
             execution: AgentExecutionConfig {
                 process_inventory_source: AgentProcessInventorySource::CustomCommand,
                 process_inventory_command: Some(RuntimeTunnelCommand {
-                    argv: vec![source.to_string_lossy().to_string()],
+                    argv: vec!["/bin/sh".to_string(), source.to_string_lossy().to_string()],
                     max_timeout_secs: 1,
                     max_output_bytes: 4096,
                 }),
@@ -2241,11 +2241,5 @@ mod tests {
             "process inventory source timed out"
         ));
         std::fs::remove_dir_all(root).ok();
-    }
-
-    fn make_executable(path: &std::path::Path) {
-        let mut permissions = std::fs::metadata(path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(path, permissions).unwrap();
     }
 }

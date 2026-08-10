@@ -6,7 +6,10 @@ import {
   type ConsoleDataGridColumn,
 } from "../../components/ConsoleDataGrid";
 import { VpsCombobox } from "../../components/VpsCombobox";
-import { createJobTargetCount, waitForBulkJobTargets } from "../../bulkJobProgress";
+import {
+  createJobTargetCount,
+  waitForBulkJobTargets,
+} from "../../bulkJobProgress";
 import { JOB_COMMAND_TYPE_BY_OPERATION_TYPE } from "../../generated/protocolContracts";
 import {
   beginSubmission,
@@ -25,10 +28,7 @@ import type {
   JobTargetRecord,
 } from "../../types";
 import { formatCompactTime, formatFullTime } from "../../utils";
-import {
-  pushHistoryEntry,
-  replaceHistoryEntry,
-} from "../../historyEntryState";
+import { pushHistoryEntry, replaceHistoryEntry } from "../../historyEntryState";
 
 const STORAGE_INVENTORY_LIMIT = 2048;
 
@@ -52,15 +52,16 @@ export function HostStoragePanel({
 }) {
   const [route, setRoute] = useState(readStorageRoute);
   const activeView = route.view;
-  const [inventory, setInventory] =
-    useState<HostStorageInventoryRecord | null>(null);
+  const [inventory, setInventory] = useState<HostStorageInventoryRecord | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const submissionGuardRef = useRef(createSubmissionGuard());
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const selectedAgent = route.clientId
-    ? agents.find((agent) => agent.id === route.clientId) ?? null
+    ? (agents.find((agent) => agent.id === route.clientId) ?? null)
     : null;
 
   const loadInventory = useCallback(
@@ -203,11 +204,7 @@ export function HostStoragePanel({
       );
       setStatus(null);
     } finally {
-      finishSubmission(
-        submissionGuardRef.current,
-        submissionKey,
-        successful,
-      );
+      finishSubmission(submissionGuardRef.current, submissionKey, successful);
       setRefreshing(false);
     }
   }
@@ -216,9 +213,7 @@ export function HostStoragePanel({
   const mounts = inventory?.mounts ?? [];
   const capability = inventory?.capability ?? null;
   const rawDiskBytes = devices
-    .filter(
-      (device) => device.device_type === "disk" && !device.parent_path,
-    )
+    .filter((device) => device.device_type === "disk" && !device.parent_path)
     .reduce((total, device) => total + device.size_bytes, 0);
   const readOnlyMounts = mounts.filter((mount) => mount.read_only).length;
   const measuredFilesystems = devices.filter(
@@ -232,12 +227,10 @@ export function HostStoragePanel({
   );
   const filterChanged = Boolean(
     inventory?.source_job_id &&
-      inventory.include_pseudo_mounts !== route.includePseudoMounts,
+    inventory.include_pseudo_mounts !== route.includePseudoMounts,
   );
 
-  const deviceColumns = useMemo<
-    ConsoleDataGridColumn<HostBlockDeviceRecord>[]
-  >(
+  const deviceColumns = useMemo<ConsoleDataGridColumn<HostBlockDeviceRecord>[]>(
     () => [
       {
         cell: (device) => (
@@ -297,6 +290,7 @@ export function HostStoragePanel({
         header: "Used",
         id: "usage",
         minSize: 120,
+        resizeMinSize: 96,
         searchValue: (device) => device.filesystem_used_percent,
         size: 138,
         sortValue: (device) => device.filesystem_used_percent ?? -1,
@@ -304,7 +298,9 @@ export function HostStoragePanel({
       {
         cell: (device) => {
           const value = device.mount_points.join(", ");
-          return <span title={value || undefined}>{value || "Not mounted"}</span>;
+          return (
+            <span title={value || undefined}>{value || "Not mounted"}</span>
+          );
         },
         header: "Mounted at",
         id: "mounts",
@@ -317,7 +313,11 @@ export function HostStoragePanel({
         cell: (device) => (
           <span
             className={`status ${device.read_only ? "warning" : "neutral"}`}
-            title={device.read_only ? "Kernel reports this block device as read-only" : "Kernel reports this block device as writable"}
+            title={
+              device.read_only
+                ? "Kernel reports this block device as read-only"
+                : "Kernel reports this block device as writable"
+            }
           >
             {device.read_only ? "Read-only" : "Writable"}
           </span>
@@ -412,7 +412,9 @@ export function HostStoragePanel({
       <div className="sectionHeader">
         <div>
           <h2>Host storage</h2>
-          <span>Read-only block devices, mounted filesystems, and reported usage</span>
+          <span>
+            Read-only block devices, mounted filesystems, and reported usage
+          </span>
         </div>
         <div className="headerActionStack">
           <div className="processHeaderActions storageHeaderActions">
@@ -443,7 +445,9 @@ export function HostStoragePanel({
               <input
                 checked={route.includePseudoMounts}
                 data-tooltip-disabled-reason={
-                  refreshing ? "System-mount scope cannot change while storage inventory is refreshing." : undefined
+                  refreshing
+                    ? "System-mount scope cannot change while storage inventory is refreshing."
+                    : undefined
                 }
                 disabled={refreshing}
                 onChange={(event) =>
@@ -456,7 +460,9 @@ export function HostStoragePanel({
             <button
               className="secondaryAction compactAction"
               data-tooltip-disabled-reason={
-                refreshing ? "A storage inventory refresh is already running." : refreshUnavailable ?? undefined
+                refreshing
+                  ? "A storage inventory refresh is already running."
+                  : (refreshUnavailable ?? undefined)
               }
               disabled={Boolean(refreshUnavailable) || refreshing}
               onClick={() => void refreshInventory()}
@@ -526,19 +532,29 @@ export function HostStoragePanel({
         className="processSupervisorSummaryStrip storageSummaryStrip"
       >
         <span
-          className={capability?.status !== "supported" ? "attention" : undefined}
-          title={capability ? `${providerLabel(capability.provider)} capability is ${readableToken(capability.status)}.` : "The storage inventory provider has not been checked."}
+          className={
+            capability?.status !== "supported" ? "attention" : undefined
+          }
+          title={
+            capability
+              ? `${providerLabel(capability.provider)} capability is ${readableToken(capability.status)}.`
+              : "The storage inventory provider has not been checked."
+          }
         >
           <strong title={capability?.provider_version ?? undefined}>
             {providerLabel(capability?.provider ?? null)}
           </strong>
           <small>Provider</small>
         </span>
-        <span title={`${formatBytes(rawDiskBytes)} raw capacity is reported across top-level disk devices.`}>
+        <span
+          title={`${formatBytes(rawDiskBytes)} raw capacity is reported across top-level disk devices.`}
+        >
           <strong>{formatBytes(rawDiskBytes)}</strong>
           <small>Raw disks</small>
         </span>
-        <span title={`${mounts.length} mount records are included in the current snapshot view.`}>
+        <span
+          title={`${mounts.length} mount records are included in the current snapshot view.`}
+        >
           <strong>{mounts.length}</strong>
           <small>Mounts shown</small>
         </span>
@@ -557,8 +573,16 @@ export function HostStoragePanel({
           <small>At least 85% used</small>
         </span>
         <span
-          className={capability && !capability.can_report_filesystem_usage ? "attention" : undefined}
-          title={capability?.can_report_filesystem_usage ? `${measuredFilesystems} filesystems include usage measurements.` : "The detected provider does not report filesystem usage."}
+          className={
+            capability && !capability.can_report_filesystem_usage
+              ? "attention"
+              : undefined
+          }
+          title={
+            capability?.can_report_filesystem_usage
+              ? `${measuredFilesystems} filesystems include usage measurements.`
+              : "The detected provider does not report filesystem usage."
+          }
         >
           <strong>
             {capability?.can_report_filesystem_usage
@@ -567,7 +591,13 @@ export function HostStoragePanel({
           </strong>
           <small>Usage coverage</small>
         </span>
-        <span title={inventory?.observed_at ? `Storage inventory observed ${formatFullTime(inventory.observed_at)}.` : "No storage inventory observation time has been reported."}>
+        <span
+          title={
+            inventory?.observed_at
+              ? `Storage inventory observed ${formatFullTime(inventory.observed_at)}.`
+              : "No storage inventory observation time has been reported."
+          }
+        >
           <strong
             title={
               inventory?.observed_at
@@ -592,7 +622,11 @@ export function HostStoragePanel({
               : "Kernel mount table and effective mount options"}
           </span>
         </div>
-        <div aria-label="Storage inventory view" className="segmented" role="group">
+        <div
+          aria-label="Storage inventory view"
+          className="segmented"
+          role="group"
+        >
           <button
             aria-pressed={activeView === "devices"}
             className={activeView === "devices" ? "selected" : ""}
@@ -637,7 +671,10 @@ export function HostStoragePanel({
           getRowId={(device) => device.path}
           itemLabel="block devices"
           renderExpandedRow={(device) => (
-            <DeviceDetails device={device} observedAt={inventory?.observed_at} />
+            <DeviceDetails
+              device={device}
+              observedAt={inventory?.observed_at}
+            />
           )}
           rows={devices}
           searchPlaceholder="Search device, path, filesystem, model, or serial"
@@ -722,15 +759,19 @@ function DeviceDetails({
       <span>Capacity</span>
       <strong>{formatBytes(device.size_bytes)}</strong>
       <span>Filesystem</span>
-      <strong>{
-        [device.filesystem_type, device.filesystem_version]
+      <strong>
+        {[device.filesystem_type, device.filesystem_version]
           .filter(Boolean)
-          .join(" ") || "Not reported"
-      }</strong>
+          .join(" ") || "Not reported"}
+      </strong>
       <span>Label</span>
-      <strong title={device.label ?? undefined}>{device.label ?? "Not set"}</strong>
+      <strong title={device.label ?? undefined}>
+        {device.label ?? "Not set"}
+      </strong>
       <span>UUID</span>
-      <strong title={device.uuid ?? undefined}>{device.uuid ?? "Not reported"}</strong>
+      <strong title={device.uuid ?? undefined}>
+        {device.uuid ?? "Not reported"}
+      </strong>
       <span>Mounted at</span>
       <strong title={device.mount_points.join(", ") || undefined}>
         {device.mount_points.join(", ") || "Not mounted"}
@@ -743,12 +784,17 @@ function DeviceDetails({
       </strong>
       <span>Device state</span>
       <strong>
-        {device.read_only ? "Read-only" : "Writable"} · {device.removable ? "Removable" : "Fixed"}
+        {device.read_only ? "Read-only" : "Writable"} ·{" "}
+        {device.removable ? "Removable" : "Fixed"}
       </strong>
       <span>Model</span>
-      <strong title={device.model ?? undefined}>{device.model ?? "Not reported"}</strong>
+      <strong title={device.model ?? undefined}>
+        {device.model ?? "Not reported"}
+      </strong>
       <span>Serial</span>
-      <strong title={device.serial ?? undefined}>{device.serial ?? "Not reported"}</strong>
+      <strong title={device.serial ?? undefined}>
+        {device.serial ?? "Not reported"}
+      </strong>
       <span>Transport</span>
       <strong>{device.transport ?? "Not reported"}</strong>
       <span>Major:minor</span>
@@ -787,7 +833,9 @@ function MountDetails({
       <span>System mount</span>
       <strong>{mount.pseudo ? "Yes" : "No"}</strong>
       <span>Options</span>
-      <strong title={mount.options.join(", ")}>{mount.options.join(", ")}</strong>
+      <strong title={mount.options.join(", ")}>
+        {mount.options.join(", ")}
+      </strong>
       <span>Observed</span>
       <strong>{observedAt ? formatFullTime(observedAt) : "Unknown"}</strong>
     </div>

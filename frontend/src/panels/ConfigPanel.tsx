@@ -991,21 +991,27 @@ function ConfigOverview({
                 key={change.id}
                 role="row"
               >
-                <span role="cell" title={change.target}>
+                <span className="truncateValue" role="cell">
                   {change.target}
                 </span>
-                <span role="cell" title={change.operation}>
+                <span className="truncateValue" role="cell">
                   {change.operation}
                 </span>
-                <span role="cell" title={change.status}>
+                <span className="truncateValue" role="cell">
                   <ConsoleStatusBadge tone={change.tone}>
                     {change.status}
                   </ConsoleStatusBadge>
                 </span>
-                <span role="cell" title={change.title}>
+                <span
+                  className="truncateValue"
+                  role="cell"
+                  title={
+                    change.title !== change.detail ? change.title : undefined
+                  }
+                >
                   {change.detail}
                 </span>
-                <span role="cell" title={updated}>
+                <span className="truncateValue" role="cell">
                   {updated}
                 </span>
               </div>

@@ -368,6 +368,7 @@ export function RolloutsPanel({
         header: "Progress",
         id: "progress",
         minSize: 120,
+        resizeMinSize: 96,
         searchValue: (rollout) => rolloutProgress(rollout).terminal,
         size: 150,
         sortValue: (rollout) => rolloutProgress(rollout).terminal,

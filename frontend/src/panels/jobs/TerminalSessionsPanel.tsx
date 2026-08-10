@@ -375,6 +375,7 @@ export function TerminalSessionsPanel({
       },
       header: "Session",
       id: "session",
+      resizeMinSize: 160,
       searchValue: (session) =>
         `${clientLabel(session.client_id)} ${session.client_id} ${session.session_id}`,
       sortValue: (session) =>
@@ -936,11 +937,6 @@ export function TerminalSessionsPanel({
               aria-label="Terminal shell profile"
               onChange={(event) =>
                 setLaunchProfile(event.target.value as TerminalLaunchProfile)
-              }
-              title={
-                TERMINAL_LAUNCH_PROFILES.find(
-                  (profile) => profile.value === launchProfile,
-                )?.description
               }
               value={launchProfile}
             >

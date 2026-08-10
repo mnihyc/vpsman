@@ -2656,13 +2656,12 @@ function operationReviewItems(
         ? `${environmentNames.join(", ")} (values hidden)`
         : "No overrides";
     items.push(
-      { label: "Command argv", sensitive: true, value: command },
+      { label: "Command argv", value: command },
       {
         label: "Working directory",
-        sensitive: true,
         value: operation.cwd ?? "Agent default",
       },
-      { label: "Environment", sensitive: true, value: environment },
+      { label: "Environment", value: environment },
     );
   }
   if (operation.type === "process_logs") {

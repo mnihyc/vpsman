@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
 use vpsman_common::{plan_tunnel, RuntimeTunnelControl, TunnelKind, TunnelPlanInput};
 
@@ -48,6 +46,7 @@ fn adapter(status: &std::path::Path, update: &std::path::Path) -> RoutingCostAda
         definition_name: "Test routing adapter".to_string(),
         definition_hash: "a".repeat(64),
         status: command(&[
+            "/bin/sh".to_string(),
             status.to_string_lossy().to_string(),
             "{plan_id}".to_string(),
             "{interface}".to_string(),
@@ -56,6 +55,7 @@ fn adapter(status: &std::path::Path, update: &std::path::Path) -> RoutingCostAda
             "{remote_underlay}".to_string(),
         ]),
         update: command(&[
+            "/bin/sh".to_string(),
             update.to_string_lossy().to_string(),
             "{plan_id}".to_string(),
             "{interface}".to_string(),
@@ -116,9 +116,6 @@ fn routing_adapter_argv_contains_exact_endpoint_and_cost_evidence() {
 
 fn write_script(path: &std::path::Path, contents: &str) {
     std::fs::write(path, contents).unwrap();
-    let mut permissions = std::fs::metadata(path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).unwrap();
 }
 
 #[tokio::test]

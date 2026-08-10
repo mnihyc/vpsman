@@ -5806,11 +5806,11 @@ export function FleetAlertPolicyManager({
                       <ConsoleField
                         label="Condition expression"
                         className="fieldFull"
+                        labelTitle="Supported metrics: traffic quota/cycle values, cpu.load_1, cpu.load_saturation, memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
                       >
                         <textarea
                           aria-label="Rule condition expression"
                           placeholder="traffic.cycle.total >= traffic.quota.total * 0.8"
-                          title="Supported metrics: traffic quota/cycle values, cpu.load_1, cpu.load_saturation, memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
                           value={draft.condition_expression}
                           onChange={(event) =>
                             updateRuleDraft(draft.localId, {
@@ -8979,7 +8979,6 @@ export function WebhookRuleManager({
                   aria-label="Webhook cooldown seconds"
                   max={2592000}
                   min={0}
-                  title="Minimum seconds between new automatic deliveries for this rule. Retries are controlled separately."
                   type="number"
                   value={cooldownSecs}
                   onChange={(event) => setCooldownSecs(event.target.value)}

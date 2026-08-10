@@ -113,7 +113,7 @@ export function SearchExpressionInput({
     metaDescription ?? verificationMessage ?? matchTitle ?? matchSummary;
   const showVisibleMeta = Boolean(
     (showMatchCount && agents) ||
-      (showVerificationMessage && verificationMessage),
+    (showVerificationMessage && verificationMessage),
   );
   const showMeta = showVisibleMeta || Boolean(verificationMessage);
   const autocompleteVisible =
@@ -537,12 +537,11 @@ export function SearchExpressionInput({
                   onMouseMove={() => setActiveSuggestionIndex(index)}
                   role="option"
                   tabIndex={-1}
-                  title={`${suggestion.label} ${suggestion.detail ?? ""}`.trim()}
                   type="button"
                 >
-                  <span title={suggestion.label}>{suggestion.label}</span>
+                  <span className="truncateValue">{suggestion.label}</span>
                   {suggestion.detail ? (
-                    <small title={suggestion.detail}>{suggestion.detail}</small>
+                    <small>{suggestion.detail}</small>
                   ) : null}
                 </button>
               ))}

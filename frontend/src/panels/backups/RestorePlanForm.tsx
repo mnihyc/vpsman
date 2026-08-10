@@ -49,7 +49,10 @@ export function RestorePlanForm({
     <>
       <div className="sectionHeader compact restoreFormHeader">
         <h2>Draft restore</h2>
-        <span>{restoreTargetName ?? "Choose artifact, destination, and path behavior"}</span>
+        <span>
+          {restoreTargetName ??
+            "Choose artifact, destination, and path behavior"}
+        </span>
       </div>
       <form className="dispatchForm" onSubmit={onSubmit}>
         <label>
@@ -61,7 +64,7 @@ export function RestorePlanForm({
           >
             <option value="">Select source artifact</option>
             {backups.map((backup) => (
-              <option key={backup.id} title={backup.id} value={backup.id}>
+              <option key={backup.id} value={backup.id}>
                 {shortId(backup.id)} from {clientLabel(backup.client_id)}
               </option>
             ))}

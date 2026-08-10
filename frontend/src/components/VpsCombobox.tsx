@@ -60,7 +60,10 @@ export function VpsCombobox({
     () => searchableOptions(agents, excludeIds, value),
     [agents, excludeIds, value],
   );
-  const filtered = useMemo(() => filterOptions(options, query), [options, query]);
+  const filtered = useMemo(
+    () => filterOptions(options, query),
+    [options, query],
+  );
 
   useEffect(() => {
     if (!focused) {
@@ -90,7 +93,12 @@ export function VpsCombobox({
       commitQuery();
     }
     document.addEventListener("pointerdown", handleDocumentPointerDown, true);
-    return () => document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+    return () =>
+      document.removeEventListener(
+        "pointerdown",
+        handleDocumentPointerDown,
+        true,
+      );
   });
 
   useLayoutEffect(() => {
@@ -130,7 +138,10 @@ export function VpsCombobox({
         available,
         Math.max(0, viewportHeight - margin * 2),
       );
-      const width = Math.min(rect.width, Math.max(0, viewportWidth - margin * 2));
+      const width = Math.min(
+        rect.width,
+        Math.max(0, viewportWidth - margin * 2),
+      );
       const left = Math.min(
         Math.max(rect.left, margin),
         Math.max(margin, viewportWidth - width - margin),
@@ -296,38 +307,39 @@ export function VpsCombobox({
       <ChevronDown size={15} />
       {open && !disabled && menuStyle
         ? createPortal(
-          <div
-            aria-label={`${ariaLabel} options`}
-            className="vpsComboboxMenu"
-            id={listboxId}
-            ref={menuRef}
-            role="listbox"
-            style={menuStyle}
-          >
-          {filtered.length > 0 ? (
-            filtered.map((option, index) => (
-              <button
-                aria-selected={index === activeIndex}
-                className={index === activeIndex ? "active" : undefined}
-                key={option.id}
-                title={`${option.label} ${option.detail}`.trim()}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  selectOption(option);
-                }}
-                role="option"
-                type="button"
-              >
-                <strong>{option.label}</strong>
-                <small>{option.detail}</small>
-              </button>
-            ))
-          ) : (
-            <span className="vpsComboboxEmpty" title="No VPS matches this search.">No VPS matches this search.</span>
-          )}
-          </div>,
-          document.body,
-        )
+            <div
+              aria-label={`${ariaLabel} options`}
+              className="vpsComboboxMenu"
+              id={listboxId}
+              ref={menuRef}
+              role="listbox"
+              style={menuStyle}
+            >
+              {filtered.length > 0 ? (
+                filtered.map((option, index) => (
+                  <button
+                    aria-selected={index === activeIndex}
+                    className={index === activeIndex ? "active" : undefined}
+                    key={option.id}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      selectOption(option);
+                    }}
+                    role="option"
+                    type="button"
+                  >
+                    <strong>{option.label}</strong>
+                    <small>{option.detail}</small>
+                  </button>
+                ))
+              ) : (
+                <span className="vpsComboboxEmpty">
+                  No VPS matches this search.
+                </span>
+              )}
+            </div>,
+            document.body,
+          )
         : null}
     </div>
   );
@@ -345,7 +357,9 @@ function searchableOptions(
   excludeIds: string[],
   currentValue: string,
 ): SearchableVpsOption[] {
-  const excluded = new Set(excludeIds.filter((id) => id && id !== currentValue));
+  const excluded = new Set(
+    excludeIds.filter((id) => id && id !== currentValue),
+  );
   return agents
     .filter((agent) => !excluded.has(agent.id))
     .map((agent) => {
@@ -368,10 +382,17 @@ function searchableOptions(
           .toLocaleLowerCase(),
       };
     })
-    .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
+    .sort(
+      (left, right) =>
+        left.label.localeCompare(right.label) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
-function filterOptions(options: SearchableVpsOption[], query: string): SearchableVpsOption[] {
+function filterOptions(
+  options: SearchableVpsOption[],
+  query: string,
+): SearchableVpsOption[] {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) {
     return options;
@@ -379,21 +400,22 @@ function filterOptions(options: SearchableVpsOption[], query: string): Searchabl
   return options.filter((option) => option.searchText.includes(normalized));
 }
 
-function exactOption(options: SearchableVpsOption[], query: string): SearchableVpsOption | null {
+function exactOption(
+  options: SearchableVpsOption[],
+  query: string,
+): SearchableVpsOption | null {
   const normalized = query.trim().toLocaleLowerCase();
   return (
-    options.find((option) =>
-      option.id.toLocaleLowerCase() === normalized ||
-      option.label.toLocaleLowerCase() === normalized ||
-      clientIdSuffix(option.id)?.toLocaleLowerCase() === normalized,
+    options.find(
+      (option) =>
+        option.id.toLocaleLowerCase() === normalized ||
+        option.label.toLocaleLowerCase() === normalized ||
+        clientIdSuffix(option.id)?.toLocaleLowerCase() === normalized,
     ) ?? null
   );
 }
 
-function displayValue(
-  value: string,
-  agents: VpsComboboxOption[],
-): string {
+function displayValue(value: string, agents: VpsComboboxOption[]): string {
   const selected = agents.find((agent) => agent.id === value);
   return selected ? optionLabel(selected) : value;
 }

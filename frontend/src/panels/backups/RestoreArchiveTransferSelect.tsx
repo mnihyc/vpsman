@@ -36,21 +36,19 @@ export function RestoreArchiveTransferSelect({
   const selected = options.find((option) => option.key === value) ?? null;
   return (
     <div className="restoreArchiveSelect">
-      <label>
+      <label title="Completed upload transfer whose bytes match the selected backup artifact.">
         <span>{label}</span>
         <select
           aria-label={label}
-          disabled={disabled || options.length === 0}
-          onChange={(event) => onChange(event.target.value)}
-          title={
+          data-tooltip-disabled-reason={
             disabled
               ? "Archive selection is unavailable for this restore state"
               : options.length === 0
                 ? emptyMessage
-                : selected
-                  ? selected.path
-                  : "Completed upload transfer whose bytes match the selected backup artifact"
+                : undefined
           }
+          disabled={disabled || options.length === 0}
+          onChange={(event) => onChange(event.target.value)}
           value={selected ? selected.key : ""}
         >
           <option value="">
@@ -61,11 +59,7 @@ export function RestoreArchiveTransferSelect({
               : "Select staged archive"}
           </option>
           {options.map((option) => (
-            <option
-              key={option.key}
-              title={`${option.path} · SHA-256 ${option.sha256Hex}`}
-              value={option.key}
-            >
+            <option key={option.key} value={option.key}>
               {shortId(option.sessionId)} / {formatBytes(option.sizeBytes)} /{" "}
               {shortHash(option.sha256Hex)}
             </option>
@@ -77,21 +71,19 @@ export function RestoreArchiveTransferSelect({
         aria-live="polite"
         title={
           selected
-            ? `${selected.path}; ${formatBytes(selected.sizeBytes)}; SHA-256 ${shortHash(selected.sha256Hex)}; observed ${formatTime(selected.observedAt)}`
-            : emptyMessage
+            ? `${selected.path}; ${formatBytes(selected.sizeBytes)}; SHA-256 ${selected.sha256Hex}; observed ${selected.observedAt}`
+            : undefined
         }
       >
         {selected ? (
           <>
             <div>
               <span>Path</span>
-              <strong title={selected.path}>{selected.path}</strong>
+              <strong>{selected.path}</strong>
             </div>
             <div>
               <span>Size</span>
-              <strong title={String(selected.sizeBytes)}>
-                {formatBytes(selected.sizeBytes)}
-              </strong>
+              <strong>{formatBytes(selected.sizeBytes)}</strong>
             </div>
             <div>
               <span>SHA-256</span>
@@ -101,16 +93,12 @@ export function RestoreArchiveTransferSelect({
             </div>
             <div>
               <span>Observed</span>
-              <strong title={selected.observedAt}>
-                {formatTime(selected.observedAt)}
-              </strong>
+              <strong>{formatTime(selected.observedAt)}</strong>
             </div>
           </>
         ) : (
           <div className="restoreArchiveEmptyState">
-            <span className="restoreArchiveEmpty" title={emptyMessage}>
-              {emptyMessage}
-            </span>
+            <span className="restoreArchiveEmpty">{emptyMessage}</span>
             {onDownloadPackage || onOpenTransfers ? (
               <div className="restoreArchiveActions">
                 {onDownloadPackage ? (

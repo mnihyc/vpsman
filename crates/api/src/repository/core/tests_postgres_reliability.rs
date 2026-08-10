@@ -43,7 +43,9 @@ use crate::{
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
-    model_port_forwarding::{CreatePortForwardRuleRequest, UpdatePortForwardRuleRequest},
+    model_port_forwarding::{
+        CreatePortForwardRuleRequest, UpdatePortForwardRuleRequest, UpdateTargetHostname,
+    },
     model_terminal::TerminalSessionView,
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
@@ -6360,6 +6362,117 @@ async fn postgres_tunnel_underlay_and_operator_assessment_round_trip_without_con
 }
 
 #[tokio::test]
+async fn postgres_port_forward_hostname_context_round_trips_with_literal_target() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    insert_client(&db.pool, "edge-domain", None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let created = db
+        .repo
+        .create_port_forward_rule(
+            &CreatePortForwardRuleRequest {
+                client_id: "edge-domain".to_string(),
+                name: "resolved-web".to_string(),
+                protocol: PortForwardProtocol::Tcp,
+                target_ip: "192.0.2.40".parse().unwrap(),
+                target_hostname: Some(" App.Internal. ".to_string()),
+                mappings: pair_port_expressions("18443", "8443").unwrap(),
+                masquerade: true,
+                enabled: true,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.target_hostname.as_deref(), Some("app.internal"));
+
+    let row = sqlx::query(
+        "SELECT host(target_ip) AS target_ip, target_hostname FROM port_forward_rules WHERE id = $1",
+    )
+    .bind(created.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.try_get::<String, _>("target_ip").unwrap(), "192.0.2.40");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("target_hostname")
+            .unwrap()
+            .as_deref(),
+        Some("app.internal")
+    );
+
+    let disabled = db
+        .repo
+        .set_port_forward_rule_enabled(created.id, created.revision, false, &operator)
+        .await
+        .unwrap();
+    assert_eq!(disabled.target_hostname.as_deref(), Some("app.internal"));
+    let listed = db
+        .repo
+        .get_port_forward_rule(created.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(listed.target_hostname.as_deref(), Some("app.internal"));
+    let audit_hostname: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT metadata ->> 'target_hostname'
+        FROM audit_logs
+        WHERE target = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(format!("port_forward_rule:{}", created.id))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_hostname.as_deref(), Some("app.internal"));
+
+    let cleared = db
+        .repo
+        .update_port_forward_rule(
+            created.id,
+            &UpdatePortForwardRuleRequest {
+                expected_revision: disabled.revision,
+                name: disabled.name.clone(),
+                protocol: disabled.protocol,
+                target_ip: disabled.target_ip,
+                target_hostname: UpdateTargetHostname::Clear,
+                mappings: disabled.mappings.clone(),
+                masquerade: disabled.masquerade,
+                enabled: false,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(cleared.target_hostname, None);
+    let persisted_hostname: Option<String> =
+        sqlx::query_scalar("SELECT target_hostname FROM port_forward_rules WHERE id = $1")
+            .bind(created.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(persisted_hostname, None);
+
+    let invalid_literal =
+        sqlx::query("UPDATE port_forward_rules SET target_hostname = '192.0.2.40' WHERE id = $1")
+            .bind(created.id)
+            .execute(&db.pool)
+            .await
+            .unwrap_err();
+    assert!(invalid_literal
+        .to_string()
+        .contains("port_forward_rules_target_hostname_check"));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -6430,6 +6543,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 name: "healthy-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
                 target_ip: "192.0.2.10".parse().unwrap(),
+                target_hostname: None,
                 mappings: mappings_a,
                 masquerade: true,
                 enabled: true,
@@ -6447,6 +6561,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
                 target_ip: "192.0.2.11".parse().unwrap(),
+                target_hostname: None,
                 mappings: mappings_b.clone(),
                 masquerade: true,
                 enabled: true,
@@ -6488,6 +6603,7 @@ async fn postgres_network_json_corruption_is_visible_isolated_and_replaceable() 
                 name: "repair-web".to_string(),
                 protocol: PortForwardProtocol::Tcp,
                 target_ip: "192.0.2.11".parse().unwrap(),
+                target_hostname: UpdateTargetHostname::Preserve,
                 mappings: mappings_b,
                 masquerade: true,
                 enabled: true,

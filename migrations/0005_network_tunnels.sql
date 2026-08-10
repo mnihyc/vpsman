@@ -182,6 +182,7 @@ CREATE TABLE port_forward_rules (
     name TEXT NOT NULL,
     protocol TEXT NOT NULL,
     target_ip INET NOT NULL,
+    target_hostname TEXT,
     mappings JSONB NOT NULL,
     masquerade BOOLEAN NOT NULL DEFAULT TRUE,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -199,6 +200,17 @@ CREATE TABLE port_forward_rules (
         CHECK (length(btrim(name)) BETWEEN 1 AND 128),
     CONSTRAINT port_forward_rules_protocol_check
         CHECK (protocol IN ('tcp', 'udp', 'both')),
+    CONSTRAINT port_forward_rules_target_hostname_check
+        CHECK (
+            target_hostname IS NULL
+            OR (
+                length(target_hostname) BETWEEN 1 AND 253
+                AND target_hostname = lower(target_hostname)
+                AND target_hostname = btrim(target_hostname)
+                AND target_hostname ~ '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$'
+                AND target_hostname !~ '^((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])$'
+            )
+        ),
     CONSTRAINT port_forward_rules_mappings_array_check
         CHECK (jsonb_typeof(mappings) = 'array')
 );

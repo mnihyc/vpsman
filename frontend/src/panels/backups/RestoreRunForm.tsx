@@ -78,13 +78,12 @@ export function RestoreRunForm({
           pending={pending}
           value={archiveTransferKey}
         />
-        <label>
+        <label title="Command and arguments to run after restore, separated by spaces">
           <span>Post-restore check argv</span>
           <input
             aria-label="Post-restore argv"
             onChange={(event) => onPostRestoreArgvChange(event.target.value)}
             placeholder="/usr/local/sbin/post-restore-check --json"
-            title="Command and arguments to run after restore, separated by spaces"
             value={restorePostRestoreArgv}
           />
         </label>

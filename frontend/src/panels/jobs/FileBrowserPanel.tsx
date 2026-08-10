@@ -1796,14 +1796,13 @@ export function FileBrowserPanel({
                     type="file"
                   />
                 </label>
-                <label>
+                <label title="Absolute destination path. A trailing slash appends the selected file name.">
                   <span>Destination</span>
                   <input
                     aria-label="Upload destination"
                     onChange={(event) =>
                       setUploadDestination(event.target.value)
                     }
-                    title="Absolute destination path. A trailing slash appends the selected file name."
                     value={uploadDestination}
                   />
                 </label>

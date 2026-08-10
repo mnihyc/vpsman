@@ -57,6 +57,12 @@ pub(crate) struct PortForwardCreateCommand {
     pub(crate) target_ip: IpAddr,
     #[arg(
         long,
+        value_name = "HOSTNAME",
+        help = "Retain the resolved hostname alongside the selected target IP"
+    )]
+    pub(crate) target_hostname: Option<String>,
+    #[arg(
+        long,
         value_name = "PORTS",
         help = "Incoming PORT or START-END items, comma separated"
     )]
@@ -95,6 +101,20 @@ pub(crate) struct PortForwardUpdateCommand {
     pub(crate) protocol: PortForwardProtocolArg,
     #[arg(long, value_name = "IP")]
     pub(crate) target_ip: IpAddr,
+    #[arg(
+        long,
+        value_name = "HOSTNAME",
+        conflicts_with = "clear_target_hostname",
+        help = "Replace the resolved hostname retained alongside the target IP"
+    )]
+    pub(crate) target_hostname: Option<String>,
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with = "target_hostname",
+        help = "Clear the retained target hostname"
+    )]
+    pub(crate) clear_target_hostname: bool,
     #[arg(long, value_name = "PORTS")]
     pub(crate) incoming: String,
     #[arg(long, value_name = "PORTS")]
@@ -158,23 +178,20 @@ pub(crate) fn create(
     }
     let mappings = pair_port_expressions(&request.incoming, &request.target)
         .context("invalid port mapping")?;
+    let mut payload = serde_json::json!({
+        "client_id": request.client_id,
+        "name": request.name,
+        "protocol": PortForwardProtocol::from(request.protocol),
+        "target_ip": request.target_ip,
+        "mappings": mappings,
+        "masquerade": !request.preserve_source,
+        "enabled": !request.disabled,
+        "confirmed": request.confirmed,
+    });
+    insert_target_hostname(&mut payload, request.target_hostname.as_deref(), false);
     println!(
         "{}",
-        http_post_json(
-            api_url,
-            "/api/v1/port-forward-rules",
-            token,
-            &serde_json::json!({
-                "client_id": request.client_id,
-                "name": request.name,
-                "protocol": PortForwardProtocol::from(request.protocol),
-                "target_ip": request.target_ip,
-                "mappings": mappings,
-                "masquerade": !request.preserve_source,
-                "enabled": !request.disabled,
-                "confirmed": request.confirmed,
-            })
-        )?
+        http_post_json(api_url, "/api/v1/port-forward-rules", token, &payload,)?
     );
     Ok(())
 }
@@ -196,22 +213,28 @@ pub(crate) fn update(
     }
     let mappings = pair_port_expressions(&request.incoming, &request.target)
         .context("invalid port mapping")?;
+    let mut payload = serde_json::json!({
+        "expected_revision": request.expected_revision,
+        "name": request.name,
+        "protocol": PortForwardProtocol::from(request.protocol),
+        "target_ip": request.target_ip,
+        "mappings": mappings,
+        "masquerade": !request.preserve_source,
+        "enabled": request.enabled,
+        "confirmed": request.confirmed,
+    });
+    insert_target_hostname(
+        &mut payload,
+        request.target_hostname.as_deref(),
+        request.clear_target_hostname,
+    );
     println!(
         "{}",
         http_put_json(
             api_url,
             &format!("/api/v1/port-forward-rules/{}", request.rule_id),
             token,
-            &serde_json::json!({
-                "expected_revision": request.expected_revision,
-                "name": request.name,
-                "protocol": PortForwardProtocol::from(request.protocol),
-                "target_ip": request.target_ip,
-                "mappings": mappings,
-                "masquerade": !request.preserve_source,
-                "enabled": request.enabled,
-                "confirmed": request.confirmed,
-            })
+            &payload,
         )?
     );
     Ok(())
@@ -298,6 +321,24 @@ pub(crate) fn bulk(
         )?
     );
     Ok(())
+}
+
+fn insert_target_hostname(
+    payload: &mut serde_json::Value,
+    target_hostname: Option<&str>,
+    clear_target_hostname: bool,
+) {
+    let fields = payload
+        .as_object_mut()
+        .expect("port-forward request payload must be an object");
+    if clear_target_hostname {
+        fields.insert("target_hostname".to_string(), serde_json::Value::Null);
+    } else if let Some(target_hostname) = target_hostname {
+        fields.insert(
+            "target_hostname".to_string(),
+            serde_json::Value::String(target_hostname.to_string()),
+        );
+    }
 }
 
 #[cfg(test)]

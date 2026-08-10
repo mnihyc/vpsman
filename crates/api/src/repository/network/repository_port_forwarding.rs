@@ -14,9 +14,10 @@ use crate::{
     internal_operator::persisted_actor_id,
     model::{AuditLogView, AuthContext},
     model_port_forwarding::{
-        CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkItem,
-        PortForwardRuleCorruptView, PortForwardRuleListItem, PortForwardRuleRecord,
-        PortForwardRuleView, PortForwardRuntimeRecord, UpdatePortForwardRuleRequest,
+        normalize_port_forward_hostname, CreatePortForwardRuleRequest, PortForwardBulkAction,
+        PortForwardBulkItem, PortForwardRuleCorruptView, PortForwardRuleListItem,
+        PortForwardRuleRecord, PortForwardRuleView, PortForwardRuntimeRecord,
+        UpdatePortForwardRuleRequest, UpdateTargetHostname,
     },
     repository::{MemoryState, Repository},
     unix_now,
@@ -231,6 +232,7 @@ impl Repository {
         request: &CreatePortForwardRuleRequest,
         operator: &AuthContext,
     ) -> Result<PortForwardRuleView> {
+        let target_hostname = normalized_target_hostname(request.target_hostname.as_deref())?;
         let now = unix_now().to_string();
         let candidate = PortForwardRuleRecord {
             id: Uuid::new_v4(),
@@ -239,6 +241,7 @@ impl Repository {
             name: request.name.trim().to_string(),
             protocol: request.protocol,
             target_ip: request.target_ip,
+            target_hostname,
             mappings: request.mappings.clone(),
             masquerade: request.masquerade,
             enabled: request.enabled,
@@ -281,10 +284,10 @@ impl Repository {
                 sqlx::query(
                     r#"
                     INSERT INTO port_forward_rules (
-                        id, actor_id, client_id, name, protocol, target_ip, mappings,
-                        masquerade, enabled
+                        id, actor_id, client_id, name, protocol, target_ip, target_hostname,
+                        mappings, masquerade, enabled
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9)
+                    VALUES ($1, $2, $3, $4, $5, $6::inet, $7, $8, $9, $10)
                     "#,
                 )
                 .bind(candidate.id)
@@ -293,6 +296,7 @@ impl Repository {
                 .bind(&candidate.name)
                 .bind(protocol_name(candidate.protocol))
                 .bind(candidate.target_ip.to_string())
+                .bind(&candidate.target_hostname)
                 .bind(SqlJson(&candidate.mappings))
                 .bind(candidate.masquerade)
                 .bind(candidate.enabled)
@@ -317,6 +321,7 @@ impl Repository {
         request: &UpdatePortForwardRuleRequest,
         operator: &AuthContext,
     ) -> Result<PortForwardRuleView> {
+        let target_hostname = normalized_target_hostname_update(&request.target_hostname)?;
         let persisted = match self {
             Self::Memory(memory) => {
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
@@ -340,7 +345,7 @@ impl Repository {
                         "port_forward_rule_snapshot_stale"
                     );
                     let mut candidate = rules[index].clone();
-                    apply_update(&mut candidate, request, operator);
+                    apply_update(&mut candidate, request, &target_hostname, operator);
                     ensure_candidate_valid(&candidate, &rules, Some(id))?;
                     rules[index] = candidate.clone();
                     candidate
@@ -361,7 +366,7 @@ impl Repository {
                 ensure_postgres_port_forward_client_active(&mut tx, &client_id).await?;
                 let current = sqlx::query(
                     r#"
-                    SELECT id, actor_id, client_id, enabled, revision,
+                    SELECT id, actor_id, client_id, target_hostname, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -395,6 +400,9 @@ impl Repository {
                     name: request.name.trim().to_string(),
                     protocol: request.protocol,
                     target_ip: request.target_ip,
+                    target_hostname: target_hostname
+                        .clone()
+                        .unwrap_or(current.try_get("target_hostname")?),
                     mappings: request.mappings.clone(),
                     masquerade: request.masquerade,
                     enabled: request.enabled,
@@ -417,9 +425,10 @@ impl Repository {
                         name = $4,
                         protocol = $5,
                         target_ip = $6::inet,
-                        mappings = $7,
-                        masquerade = $8,
-                        enabled = $9,
+                        target_hostname = $7,
+                        mappings = $8,
+                        masquerade = $9,
+                        enabled = $10,
                         revision = revision + 1,
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
@@ -431,6 +440,7 @@ impl Repository {
                 .bind(&candidate.name)
                 .bind(protocol_name(candidate.protocol))
                 .bind(candidate.target_ip.to_string())
+                .bind(&candidate.target_hostname)
                 .bind(SqlJson(&candidate.mappings))
                 .bind(candidate.masquerade)
                 .bind(candidate.enabled)
@@ -470,6 +480,7 @@ impl Repository {
             name: current.name,
             protocol: current.protocol,
             target_ip: current.target_ip,
+            target_hostname: UpdateTargetHostname::Preserve,
             mappings: current.mappings,
             masquerade: current.masquerade,
             enabled,
@@ -553,7 +564,8 @@ impl Repository {
                         updated_at = now()
                     WHERE id = $1 AND revision = $2 AND deleted_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -755,7 +767,8 @@ impl Repository {
                       AND removal_confirmed_at IS NULL
                       AND forgotten_at IS NULL
                     RETURNING id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -883,7 +896,8 @@ impl Repository {
                 let selected_rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -1204,7 +1218,8 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -1276,7 +1291,8 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT id, actor_id, client_id, name, protocol,
-                        host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+                        host(target_ip) AS target_ip, target_hostname, mappings,
+                        masquerade, enabled, revision,
                         created_at::text AS created_at, updated_at::text AS updated_at,
                         deleted_at::text AS deleted_at, deleted_by, deleted_reason,
                         removal_confirmed_at::text AS removal_confirmed_at,
@@ -1524,12 +1540,16 @@ fn runtime_rule_from_record(record: &PortForwardRuleRecord) -> PortForwardRule {
 fn apply_update(
     record: &mut PortForwardRuleRecord,
     request: &UpdatePortForwardRuleRequest,
+    target_hostname: &Option<Option<String>>,
     operator: &AuthContext,
 ) {
     record.actor_id = persisted_actor_id(operator);
     record.name = request.name.trim().to_string();
     record.protocol = request.protocol;
     record.target_ip = request.target_ip;
+    if let Some(target_hostname) = target_hostname {
+        record.target_hostname.clone_from(target_hostname);
+    }
     record.mappings = request.mappings.clone();
     record.masquerade = request.masquerade;
     record.enabled = request.enabled;
@@ -1646,6 +1666,7 @@ fn record_to_view(
         name: record.name,
         protocol: record.protocol,
         target_ip: record.target_ip,
+        target_hostname: record.target_hostname,
         mappings: record.mappings,
         masquerade: record.masquerade,
         enabled: record.enabled,
@@ -1713,6 +1734,27 @@ fn parse_protocol(value: &str) -> Result<PortForwardProtocol> {
     }
 }
 
+fn normalized_target_hostname(value: Option<&str>) -> Result<Option<String>> {
+    value
+        .map(|hostname| {
+            normalize_port_forward_hostname(hostname)
+                .context("port_forward_target_hostname_invalid")
+        })
+        .transpose()
+}
+
+fn normalized_target_hostname_update(
+    value: &UpdateTargetHostname,
+) -> Result<Option<Option<String>>> {
+    match value {
+        UpdateTargetHostname::Preserve => Ok(None),
+        UpdateTargetHostname::Clear => Ok(Some(None)),
+        UpdateTargetHostname::Replace(hostname) => {
+            Ok(Some(normalized_target_hostname(Some(hostname))?))
+        }
+    }
+}
+
 fn normalize_reason(reason: Option<&str>) -> Option<String> {
     reason
         .map(str::trim)
@@ -1756,6 +1798,7 @@ fn port_forward_audit_metadata(
             "name": &record.name,
             "protocol": protocol_name(record.protocol),
             "target_ip": record.target_ip,
+            "target_hostname": &record.target_hostname,
             "mappings": &record.mappings,
             "masquerade": record.masquerade,
             "enabled": record.enabled,
@@ -1848,6 +1891,7 @@ fn port_forward_record_from_row(row: &sqlx::postgres::PgRow) -> Result<PortForwa
         target_ip: target_ip
             .parse::<IpAddr>()
             .context("invalid persisted target IP")?,
+        target_hostname: row.try_get("target_hostname")?,
         mappings,
         masquerade: row.try_get("masquerade")?,
         enabled: row.try_get("enabled")?,
@@ -2043,7 +2087,8 @@ async fn select_postgres_port_forward_rules_for_client_excluding(
     let rows = sqlx::query(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
-            host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+            host(target_ip) AS target_ip, target_hostname, mappings,
+            masquerade, enabled, revision,
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
             removal_confirmed_at::text AS removal_confirmed_at,
@@ -2083,7 +2128,8 @@ async fn select_postgres_port_forward_rule(
     let row = sqlx::query(
         r#"
         SELECT id, actor_id, client_id, name, protocol,
-            host(target_ip) AS target_ip, mappings, masquerade, enabled, revision,
+            host(target_ip) AS target_ip, target_hostname, mappings,
+            masquerade, enabled, revision,
             created_at::text AS created_at, updated_at::text AS updated_at,
             deleted_at::text AS deleted_at, deleted_by, deleted_reason,
             removal_confirmed_at::text AS removal_confirmed_at,

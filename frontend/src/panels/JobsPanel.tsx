@@ -704,6 +704,7 @@ export function JobsPanel({
         header: "Targets",
         size: 130,
         minSize: 112,
+        resizeMinSize: 130,
         sortValue: (job) => job.target_count,
         searchValue: (job) => job.target_count,
         cell: (job) => (
@@ -844,6 +845,7 @@ export function JobsPanel({
         header: "Targets",
         size: 130,
         minSize: 112,
+        resizeMinSize: 130,
         sortValue: (job) => job.target_count,
         searchValue: (job) => job.target_count,
         cell: (job) => (

@@ -399,11 +399,9 @@ export function ConsoleShell({
         onChange={(event) => onApplySavedFleetView(event.target.value)}
         value={activeSavedFleetViewId ?? ""}
       >
-        <option value="" title="Saved views">
-          Saved views
-        </option>
+        <option value="">Saved views</option>
         {savedFleetViews.map((view) => (
-          <option key={view.id} value={view.id} title={view.name}>
+          <option key={view.id} value={view.id}>
             {view.name}
           </option>
         ))}
@@ -854,7 +852,6 @@ export function ConsoleShell({
                 className="mobilePageSelector"
                 name="console_page"
                 onChange={(event) => selectMobilePage(event.target.value)}
-                title={`${activeViewLabel} / ${activeSubpageLabel}`}
                 value={mobilePageValue}
               >
                 {navSections.map((section) => (

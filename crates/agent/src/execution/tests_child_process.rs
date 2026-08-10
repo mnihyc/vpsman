@@ -1,6 +1,41 @@
 use super::*;
+use std::{io::Write, os::unix::fs::PermissionsExt};
 
 const TEST_SHELL: &str = "/bin/sh";
+
+#[tokio::test]
+async fn test_spawn_retries_transient_text_file_busy() {
+    let root = std::env::temp_dir().join(format!("vpsman-child-etxtbsy-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("busy.sh");
+    let mut script = File::create(&path).unwrap();
+    script
+        .write_all(b"#!/bin/sh\nprintf fixture-ready")
+        .unwrap();
+    let mut permissions = script.metadata().unwrap().permissions();
+    permissions.set_mode(0o755);
+    script.set_permissions(permissions).unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        drop(script);
+    });
+
+    let command = tokio::process::Command::new(&path);
+    let output =
+        match run_child_with_bounded_output(command, 5, 64, ChildCleanupPolicy::ProcessGroup)
+            .await
+            .unwrap()
+        {
+            ChildRunResult::Completed(output) => output,
+            ChildRunResult::TimedOut(_) => panic!("fixture command timed out"),
+            ChildRunResult::Canceled { .. } => panic!("fixture command was canceled"),
+        };
+
+    release.join().unwrap();
+    assert_eq!(output.stdout, b"fixture-ready");
+    assert_eq!(output.exit_code, Some(0));
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 #[tokio::test]
 async fn streams_stdout_before_child_exits() {

@@ -424,6 +424,7 @@ export function FileTransferSessionsPanel({
       },
       header: "Progress/speed",
       id: "progress_speed",
+      resizeMinSize: 96,
       searchValue: (transfer) =>
         `${formatTransferProgress(transfer)} ${formatTransferRateLimit(transfer.rate_limit_kbps)}`,
       sortValue: (transfer) => transfer.progress_ratio ?? 0,
@@ -688,7 +689,9 @@ export function FileTransferSessionsPanel({
           <button
             className="secondaryAction"
             data-tooltip-disabled-reason={
-              loading ? "File transfer sessions are already refreshing." : undefined
+              loading
+                ? "File transfer sessions are already refreshing."
+                : undefined
             }
             disabled={loading}
             onClick={onRefresh}
@@ -705,9 +708,7 @@ export function FileTransferSessionsPanel({
       >
         <span title="Start a reviewed browser upload or download against one selected VPS.">
           <strong>New transfer</strong>
-          <small title="Upload or download with local review">
-            Upload or download with local review
-          </small>
+          <small>Upload or download with local review</small>
         </span>
         <span
           title={
@@ -976,41 +977,59 @@ export function FileTransferSessionsPanel({
           {
             label: "Save method",
             value: handoffSnapshot?.mode ?? (
-              <span data-tooltip-empty-reason="No ready-download review is active.">-</span>
+              <span data-tooltip-empty-reason="No ready-download review is active.">
+                -
+              </span>
             ),
           },
           {
             label: "Transfers",
-            value: handoffSnapshot
-              ? String(handoffSnapshot.transfers.length)
-              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
+            value: handoffSnapshot ? (
+              String(handoffSnapshot.transfers.length)
+            ) : (
+              <span data-tooltip-empty-reason="No ready-download review is active.">
+                -
+              </span>
+            ),
           },
           {
             label: "Sessions",
             title: handoffSnapshot
               ? handoffFullSessionSummary(handoffSnapshot.transfers)
               : undefined,
-            value: handoffSnapshot
-              ? handoffSessionSummary(handoffSnapshot.transfers)
-              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
+            value: handoffSnapshot ? (
+              handoffSessionSummary(handoffSnapshot.transfers)
+            ) : (
+              <span data-tooltip-empty-reason="No ready-download review is active.">
+                -
+              </span>
+            ),
           },
           {
             label: "Expected hashes",
             title: handoffSnapshot
               ? handoffFullHashSummary(handoffSnapshot.transfers)
               : undefined,
-            value: handoffSnapshot
-              ? handoffHashSummary(handoffSnapshot.transfers)
-              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
+            value: handoffSnapshot ? (
+              handoffHashSummary(handoffSnapshot.transfers)
+            ) : (
+              <span data-tooltip-empty-reason="No ready-download review is active.">
+                -
+              </span>
+            ),
           },
           {
             label: "Evidence",
             title: handoffSnapshot
               ? handoffFullEvidenceSummary(handoffSnapshot.transfers)
               : undefined,
-            value: handoffSnapshot
-              ? handoffEvidenceSummary(handoffSnapshot.transfers)
-              : <span data-tooltip-empty-reason="No ready-download review is active.">-</span>,
+            value: handoffSnapshot ? (
+              handoffEvidenceSummary(handoffSnapshot.transfers)
+            ) : (
+              <span data-tooltip-empty-reason="No ready-download review is active.">
+                -
+              </span>
+            ),
           },
         ]}
         onCancel={() => setHandoffSnapshot(null)}
@@ -1100,7 +1119,9 @@ export function FileTransferSessionsPanel({
             <button
               className="secondaryAction compactAction"
               data-tooltip-disabled-reason={
-                onOpenDispatchPreset ? undefined : "Retry dispatch is unavailable on this surface."
+                onOpenDispatchPreset
+                  ? undefined
+                  : "Retry dispatch is unavailable on this surface."
               }
               disabled={!onOpenDispatchPreset}
               onClick={() => {
@@ -1122,7 +1143,9 @@ export function FileTransferSessionsPanel({
             <button
               className="primaryAction compactAction"
               data-tooltip-disabled-reason={
-                onOpenDispatchPreset ? undefined : "Retry dispatch is unavailable on this surface."
+                onOpenDispatchPreset
+                  ? undefined
+                  : "Retry dispatch is unavailable on this surface."
               }
               disabled={!onOpenDispatchPreset}
               onClick={() => {
@@ -1226,7 +1249,9 @@ export function FileTransferSessionsPanel({
             <select
               aria-label="Ready download save method"
               data-tooltip-disabled-reason={
-                handoffBusy ? "The save method cannot change while downloads are being prepared." : undefined
+                handoffBusy
+                  ? "The save method cannot change while downloads are being prepared."
+                  : undefined
               }
               disabled={handoffBusy}
               onChange={(event) =>
@@ -1320,23 +1345,33 @@ export function FileTransferSessionsPanel({
             items={[
               {
                 label: "Name",
-                value:
-                  sourceSnapshot?.request.name ??
-                  sourceSnapshot?.fileName ??
-                  <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
+                value: sourceSnapshot?.request.name ??
+                  sourceSnapshot?.fileName ?? (
+                    <span data-tooltip-empty-reason="No source-artifact upload review is active.">
+                      -
+                    </span>
+                  ),
               },
               {
                 label: "SHA-256",
                 title: sourceSnapshot?.request.sha256_hex,
-                value: sourceSnapshot
-                  ? shortHash(sourceSnapshot.request.sha256_hex)
-                  : <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
+                value: sourceSnapshot ? (
+                  shortHash(sourceSnapshot.request.sha256_hex)
+                ) : (
+                  <span data-tooltip-empty-reason="No source-artifact upload review is active.">
+                    -
+                  </span>
+                ),
               },
               {
                 label: "Size",
-                value: sourceSnapshot
-                  ? formatBytes(sourceSnapshot.request.size_bytes)
-                  : <span data-tooltip-empty-reason="No source-artifact upload review is active.">-</span>,
+                value: sourceSnapshot ? (
+                  formatBytes(sourceSnapshot.request.size_bytes)
+                ) : (
+                  <span data-tooltip-empty-reason="No source-artifact upload review is active.">
+                    -
+                  </span>
+                ),
               },
             ]}
             onCancel={() => setSourceSnapshot(null)}

@@ -1138,6 +1138,7 @@ function TunnelPlansWorkspace({
         sortValue: (plan) =>
           `${plan.left_runtime_config.status} ${plan.right_runtime_config.status}`,
         minSize: 165,
+        resizeMinSize: 112,
         size: 190,
       },
       {

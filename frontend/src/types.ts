@@ -60,11 +60,21 @@ export type TopologyObservationState = GeneratedTopologyObservationState;
 export type TopologyProbeState = GeneratedTopologyProbeState;
 export type TopologyRuntimeState = GeneratedTopologyRuntimeState;
 export type TunnelEndpointRuntimeState =
-  "disabled" | "unknown" | "stale" | "healthy" | "degraded";
+  | "disabled"
+  | "unknown"
+  | "stale"
+  | "healthy"
+  | "degraded";
 export type TunnelEndpointReachabilityState =
-  "unknown" | "reachable" | "probe_failed" | "stale" | "not_configured";
+  | "unknown"
+  | "reachable"
+  | "probe_failed"
+  | "stale"
+  | "not_configured";
 export type TunnelConnectionAssessment =
-  "automatic" | "connected" | "disconnected";
+  | "automatic"
+  | "connected"
+  | "disconnected";
 export type WebhookRuleDeliveryHistoryStatus =
   GeneratedWebhookRuleDeliveryHistoryStatus;
 export type WebhookRuleDeliveryProcessStatus =
@@ -84,13 +94,32 @@ export type FleetSummary = {
 };
 
 export type DashboardWindow =
-  "15m" | "1h" | "8h" | "1d" | "7d" | "30d" | "90d" | "180d" | "1y" | "all";
+  | "15m"
+  | "1h"
+  | "8h"
+  | "1d"
+  | "7d"
+  | "30d"
+  | "90d"
+  | "180d"
+  | "1y"
+  | "all";
 
 export type DashboardGroupBy =
-  "labels" | "tags" | "countries" | "providers" | "clients" | "status" | "date";
+  | "labels"
+  | "tags"
+  | "countries"
+  | "providers"
+  | "clients"
+  | "status"
+  | "date";
 
 export type DashboardScopeKind =
-  "all" | "tag" | "country" | "provider" | "client";
+  | "all"
+  | "tag"
+  | "country"
+  | "provider"
+  | "client";
 
 export type DashboardResourceMetric = "cpu_load" | "memory_used" | "disk_free";
 
@@ -798,6 +827,7 @@ export type PortForwardRuleRecord = {
   client_id: string;
   name: string;
   protocol: PortForwardProtocol;
+  target_hostname: string | null;
   target_ip: string;
   mappings: PortForwardMapping[];
   masquerade: boolean;
@@ -846,11 +876,13 @@ export type PortForwardRuleCorruptRecord = {
 };
 
 export type PortForwardRuleListItem =
-  PortForwardRuleRecord | PortForwardRuleCorruptRecord;
+  | PortForwardRuleRecord
+  | PortForwardRuleCorruptRecord;
 
 export type PortForwardRuleInput = {
   name: string;
   protocol: PortForwardProtocol;
+  target_hostname: string | null;
   target_ip: string;
   mappings: PortForwardMapping[];
   masquerade: boolean;
@@ -1811,7 +1843,9 @@ export type TunnelKind =
   | "custom";
 export type TunnelEndpointSide = "left" | "right";
 export type RuntimeTunnelManager =
-  "agent_builtin" | "external_observed" | "custom_adapter";
+  | "agent_builtin"
+  | "external_observed"
+  | "custom_adapter";
 
 export type RuntimeTunnelCommand = {
   argv: string[];
@@ -2246,7 +2280,11 @@ export type HostProcessInventoryRecord = {
 
 export type HostServiceProvider = "systemd" | "openrc" | "sysv";
 export type HostServiceAction =
-  "start" | "stop" | "restart" | "enable" | "disable";
+  | "start"
+  | "stop"
+  | "restart"
+  | "enable"
+  | "disable";
 
 export type HostServiceCapabilityRecord = {
   status: "supported" | "ambiguous" | "probe_failed" | "unsupported";
@@ -2529,9 +2567,13 @@ export type NetworkOspfUpdatePlanRecord = {
   right_client_id: string;
   control_mode: OspfControlMode;
   left_updater_source:
-    "plan_override" | "configuration_preset" | "unconfigured";
+    | "plan_override"
+    | "configuration_preset"
+    | "unconfigured";
   right_updater_source:
-    "plan_override" | "configuration_preset" | "unconfigured";
+    | "plan_override"
+    | "configuration_preset"
+    | "unconfigured";
   left_adapter_template_id: string | null;
   right_adapter_template_id: string | null;
   left_adapter_template_name: string | null;
@@ -3179,10 +3221,9 @@ export type ClearTunnelPlanEvidenceResponse = {
   cleared_observation_count: number;
 };
 
-export type ClearTunnelPlanEvidenceOutcome =
-  ClearTunnelPlanEvidenceResponse & {
-    refresh_warnings: string[];
-  };
+export type ClearTunnelPlanEvidenceOutcome = ClearTunnelPlanEvidenceResponse & {
+  refresh_warnings: string[];
+};
 
 export type UpdateTunnelPlanOspfCostRequest = {
   plan_revision: number;
@@ -3395,7 +3436,12 @@ export type JobTargetSelection = {
 };
 
 export type JsonValue =
-  JsonValue[] | boolean | null | number | string | { [key: string]: JsonValue };
+  | JsonValue[]
+  | boolean
+  | null
+  | number
+  | string
+  | { [key: string]: JsonValue };
 
 export type AuditLogRecord = {
   id: string;
@@ -3553,7 +3599,11 @@ export type ConfigurationPresetRecord = {
 };
 
 export type ConfigurationSourceSyncState =
-  "applied" | "queued" | "failed" | "stale" | "unknown";
+  | "applied"
+  | "queued"
+  | "failed"
+  | "stale"
+  | "unknown";
 
 export type ConfigurationSourceView = {
   client_id: string;

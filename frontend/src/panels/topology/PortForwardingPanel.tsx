@@ -92,6 +92,7 @@ type EditorDraft = {
   name: string;
   protocol: PortForwardProtocol;
   target: string;
+  targetHostname: string | null;
   targetInput: string;
   targetIp: string;
   clientId: string;
@@ -129,6 +130,7 @@ const EMPTY_DRAFT: EditorDraft = {
   name: "",
   protocol: "tcp",
   target: "",
+  targetHostname: null,
   targetInput: "",
   targetIp: "",
 };
@@ -269,7 +271,8 @@ export function PortForwardingPanel({
         name: rule.name,
         protocol: rule.protocol,
         target: expressions.target,
-        targetInput: rule.target_ip,
+        targetHostname: rule.target_hostname ?? null,
+        targetInput: rule.target_hostname ?? rule.target_ip,
         targetIp: rule.target_ip,
       },
     });
@@ -289,7 +292,8 @@ export function PortForwardingPanel({
         name: nextCloneName(rule.name, rules, rule.client_id),
         protocol: rule.protocol,
         target: expressions.target,
-        targetInput: rule.target_ip,
+        targetHostname: rule.target_hostname ?? null,
+        targetInput: rule.target_hostname ?? rule.target_ip,
         targetIp: rule.target_ip,
       },
     });
@@ -398,6 +402,7 @@ export function PortForwardingPanel({
       masquerade: draft.masquerade,
       name: draft.name.trim(),
       protocol: draft.protocol,
+      target_hostname: draft.targetHostname,
       target_ip: draft.targetIp,
     };
     return editing
@@ -492,6 +497,22 @@ export function PortForwardingPanel({
         sortValue: (rule) => rule.name,
         minSize: 180,
         size: 220,
+      },
+      {
+        id: "domain",
+        header: "Domain",
+        headerTitle:
+          "DNS hostname retained with the selected literal target address.",
+        cell: (rule) =>
+          rule.target_hostname ? (
+            <span className="truncateValue">{rule.target_hostname}</span>
+          ) : (
+            <span>-</span>
+          ),
+        searchValue: (rule) => rule.target_hostname ?? "",
+        sortValue: (rule) => rule.target_hostname ?? "",
+        minSize: 140,
+        size: 190,
       },
       {
         id: "mapping",
@@ -765,6 +786,7 @@ export function PortForwardingPanel({
             label="Listener scope"
             value={`All current local ${rule.target_ip.includes(":") ? "IPv6" : "IPv4"} addresses`}
           />
+          <Detail label="Domain" value={rule.target_hostname ?? "-"} />
           <Detail label="Target" value={rule.target_ip} />
           <Detail label="Mappings" value={formatPortMappings(rule.mappings)} />
           <Detail
@@ -1009,6 +1031,7 @@ export function PortForwardingPanel({
         <ConsoleDataGrid
           actions={actions}
           columns={columns}
+          defaultColumnVisibility={{ domain: false }}
           defaultPageSize={100}
           empty={
             <div className="emptyState compactEmptyState">
@@ -1030,7 +1053,7 @@ export function PortForwardingPanel({
           openRowOnClick={false}
           renderExpandedRow={renderRuleDetails}
           rows={rules}
-          searchPlaceholder="Search name, VPS, mapping, family, desired, or runtime"
+          searchPlaceholder="Search name, VPS, domain, mapping, family, desired, or runtime"
           selectable={canWrite}
           showMobileRowActions={false}
           singleExpandedRow
@@ -1192,6 +1215,8 @@ const PortForwardEditor = forwardRef<
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const feedbackRef = useRef<HTMLDivElement | null>(null);
+  const mountedRef = useRef(false);
+  const resolveRequestGenerationRef = useRef(0);
   const targetInputRef = useRef(draft.targetInput);
   const draftRef = useRef(draft);
   targetInputRef.current = draft.targetInput;
@@ -1215,20 +1240,30 @@ const PortForwardEditor = forwardRef<
   const targetIsLiteral = literalIpFamily(draft.targetInput) !== null;
   const saveDisabledReason = pending
     ? "Another port-forwarding action is in progress"
-    : !draft.name.trim()
-      ? "Enter a rule name"
-      : utf8ByteLength(draft.name.trim()) > MAX_RULE_NAME_BYTES
-        ? `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`
-        : !draft.clientId
-          ? "Select a VPS"
-          : !draft.targetIp
-            ? "Enter a literal target IP, or resolve and select a hostname result"
-            : mappingPreview.error
-              ? mappingPreview.error
-              : draft.enabled && capability?.status !== "supported"
-                ? capabilityLabel(capability?.status, capability?.reason)
-                : null;
+    : resolving
+      ? "Wait for hostname resolution to finish before reviewing this rule, then select one resolved address"
+      : !draft.name.trim()
+        ? "Enter a rule name"
+        : utf8ByteLength(draft.name.trim()) > MAX_RULE_NAME_BYTES
+          ? `Rule name must not exceed ${MAX_RULE_NAME_BYTES} UTF-8 bytes`
+          : !draft.clientId
+            ? "Select a VPS"
+            : !draft.targetIp
+              ? "Enter a literal target IP, or resolve and select a hostname result"
+              : mappingPreview.error
+                ? mappingPreview.error
+                : draft.enabled && capability?.status !== "supported"
+                  ? capabilityLabel(capability?.status, capability?.reason)
+                  : null;
   const saveDisabled = saveDisabledReason !== null;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      resolveRequestGenerationRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => {
     if (!feedback?.message) return;
@@ -1242,21 +1277,31 @@ const PortForwardEditor = forwardRef<
 
   async function resolveHostname() {
     const requestedHostname = targetInputRef.current.trim();
+    const requestGeneration = ++resolveRequestGenerationRef.current;
+    const requestIsCurrent = () =>
+      mountedRef.current &&
+      resolveRequestGenerationRef.current === requestGeneration &&
+      targetInputRef.current.trim() === requestedHostname;
     setResolving(true);
     setResolveError(null);
     setResolution(null);
     try {
       const result = await onResolveHostname(requestedHostname);
-      if (targetInputRef.current.trim() !== requestedHostname) return;
+      if (!requestIsCurrent()) return;
       setResolution(result);
-      onChange({ ...draftRef.current, targetIp: "" });
+      onChange({
+        ...draftRef.current,
+        targetHostname: result.hostname,
+        targetInput: result.hostname,
+        targetIp: "",
+      });
     } catch (error) {
-      if (targetInputRef.current.trim() !== requestedHostname) return;
+      if (!requestIsCurrent()) return;
       setResolveError(
         error instanceof Error ? error.message : "Hostname resolution failed",
       );
     } finally {
-      setResolving(false);
+      if (requestIsCurrent()) setResolving(false);
     }
   }
 
@@ -1288,7 +1333,16 @@ const PortForwardEditor = forwardRef<
           <X size={17} />
         </button>
       </div>
-      <form className="portForwardForm" onSubmit={onSubmit}>
+      <form
+        className="portForwardForm"
+        onSubmit={(event) => {
+          if (resolving) {
+            event.preventDefault();
+            return;
+          }
+          onSubmit(event);
+        }}
+      >
         <ActionFeedback
           className="localActionFeedback"
           message={feedback?.message}
@@ -1387,10 +1441,13 @@ const PortForwardEditor = forwardRef<
               onChange={(event) => {
                 const value = event.target.value;
                 const literal = literalIpFamily(value);
+                resolveRequestGenerationRef.current += 1;
+                setResolving(false);
                 setResolution(null);
                 setResolveError(null);
                 onChange({
                   ...draft,
+                  targetHostname: null,
                   targetInput: value,
                   targetIp: literal ? value.trim() : "",
                 });
@@ -1515,7 +1572,7 @@ const PortForwardEditor = forwardRef<
           {!mappingStarted ? (
             <>
               <Info size={16} />
-              <span title="Enter incoming and target ports to preview the exact mappings">
+              <span>
                 Enter incoming and target ports to preview the exact mappings
               </span>
             </>
@@ -1557,6 +1614,7 @@ const PortForwardEditor = forwardRef<
             Cancel
           </button>
           <button
+            aria-busy={resolving}
             className="primaryAction"
             disabled={saveDisabled}
             title={
@@ -1565,7 +1623,11 @@ const PortForwardEditor = forwardRef<
             }
             type="submit"
           >
-            {editing ? "Save changes" : "Create rule"}
+            {resolving
+              ? "Resolving hostname"
+              : editing
+                ? "Save changes"
+                : "Create rule"}
           </button>
         </div>
       </form>
@@ -1957,6 +2019,9 @@ function confirmationItems(
         title: state.draft.incoming,
         value: `${state.draft.protocol.toUpperCase()} ${state.draft.incoming}`,
       },
+      ...(state.draft.targetHostname
+        ? [{ label: "Domain", value: state.draft.targetHostname }]
+        : []),
       { label: "Target", value: state.draft.targetIp },
       { label: "Mapping", title: mappings, value: mappings },
       {

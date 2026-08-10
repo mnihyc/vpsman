@@ -11,11 +11,11 @@ use crate::{
     error::ApiError,
     model::AuthContext,
     model_port_forwarding::{
-        CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkRequest,
-        PortForwardBulkResponse, PortForwardClientSyncView, PortForwardMutationRequest,
-        PortForwardMutationResponse, PortForwardRuleListItem, PortForwardRuleView,
-        PortForwardSyncView, ResolveHostnameRequest, ResolveHostnameResponse, ResolvedAddressView,
-        UpdatePortForwardRuleRequest,
+        normalize_port_forward_hostname, CreatePortForwardRuleRequest, PortForwardBulkAction,
+        PortForwardBulkRequest, PortForwardBulkResponse, PortForwardClientSyncView,
+        PortForwardMutationRequest, PortForwardMutationResponse, PortForwardRuleListItem,
+        PortForwardRuleView, PortForwardSyncView, ResolveHostnameRequest, ResolveHostnameResponse,
+        ResolvedAddressView, UpdatePortForwardRuleRequest,
     },
     runtime_config::dispatch_runtime_config_for_clients,
     security::SCOPE_NETWORK_READ,
@@ -395,7 +395,8 @@ pub(crate) async fn resolve_network_hostname(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
-    let hostname = normalize_hostname(&request.hostname)?;
+    let hostname = normalize_port_forward_hostname(&request.hostname)
+        .ok_or_else(|| ApiError::bad_request("hostname_invalid"))?;
     let resolved = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::net::lookup_host((hostname.as_str(), 0)),
@@ -591,26 +592,6 @@ fn validate_confirmation(applies_to_host: bool, confirmed: bool) -> Result<(), A
     }
 }
 
-fn normalize_hostname(value: &str) -> Result<String, ApiError> {
-    let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
-    let valid = !hostname.is_empty()
-        && hostname.len() <= 253
-        && hostname.is_ascii()
-        && hostname.split('.').all(|label| {
-            !label.is_empty()
-                && label.len() <= 63
-                && !label.starts_with('-')
-                && !label.ends_with('-')
-                && label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        });
-    if !valid || hostname.parse::<IpAddr>().is_ok() {
-        return Err(ApiError::bad_request("hostname_invalid"));
-    }
-    Ok(hostname)
-}
-
 fn bulk_sync_reason(action: PortForwardBulkAction) -> &'static str {
     match action {
         PortForwardBulkAction::Enable => "port_forward_bulk_enabled",
@@ -628,6 +609,8 @@ fn port_forward_repository_error(error: anyhow::Error) -> ApiError {
         ApiError::not_found("port_forward_rule_not_found")
     } else if message.contains("snapshot_stale") {
         ApiError::conflict("port_forward_rule_snapshot_stale")
+    } else if message.contains("port_forward_target_hostname_invalid") {
+        ApiError::bad_request("hostname_invalid")
     } else if message.contains("name_conflict")
         || message.contains("port_forward_rules_active_name_idx")
     {

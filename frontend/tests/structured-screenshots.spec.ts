@@ -1717,8 +1717,16 @@ async function navigateAndScreenshot(
     ).toHaveCount(0);
   }
   if (entry.id === "08c-fleet-instance-ping-detail") {
-    const targetNames = page.locator(".vpsMonitoringPingTarget strong");
-    await expect(targetNames.first()).toHaveAttribute("title", /\S/);
+    const targetName = page.locator(".vpsMonitoringPingTarget strong").first();
+    const targetNameState = await targetName.evaluate((element) => ({
+      shortened: element.scrollWidth > element.clientWidth + 1,
+      text: element.textContent?.trim() ?? "",
+    }));
+    if (targetNameState.shortened) {
+      await expect(targetName).toHaveAttribute("title", targetNameState.text);
+    } else {
+      await expect(targetName).not.toHaveAttribute("title", /\S/);
+    }
   }
 
   await page.waitForTimeout(200);

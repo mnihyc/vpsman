@@ -102,8 +102,10 @@ test("keeps the tooltip foundation supplemental and preserves authored evidence"
   );
 
   const dispatch = source("panels/JobDispatchPanel.tsx");
-  expect(dispatch).toMatch(
-    /label:\s*"Command argv",\s*sensitive:\s*true,\s*value:\s*command/,
+  expect(dispatch).toMatch(/label:\s*"Command argv",\s*value:\s*command/);
+  expect(dispatch).not.toMatch(/label:\s*"Command argv",\s*sensitive:\s*true/);
+  expect(dispatch).toContain(
+    '`${environmentNames.join(", ")} (values hidden)`',
   );
 });
 

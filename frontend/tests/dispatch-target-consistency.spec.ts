@@ -1679,7 +1679,25 @@ test("backup restore confirmations close on edit and submit fresh snapshots", as
   await expect(stagedArchive).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
-  await expect(stagedArchive).toHaveAttribute("title", archivePath);
+  await expect(stagedArchive).toBeEnabled();
+  await expect(stagedArchive).not.toHaveAttribute("title", /\S/);
+  await expect(stagedArchive.locator("..")).toHaveAttribute(
+    "title",
+    "Completed upload transfer whose bytes match the selected backup artifact.",
+  );
+  const stagedArchiveSummary = restoreWorkflow.locator(
+    ".restoreArchiveSummary",
+  );
+  await expect(stagedArchiveSummary).toContainText(`Path${archivePath}`);
+  await expect(stagedArchiveSummary).toContainText(`Size${archiveSizeBytes} B`);
+  await expect(stagedArchiveSummary).toContainText(
+    `SHA-256${archiveSha256Hex.slice(0, 14)}...`,
+  );
+  await expect(stagedArchiveSummary).toContainText("Observed");
+  await expect(stagedArchiveSummary).toHaveAttribute(
+    "title",
+    `${archivePath}; ${archiveSizeBytes} B; SHA-256 ${archiveSha256Hex}; observed 2026-05-31T10:11:20Z`,
+  );
   const dryRunToggle = restoreWorkflow.getByLabel("Dry-run rehearsal");
   await expect(dryRunToggle).toBeChecked();
   await expect(

@@ -58,7 +58,7 @@ export function ArtifactUploadForm({
           >
             <option value="">Select backup request</option>
             {backups.map((backup) => (
-              <option key={backup.id} title={backup.id} value={backup.id}>
+              <option key={backup.id} value={backup.id}>
                 {shortId(backup.id)} from {clientLabel(backup.client_id)}
               </option>
             ))}

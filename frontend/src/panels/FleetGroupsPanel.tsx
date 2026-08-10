@@ -843,7 +843,9 @@ function TagRegistry({
           <button
             className="primaryAction compactAction"
             data-tooltip-disabled-reason={
-              pending ? "Wait for the current group change to finish" : undefined
+              pending
+                ? "Wait for the current group change to finish"
+                : undefined
             }
             disabled={pending}
             onClick={() => {
@@ -900,7 +902,9 @@ function TagRegistry({
             <button
               className="secondaryAction"
               data-tooltip-disabled-reason={
-                pending ? "Wait for the current group change to finish" : undefined
+                pending
+                  ? "Wait for the current group change to finish"
+                  : undefined
               }
               disabled={pending}
               onClick={() => {
@@ -919,7 +923,7 @@ function TagRegistry({
                   ? "Wait for the current group change to finish"
                   : !trimmedGroupName
                     ? "Enter a group name before creating it"
-                    : groupNameError ?? undefined
+                    : (groupNameError ?? undefined)
               }
               disabled={pending || !trimmedGroupName || groupNameError !== null}
               type="submit"
@@ -1504,7 +1508,9 @@ function TagAssignments({
                         aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
                         className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
                         data-tooltip-disabled-reason={
-                          pending ? "Wait for the current group assignment change to finish" : undefined
+                          pending
+                            ? "Wait for the current group assignment change to finish"
+                            : undefined
                         }
                         disabled={pending}
                         key={tag}
@@ -1525,7 +1531,7 @@ function TagAssignments({
                 <span className="formHint">No groups assigned.</span>
               )}
               <label className="consoleField fieldFull">
-                <span>Add group</span>
+                <span title={suggestionsText}>Add group</span>
                 <input
                   aria-describedby={`group-suggestions-${editingAgent.id}`}
                   aria-label={`Group to add to ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
@@ -1538,7 +1544,6 @@ function TagAssignments({
                     }))
                   }
                   placeholder="group name"
-                  title={suggestionsText}
                   value={editingGroupInput}
                 />
                 <small id={`group-suggestions-${editingAgent.id}`}>
@@ -1555,7 +1560,7 @@ function TagAssignments({
                       ? "Wait for the current group assignment change to finish"
                       : !editingGroupInput.trim()
                         ? "Enter a group name before adding it"
-                        : editingGroupError ?? undefined
+                        : (editingGroupError ?? undefined)
                   }
                   disabled={
                     pending ||
@@ -1589,7 +1594,9 @@ function TagAssignments({
                   <button
                     className="secondaryAction compactAction"
                     data-tooltip-disabled-reason={
-                      pending ? "Wait for the current group assignment change to finish" : undefined
+                      pending
+                        ? "Wait for the current group assignment change to finish"
+                        : undefined
                     }
                     disabled={pending}
                     onClick={undoRemoveTag}

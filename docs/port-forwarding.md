@@ -116,9 +116,12 @@ the control plane receives a fresh capability snapshot before enabling rules.
 
 Rules apply to every current local address in the target IP's family. IPv4
 targets create IPv4 DNAT rules and IPv6 targets create IPv6 DNAT rules; NAT46
-and NAT64 are not inferred. Hostname answers are never stored as desired state
-and are never refreshed automatically. Use Resolve again, select the intended
-literal address, and save a new revision when DNS changes.
+and NAT64 are not inferred. The selected literal address is the desired state.
+When a hostname is resolved, its normalized name is retained alongside that
+address as operator context so Edit can resolve it again; the hostname is not
+sent to the agent, included in forwarding desired state, or refreshed
+automatically. Use Resolve again, select the intended literal address, and save
+a new revision when DNS changes.
 
 ### Port Expressions
 
@@ -203,8 +206,14 @@ vpsctl port-forward-create \
   --incoming 80,443 \
   --target 8080,8443 \
   --target-ip 10.20.0.15 \
+  --target-hostname app.internal \
   --confirmed
 ```
+
+`--target-hostname` stores the hostname as operator context while the selected
+literal `--target-ip` remains the only forwarding target sent to the agent. On
+update, omit `--target-hostname` to retain the stored hostname, provide it to
+replace that context, or use `--clear-target-hostname` to remove it.
 
 Use `--preserve-source` only with a verified return route, or `--disabled` to
 save a draft without host mutation. Every mutation uses the rule's current

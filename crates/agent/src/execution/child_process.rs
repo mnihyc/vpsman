@@ -24,6 +24,10 @@ use crate::{
 const STREAM_OUTPUT_CHUNK_BYTES: usize = 32 * 1024;
 const STREAM_OUTPUT_FLUSH_MS: u64 = 200;
 const CHILD_TERMINATION_GRACE_MS: u64 = 500;
+#[cfg(test)]
+const TEST_ETXTBSY_SPAWN_RETRIES: usize = 20;
+#[cfg(test)]
+const TEST_ETXTBSY_RETRY_DELAY: Duration = Duration::from_millis(5);
 
 pub(crate) enum ChildRunResult {
     Completed(ChildRunOutput),
@@ -545,7 +549,7 @@ impl RunningChild {
         mut command: tokio::process::Command,
         cleanup_policy: ChildCleanupPolicy,
     ) -> Result<Self> {
-        let child = command.spawn().context("failed to spawn command")?;
+        let child = spawn_command(&mut command).context("failed to spawn command")?;
         let pid = child.id().map(|pid| pid as libc::pid_t);
         let process_group_id = if cleanup_policy == ChildCleanupPolicy::ProcessGroup {
             pid
@@ -703,6 +707,31 @@ impl RunningChild {
         report.target_kind = "process";
         report
     }
+}
+
+#[cfg(not(test))]
+fn spawn_command(command: &mut tokio::process::Command) -> io::Result<Child> {
+    command.spawn()
+}
+
+#[cfg(test)]
+fn spawn_command(command: &mut tokio::process::Command) -> io::Result<Child> {
+    for attempt in 0..=TEST_ETXTBSY_SPAWN_RETRIES {
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY)
+                    && attempt < TEST_ETXTBSY_SPAWN_RETRIES =>
+            {
+                // Parallel tests can fork while another test is writing an executable
+                // fixture. The fork briefly inherits that write descriptor, so Linux
+                // can reject the fixture's exec even after its creator closed the file.
+                std::thread::sleep(TEST_ETXTBSY_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded spawn loop always returns")
 }
 
 impl Drop for RunningChild {

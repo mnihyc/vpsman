@@ -29,7 +29,9 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(systemPanel).toContain("systemSessionActionFeedback");
   expect(systemPanel).toContain("systemConfigActionFeedback");
-  expect(systemPanel).not.toMatch(/<div className="panelError">\{error\}<\/div>/);
+  expect(systemPanel).not.toMatch(
+    /<div className="panelError">\{error\}<\/div>/,
+  );
 
   const jobsPanel = source("panels/JobsPanel.tsx");
   expect(jobsPanel).not.toMatch(
@@ -38,9 +40,7 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(jobsPanel).not.toContain(
     '{error ?? "No job records match the current search."}',
   );
-  expect(jobsPanel).not.toMatch(
-    /targetError\s*\?\?\s*\(\s*targetsLoading/,
-  );
+  expect(jobsPanel).not.toMatch(/targetError\s*\?\?\s*\(\s*targetsLoading/);
   expect(jobsPanel).not.toMatch(
     /targetError\s*\?\?\s*"This job has no resolved per-client records\."/,
   );
@@ -59,9 +59,7 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(jobsPanel).toContain("jobHistoryFreshnessFeedback");
 
   const fleetWorkspace = source("panels/FleetWorkspace.tsx");
-  expect(fleetWorkspace).not.toMatch(
-    /apiError\s*\?\?\s*\(\s*scopeActive\s*\?/,
-  );
+  expect(fleetWorkspace).not.toMatch(/apiError\s*\?\?\s*\(\s*scopeActive\s*\?/);
   expect(fleetWorkspace).not.toContain(
     '{apiError ? "API unavailable" : "Live control-plane inventory"}',
   );
@@ -76,9 +74,7 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(fleetWorkspace).toContain("policyDryRunValidationFeedback");
 
   const vpsDetailPanel = source("panels/VpsDetailPanel.tsx");
-  expect(vpsDetailPanel).not.toMatch(
-    /apiError\s*\?\?\s*\(\s*loading\s*\?/,
-  );
+  expect(vpsDetailPanel).not.toMatch(/apiError\s*\?\?\s*\(\s*loading\s*\?/);
   expect(vpsDetailPanel).not.toContain('className="vpsDetailNotice critical"');
   expect(vpsDetailPanel).toContain("ActionFeedback");
   expect(vpsDetailPanel).toContain("vpsDetailActionFeedback");
@@ -88,8 +84,8 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(processSupervisorPanel).not.toContain("processActionNotice");
   expect(processSupervisorPanel).toContain("processSupervisorActionFeedback");
-  expect(processSupervisorPanel).toContain(
-    "message={!stopProcess && !restartProcess ? actionError ?? actionStatus : null}",
+  expect(processSupervisorPanel).toMatch(
+    /message=\{\s*!stopProcess\s*&&\s*!restartProcess\s*\?\s*\(?actionError\s*\?\?\s*actionStatus\)?\s*:\s*null\s*\}/,
   );
 
   const hostServicesPanel = source("panels/jobs/HostServicesPanel.tsx");
@@ -105,9 +101,7 @@ test("keeps action feedback in dedicated local containers", () => {
   expect(fleetGroupsPanel).not.toContain("bulkPreviewFailure");
   expect(fleetGroupsPanel).toContain("bulkTagPreviewActionFeedback");
 
-  const terminalSessionsPanel = source(
-    "panels/jobs/TerminalSessionsPanel.tsx",
-  );
+  const terminalSessionsPanel = source("panels/jobs/TerminalSessionsPanel.tsx");
   expect(terminalSessionsPanel).not.toMatch(
     /const terminalSummary\s*=\s*replayError\s*\?\?/,
   );
@@ -141,9 +135,7 @@ test("keeps action feedback in dedicated local containers", () => {
   );
 
   const auditLogPanel = source("panels/AuditLogPanel.tsx");
-  expect(auditLogPanel).not.toMatch(
-    /error\s*\?\?\s*\(\s*hasAuditFilters/,
-  );
+  expect(auditLogPanel).not.toMatch(/error\s*\?\?\s*\(\s*hasAuditFilters/);
 
   const jobEvidencePanel = source("panels/audit/JobEvidencePanel.tsx");
   expect(jobEvidencePanel).not.toContain('className="errorBanner"');
@@ -156,8 +148,12 @@ test("keeps action feedback in dedicated local containers", () => {
   );
   expect(homeTelemetryPanel).toContain("homeTelemetryActionFeedback");
 
-  const fleetMetricsPanel = source("panels/observability/FleetMetricsPanel.tsx");
-  expect(fleetMetricsPanel).not.toContain("panelError observabilityMetricsError");
+  const fleetMetricsPanel = source(
+    "panels/observability/FleetMetricsPanel.tsx",
+  );
+  expect(fleetMetricsPanel).not.toContain(
+    "panelError observabilityMetricsError",
+  );
   expect(fleetMetricsPanel).toContain("fleetMetricsActionFeedback");
 
   const alertsPanel = source("panels/observability/AlertsPanel.tsx");

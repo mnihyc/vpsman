@@ -1,3 +1,8 @@
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use tokio::sync::broadcast;
 use vpsman_common::{
     pair_port_expressions, PortForwardProtocol, PortForwardRuleRuntimeStat,
     PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
@@ -7,9 +12,10 @@ use crate::{
     model::{AgentView, AuthContext, OperatorPreferences, OperatorView},
     model_port_forwarding::{
         CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkItem,
-        UpdatePortForwardRuleRequest,
+        PortForwardRuleListItem, UpdatePortForwardRuleRequest, UpdateTargetHostname,
     },
     repository::{MemoryState, Repository},
+    state::AppState,
 };
 
 #[tokio::test]
@@ -64,6 +70,188 @@ async fn memory_management_list_preserves_typed_rule_identity() {
 }
 
 #[tokio::test]
+async fn hostname_context_round_trips_and_stays_out_of_agent_desired_state() {
+    let repo = port_forward_repo().await;
+    let operator = port_forward_operator();
+    let mut request = create_request("resolved-web", "443", "8443", true);
+    request.target_hostname = Some(" App.Internal. ".to_string());
+
+    let created = repo
+        .create_port_forward_rule(&request, &operator)
+        .await
+        .unwrap();
+    assert_eq!(created.target_hostname.as_deref(), Some("app.internal"));
+    let config = repo
+        .port_forwarding_config_for_client("edge-a")
+        .await
+        .unwrap();
+    assert_eq!(config.rules[0].target_ip, created.target_ip);
+    assert!(!serde_json::to_string(&config)
+        .unwrap()
+        .contains("app.internal"));
+
+    let disabled = repo
+        .set_port_forward_rule_enabled(created.id, created.revision, false, &operator)
+        .await
+        .unwrap();
+    assert_eq!(disabled.target_hostname.as_deref(), Some("app.internal"));
+
+    let mut invalid = create_request("invalid-hostname", "444", "8444", false);
+    invalid.target_hostname = Some("192.0.2.8".to_string());
+    assert!(repo
+        .create_port_forward_rule(&invalid, &operator)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("target_hostname_invalid"));
+}
+
+#[test]
+fn update_hostname_json_distinguishes_omitted_null_and_string_values() {
+    let mut request = serde_json::json!({
+        "expected_revision": 1,
+        "name": "resolved-web",
+        "protocol": "tcp",
+        "target_ip": "192.0.2.8",
+        "mappings": pair_port_expressions("443", "8443").unwrap(),
+        "masquerade": true,
+        "enabled": false,
+        "confirmed": false,
+    });
+    let omitted: UpdatePortForwardRuleRequest = serde_json::from_value(request.clone()).unwrap();
+    assert_eq!(omitted.target_hostname, UpdateTargetHostname::Preserve);
+
+    request["target_hostname"] = serde_json::Value::Null;
+    let cleared: UpdatePortForwardRuleRequest = serde_json::from_value(request.clone()).unwrap();
+    assert_eq!(cleared.target_hostname, UpdateTargetHostname::Clear);
+
+    request["target_hostname"] = serde_json::json!(" New.App.Internal. ");
+    let replaced: UpdatePortForwardRuleRequest = serde_json::from_value(request).unwrap();
+    assert_eq!(
+        replaced.target_hostname,
+        UpdateTargetHostname::Replace(" New.App.Internal. ".to_string())
+    );
+}
+
+#[tokio::test]
+async fn mutation_routes_return_normalized_hostname_context_for_editing() {
+    let state = port_forward_test_state(port_forward_repo().await);
+    let headers = crate::test_auth_headers(&state).await;
+    let mut create = create_request("route-resolved-web", "1443", "8443", false);
+    create.target_hostname = Some(" App.Internal. ".to_string());
+
+    let (_, Json(created)) = crate::routes_port_forwarding::create_port_forward_rule(
+        State(state.clone()),
+        headers.clone(),
+        Json(create),
+    )
+    .await
+    .unwrap();
+    let PortForwardRuleListItem::Rule(created) = created.rule else {
+        panic!("created port-forward rule must be typed");
+    };
+    assert_eq!(created.target_hostname.as_deref(), Some("app.internal"));
+
+    let Json(preserved) = crate::routes_port_forwarding::update_port_forward_rule(
+        State(state.clone()),
+        headers.clone(),
+        Path(created.id),
+        Json(UpdatePortForwardRuleRequest {
+            expected_revision: created.revision,
+            name: created.name.clone(),
+            protocol: created.protocol,
+            target_ip: "192.0.2.9".parse().unwrap(),
+            target_hostname: UpdateTargetHostname::Preserve,
+            mappings: created.mappings.clone(),
+            masquerade: created.masquerade,
+            enabled: false,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let PortForwardRuleListItem::Rule(preserved) = preserved.rule else {
+        panic!("updated port-forward rule must be typed");
+    };
+    assert_eq!(preserved.target_hostname.as_deref(), Some("app.internal"));
+    assert_eq!(
+        preserved.target_ip,
+        "192.0.2.9".parse::<std::net::IpAddr>().unwrap()
+    );
+
+    let Json(updated) = crate::routes_port_forwarding::update_port_forward_rule(
+        State(state.clone()),
+        headers.clone(),
+        Path(preserved.id),
+        Json(UpdatePortForwardRuleRequest {
+            expected_revision: preserved.revision,
+            name: preserved.name.clone(),
+            protocol: preserved.protocol,
+            target_ip: preserved.target_ip,
+            target_hostname: UpdateTargetHostname::Replace(" New.App.Internal. ".to_string()),
+            mappings: preserved.mappings.clone(),
+            masquerade: preserved.masquerade,
+            enabled: false,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let PortForwardRuleListItem::Rule(updated) = updated.rule else {
+        panic!("updated port-forward rule must be typed");
+    };
+    assert_eq!(updated.target_hostname.as_deref(), Some("new.app.internal"));
+    assert_eq!(
+        updated.target_ip,
+        "192.0.2.9".parse::<std::net::IpAddr>().unwrap()
+    );
+
+    let Json(cleared) = crate::routes_port_forwarding::update_port_forward_rule(
+        State(state.clone()),
+        headers.clone(),
+        Path(updated.id),
+        Json(UpdatePortForwardRuleRequest {
+            expected_revision: updated.revision,
+            name: updated.name.clone(),
+            protocol: updated.protocol,
+            target_ip: updated.target_ip,
+            target_hostname: UpdateTargetHostname::Clear,
+            mappings: updated.mappings.clone(),
+            masquerade: updated.masquerade,
+            enabled: false,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let PortForwardRuleListItem::Rule(cleared) = cleared.rule else {
+        panic!("updated port-forward rule must be typed");
+    };
+    assert_eq!(cleared.target_hostname, None);
+
+    let invalid = crate::routes_port_forwarding::update_port_forward_rule(
+        State(state),
+        headers,
+        Path(cleared.id),
+        Json(UpdatePortForwardRuleRequest {
+            expected_revision: cleared.revision,
+            name: cleared.name.clone(),
+            protocol: cleared.protocol,
+            target_ip: cleared.target_ip,
+            target_hostname: UpdateTargetHostname::Replace("192.0.2.9".to_string()),
+            mappings: cleared.mappings.clone(),
+            masquerade: cleared.masquerade,
+            enabled: false,
+            confirmed: false,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(invalid.status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(invalid.code, "hostname_invalid");
+}
+
+#[tokio::test]
 async fn runtime_state_is_hash_bound_and_cleanup_is_evidence_bound() {
     let repo = port_forward_repo().await;
     let operator = port_forward_operator();
@@ -107,6 +295,7 @@ async fn runtime_state_is_hash_bound_and_cleanup_is_evidence_bound() {
                 name: created.name.clone(),
                 protocol: created.protocol,
                 target_ip: "192.0.2.9".parse().unwrap(),
+                target_hostname: UpdateTargetHostname::Preserve,
                 mappings: created.mappings.clone(),
                 masquerade: created.masquerade,
                 enabled: true,
@@ -399,6 +588,7 @@ fn create_request(
         name: name.to_string(),
         protocol: PortForwardProtocol::Tcp,
         target_ip: "192.0.2.8".parse().unwrap(),
+        target_hostname: None,
         mappings: pair_port_expressions(incoming, target).unwrap(),
         masquerade: true,
         enabled,
@@ -443,4 +633,22 @@ async fn port_forward_repo() -> Repository {
         capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
     });
     Repository::Memory(memory)
+}
+
+fn port_forward_test_state(repo: Repository) -> AppState {
+    let (events, _) = broadcast::channel(16);
+    AppState {
+        repo,
+        events,
+        internal_token: None,
+        gateway: crate::gateway_client::GatewayDispatchClient::test_privilege_auto_approve(),
+        backup_object_store: None,
+        update_release_policy: Default::default(),
+        fleet_alert_policy: Default::default(),
+        job_output_artifact_min_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
+        artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
+        require_registered_agent_updates: false,
+        suite_config_path: std::path::PathBuf::from("config/vpsman-test-missing.toml"),
+        dispatcher_config: Default::default(),
+    }
 }

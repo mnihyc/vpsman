@@ -6,6 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   flexRender,
   getCoreRowModel,
@@ -68,9 +69,12 @@ export type ConsoleDataGridColumn<T> = {
   header: string;
   headerTitle?: string;
   id: string;
+  /** Preferred floor for the initial automatic layout, not a manual-resize clamp. */
   minSize?: number;
   mobilePrimary?: boolean;
   mobileState?: boolean;
+  /** Optional hard floor while the operator manually resizes this column. */
+  resizeMinSize?: number;
   searchValue?: (row: T) => string | number | boolean | null | undefined;
   size?: number;
   sortValue?: (row: T) => string | number | boolean | null | undefined;
@@ -102,6 +106,10 @@ type ConsoleDataGridPreferences = {
   pageSize?: number;
   sorting?: SortingState;
 };
+
+const DEFAULT_COLUMN_SIZE = 160;
+const DEFAULT_COLUMN_PREFERRED_MIN_SIZE = 96;
+const DEFAULT_COLUMN_RESIZE_MIN_SIZE = 64;
 
 export function ConsoleDataGrid<T>({
   actions = [],
@@ -234,6 +242,7 @@ export function ConsoleDataGrid<T>({
               minSize: 42,
               maxSize: 42,
               enableHiding: false,
+              enableResizing: false,
               header: ({ table }) => (
                 <input
                   aria-label={`Select all ${title}`}
@@ -275,6 +284,7 @@ export function ConsoleDataGrid<T>({
               minSize: 42,
               maxSize: 42,
               enableHiding: false,
+              enableResizing: false,
               header: "",
               cell: ({ row }: { row: Row<T> }) => {
                 const open = Boolean(expandedRowsRef.current[row.id]);
@@ -307,31 +317,37 @@ export function ConsoleDataGrid<T>({
             } satisfies ColumnDef<T>,
           ]
         : []),
-      ...columns.map((column) => ({
-        id: column.id,
-        accessorFn: (row: T) =>
-          column.sortValue?.(row) ?? column.searchValue?.(row) ?? "",
-        header: column.header,
-        minSize: column.minSize ?? 96,
-        size: column.size ?? 160,
-        enableHiding: column.enableHiding ?? true,
-        cell: ({ row }: { row: Row<T> }) => {
-          const tooltip = columnTooltip(column, row.original);
-          return (
-            <span
-              className={
-                column.align === "end"
-                  ? "gridCellContent alignEnd"
-                  : "gridCellContent"
-              }
-              data-value-tooltip-skip={tooltip.skip ? "true" : undefined}
-              title={tooltip.title}
-            >
-              {column.cell(row.original)}
-            </span>
-          );
-        },
-      })),
+      ...columns.map((column) => {
+        const preferredSize = Math.max(
+          column.size ?? DEFAULT_COLUMN_SIZE,
+          column.minSize ?? DEFAULT_COLUMN_PREFERRED_MIN_SIZE,
+        );
+        return {
+          id: column.id,
+          accessorFn: (row: T) =>
+            column.sortValue?.(row) ?? column.searchValue?.(row) ?? "",
+          header: column.header,
+          minSize: column.resizeMinSize ?? DEFAULT_COLUMN_RESIZE_MIN_SIZE,
+          size: preferredSize,
+          enableHiding: column.enableHiding ?? true,
+          cell: ({ row }: { row: Row<T> }) => {
+            const tooltip = columnTooltip(column, row.original);
+            return (
+              <span
+                className={
+                  column.align === "end"
+                    ? "gridCellContent alignEnd"
+                    : "gridCellContent"
+                }
+                data-value-tooltip-skip={tooltip.skip ? "true" : undefined}
+                title={tooltip.title}
+              >
+                {column.cell(row.original)}
+              </span>
+            );
+          },
+        };
+      }),
     ],
     [columns, controlIdPrefix, hasExpandedRows, selectable, title],
   );
@@ -379,12 +395,18 @@ export function ConsoleDataGrid<T>({
       sorting,
     },
   });
-  const fitDefaultColumns =
-    !showMobileCards && Object.keys(columnSizing).length === 0;
-  const gridContentStyle =
-    showMobileCards || fitDefaultColumns
-      ? undefined
-      : { minWidth: table.getTotalSize() };
+  const visibleMinimumGridWidth = table
+    .getVisibleLeafColumns()
+    .reduce((total, column) => {
+      const userSized =
+        !isStructuralColumnId(column.id) &&
+        hasOwnColumnSize(columnSizing, column.id);
+      const resizeMinimum = column.columnDef.minSize ?? column.getSize();
+      return total + (userSized ? column.getSize() : resizeMinimum);
+    }, 0);
+  const gridContentStyle = showMobileCards
+    ? undefined
+    : { minWidth: visibleMinimumGridWidth };
   const selectedRows = table
     .getSelectedRowModel()
     .rows.map((row) => row.original);
@@ -1087,12 +1109,27 @@ export function ConsoleDataGrid<T>({
                     {headerGroup.headers.map((header) => (
                       <SortableHeaderCell
                         canDrag={sortableColumnIds.includes(header.column.id)}
-                        fitDefaultColumns={fitDefaultColumns}
                         header={header}
                         headerTitle={
                           dataColumnsById.get(header.column.id)?.headerTitle
                         }
                         key={header.id}
+                        onSeedRenderedSize={(columnId, size) => {
+                          flushSync(() => {
+                            setColumnSizing((current) =>
+                              hasOwnColumnSize(current, columnId)
+                                ? current
+                                : {
+                                    ...current,
+                                    [columnId]: Math.round(size * 100) / 100,
+                                  },
+                            );
+                          });
+                        }}
+                        userSized={hasOwnColumnSize(
+                          columnSizing,
+                          header.column.id,
+                        )}
                       />
                     ))}
                   </div>
@@ -1165,7 +1202,10 @@ export function ConsoleDataGrid<T>({
                                 role="gridcell"
                                 style={gridColumnStyle(
                                   cell.column,
-                                  fitDefaultColumns,
+                                  hasOwnColumnSize(
+                                    columnSizing,
+                                    cell.column.id,
+                                  ),
                                 )}
                                 title={tooltip.title}
                               >
@@ -1345,14 +1385,16 @@ function columnTooltip<T>(
 
 function SortableHeaderCell<T>({
   canDrag,
-  fitDefaultColumns,
   header,
   headerTitle,
+  onSeedRenderedSize,
+  userSized,
 }: {
   canDrag: boolean;
-  fitDefaultColumns: boolean;
   header: Header<T, unknown>;
   headerTitle?: string;
+  onSeedRenderedSize: (columnId: string, size: number) => void;
+  userSized: boolean;
 }) {
   const {
     attributes,
@@ -1379,7 +1421,7 @@ function SortableHeaderCell<T>({
       ref={setNodeRef}
       role="columnheader"
       style={{
-        ...gridColumnStyle(header.column, fitDefaultColumns),
+        ...gridColumnStyle(header.column, userSized),
         transform: CSS.Transform.toString(transform),
         transition,
       }}
@@ -1423,8 +1465,26 @@ function SortableHeaderCell<T>({
               : "gridResizeHandle"
           }
           onDoubleClick={() => header.column.resetSize()}
-          onMouseDown={header.getResizeHandler()}
-          onTouchStart={header.getResizeHandler()}
+          onMouseDown={(event) => {
+            if (!userSized) {
+              onSeedRenderedSize(
+                header.column.id,
+                event.currentTarget.parentElement?.getBoundingClientRect()
+                  .width ?? header.column.getSize(),
+              );
+            }
+            header.getResizeHandler()(event);
+          }}
+          onTouchStart={(event) => {
+            if (!userSized) {
+              onSeedRenderedSize(
+                header.column.id,
+                event.currentTarget.parentElement?.getBoundingClientRect()
+                  .width ?? header.column.getSize(),
+              );
+            }
+            header.getResizeHandler()(event);
+          }}
         />
       )}
     </div>
@@ -1433,7 +1493,7 @@ function SortableHeaderCell<T>({
 
 function gridColumnStyle<T>(
   column: Header<T, unknown>["column"],
-  fitDefaultColumns = false,
+  userSized = false,
 ) {
   const size = column.getSize();
   const minSize = column.columnDef.minSize ?? size;
@@ -1441,13 +1501,23 @@ function gridColumnStyle<T>(
   const fixed = maxSize != null && maxSize <= minSize;
 
   return {
-    flex: fixed ? `0 0 ${size}px` : `1 1 ${size}px`,
-    minWidth: fixed || !fitDefaultColumns ? minSize : 0,
+    flex: fixed || userSized ? `0 0 ${size}px` : `1 1 ${size}px`,
+    minWidth: minSize,
     width: size,
   };
 }
 
+function hasOwnColumnSize(columnSizing: ColumnSizingState, columnId: string) {
+  return Object.prototype.hasOwnProperty.call(columnSizing, columnId);
+}
+
 const STRUCTURAL_COLUMN_ORDER = ["__select", "__expand"] as const;
+
+function isStructuralColumnId(columnId: string) {
+  return STRUCTURAL_COLUMN_ORDER.some(
+    (structuralColumnId) => structuralColumnId === columnId,
+  );
+}
 
 function gridControlId(value: string): string {
   return (

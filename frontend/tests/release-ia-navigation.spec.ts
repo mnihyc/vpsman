@@ -1864,10 +1864,7 @@ test("home exposes quick actions, availability, running work, failures, attentio
   const attentionDetail = attentionPanel
     .locator(".homeActionText small")
     .first();
-  await expect(attentionDetail).toHaveAttribute(
-    "title",
-    (await attentionDetail.textContent())?.trim() ?? "",
-  );
+  await expect(attentionDetail).not.toHaveAttribute("title", /\S/);
   await expect(
     page.getByRole("heading", { name: "Recent activity" }),
   ).toBeVisible();
@@ -2735,6 +2732,9 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   await expect(assignmentDrawer).toContainText("Used by 1 schedule");
   await expect(
     assignmentDrawer.getByLabel("Group to add to edge-sfo-01"),
+  ).not.toHaveAttribute("title", /\S/);
+  await expect(
+    assignmentDrawer.getByText("Add group", { exact: true }),
   ).toHaveAttribute("title", /Suggestions: edge \(2 VPSs\)/);
   await expect(
     assignmentDrawer.getByRole("button", {
@@ -4010,9 +4010,36 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   const recentConfigCells = page
     .getByLabel("Recent config changes")
     .locator(".configRecentGrid:not(.heading) > span");
-  for (let index = 0; index < (await recentConfigCells.count()); index += 1) {
-    await expect(recentConfigCells.nth(index)).toHaveAttribute("title");
-  }
+  const recentConfigTooltipState = await recentConfigCells.evaluateAll(
+    (cells) =>
+      cells.map((cell, index) => ({
+        cellIndex: index % 5,
+        generated: cell.getAttribute("data-value-tooltip") === "true",
+        text: cell.textContent?.replace(/\s+/g, " ").trim() ?? "",
+        title: cell.getAttribute("title"),
+      })),
+  );
+  expect(
+    recentConfigTooltipState.filter(
+      ({ cellIndex, generated, title }) =>
+        cellIndex !== 3 && Boolean(title) && !generated,
+    ),
+    "only a shortened cell or the full detail diagnostic may expose a recent-config tooltip",
+  ).toEqual([]);
+  expect(
+    recentConfigTooltipState.filter(
+      ({ generated, text, title }) =>
+        Boolean(title) && !generated && title === text,
+    ),
+    "authored recent-config tooltips must add diagnostic detail instead of echoing visible values",
+  ).toEqual([]);
+  expect(
+    recentConfigTooltipState.some(
+      ({ cellIndex, generated, text, title }) =>
+        cellIndex === 3 && Boolean(title) && !generated && title !== text,
+    ),
+    "full recent-config diagnostics remain available where the visible detail is shortened",
+  ).toBe(true);
   await expect(page.getByLabel("Bulk patch target expression")).toHaveCount(0);
   await expect(page.getByLabel("VPS config target")).toHaveCount(0);
   await expect(page.getByLabel("Patch generators data grid")).toHaveCount(0);
@@ -8036,14 +8063,20 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   const apiUrl = page.getByLabel("API URL");
   const apiUrlValue = await apiUrl.inputValue();
   expect((await apiUrl.getAttribute("title")) ?? "").not.toContain(apiUrlValue);
-  await expect(
-    page
-      .locator(".systemConfigFieldRow", { has: apiUrl })
-      .locator(".systemConfigFieldMeta summary"),
-  ).toHaveAttribute(
-    "title",
-    new RegExp(apiUrlValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  const apiUrlMetadata = page
+    .locator(".systemConfigFieldRow", { has: apiUrl })
+    .locator(".systemConfigFieldMeta summary span");
+  const apiUrlMetadataIsShortened = await apiUrlMetadata.evaluate(
+    (element) => element.scrollWidth > element.clientWidth + 1,
   );
+  if (apiUrlMetadataIsShortened) {
+    await expect(apiUrlMetadata).toHaveAttribute(
+      "title",
+      new RegExp(apiUrlValue.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+  } else {
+    await expect(apiUrlMetadata).not.toHaveAttribute("title", /\S/);
+  }
   await expect(
     page.getByLabel("Suite config validation and save review"),
   ).toContainText("Edit");

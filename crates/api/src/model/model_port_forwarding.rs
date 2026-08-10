@@ -11,6 +11,7 @@ pub(crate) struct PortForwardRuleView {
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
     pub(crate) target_ip: IpAddr,
+    pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
@@ -69,6 +70,7 @@ pub(crate) struct PortForwardRuleRecord {
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
     pub(crate) target_ip: IpAddr,
+    pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
@@ -91,6 +93,8 @@ pub(crate) struct CreatePortForwardRuleRequest {
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
     pub(crate) target_ip: IpAddr,
+    #[serde(default)]
+    pub(crate) target_hostname: Option<String>,
     pub(crate) mappings: Vec<PortForwardMapping>,
     #[serde(default = "default_true")]
     pub(crate) masquerade: bool,
@@ -107,12 +111,34 @@ pub(crate) struct UpdatePortForwardRuleRequest {
     pub(crate) name: String,
     pub(crate) protocol: PortForwardProtocol,
     pub(crate) target_ip: IpAddr,
+    #[serde(default)]
+    pub(crate) target_hostname: UpdateTargetHostname,
     pub(crate) mappings: Vec<PortForwardMapping>,
     #[serde(default = "default_true")]
     pub(crate) masquerade: bool,
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) confirmed: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) enum UpdateTargetHostname {
+    #[default]
+    Preserve,
+    Clear,
+    Replace(String),
+}
+
+impl<'de> Deserialize<'de> for UpdateTargetHostname {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            Some(hostname) => Self::Replace(hostname),
+            None => Self::Clear,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,4 +227,21 @@ pub(crate) struct PortForwardRuntimeRecord {
 
 const fn default_true() -> bool {
     true
+}
+
+pub(crate) fn normalize_port_forward_hostname(value: &str) -> Option<String> {
+    let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    let valid = !hostname.is_empty()
+        && hostname.len() <= 253
+        && hostname.is_ascii()
+        && hostname.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    (valid && hostname.parse::<IpAddr>().is_err()).then_some(hostname)
 }

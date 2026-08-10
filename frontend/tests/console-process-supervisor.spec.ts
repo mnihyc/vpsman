@@ -400,13 +400,6 @@ test("reviews the exact process start command without exposing environment value
   await expect(prompt).toContainText("/srv/reporting");
   await expect(prompt).toContainText("REGION, REPORT_TOKEN (values hidden)");
   await expect(prompt).not.toContainText(environmentTooltipSentinel);
-  const promptTitles = await prompt
-    .locator("[title]")
-    .evaluateAll((elements) =>
-      elements.map((element) => element.getAttribute("title") ?? ""),
-    );
-  expect(promptTitles.join("\n")).toContain(argvTooltipSentinel);
-  expect(promptTitles.join("\n")).not.toContain(environmentTooltipSentinel);
   const commandReview = prompt.locator("dd", { hasText: reviewedCommand });
   await expect
     .poll(() =>
@@ -416,6 +409,13 @@ test("reviews the exact process start command without exposing environment value
     )
     .toBe(true);
   await expect(commandReview).toHaveAttribute("title", reviewedCommand);
+  const promptTitles = await prompt
+    .locator("[title]")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("title") ?? ""),
+    );
+  expect(promptTitles.join("\n")).toContain(argvTooltipSentinel);
+  expect(promptTitles.join("\n")).not.toContain(environmentTooltipSentinel);
 });
 
 test("uses the common process inventory grid on mobile", async ({

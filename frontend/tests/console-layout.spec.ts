@@ -537,6 +537,18 @@ test("keeps tooltips supplemental and reveals only genuinely shortened values", 
   await expect(
     page.locator('[data-test-tooltip-disabled="true"]'),
   ).toHaveAttribute("title", "Select one VPS to retry evidence.");
+  await page.locator('[data-test-tooltip-disabled="true"]').evaluate((node) => {
+    (node as HTMLButtonElement).disabled = false;
+  });
+  await expect(
+    page.locator('[data-test-tooltip-disabled="true"]'),
+  ).not.toHaveAttribute("title", /.+/);
+  await page.locator('[data-test-tooltip-disabled="true"]').evaluate((node) => {
+    (node as HTMLButtonElement).disabled = true;
+  });
+  await expect(
+    page.locator('[data-test-tooltip-disabled="true"]'),
+  ).toHaveAttribute("title", "Select one VPS to retry evidence.");
   await expect(
     page.locator('[data-test-tooltip-empty="true"]'),
   ).toHaveAttribute("title", "Latency has not been reported.");
@@ -678,9 +690,17 @@ test("keeps VPS combobox menus above clipped workflow panels", async ({
   expect(verticalGap).toBeLessThanOrEqual(6);
   const edgeOption = menu.getByRole("option", { name: /edge-sfo-01/ });
   await expect(edgeOption).toBeVisible();
-  await expect(edgeOption).toHaveAttribute(
+  await expect(edgeOption).not.toHaveAttribute("title", /\S/);
+  await expect(edgeOption.locator("strong")).toContainText("edge-sfo-01");
+  await expect(edgeOption.locator("small")).toContainText("agent-sfo-01");
+  await expect(edgeOption.locator("strong")).not.toHaveAttribute("title", /\S/);
+  await expect(edgeOption.locator("small")).not.toHaveAttribute("title", /\S/);
+  await edgeOption.locator("strong").evaluate((label) => {
+    label.style.width = "32px";
+  });
+  await expect(edgeOption.locator("strong")).toHaveAttribute(
     "title",
-    /edge-sfo-01.*agent-sfo-01/,
+    "edge-sfo-01 (fo01)",
   );
 });
 
@@ -730,7 +750,19 @@ test("keeps search expression autocomplete above clipped workflow panels", async
     name: /^provider:alpha$/,
   });
   await expect(providerOption).toBeVisible();
-  await expect(providerOption).toHaveAttribute("title", "provider:alpha");
+  await expect(providerOption).not.toHaveAttribute("title", /\S/);
+  await expect(providerOption.locator("span")).toHaveText("provider:alpha");
+  await expect(providerOption.locator("span")).not.toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await providerOption.locator("span").evaluate((label) => {
+    label.style.width = "32px";
+  });
+  await expect(providerOption.locator("span")).toHaveAttribute(
+    "title",
+    "provider:alpha",
+  );
   await expect(targetExpression).toHaveAttribute("role", "combobox");
   await expect(targetExpression).toHaveAttribute("aria-expanded", "true");
   const options = autocomplete.getByRole("option");
@@ -2092,9 +2124,7 @@ test(
     await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText(
       "Traffic",
     );
-    await expect(traffic.locator(":scope > small")).not.toContainText(
-      "No reset",
-    );
+    await expect(traffic).not.toContainText("No reset");
     await expect(traffic).not.toContainText("Reset time unavailable");
   },
 );
@@ -2237,12 +2267,12 @@ test("rehydrates the exact VPS on the canonical Config Rules route", async ({
   const editor = page.locator(".consoleDetailPanel", {
     hasText: "Bulk rule editor",
   });
-  await expect(vpsRuleTextbox(editor, "Reset day")).toHaveValue("14");
-  await expect(vpsRuleTextbox(editor, "Reset day")).toHaveAttribute(
-    "placeholder",
-    "-1 or 14",
-  );
-  await expect(vpsRuleTextbox(editor, "Reset day")).toHaveAttribute(
+  const resetDay = vpsRuleTextbox(editor, "Reset day");
+  await expect(resetDay).toHaveValue("14");
+  await expect(resetDay).toHaveAttribute("placeholder", "-1 or 14");
+  await expect(resetDay).toBeEnabled();
+  await expect(resetDay).not.toHaveAttribute("title", /\S/);
+  await expect(resetDay.locator("..")).toHaveAttribute(
     "title",
     /-1 to accumulate totals continuously/,
   );
@@ -3342,6 +3372,8 @@ test("keeps console layout usable on desktop and mobile widths", async ({
     await expect(mobileSavedViewSelect).toBeHidden();
     await mobileSavedViews.getByLabel("Open saved fleet views menu").click();
     await expect(mobileSavedViewSelect).toBeVisible();
+    await expect(mobileSavedViewSelect).not.toHaveAttribute("title", /\S/);
+    await expect(mobileSavedViewSelect.locator("option[title]")).toHaveCount(0);
     const mobilePageMenu = page.locator(".mobilePageMenu");
     await expect(mobilePageMenu).toBeVisible();
     const mobilePageSelector = page.getByRole("combobox", {
@@ -3349,6 +3381,7 @@ test("keeps console layout usable on desktop and mobile widths", async ({
       exact: true,
     });
     await expect(mobilePageSelector).toBeVisible();
+    await expect(mobilePageSelector).not.toHaveAttribute("title", /\S/);
     await mobilePageSelector.selectOption("Config::sources");
     await expect(
       page.getByRole("heading", { name: "Config", exact: true }),
@@ -3802,11 +3835,19 @@ test("surfaces operator users under Access and session evidence under Audit", as
   await expect(page.getByLabel("Operator username")).toHaveValue(
     "noc-operator",
   );
-  await expect(page.getByLabel("Operator password")).toHaveAttribute(
+  await expect(page.getByLabel("Operator password")).not.toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(page.getByLabel("New password help")).toHaveAttribute(
     "title",
     /Save does not read or send this field/,
   );
-  await expect(page.getByLabel("Session refresh TTL days")).toHaveAttribute(
+  await expect(page.getByLabel("Session refresh TTL days")).not.toHaveAttribute(
+    "title",
+    /\S/,
+  );
+  await expect(page.getByLabel("Session TTL days help")).toHaveAttribute(
     "title",
     /Refresh-token\/session lifetime/,
   );
@@ -4719,7 +4760,13 @@ test("accepts server-valid leap-day, named, and extended cadences without treati
   await page
     .getByLabel("Schedule job template")
     .selectOption("46464646-5656-4789-8abc-defdefdefdef");
-  await expect(page.getByLabel("Schedule job argv")).toHaveAttribute(
+  const scheduleJobArgv = page.getByLabel("Schedule job argv");
+  await expect(scheduleJobArgv).toBeDisabled();
+  await expect(scheduleJobArgv).toHaveAttribute(
+    "title",
+    /selected template supplies this operation/i,
+  );
+  await expect(scheduleJobArgv.locator("..")).toHaveAttribute(
     "title",
     /Operation evidence:[\s\S]*"argv": \[[\s\S]*"uptime"/,
   );
@@ -5059,6 +5106,7 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
   await expect(prompt).toContainText("core-fra-02");
   await expect(prompt).not.toContainText("edge-sfo-01");
   await confirmVisiblePrompt(page, "Save selection");
+  await expect(drawer).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Change configuration" }));
   drawer = page.getByRole("complementary", {
@@ -5067,12 +5115,14 @@ test("keeps the primary one-VPS preset and inheritance path direct and explicit"
   await drawer
     .getByLabel("Configuration behavior")
     .selectOption("process_inventory");
-  await chooseVpsBySearch(
-    drawer,
-    "Add configuration target VPS",
-    "core-fra",
-    /core-fra-02/,
-  );
+  const resetTarget = drawer.getByRole("combobox", {
+    name: "Add configuration target VPS",
+  });
+  await resetTarget.fill("core-fra");
+  await resetTarget.press("Enter");
+  await expect(
+    drawer.getByRole("button", { name: /Remove core-fra-02/ }),
+  ).toBeVisible();
   await activate(
     drawer.getByRole("button", {
       name: "Review reset to system default",
@@ -5639,9 +5689,13 @@ test("renders patch generators and submits explicit runtime config patch modes",
     /github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json/,
   );
   const validGeneratorValues = await generatorValues.inputValue();
-  await expect(generatorValues).toHaveAttribute(
+  await expect(generatorValues).not.toHaveAttribute("title", /\S/);
+  const bulkPatchPrimary = generatorValues.locator(
+    "xpath=ancestor::section[1]",
+  );
+  await expect(bulkPatchPrimary).toHaveAttribute(
     "title",
-    "JSON values matched against the selected patch generator schema.",
+    /Supply values for the selected generator and review its server-rendered TOML patch before dispatch/,
   );
   await bulk
     .getByRole("combobox", { name: "Bulk patch target expression" })
@@ -5669,9 +5723,10 @@ test("renders patch generators and submits explicit runtime config patch modes",
   await expect(renderedPatch).toHaveValue(
     /\[update\][\s\S]*unmanaged_enabled = false[\s\S]*version\.json/,
   );
-  await expect(renderedPatch).toHaveAttribute(
+  await expect(renderedPatch).not.toHaveAttribute("title", /\S/);
+  await expect(bulkPatchPrimary).toHaveAttribute(
     "title",
-    "Server-rendered TOML patch that will be reviewed before dispatch.",
+    /review its server-rendered TOML patch before dispatch/,
   );
   await expect(bulk.getByText("1 VPS verified")).toBeVisible();
   await expect(bulk.getByLabel("Bulk patch change summary")).toContainText(
@@ -8335,6 +8390,11 @@ test("dispatches executable restores with agent-local archive metadata only", as
   const stagedArchive = restoreWorkflow.getByLabel("Staged archive");
   await expect(stagedArchive).toHaveValue("");
   await expect(stagedArchive).toContainText("No matching upload");
+  await expect(stagedArchive).toBeDisabled();
+  await expect(stagedArchive).toHaveAttribute(
+    "title",
+    "Download this package, then upload it to the selected VPS in Remote / Transfers",
+  );
   await expect(
     restoreWorkflow.getByRole("button", { name: "Download package" }),
   ).toBeVisible();
@@ -8377,7 +8437,25 @@ test("dispatches executable restores with agent-local archive metadata only", as
   await expect(stagedArchive).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
-  await expect(stagedArchive).toHaveAttribute("title", archivePath);
+  await expect(stagedArchive).toBeEnabled();
+  await expect(stagedArchive).not.toHaveAttribute("title", /\S/);
+  await expect(stagedArchive.locator("..")).toHaveAttribute(
+    "title",
+    "Completed upload transfer whose bytes match the selected backup artifact.",
+  );
+  const stagedArchiveSummary = restoreWorkflow.locator(
+    ".restoreArchiveSummary",
+  );
+  await expect(stagedArchiveSummary).toContainText(`Path${archivePath}`);
+  await expect(stagedArchiveSummary).toContainText(`Size${archiveSizeBytes} B`);
+  await expect(stagedArchiveSummary).toContainText(
+    `SHA-256${archiveSha256Hex.slice(0, 14)}...`,
+  );
+  await expect(stagedArchiveSummary).toContainText("Observed");
+  await expect(stagedArchiveSummary).toHaveAttribute(
+    "title",
+    `${archivePath}; ${archiveSizeBytes} B; SHA-256 ${archiveSha256Hex}; observed 2026-05-31T10:11:20Z`,
+  );
   const dryRunToggle = restoreWorkflow.getByLabel("Dry-run rehearsal");
   await expect(dryRunToggle).toBeChecked();
   await expect(

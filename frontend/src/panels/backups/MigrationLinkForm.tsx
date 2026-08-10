@@ -153,20 +153,18 @@ export function MigrationLinkForm({
         className="dispatchForm migrationLinkForm"
         onSubmit={(event) => event.preventDefault()}
       >
-        <label>
+        <label title="Draft restore relationship from the source artifact VPS to its replacement VPS.">
           <span>Draft restore relationship</span>
           <select
             aria-label="Migration draft restore"
+            data-tooltip-disabled-reason={
+              restorePlans.length === 0
+                ? "No draft restore targets a replacement VPS; create one on Restore first"
+                : undefined
+            }
             disabled={restorePlans.length === 0}
             onChange={(event) =>
               onMigrationRestorePlanIdChange(event.target.value)
-            }
-            title={
-              restorePlans.length === 0
-                ? "No draft restore targets a replacement VPS; create one on Restore first"
-                : selectedPlan
-                  ? `${clientLabel(selectedPlan.source_client_id)} to ${clientLabel(selectedPlan.target_client_id)} (${restorePlanStatusLabel(selectedPlan.status)})`
-                  : "Select a draft restore with a replacement VPS"
             }
             value={migrationRestorePlanId}
           >
@@ -279,18 +277,19 @@ export function MigrationLinkForm({
             </div>
           </div>
         ) : null}
-        <label>
+        <label
+          title={
+            existingLink
+              ? "Saved mapping notes are immutable for this draft restore"
+              : "Optional notes saved with this migration mapping"
+          }
+        >
           <span>Mapping notes</span>
           <input
             aria-label="Migration mapping notes"
             onChange={(event) => onMigrationNoteChange(event.target.value)}
             placeholder="rebuilt VPS cutover"
             readOnly={Boolean(existingLink)}
-            title={
-              existingLink
-                ? "Saved mapping notes are immutable for this draft restore"
-                : "Optional notes saved with this migration mapping"
-            }
             value={existingLink?.note ?? migrationNote}
           />
         </label>
@@ -336,13 +335,12 @@ export function MigrationLinkForm({
           pending={pending}
           value={archiveTransferKey}
         />
-        <label>
+        <label title="Command and arguments to run after restore, separated by spaces">
           <span>Post-restore check argv</span>
           <input
             aria-label="Migration post-restore argv"
             onChange={(event) => onPostRestoreArgvChange(event.target.value)}
             placeholder="/usr/local/sbin/post-restore-check --json"
-            title="Command and arguments to run after restore, separated by spaces"
             value={postRestoreArgv}
           />
         </label>
