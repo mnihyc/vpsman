@@ -145,18 +145,19 @@ impl Repository {
                 let row = sqlx::query(
                     r#"
                     SELECT
-                        (SELECT count(*) FROM visible_clients) AS total,
-                        (SELECT count(*) FROM visible_clients WHERE status = 'online' AND last_seen_at IS NOT NULL) AS online,
-                        (SELECT count(*) FROM visible_clients WHERE status IN ('offline', 'disconnected')) AS offline,
-                        (SELECT count(*) FROM visible_clients WHERE status = 'never') AS never,
-                        (SELECT count(*) FROM visible_clients WHERE status = 'revoked') AS revoked,
-                        (SELECT count(*) FROM visible_clients WHERE status = 'stale') AS stale,
-                        (SELECT count(*) FROM visible_clients WHERE (
+                        count(*) AS total,
+                        count(*) FILTER (WHERE status = 'online' AND last_seen_at IS NOT NULL) AS online,
+                        count(*) FILTER (WHERE status IN ('offline', 'disconnected')) AS offline,
+                        count(*) FILTER (WHERE status = 'never') AS never,
+                        count(*) FILTER (WHERE status = 'revoked') AS revoked,
+                        count(*) FILTER (WHERE status = 'stale') AS stale,
+                        count(*) FILTER (WHERE (
                             (status = 'online' AND last_seen_at IS NULL)
                             OR status NOT IN ('online', 'offline', 'disconnected', 'never', 'revoked', 'stale')
                         )) AS unknown,
-                        (SELECT count(*) FROM visible_clients WHERE NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
+                        count(*) FILTER (WHERE NOT (status = 'online' AND last_seen_at IS NOT NULL)) AS warnings,
                         (SELECT count(*) FROM jobs WHERE status IN ('queued', 'running')) AS running_jobs
+                    FROM visible_clients
                     "#,
                 )
                 .fetch_one(pool)
@@ -312,20 +313,51 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
-                    "SELECT name, display_order FROM tags ORDER BY display_order, created_at, name",
+                    r#"
+                    SELECT
+                        t.name,
+                        t.display_order,
+                        COALESCE(
+                            array_remove(array_agg(c.id), NULL),
+                            ARRAY[]::TEXT[]
+                        ) AS client_ids
+                    FROM tags t
+                    LEFT JOIN client_tags ct ON ct.tag_id = t.id
+                    LEFT JOIN visible_clients c ON c.id = ct.client_id
+                    GROUP BY t.id, t.name, t.display_order, t.created_at
+                    ORDER BY t.display_order, t.created_at, t.name
+                    "#,
                 )
                 .fetch_all(pool)
                 .await?;
-                let mut tags = Vec::with_capacity(rows.len());
+                let mut tag_metadata = Vec::<(String, i64)>::new();
+                let mut client_ids = Vec::new();
+                let mut seen_client_ids = HashSet::new();
                 for row in rows {
-                    let name: String = row.try_get("name")?;
-                    tags.push(TagView {
-                        clients: self.clients_for_tag(&name).await?,
-                        display_order: row.try_get("display_order")?,
-                        name,
-                    });
+                    tag_metadata.push((row.try_get("name")?, row.try_get("display_order")?));
+                    for client_id in row.try_get::<Vec<String>, _>("client_ids")? {
+                        if seen_client_ids.insert(client_id.clone()) {
+                            client_ids.push(client_id);
+                        }
+                    }
                 }
-                Ok(tags)
+                let mut clients_by_tag = HashMap::<String, Vec<AgentView>>::new();
+                for agent in self.list_agents_for_client_ids(&client_ids).await? {
+                    for name in &agent.tags {
+                        clients_by_tag
+                            .entry(name.clone())
+                            .or_default()
+                            .push(agent.clone());
+                    }
+                }
+                Ok(tag_metadata
+                    .into_iter()
+                    .map(|(name, display_order)| TagView {
+                        clients: clients_by_tag.remove(&name).unwrap_or_default(),
+                        display_order,
+                        name,
+                    })
+                    .collect())
             }
         }
     }

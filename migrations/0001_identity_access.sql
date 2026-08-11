@@ -165,6 +165,9 @@ CREATE TABLE client_tags (
     PRIMARY KEY (client_id, tag_id)
 );
 
+CREATE INDEX client_tags_tag_id_client_id_idx
+    ON client_tags (tag_id, client_id);
+
 CREATE TABLE operator_sessions (
     id UUID PRIMARY KEY,
     operator_id UUID NOT NULL REFERENCES operators(id) ON DELETE CASCADE,
@@ -178,12 +181,6 @@ CREATE TABLE operator_sessions (
 
 CREATE INDEX operator_sessions_operator_id_idx
     ON operator_sessions (operator_id);
-
-CREATE INDEX operator_sessions_access_token_hash_idx
-    ON operator_sessions (access_token_hash);
-
-CREATE INDEX operator_sessions_refresh_token_hash_idx
-    ON operator_sessions (refresh_token_hash);
 
 CREATE TABLE operator_auth_throttle (
     scope_kind TEXT NOT NULL,

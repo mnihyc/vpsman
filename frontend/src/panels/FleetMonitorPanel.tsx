@@ -10,6 +10,7 @@ import { CountryFlag } from "../components/CountryFlag";
 import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
+  MONITORING_REFRESH_INTERVAL_MS,
 } from "../constants";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
@@ -248,7 +249,10 @@ export function FleetMonitorPanel({
       }
     };
     void loadCards();
-    const refreshTimer = window.setInterval(() => void loadCards(), 60_000);
+    const refreshTimer = window.setInterval(
+      () => void loadCards(),
+      MONITORING_REFRESH_INTERVAL_MS,
+    );
     return () => {
       active = false;
       window.clearInterval(refreshTimer);

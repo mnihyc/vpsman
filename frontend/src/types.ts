@@ -129,7 +129,7 @@ export type DashboardTrafficSort = "total" | "rx" | "tx";
 
 export type DashboardPointDensity = "compact" | "balanced" | "dense";
 
-export type DashboardRefreshIntervalSecs = 5 | 30 | 60;
+export type DashboardRefreshIntervalSecs = 5 | 15 | 30 | 60;
 
 export type DashboardPreferences = {
   groupBy: DashboardGroupBy;

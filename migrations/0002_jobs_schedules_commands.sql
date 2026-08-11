@@ -225,6 +225,11 @@ CREATE INDEX job_targets_active_status_idx
     ON job_targets (status, job_id, client_id)
     WHERE completed_at IS NULL;
 
+CREATE INDEX job_targets_active_client_idx
+    ON job_targets (client_id, job_id)
+    WHERE completed_at IS NULL
+      AND status IN ('queued', 'dispatching', 'running');
+
 CREATE INDEX job_targets_recent_terminal_idx
     ON job_targets (status, completed_at DESC, job_id, client_id)
     WHERE completed_at IS NOT NULL;

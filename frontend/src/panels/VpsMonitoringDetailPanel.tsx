@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "../api";
 import { consolePalette, dashboardChartColors } from "../colorPalette";
 import { ActionFeedback } from "../components/ActionFeedback";
+import { MONITORING_REFRESH_INTERVAL_MS } from "../constants";
 import {
   MonitoringRangeTabs,
   type MonitoringWindow,
@@ -164,7 +165,10 @@ export function VpsMonitoringDetailPanel({
     void load();
     const refreshTimer =
       window === "15m"
-        ? globalThis.setInterval(() => void load(), 60_000)
+        ? globalThis.setInterval(
+            () => void load(),
+            MONITORING_REFRESH_INTERVAL_MS,
+          )
         : null;
 
     return () => {

@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { apiGet, isApiUnauthorized } from "../api";
+import { DEFAULT_MONITORING_REFRESH_INTERVAL_SECS } from "../constants";
 import { dashboardWindowOptions } from "../dashboardQuery";
 import type {
   DashboardGroupBy,
@@ -21,7 +22,7 @@ const defaultDashboardPreferences: DashboardPreferences = {
   groupBy: "labels",
   networkView: "speed",
   pointDensity: "balanced",
-  refreshIntervalSecs: 30,
+  refreshIntervalSecs: DEFAULT_MONITORING_REFRESH_INTERVAL_SECS,
   resourceMetric: "cpu_load",
   scopeKind: "all",
   scopeValue: "",
@@ -366,7 +367,7 @@ function normalizeDashboardRefreshInterval(
       : typeof value === "string"
         ? Number(value)
         : NaN;
-  return numeric === 5 || numeric === 30 || numeric === 60
+  return numeric === 5 || numeric === 15 || numeric === 30 || numeric === 60
     ? (numeric as DashboardRefreshIntervalSecs)
     : defaultDashboardPreferences.refreshIntervalSecs;
 }

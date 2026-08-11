@@ -8,6 +8,7 @@ import {
 } from "./components/TimeSeriesChart";
 import { ConsoleStatusBadge } from "./components/ConsoleLayout";
 import { CountryFlag } from "./components/CountryFlag";
+import { MONITORING_REFRESH_INTERVAL_MS } from "./constants";
 import {
   MonitoringRangeTabs,
   type MonitoringWindow,
@@ -358,7 +359,10 @@ export function PublicMonitoringSharePage({
         inFlight = false;
       }
     };
-    const timer = globalThis.setInterval(() => void refreshCards(), 60_000);
+    const timer = globalThis.setInterval(
+      () => void refreshCards(),
+      MONITORING_REFRESH_INTERVAL_MS,
+    );
     return () => {
       active = false;
       globalThis.clearInterval(timer);
@@ -417,7 +421,10 @@ export function PublicMonitoringSharePage({
     void loadDetail();
     const timer =
       window === "15m"
-        ? globalThis.setInterval(() => void loadDetail(), 60_000)
+        ? globalThis.setInterval(
+            () => void loadDetail(),
+            MONITORING_REFRESH_INTERVAL_MS,
+          )
         : null;
     return () => {
       active = false;

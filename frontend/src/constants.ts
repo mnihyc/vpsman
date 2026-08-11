@@ -15,6 +15,10 @@ import {
 } from "lucide-react";
 import type { ActiveView, FleetSummary } from "./types";
 
+export const DEFAULT_MONITORING_REFRESH_INTERVAL_SECS = 15;
+export const MONITORING_REFRESH_INTERVAL_MS =
+  DEFAULT_MONITORING_REFRESH_INTERVAL_SECS * 1_000;
+
 export type ConsoleSubpage = {
   id: string;
   label: string;

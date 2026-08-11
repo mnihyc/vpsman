@@ -30,6 +30,9 @@ use crate::{
     util::parse_timestamp_unix,
 };
 
+const CURRENT_PING_LOSS_WINDOW_SECS: u64 = 15 * 60;
+const CURRENT_PING_DEGRADED_LOSS_RATIO: f64 = 0.10;
+
 impl Repository {
     pub(crate) async fn list_latest_telemetry_uptimes(&self) -> Result<Vec<TelemetryUptimeView>> {
         match self {
@@ -1292,9 +1295,19 @@ impl Repository {
                             monitoring_timestamp_unix(&left.latest_checked_at)
                                 .cmp(&monitoring_timestamp_unix(&right.latest_checked_at))
                         });
+                    let rolling_loss_ratio = latest.and_then(|latest| {
+                        current_ping_loss_ratio(
+                            latest,
+                            rollups.iter().filter(|rollup| {
+                                rollup.client_id == assignment.client_id
+                                    && rollup.target_id == assignment.target_id
+                                    && rollup.generation == target.generation
+                            }),
+                        )
+                    });
                     rows.push((
                         assignment.client_id.clone(),
-                        current_ping_view(target, latest),
+                        current_ping_view(target, latest, rolling_loss_ratio),
                     ));
                 }
                 rows.sort_by(|left, right| {
@@ -1322,6 +1335,7 @@ impl Repository {
                         latest.latest_status,
                         latest.latency_avg_ms,
                         latest.loss_ratio_avg,
+                        rolling.loss_ratio AS rolling_loss_ratio,
                         latest.latest_reason,
                         latest.latest_checked_at::text AS latest_checked_at
                     FROM ping_target_assignments a
@@ -1340,6 +1354,111 @@ impl Repository {
                         ORDER BY p.latest_checked_at DESC, p.bucket_start DESC
                         LIMIT 1
                     ) latest ON TRUE
+                    LEFT JOIN LATERAL (
+                        WITH bounds AS (
+                            SELECT
+                                extract(epoch FROM latest.latest_checked_at)::bigint AS end_unix,
+                                GREATEST(
+                                    extract(epoch FROM latest.latest_checked_at)::bigint
+                                        - ($3::bigint - 1),
+                                    0
+                                ) AS start_unix
+                        ), recent_physical AS (
+                            SELECT
+                                p.bucket_start,
+                                p.bucket_secs,
+                                p.sample_count,
+                                p.loss_ratio_avg
+                            FROM telemetry_ping_rollups p
+                            CROSS JOIN bounds
+                            WHERE p.client_id = a.client_id
+                              AND p.target_id = a.target_id
+                              AND p.generation = t.generation
+                              AND p.bucket_secs >= 60
+                              AND p.bucket_secs % 60 = 0
+                              AND p.bucket_start >= to_timestamp(bounds.start_unix)
+                              AND p.bucket_start <= to_timestamp(bounds.end_unix)
+                        ), preceding_physical AS (
+                            SELECT
+                                preceding.bucket_start,
+                                preceding.bucket_secs,
+                                preceding.sample_count,
+                                preceding.loss_ratio_avg
+                            FROM bounds
+                            CROSS JOIN LATERAL (
+                                SELECT
+                                    candidate.bucket_start
+                                FROM telemetry_ping_rollups candidate
+                                WHERE candidate.client_id = a.client_id
+                                  AND candidate.target_id = a.target_id
+                                  AND candidate.generation = t.generation
+                                  AND candidate.bucket_secs >= 60
+                                  AND candidate.bucket_secs % 60 = 0
+                                  AND candidate.bucket_start
+                                        < to_timestamp(bounds.start_unix)
+                                ORDER BY candidate.bucket_start DESC
+                                LIMIT 1
+                            ) preceding_start
+                            JOIN telemetry_ping_rollups preceding
+                              ON preceding.client_id = a.client_id
+                             AND preceding.target_id = a.target_id
+                             AND preceding.generation = t.generation
+                             AND preceding.bucket_start = preceding_start.bucket_start
+                             AND preceding.bucket_secs >= 60
+                             AND preceding.bucket_secs % 60 = 0
+                            WHERE preceding.bucket_start
+                                    + make_interval(secs => preceding.bucket_secs - 60)
+                                    >= to_timestamp(bounds.start_unix)
+                        ), bounded_physical AS (
+                            /* The indexed 15-minute range plus one preceding adaptive span
+                               covers every non-overlapping physical rollup that can contribute. */
+                            SELECT * FROM recent_physical
+                            UNION ALL
+                            SELECT * FROM preceding_physical
+                        ), candidates AS (
+                            SELECT
+                                p.loss_ratio_avg,
+                                p.sample_count::bigint AS sample_count,
+                                extract(epoch FROM p.bucket_start)::bigint AS source_start,
+                                (p.bucket_secs / 60)::bigint AS source_minutes,
+                                bounds.start_unix,
+                                bounds.end_unix
+                            FROM bounded_physical p
+                            CROSS JOIN bounds
+                        ), physical AS (
+                            SELECT
+                                candidates.*,
+                                CASE
+                                    WHEN start_unix <= source_start THEN 0::bigint
+                                    ELSE LEAST(
+                                        source_minutes,
+                                        (start_unix - source_start + 59) / 60
+                                    )
+                                END AS first_minute,
+                                CASE
+                                    WHEN end_unix < source_start THEN 0::bigint
+                                    ELSE LEAST(
+                                        source_minutes,
+                                        (end_unix - source_start) / 60 + 1
+                                    )
+                                END AS end_minute
+                            FROM candidates
+                        ), selected AS (
+                            SELECT
+                                loss_ratio_avg,
+                                sample_count * end_minute / source_minutes
+                                    - sample_count * first_minute / source_minutes
+                                    AS sample_count
+                            FROM physical
+                            WHERE first_minute < end_minute
+                        )
+                        SELECT
+                            sum(loss_ratio_avg * sample_count::double precision)
+                                / NULLIF(sum(sample_count)::double precision, 0)
+                                AS loss_ratio
+                        FROM selected
+                        WHERE sample_count > 0
+                    ) rolling ON latest.latest_checked_at IS NOT NULL
                     WHERE a.client_id = ANY($1::TEXT[])
                       AND (NOT $2::BOOLEAN OR a.is_primary)
                     ORDER BY a.client_id, lower(t.name), t.id
@@ -1347,12 +1466,20 @@ impl Repository {
                 )
                 .bind(client_ids)
                 .bind(primary_only)
+                .bind(CURRENT_PING_LOSS_WINDOW_SECS as i64)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
                     .map(|row| {
                         let enabled: bool = row.try_get("enabled")?;
-                        let status = row.try_get::<Option<String>, _>("latest_status")?;
+                        let latest_status = row.try_get::<Option<String>, _>("latest_status")?;
+                        let latest_loss_ratio = row.try_get::<Option<f64>, _>("loss_ratio_avg")?;
+                        let rolling_loss_ratio = row
+                            .try_get::<Option<f64>, _>("rolling_loss_ratio")?
+                            .or(latest_loss_ratio);
+                        let status = latest_status.as_deref().map(|latest_status| {
+                            current_ping_status(latest_status, rolling_loss_ratio)
+                        });
                         let state = if !enabled {
                             "disabled".to_string()
                         } else {
@@ -1368,7 +1495,7 @@ impl Repository {
                                 state,
                                 status,
                                 latency_avg_ms: row.try_get("latency_avg_ms")?,
-                                loss_ratio: row.try_get("loss_ratio_avg")?,
+                                loss_ratio: rolling_loss_ratio,
                                 reason: row.try_get("latest_reason")?,
                                 checked_at: row.try_get("latest_checked_at")?,
                             },
@@ -3415,8 +3542,10 @@ fn ping_target_view(
 fn current_ping_view(
     target: &PingTargetRecord,
     latest: Option<&PingRollupView>,
+    rolling_loss_ratio: Option<f64>,
 ) -> CurrentPingView {
-    let status = latest.map(|rollup| rollup.latest_status.clone());
+    let loss_ratio = rolling_loss_ratio.or_else(|| latest.map(|rollup| rollup.loss_ratio_avg));
+    let status = latest.map(|rollup| current_ping_status(&rollup.latest_status, loss_ratio));
     CurrentPingView {
         target_id: target.id,
         target_name: target.name.clone(),
@@ -3429,10 +3558,54 @@ fn current_ping_view(
         },
         status,
         latency_avg_ms: latest.and_then(|rollup| rollup.latency_avg_ms),
-        loss_ratio: latest.map(|rollup| rollup.loss_ratio_avg),
+        loss_ratio,
         reason: latest.and_then(|rollup| rollup.latest_reason.clone()),
         checked_at: latest.map(|rollup| rollup.latest_checked_at.clone()),
     }
+}
+
+fn current_ping_status(latest_status: &str, rolling_loss_ratio: Option<f64>) -> String {
+    if matches!(latest_status, "down" | "error") {
+        return latest_status.to_string();
+    }
+    if rolling_loss_ratio
+        .is_some_and(|loss_ratio| loss_ratio + f64::EPSILON >= CURRENT_PING_DEGRADED_LOSS_RATIO)
+    {
+        "degraded".to_string()
+    } else {
+        "ok".to_string()
+    }
+}
+
+fn current_ping_loss_ratio<'a>(
+    latest: &PingRollupView,
+    rollups: impl Iterator<Item = &'a PingRollupView>,
+) -> Option<f64> {
+    let latest_checked_at = parse_timestamp_unix(&latest.latest_checked_at)?;
+    let window_start = if latest_checked_at >= CURRENT_PING_LOSS_WINDOW_SECS {
+        latest_checked_at - (CURRENT_PING_LOSS_WINDOW_SECS - 1)
+    } else {
+        0
+    };
+    let mut sample_count = 0_i64;
+    let mut loss_weighted_total = 0.0;
+    for rollup in rollups {
+        let Some(bucket_start) = parse_timestamp_unix(&rollup.bucket_start) else {
+            continue;
+        };
+        for fragment in logical_span_fragments(
+            bucket_start,
+            rollup.bucket_secs,
+            Some(window_start),
+            Some(latest_checked_at),
+            CURRENT_PING_LOSS_WINDOW_SECS as i32,
+        ) {
+            let fragment_samples = proportional_fragment_count(rollup.sample_count, fragment);
+            sample_count = sample_count.saturating_add(i64::from(fragment_samples));
+            loss_weighted_total += rollup.loss_ratio_avg * f64::from(fragment_samples);
+        }
+    }
+    (sample_count > 0).then_some(loss_weighted_total / sample_count as f64)
 }
 
 fn ping_target_record_from_row(row: sqlx::postgres::PgRow) -> Result<PingTargetRecord> {

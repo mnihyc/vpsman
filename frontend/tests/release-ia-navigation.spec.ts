@@ -2015,6 +2015,39 @@ test("home overview text fits desktop tablet and mobile widths", async ({
   }
 });
 
+test("home refresh defaults to 15 seconds without replacing valid saved intervals", async ({
+  page,
+}) => {
+  await gotoConsoleHome(page);
+  const refreshInterval = page.getByLabel("Home refresh interval");
+  await expect(refreshInterval).toHaveValue("15");
+  await expect(refreshInterval.locator("option")).toHaveText([
+    "5s",
+    "15s",
+    "30s",
+    "1m",
+  ]);
+
+  for (const [stored, expected] of [
+    [999, "15"],
+    [5, "5"],
+    [30, "30"],
+    [60, "60"],
+  ] as const) {
+    await page.evaluate((refreshIntervalSecs) => {
+      window.localStorage.setItem(
+        "vpsman.dashboardPreferences",
+        JSON.stringify({ refreshIntervalSecs }),
+      );
+    }, stored);
+    await page.reload();
+    await waitForConsoleShell(page);
+    await expect(page.getByLabel("Home refresh interval")).toHaveValue(
+      expected,
+    );
+  }
+});
+
 test("fleet monitor keeps unsettled evidence neutral while cards load", async ({
   page,
 }, testInfo) => {

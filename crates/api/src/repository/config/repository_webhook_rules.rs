@@ -1467,12 +1467,19 @@ pub(crate) async fn ensure_webhook_event_partition_in_tx(
     let next = date
         .succ_opt()
         .context("failed to calculate webhook event partition date")?;
+    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
+    let partition_exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&table_name)
+        .fetch_one(&mut **tx)
+        .await?;
+    if partition_exists {
+        return Ok(());
+    }
     let lock_name = format!("vpsman:webhook_events:{date}");
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(lock_name)
         .execute(&mut **tx)
         .await?;
-    let table_name = format!("webhook_events_{}", date.format("%Y%m%d"));
     let sql = format!(
         r#"
         CREATE TABLE IF NOT EXISTS {table_name}

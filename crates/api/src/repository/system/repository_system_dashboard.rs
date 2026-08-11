@@ -101,57 +101,74 @@ impl Repository {
                 })
             }
             Self::Postgres(pool) => {
-                let target_row = sqlx::query(
+                let row = sqlx::query(
                     r#"
                     SELECT
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'dispatching')::bigint AS dispatching,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status IN ('dispatching', 'running'))::bigint AS active,
-                        COUNT(*) FILTER (
-                            WHERE completed_at IS NULL
-                              AND status IN ('dispatching', 'running')
-                              AND deadline_at IS NOT NULL
-                              AND deadline_at <= now()
-                        )::bigint AS deadline_expired_active,
-                        COUNT(*) FILTER (
-                            WHERE status = 'control_timeout'
-                              AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS control_timeout_last_24h,
-                        COUNT(*) FILTER (
-                            WHERE status = 'agent_timeout'
-                              AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS agent_timeout_last_24h,
-                        COUNT(*) FILTER (
-                            WHERE status = 'agent_lost'
-                              AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS agent_lost_last_24h,
-                        COUNT(*) FILTER (
-                            WHERE status = 'canceled'
-                              AND COALESCE(completed_at, cancel_acked_at, cancel_sent_at, cancel_requested_at, started_at) >= now() - interval '24 hours'
-                        )::bigint AS canceled_last_24h,
-                        COALESCE(SUM(dispatch_attempts), 0)::bigint AS total_dispatch_attempts,
-                        COUNT(*) FILTER (WHERE dispatch_attempts > 1)::bigint AS retried_targets,
-                        COUNT(*) FILTER (WHERE cancel_requested_at IS NOT NULL)::bigint AS cancel_requested,
-                        COUNT(*) FILTER (WHERE cancel_sent_at IS NOT NULL)::bigint AS cancel_sent,
-                        COUNT(*) FILTER (WHERE cancel_acked_at IS NOT NULL)::bigint AS cancel_acked,
-                        COUNT(*) FILTER (
-                            WHERE cancel_sent_at IS NOT NULL
-                              AND cancel_acked_at IS NULL
-                              AND completed_at IS NULL
-                        )::bigint AS cancel_awaiting_ack
-                    FROM job_targets
-                    "#,
-                )
-                .fetch_one(pool)
-                .await?;
-                let job_row = sqlx::query(
-                    r#"
-                    SELECT
-                        COUNT(*) FILTER (WHERE completed_at IS NULL)::bigint AS active_jobs,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued_jobs,
-                        COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running_jobs
-                    FROM jobs
+                        target_metrics.queued,
+                        target_metrics.dispatching,
+                        target_metrics.running,
+                        target_metrics.active,
+                        target_metrics.deadline_expired_active,
+                        target_metrics.control_timeout_last_24h,
+                        target_metrics.agent_timeout_last_24h,
+                        target_metrics.agent_lost_last_24h,
+                        target_metrics.canceled_last_24h,
+                        target_metrics.total_dispatch_attempts,
+                        target_metrics.retried_targets,
+                        target_metrics.cancel_requested,
+                        target_metrics.cancel_sent,
+                        target_metrics.cancel_acked,
+                        target_metrics.cancel_awaiting_ack,
+                        job_metrics.active_jobs,
+                        job_metrics.queued_jobs,
+                        job_metrics.running_jobs
+                    FROM (
+                        SELECT
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued,
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'dispatching')::bigint AS dispatching,
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running,
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status IN ('dispatching', 'running'))::bigint AS active,
+                            COUNT(*) FILTER (
+                                WHERE completed_at IS NULL
+                                  AND status IN ('dispatching', 'running')
+                                  AND deadline_at IS NOT NULL
+                                  AND deadline_at <= now()
+                            )::bigint AS deadline_expired_active,
+                            COUNT(*) FILTER (
+                                WHERE status = 'control_timeout'
+                                  AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
+                            )::bigint AS control_timeout_last_24h,
+                            COUNT(*) FILTER (
+                                WHERE status = 'agent_timeout'
+                                  AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
+                            )::bigint AS agent_timeout_last_24h,
+                            COUNT(*) FILTER (
+                                WHERE status = 'agent_lost'
+                                  AND COALESCE(completed_at, result_received_at, started_at) >= now() - interval '24 hours'
+                            )::bigint AS agent_lost_last_24h,
+                            COUNT(*) FILTER (
+                                WHERE status = 'canceled'
+                                  AND COALESCE(completed_at, cancel_acked_at, cancel_sent_at, cancel_requested_at, started_at) >= now() - interval '24 hours'
+                            )::bigint AS canceled_last_24h,
+                            COALESCE(SUM(dispatch_attempts), 0)::bigint AS total_dispatch_attempts,
+                            COUNT(*) FILTER (WHERE dispatch_attempts > 1)::bigint AS retried_targets,
+                            COUNT(*) FILTER (WHERE cancel_requested_at IS NOT NULL)::bigint AS cancel_requested,
+                            COUNT(*) FILTER (WHERE cancel_sent_at IS NOT NULL)::bigint AS cancel_sent,
+                            COUNT(*) FILTER (WHERE cancel_acked_at IS NOT NULL)::bigint AS cancel_acked,
+                            COUNT(*) FILTER (
+                                WHERE cancel_sent_at IS NOT NULL
+                                  AND cancel_acked_at IS NULL
+                                  AND completed_at IS NULL
+                            )::bigint AS cancel_awaiting_ack
+                        FROM job_targets
+                    ) target_metrics
+                    CROSS JOIN (
+                        SELECT
+                            COUNT(*) FILTER (WHERE completed_at IS NULL)::bigint AS active_jobs,
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'queued')::bigint AS queued_jobs,
+                            COUNT(*) FILTER (WHERE completed_at IS NULL AND status = 'running')::bigint AS running_jobs
+                        FROM jobs
+                    ) job_metrics
                     "#,
                 )
                 .fetch_one(pool)
@@ -167,30 +184,30 @@ impl Repository {
                         in_use_connections,
                     },
                     dispatch: SystemDashboardDispatchView {
-                        active_jobs: job_row.try_get("active_jobs")?,
-                        queued_jobs: job_row.try_get("queued_jobs")?,
-                        running_jobs: job_row.try_get("running_jobs")?,
-                        queue_depth: target_row.try_get::<i64, _>("queued")?
-                            + target_row.try_get::<i64, _>("dispatching")?,
-                        total_dispatch_attempts: target_row.try_get("total_dispatch_attempts")?,
-                        retried_targets: target_row.try_get("retried_targets")?,
+                        active_jobs: row.try_get("active_jobs")?,
+                        queued_jobs: row.try_get("queued_jobs")?,
+                        running_jobs: row.try_get("running_jobs")?,
+                        queue_depth: row.try_get::<i64, _>("queued")?
+                            + row.try_get::<i64, _>("dispatching")?,
+                        total_dispatch_attempts: row.try_get("total_dispatch_attempts")?,
+                        retried_targets: row.try_get("retried_targets")?,
                     },
                     targets: SystemDashboardTargetsView {
-                        queued: target_row.try_get("queued")?,
-                        dispatching: target_row.try_get("dispatching")?,
-                        running: target_row.try_get("running")?,
-                        active: target_row.try_get("active")?,
-                        deadline_expired_active: target_row.try_get("deadline_expired_active")?,
-                        control_timeout_last_24h: target_row.try_get("control_timeout_last_24h")?,
-                        agent_timeout_last_24h: target_row.try_get("agent_timeout_last_24h")?,
-                        agent_lost_last_24h: target_row.try_get("agent_lost_last_24h")?,
-                        canceled_last_24h: target_row.try_get("canceled_last_24h")?,
+                        queued: row.try_get("queued")?,
+                        dispatching: row.try_get("dispatching")?,
+                        running: row.try_get("running")?,
+                        active: row.try_get("active")?,
+                        deadline_expired_active: row.try_get("deadline_expired_active")?,
+                        control_timeout_last_24h: row.try_get("control_timeout_last_24h")?,
+                        agent_timeout_last_24h: row.try_get("agent_timeout_last_24h")?,
+                        agent_lost_last_24h: row.try_get("agent_lost_last_24h")?,
+                        canceled_last_24h: row.try_get("canceled_last_24h")?,
                     },
                     cancellations: SystemDashboardCancellationsView {
-                        requested: target_row.try_get("cancel_requested")?,
-                        sent: target_row.try_get("cancel_sent")?,
-                        acked: target_row.try_get("cancel_acked")?,
-                        awaiting_ack: target_row.try_get("cancel_awaiting_ack")?,
+                        requested: row.try_get("cancel_requested")?,
+                        sent: row.try_get("cancel_sent")?,
+                        acked: row.try_get("cancel_acked")?,
+                        awaiting_ack: row.try_get("cancel_awaiting_ack")?,
                     },
                 })
             }
@@ -234,58 +251,87 @@ impl Repository {
                 Ok(())
             }
             Self::Postgres(pool) => {
-                for sample in samples {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO system_metric_rollups (
-                            metric,
-                            bucket_start,
-                            bucket_secs,
-                            sample_count,
-                            avg_value,
-                            max_value,
-                            latest_value,
-                            latest_observed_at,
-                            updated_at
-                        )
-                        VALUES (
-                            $1,
-                            to_timestamp($2::double precision),
-                            $3,
-                            1,
-                            $4,
-                            $4,
-                            $4,
-                            to_timestamp($5::double precision),
-                            now()
-                        )
-                        ON CONFLICT (metric, bucket_secs, bucket_start) DO UPDATE SET
-                            sample_count = system_metric_rollups.sample_count + 1,
-                            avg_value = (
-                                system_metric_rollups.avg_value
-                                    * system_metric_rollups.sample_count::double precision
-                                + EXCLUDED.latest_value
-                            ) / (system_metric_rollups.sample_count + 1)::double precision,
-                            max_value = GREATEST(
-                                system_metric_rollups.max_value,
-                                EXCLUDED.max_value
-                            ),
-                            latest_value = EXCLUDED.latest_value,
-                            latest_observed_at = GREATEST(
-                                system_metric_rollups.latest_observed_at,
-                                EXCLUDED.latest_observed_at
-                            ),
-                            updated_at = now()
-                        "#,
-                    )
-                    .bind(sample.metric)
-                    .bind(bucket_start as f64)
-                    .bind(SYSTEM_METRIC_BUCKET_SECS)
-                    .bind(sample.value)
-                    .bind(observed_unix as f64)
-                    .execute(pool)
-                    .await?;
+                if samples.is_empty() {
+                    return Ok(());
                 }
+                let metrics = samples
+                    .iter()
+                    .map(|sample| sample.metric.to_string())
+                    .collect::<Vec<_>>();
+                let values = samples
+                    .iter()
+                    .map(|sample| sample.value)
+                    .collect::<Vec<_>>();
+                sqlx::query(
+                    r#"
+                    WITH input AS (
+                        SELECT sample.metric, sample.value, sample.ordinality
+                        FROM unnest($1::text[], $2::double precision[])
+                            WITH ORDINALITY AS sample(metric, value, ordinality)
+                    ),
+                    aggregated AS (
+                        SELECT
+                            metric,
+                            count(*)::integer AS sample_count,
+                            avg(value)::double precision AS avg_value,
+                            max(value)::double precision AS max_value,
+                            (array_agg(value ORDER BY ordinality DESC))[1]
+                                AS latest_value
+                        FROM input
+                        GROUP BY metric
+                    )
+                    INSERT INTO system_metric_rollups (
+                        metric,
+                        bucket_start,
+                        bucket_secs,
+                        sample_count,
+                        avg_value,
+                        max_value,
+                        latest_value,
+                        latest_observed_at,
+                        updated_at
+                    )
+                    SELECT
+                        metric,
+                        to_timestamp($3::double precision),
+                        $4,
+                        sample_count,
+                        avg_value,
+                        max_value,
+                        latest_value,
+                        to_timestamp($5::double precision),
+                        now()
+                    FROM aggregated
+                    ON CONFLICT (metric, bucket_secs, bucket_start) DO UPDATE SET
+                        sample_count = system_metric_rollups.sample_count
+                            + EXCLUDED.sample_count,
+                        avg_value = (
+                            system_metric_rollups.avg_value
+                                * system_metric_rollups.sample_count::double precision
+                            + EXCLUDED.avg_value
+                                * EXCLUDED.sample_count::double precision
+                        ) / (
+                            system_metric_rollups.sample_count + EXCLUDED.sample_count
+                        )::double precision,
+                        max_value = GREATEST(
+                            system_metric_rollups.max_value,
+                            EXCLUDED.max_value
+                        ),
+                        latest_value = EXCLUDED.latest_value,
+                        latest_observed_at = GREATEST(
+                            system_metric_rollups.latest_observed_at,
+                            EXCLUDED.latest_observed_at
+                        ),
+                        updated_at = now()
+                    "#,
+                )
+                .bind(&metrics)
+                .bind(&values)
+                .bind(bucket_start as f64)
+                .bind(SYSTEM_METRIC_BUCKET_SECS)
+                .bind(observed_unix as f64)
+                .execute(pool)
+                .await?;
                 Ok(())
             }
         }

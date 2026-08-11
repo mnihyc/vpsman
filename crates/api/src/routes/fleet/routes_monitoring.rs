@@ -1510,24 +1510,26 @@ async fn monitoring_range(
         .saturating_add(59)
         / 60
         * 60;
-    let raw_retention_days = state
-        .repo
-        .list_history_retention_policies()
-        .await
-        .map_err(ApiError::internal_mapper(
-            "history_retention_policies_unavailable",
-            "History-retention policies could not be loaded.",
-        ))?
-        .into_iter()
-        .find(|policy| policy.domain == "telemetry_samples")
-        .map(|policy| policy.retention_days.max(1) as u64)
-        .unwrap_or(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS as u64);
-    let raw_retention_secs = raw_retention_days.saturating_mul(24 * 60 * 60);
-    let short_window = matches!(window, "15m" | "1h" | "8h" | "1d" | "7d" | "30d" | "90d")
-        || (window == "custom" && span <= raw_retention_secs);
     let raw_covers_start = if window == "15m" {
         true
+    } else if matches!(window, "180d" | "1y" | "all") {
+        false
     } else {
+        let raw_retention_days = state
+            .repo
+            .list_history_retention_policies()
+            .await
+            .map_err(ApiError::internal_mapper(
+                "history_retention_policies_unavailable",
+                "History-retention policies could not be loaded.",
+            ))?
+            .into_iter()
+            .find(|policy| policy.domain == "telemetry_samples")
+            .map(|policy| policy.retention_days.max(1) as u64)
+            .unwrap_or(vpsman_common::DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS as u64);
+        let raw_retention_secs = raw_retention_days.saturating_mul(24 * 60 * 60);
+        let short_window = matches!(window, "1h" | "8h" | "1d" | "7d" | "30d" | "90d")
+            || (window == "custom" && span <= raw_retention_secs);
         short_window
             && start_unix >= now.saturating_sub(raw_retention_secs)
             && state

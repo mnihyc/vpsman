@@ -245,6 +245,23 @@ CREATE TABLE telemetry_ping_rollups (
 CREATE INDEX telemetry_ping_rollups_lookup_idx
     ON telemetry_ping_rollups (client_id, target_id, bucket_start DESC);
 
+CREATE INDEX telemetry_ping_rollups_current_latest_idx
+    ON telemetry_ping_rollups (
+        client_id,
+        target_id,
+        generation,
+        latest_checked_at DESC,
+        bucket_start DESC
+    );
+
+CREATE INDEX telemetry_ping_rollups_current_range_idx
+    ON telemetry_ping_rollups (
+        client_id,
+        target_id,
+        generation,
+        bucket_start DESC
+    ) INCLUDE (bucket_secs, sample_count, loss_ratio_avg);
+
 CREATE INDEX telemetry_ping_rollups_retention_idx
     ON telemetry_ping_rollups (bucket_start);
 
@@ -699,6 +716,9 @@ CREATE TABLE fleet_alert_states (
 CREATE INDEX fleet_alert_states_state_idx
     ON fleet_alert_states (state, updated_at DESC);
 
+CREATE INDEX fleet_alert_states_updated_idx
+    ON fleet_alert_states (updated_at DESC, alert_id ASC);
+
 CREATE TABLE fleet_alert_notification_channels (
     id UUID PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -771,6 +791,12 @@ CREATE INDEX fleet_alert_notification_deliveries_dedupe_idx
 
 CREATE INDEX fleet_alert_notification_deliveries_alert_idx
     ON fleet_alert_notification_deliveries (alert_id, created_at DESC);
+
+CREATE INDEX fleet_alert_notification_deliveries_created_idx
+    ON fleet_alert_notification_deliveries (created_at DESC, alert_id ASC);
+
+CREATE INDEX fleet_alert_notification_deliveries_channel_created_idx
+    ON fleet_alert_notification_deliveries (channel_id, created_at DESC, alert_id ASC);
 
 CREATE INDEX fleet_alert_notification_deliveries_attempt_idx
     ON fleet_alert_notification_deliveries (
@@ -877,6 +903,12 @@ CREATE INDEX webhook_rule_deliveries_rule_idx
 
 CREATE INDEX webhook_rule_deliveries_event_idx
     ON webhook_rule_deliveries (event_kind, event_id, created_at DESC);
+
+CREATE INDEX webhook_rule_deliveries_created_idx
+    ON webhook_rule_deliveries (created_at DESC, id DESC);
+
+CREATE INDEX webhook_rule_deliveries_event_kind_created_idx
+    ON webhook_rule_deliveries (event_kind, created_at DESC, id DESC);
 
 CREATE UNIQUE INDEX webhook_rule_deliveries_rule_event_unique_idx
     ON webhook_rule_deliveries (rule_id, event_id);

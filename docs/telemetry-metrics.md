@@ -270,6 +270,14 @@ Probe-affecting edits advance the generation. Current values and history accept
 only the active assignment generation, so old and new target definitions cannot
 be mixed.
 
+The current summary smooths packet loss over the 15 minutes ending at the
+latest accepted result, independently of the history range selected in the UI.
+It weights retained rows by `sample_count`; a target is degraded when that
+rolling loss is at least 10%. The window uses whatever evidence is available
+without a warm-up state or minimum sample count. A latest complete `down` or
+`error` result takes effect immediately, while the displayed loss remains the
+15-minute weighted value.
+
 All assigned targets appear in a VPS's Ping detail. Only the explicitly selected
 primary target appears on its fleet card. Disabling or removing a primary leaves
 an explicit disabled or unconfigured state; vpsman does not silently choose a

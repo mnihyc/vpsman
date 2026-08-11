@@ -3780,6 +3780,241 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
 }
 
 #[tokio::test]
+async fn postgres_current_ping_smooths_loss_and_keeps_latest_hard_failure_immediate() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let smoothed_client_id = "current-ping-smoothed";
+    let threshold_client_id = "current-ping-threshold";
+    let coarse_client_id = "current-ping-coarse";
+    insert_client(&db.pool, smoothed_client_id, None).await;
+    insert_client(&db.pool, threshold_client_id, None).await;
+    insert_client(&db.pool, coarse_client_id, None).await;
+    let smoothed_target_id = Uuid::new_v4();
+    let threshold_target_id = Uuid::new_v4();
+    let coarse_target_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_targets (
+            id, name, host, probe_kind, selector_expression, generation
+        ) VALUES
+            ($1, 'Current Ping Smoothed', '192.0.2.10', 'icmp', '*', 2),
+            ($2, 'Current Ping Threshold', '192.0.2.11', 'icmp', '*', 1),
+            ($3, 'Current Ping Coarse', '192.0.2.12', 'icmp', '*', 2)
+        "#,
+    )
+    .bind(smoothed_target_id)
+    .bind(threshold_target_id)
+    .bind(coarse_target_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_target_assignments (target_id, client_id, is_primary)
+        VALUES ($1, $2, TRUE), ($3, $4, TRUE), ($5, $6, TRUE)
+        "#,
+    )
+    .bind(smoothed_target_id)
+    .bind(smoothed_client_id)
+    .bind(threshold_target_id)
+    .bind(threshold_client_id)
+    .bind(coarse_target_id)
+    .bind(coarse_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let latest_minute = crate::unix_now() / 60 * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_rollups (
+            client_id, target_id, generation, bucket_start, bucket_secs,
+            sample_count, success_count, latency_avg_ms, latency_min_ms, latency_max_ms,
+            loss_ratio_avg, loss_ratio_max, latest_status, latest_checked_at
+        ) VALUES
+            (
+                $1, $2, 2, to_timestamp(($3::bigint - 1200)::double precision), 600,
+                10, 0, NULL, NULL, NULL, 1, 1, 'down',
+                to_timestamp(($3::bigint - 601)::double precision)
+            ),
+            (
+                $1, $2, 2, to_timestamp($3::double precision), 60,
+                1, 1, 55, 55, 55, 0, 0, 'ok',
+                to_timestamp($3::double precision)
+            ),
+            (
+                $1, $2, 1, to_timestamp(($3::bigint - 900)::double precision), 60,
+                1, 0, NULL, NULL, NULL, 1, 1, 'down',
+                to_timestamp(($3::bigint - 900)::double precision)
+            )
+        "#,
+    )
+    .bind(coarse_client_id)
+    .bind(coarse_target_id)
+    .bind(latest_minute as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_rollups (
+            client_id, target_id, generation, bucket_start, bucket_secs,
+            sample_count, success_count, latency_avg_ms, latency_min_ms, latency_max_ms,
+            loss_ratio_avg, loss_ratio_max, latest_status, latest_reason, latest_checked_at
+        )
+        SELECT
+            $1, $2, 2,
+            to_timestamp(($3::bigint - minute_offset * 60)::double precision), 60,
+            1, 1, 37, 37, 37,
+            CASE WHEN minute_offset = 0 THEN 1.0 / 3.0 ELSE 0 END,
+            CASE WHEN minute_offset = 0 THEN 1.0 / 3.0 ELSE 0 END,
+            CASE WHEN minute_offset = 0 THEN 'degraded' ELSE 'ok' END,
+            CASE WHEN minute_offset = 0 THEN 'packet_loss' ELSE NULL END,
+            to_timestamp(($3::bigint - minute_offset * 60)::double precision)
+        FROM generate_series(0, 14) AS offsets(minute_offset)
+        "#,
+    )
+    .bind(smoothed_client_id)
+    .bind(smoothed_target_id)
+    .bind(latest_minute as i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_rollups (
+            client_id, target_id, generation, bucket_start, bucket_secs,
+            sample_count, success_count, latency_avg_ms, latency_min_ms, latency_max_ms,
+            loss_ratio_avg, loss_ratio_max, latest_status, latest_checked_at
+        ) VALUES (
+            $1, $2, 1, to_timestamp($3::double precision), 60,
+            1, 1, 99, 99, 99, 1, 1, 'degraded',
+            to_timestamp($3::double precision)
+        )
+        "#,
+    )
+    .bind(smoothed_client_id)
+    .bind(smoothed_target_id)
+    .bind(latest_minute as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_rollups (
+            client_id, target_id, generation, bucket_start, bucket_secs,
+            sample_count, success_count, latency_avg_ms, latency_min_ms, latency_max_ms,
+            loss_ratio_avg, loss_ratio_max, latest_status, latest_reason, latest_checked_at
+        )
+        SELECT
+            $1, $2, 1,
+            to_timestamp(($3::bigint - minute_offset * 60)::double precision), 60,
+            1, 1, 41, 41, 41,
+            CASE WHEN minute_offset BETWEEN 1 AND 3 THEN 1.0 / 3.0 ELSE 0 END,
+            CASE WHEN minute_offset BETWEEN 1 AND 3 THEN 1.0 / 3.0 ELSE 0 END,
+            CASE WHEN minute_offset BETWEEN 1 AND 3 THEN 'degraded' ELSE 'ok' END,
+            CASE WHEN minute_offset BETWEEN 1 AND 3 THEN 'packet_loss' ELSE NULL END,
+            to_timestamp(($3::bigint - minute_offset * 60)::double precision)
+        FROM generate_series(0, 9) AS offsets(minute_offset)
+        "#,
+    )
+    .bind(threshold_client_id)
+    .bind(threshold_target_id)
+    .bind(latest_minute as i64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let current = db
+        .repo
+        .current_primary_ping_for_clients(&[
+            smoothed_client_id.to_string(),
+            threshold_client_id.to_string(),
+            coarse_client_id.to_string(),
+        ])
+        .await
+        .unwrap();
+    let smoothed = current
+        .iter()
+        .find_map(|(client_id, ping)| (client_id == smoothed_client_id).then_some(ping))
+        .unwrap();
+    assert_eq!(smoothed.state, "ok");
+    assert_eq!(smoothed.status.as_deref(), Some("ok"));
+    assert!((smoothed.loss_ratio.unwrap() - 1.0 / 45.0).abs() < 1e-12);
+    assert_eq!(smoothed.latency_avg_ms, Some(37.0));
+    assert_eq!(smoothed.reason.as_deref(), Some("packet_loss"));
+
+    let threshold = current
+        .iter()
+        .find_map(|(client_id, ping)| (client_id == threshold_client_id).then_some(ping))
+        .unwrap();
+    assert_eq!(threshold.state, "degraded");
+    assert_eq!(threshold.status.as_deref(), Some("degraded"));
+    assert!((threshold.loss_ratio.unwrap() - 0.1).abs() < 1e-12);
+    assert_eq!(threshold.latency_avg_ms, Some(41.0));
+
+    let coarse = current
+        .iter()
+        .find_map(|(client_id, ping)| (client_id == coarse_client_id).then_some(ping))
+        .unwrap();
+    /*
+     * Four current-generation coarse minutes are inside the open window; the old-generation
+     * exact-boundary row neither contributes nor masks the preceding coarse span.
+     */
+    assert_eq!(coarse.state, "degraded");
+    assert_eq!(coarse.status.as_deref(), Some("degraded"));
+    assert!((coarse.loss_ratio.unwrap() - 0.8).abs() < 1e-12);
+    assert_eq!(coarse.latency_avg_ms, Some(55.0));
+
+    for latest_status in ["down", "error"] {
+        sqlx::query(
+            r#"
+            UPDATE telemetry_ping_rollups
+            SET success_count = 0,
+                latency_avg_ms = NULL,
+                latency_min_ms = NULL,
+                latency_max_ms = NULL,
+                loss_ratio_avg = 1,
+                loss_ratio_max = 1,
+                latest_status = $1,
+                latest_reason = $2
+            WHERE client_id = $3
+              AND target_id = $4
+              AND generation = 2
+              AND bucket_start = to_timestamp($5::double precision)
+            "#,
+        )
+        .bind(latest_status)
+        .bind(format!("latest_{latest_status}"))
+        .bind(smoothed_client_id)
+        .bind(smoothed_target_id)
+        .bind(latest_minute as f64)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let current = db
+            .repo
+            .current_primary_ping_for_clients(&[smoothed_client_id.to_string()])
+            .await
+            .unwrap();
+        let ping = &current[0].1;
+        assert_eq!(ping.state, latest_status);
+        assert_eq!(ping.status.as_deref(), Some(latest_status));
+        assert!((ping.loss_ratio.unwrap() - 1.0 / 15.0).abs() < 1e-12);
+        assert_eq!(ping.latency_avg_ms, None);
+        let expected_reason = format!("latest_{latest_status}");
+        assert_eq!(ping.reason.as_deref(), Some(expected_reason.as_str()));
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded() {
     const CLIENT_COUNT: i32 = 5_001;
     const PUBLIC_PAGE_SIZE: i64 = 5_000;
