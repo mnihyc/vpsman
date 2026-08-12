@@ -832,74 +832,42 @@ impl Repository {
                                 requested.source_kind,
                                 requested.interface,
                                 requested.direction_mask,
-                                sample.observed_at,
-                                LEAST(
-                                    (counter.value ->> 'rx_bytes')::numeric,
-                                    9223372036854775807::numeric
-                                )::bigint AS rx_bytes,
-                                LEAST(
-                                    (counter.value ->> 'tx_bytes')::numeric,
-                                    9223372036854775807::numeric
-                                )::bigint AS tx_bytes
-                            FROM telemetry_samples sample
-                            CROSS JOIN LATERAL (
-                                SELECT 'host'::text AS source_kind, value
-                                FROM jsonb_array_elements(
-                                    CASE WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
-                                        THEN sample.payload -> 'networks' ELSE '[]'::jsonb END
-                                ) value
-                                UNION ALL
-                                SELECT 'tunnel'::text AS source_kind, value
-                                FROM jsonb_array_elements(
-                                    CASE WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
-                                        THEN sample.payload -> 'tunnels' ELSE '[]'::jsonb END
-                                ) value
-                            ) counter
+                                fact.sample_id,
+                                fact.ordinal,
+                                fact.observed_at,
+                                fact.rx_bytes,
+                                fact.tx_bytes
+                            FROM telemetry_counter_facts fact
                             JOIN requested
-                              ON requested.source_kind = counter.source_kind
-                             AND requested.interface = counter.value ->> 'interface'
-                            WHERE sample.client_id = $1
-                              AND sample.observed_at >= to_timestamp($5)
-                              AND sample.observed_at <= to_timestamp($6)
+                              ON requested.source_kind = fact.source_kind
+                             AND requested.interface = fact.interface
+                            WHERE fact.client_id = $1
+                              AND fact.observed_at >= to_timestamp($5)
+                              AND fact.observed_at <= to_timestamp($6)
                         ), baseline AS (
                             SELECT
                                 requested.source_kind,
                                 requested.interface,
                                 requested.direction_mask,
+                                previous.sample_id,
+                                previous.ordinal,
                                 previous.observed_at,
                                 previous.rx_bytes,
                                 previous.tx_bytes
                             FROM requested
                             JOIN LATERAL (
                                 SELECT
-                                    sample.observed_at,
-                                    LEAST(
-                                        (counter.value ->> 'rx_bytes')::numeric,
-                                        9223372036854775807::numeric
-                                    )::bigint AS rx_bytes,
-                                    LEAST(
-                                        (counter.value ->> 'tx_bytes')::numeric,
-                                        9223372036854775807::numeric
-                                    )::bigint AS tx_bytes
-                                FROM telemetry_samples sample
-                                CROSS JOIN LATERAL (
-                                    SELECT 'host'::text AS source_kind, value
-                                    FROM jsonb_array_elements(
-                                        CASE WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
-                                            THEN sample.payload -> 'networks' ELSE '[]'::jsonb END
-                                    ) value
-                                    UNION ALL
-                                    SELECT 'tunnel'::text AS source_kind, value
-                                    FROM jsonb_array_elements(
-                                        CASE WHEN jsonb_typeof(sample.payload -> 'tunnels') = 'array'
-                                            THEN sample.payload -> 'tunnels' ELSE '[]'::jsonb END
-                                    ) value
-                                ) counter
-                                WHERE sample.client_id = $1
-                                  AND sample.observed_at < to_timestamp($5)
-                                  AND counter.source_kind = requested.source_kind
-                                  AND counter.value ->> 'interface' = requested.interface
-                                ORDER BY sample.observed_at DESC
+                                    fact.sample_id,
+                                    fact.ordinal,
+                                    fact.observed_at,
+                                    fact.rx_bytes,
+                                    fact.tx_bytes
+                                FROM telemetry_counter_facts fact
+                                WHERE fact.client_id = $1
+                                  AND fact.observed_at < to_timestamp($5)
+                                  AND fact.source_kind = requested.source_kind
+                                  AND fact.interface = requested.interface
+                                ORDER BY fact.observed_at DESC, fact.sample_id DESC, fact.ordinal DESC
                                 LIMIT 1
                             ) previous ON TRUE
                         ), selected AS (
@@ -914,7 +882,7 @@ impl Repository {
                             FROM selected
                             WINDOW stream AS (
                                 PARTITION BY source_kind, interface
-                                ORDER BY observed_at
+                                ORDER BY observed_at, sample_id, ordinal
                             )
                         ), deltas AS (
                             SELECT

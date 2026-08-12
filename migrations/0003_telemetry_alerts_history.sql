@@ -2,13 +2,42 @@ CREATE TABLE telemetry_samples (
     id UUID PRIMARY KEY,
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
     observed_at TIMESTAMPTZ NOT NULL,
+    cpu_utilization_ratio DOUBLE PRECISION,
+    cpu_cores INTEGER NOT NULL,
     cpu_load_1 DOUBLE PRECISION NOT NULL,
+    cpu_load_5 DOUBLE PRECISION NOT NULL,
+    cpu_load_15 DOUBLE PRECISION NOT NULL,
     memory_total_bytes BIGINT NOT NULL,
     memory_available_bytes BIGINT NOT NULL,
+    swap_total_bytes BIGINT,
+    swap_available_bytes BIGINT,
+    disk_total_bytes BIGINT NOT NULL,
+    disk_available_bytes BIGINT NOT NULL,
+    network_rx_bytes BIGINT NOT NULL,
+    network_tx_bytes BIGINT NOT NULL,
+    tcp_sockets BIGINT NOT NULL,
+    udp_sockets BIGINT NOT NULL,
     payload JSONB NOT NULL,
+    CHECK (cpu_utilization_ratio IS NULL OR cpu_utilization_ratio BETWEEN 0 AND 1),
+    CHECK (cpu_cores >= 0),
     CHECK (cpu_load_1 >= 0),
+    CHECK (cpu_load_5 >= 0),
+    CHECK (cpu_load_15 >= 0),
     CHECK (memory_total_bytes >= 0),
     CHECK (memory_available_bytes >= 0),
+    CHECK (
+        (swap_total_bytes IS NULL AND swap_available_bytes IS NULL)
+        OR (
+            swap_total_bytes >= 0
+            AND swap_available_bytes BETWEEN 0 AND swap_total_bytes
+        )
+    ),
+    CHECK (disk_total_bytes >= 0),
+    CHECK (disk_available_bytes >= 0),
+    CHECK (network_rx_bytes >= 0),
+    CHECK (network_tx_bytes >= 0),
+    CHECK (tcp_sockets >= 0),
+    CHECK (udp_sockets >= 0),
     CHECK (jsonb_typeof(payload) = 'object')
 );
 
@@ -17,6 +46,42 @@ CREATE INDEX telemetry_samples_client_latest_idx
 
 CREATE INDEX telemetry_samples_retention_idx
     ON telemetry_samples (observed_at);
+
+CREATE TABLE telemetry_counter_facts (
+    sample_id UUID NOT NULL REFERENCES telemetry_samples(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    source_kind TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    interface TEXT NOT NULL,
+    rx_bytes BIGINT NOT NULL,
+    tx_bytes BIGINT NOT NULL,
+    PRIMARY KEY (sample_id, source_kind, ordinal),
+    CHECK (source_kind IN ('host', 'tunnel')),
+    CHECK (ordinal >= 0),
+    CHECK (length(interface) BETWEEN 1 AND 64),
+    CHECK (rx_bytes >= 0),
+    CHECK (tx_bytes >= 0)
+);
+
+CREATE INDEX telemetry_counter_facts_client_source_time_idx
+    ON telemetry_counter_facts (
+        client_id,
+        source_kind,
+        observed_at,
+        sample_id,
+        ordinal
+    ) INCLUDE (interface, rx_bytes, tx_bytes);
+
+CREATE INDEX telemetry_counter_facts_client_source_interface_time_idx
+    ON telemetry_counter_facts (
+        client_id,
+        source_kind,
+        interface,
+        observed_at,
+        sample_id,
+        ordinal
+    ) INCLUDE (rx_bytes, tx_bytes);
 
 CREATE TABLE telemetry_rollups (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
@@ -205,6 +270,53 @@ CREATE INDEX ping_target_assignments_client_idx
 CREATE UNIQUE INDEX ping_target_assignments_one_primary_per_client_idx
     ON ping_target_assignments (client_id)
     WHERE is_primary;
+
+CREATE TABLE telemetry_ping_facts (
+    sample_id UUID NOT NULL REFERENCES telemetry_samples(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL,
+    ordinal INTEGER NOT NULL,
+    target_id UUID NOT NULL,
+    generation BIGINT NOT NULL,
+    checked_unix BIGINT NOT NULL,
+    status TEXT NOT NULL,
+    latency_avg_ms DOUBLE PRECISION,
+    loss_ratio DOUBLE PRECISION NOT NULL,
+    reason TEXT,
+    PRIMARY KEY (sample_id, ordinal),
+    CHECK (generation > 0),
+    CHECK (ordinal >= 0),
+    CHECK (checked_unix > 0),
+    CHECK (status IN ('ok', 'degraded', 'down', 'error')),
+    CHECK (latency_avg_ms IS NULL OR latency_avg_ms BETWEEN 0 AND 3600000),
+    CHECK (loss_ratio BETWEEN 0 AND 1),
+    CHECK (reason IS NULL OR length(reason) <= 4096),
+    CHECK (
+        (status = 'ok' AND latency_avg_ms IS NOT NULL AND loss_ratio = 0)
+        OR (
+            status = 'degraded'
+            AND latency_avg_ms IS NOT NULL
+            AND loss_ratio > 0
+            AND loss_ratio < 1
+        )
+        OR (
+            status IN ('down', 'error')
+            AND latency_avg_ms IS NULL
+            AND loss_ratio = 1
+        )
+    )
+);
+
+CREATE INDEX telemetry_ping_facts_client_checked_idx
+    ON telemetry_ping_facts (
+        client_id,
+        checked_unix,
+        target_id,
+        generation,
+        observed_at DESC,
+        sample_id DESC,
+        ordinal DESC
+    ) INCLUDE (status, latency_avg_ms, loss_ratio, reason);
 
 CREATE TABLE telemetry_ping_rollups (
     client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,

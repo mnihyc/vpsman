@@ -51,21 +51,49 @@ INSERT INTO telemetry_samples (
     id,
     client_id,
     observed_at,
+    cpu_utilization_ratio,
+    cpu_cores,
     cpu_load_1,
+    cpu_load_5,
+    cpu_load_15,
     memory_total_bytes,
     memory_available_bytes,
+    swap_total_bytes,
+    swap_available_bytes,
+    disk_total_bytes,
+    disk_available_bytes,
+    network_rx_bytes,
+    network_tx_bytes,
+    tcp_sockets,
+    udp_sockets,
     payload
 )
 SELECT
     md5(points.client_id || ':' || points.sample_index::text)::uuid,
     points.client_id,
     points.observed_at,
+    points.cpu_ratio,
+    points.cpu_cores,
     points.cpu_ratio * points.cpu_cores::double precision,
+    points.cpu_ratio * points.cpu_cores::double precision * 0.88,
+    points.cpu_ratio * points.cpu_cores::double precision * 0.74,
     8589934592::bigint,
     (
         8589934592::numeric
         * (0.78::numeric - points.cpu_ratio::numeric * 0.20::numeric)
     )::bigint,
+    4294967296::bigint,
+    3221225472::bigint,
+    100000000000::bigint,
+    64000000000::bigint - (15 - points.sample_index) * 10000000::bigint,
+    CASE WHEN points.network_enabled THEN
+        10000000000::bigint + (15 - points.sample_index) * 150000000::bigint
+    ELSE 0 END,
+    CASE WHEN points.network_enabled THEN
+        5000000000::bigint + (15 - points.sample_index) * 60000000::bigint
+    ELSE 0 END,
+    120,
+    28,
     jsonb_build_object(
         'observed_unix', extract(epoch FROM points.observed_at)::bigint,
         'hostname', points.client_id,
@@ -138,6 +166,44 @@ SELECT
         END
     )
 FROM points;
+
+INSERT INTO telemetry_counter_facts (
+    sample_id, client_id, observed_at, source_kind, ordinal,
+    interface, rx_bytes, tx_bytes
+)
+SELECT
+    sample.id,
+    sample.client_id,
+    sample.observed_at,
+    'host',
+    0,
+    network ->> 'interface',
+    (network ->> 'rx_bytes')::bigint,
+    (network ->> 'tx_bytes')::bigint
+FROM telemetry_samples sample
+CROSS JOIN LATERAL jsonb_array_elements(sample.payload -> 'networks') network
+WHERE sample.client_id LIKE 'review-%';
+
+INSERT INTO telemetry_ping_facts (
+    sample_id, client_id, observed_at, ordinal, target_id, generation,
+    checked_unix, status, latency_avg_ms, loss_ratio, reason
+)
+SELECT
+    sample.id,
+    sample.client_id,
+    sample.observed_at,
+    (result.ordinal - 1)::integer,
+    (result.value ->> 'target_id')::uuid,
+    (result.value ->> 'generation')::bigint,
+    (result.value ->> 'checked_unix')::bigint,
+    result.value ->> 'status',
+    NULLIF(result.value ->> 'latency_avg_ms', '')::double precision,
+    (result.value ->> 'loss_ratio')::double precision,
+    result.value ->> 'reason'
+FROM telemetry_samples sample
+CROSS JOIN LATERAL jsonb_array_elements(sample.payload -> 'ping_results')
+    WITH ORDINALITY result(value, ordinal)
+WHERE sample.client_id LIKE 'review-%';
 
 WITH review_cases (
     client_id,

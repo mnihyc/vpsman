@@ -1831,78 +1831,50 @@ impl Repository {
         if let Self::Postgres(pool) = self {
             let rows = sqlx::query(
                 r#"
-                WITH raw AS (
+                WITH accepted AS (
                     SELECT
-                        sample.client_id,
-                        extract(epoch FROM sample.observed_at)::numeric AS observed_unix,
-                        CASE
-                            WHEN result ->> 'target_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                            THEN (result ->> 'target_id')::uuid
-                        END AS target_id,
-                        (result ->> 'generation')::numeric AS generation,
-                        (result ->> 'checked_unix')::numeric AS checked_unix,
-                        result ->> 'status' AS status,
-                        NULLIF(result ->> 'latency_avg_ms', '')::double precision
-                            AS latency_avg_ms,
-                        (result ->> 'loss_ratio')::double precision AS loss_ratio,
-                        result ->> 'reason' AS reason,
-                        sample.observed_at
-                    FROM telemetry_samples sample
-                    CROSS JOIN LATERAL jsonb_array_elements(
-                        CASE
-                            WHEN jsonb_typeof(sample.payload -> 'ping_results') = 'array'
-                            THEN sample.payload -> 'ping_results'
-                            ELSE '[]'::jsonb
-                        END
-                    ) AS result
-                    WHERE sample.client_id = ANY($1::TEXT[])
-                      AND sample.observed_at >= to_timestamp(GREATEST($2 - 300, 0))
-                      AND sample.observed_at <= to_timestamp($3 + 3900)
-                ), accepted AS (
-                    SELECT
-                        raw.client_id,
+                        fact.client_id,
                         target.id AS target_id,
                         target.name AS target_name,
                         target.generation,
-                        raw.checked_unix::bigint AS checked_unix,
-                        raw.status,
-                        raw.latency_avg_ms,
-                        raw.loss_ratio,
-                        left(raw.reason, 512) AS reason,
-                        raw.observed_at
-                    FROM raw
+                        fact.checked_unix,
+                        fact.status,
+                        fact.latency_avg_ms,
+                        fact.loss_ratio,
+                        left(fact.reason, 512) AS reason,
+                        fact.observed_at,
+                        fact.sample_id,
+                        fact.ordinal
+                    FROM telemetry_ping_facts fact
                     JOIN ping_targets target
-                      ON target.id = raw.target_id
-                     AND target.generation::numeric = raw.generation
+                      ON target.id = fact.target_id
+                     AND target.generation = fact.generation
                     JOIN ping_target_assignments assignment
                       ON assignment.target_id = target.id
-                     AND assignment.client_id = raw.client_id
+                     AND assignment.client_id = fact.client_id
                      AND assignment.is_primary
-                    WHERE raw.generation > 0
-                      AND raw.checked_unix > 0
-                      AND raw.checked_unix <= raw.observed_unix + 300
-                      AND raw.observed_unix - raw.checked_unix <= 3900
-                      AND raw.checked_unix >= $2
-                      AND raw.checked_unix <= $3
-                      AND raw.loss_ratio BETWEEN 0 AND 1
-                      AND (raw.reason IS NULL OR length(raw.reason) <= 4096)
-                      AND (
-                            (raw.status = 'ok'
-                                AND raw.latency_avg_ms BETWEEN 0 AND 3600000
-                                AND raw.loss_ratio = 0)
-                            OR (raw.status = 'degraded'
-                                AND raw.latency_avg_ms BETWEEN 0 AND 3600000
-                                AND raw.loss_ratio > 0 AND raw.loss_ratio < 1)
-                            OR (raw.status IN ('down', 'error')
-                                AND raw.latency_avg_ms IS NULL
-                                AND raw.loss_ratio = 1)
-                      )
+                    WHERE fact.client_id = ANY($1::TEXT[])
+                      AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
+                      AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
+                      AND fact.checked_unix >= $2
+                      AND fact.checked_unix <= $3
                 ), deduplicated AS (
-                    SELECT DISTINCT ON (client_id, target_id, generation, checked_unix)
+                    SELECT DISTINCT ON (
+                        client_id,
+                        target_id,
+                        generation,
+                        checked_unix
+                    )
                         *
                     FROM accepted
                     ORDER BY
-                        client_id, target_id, generation, checked_unix, observed_at DESC
+                        client_id,
+                        target_id,
+                        generation,
+                        checked_unix,
+                        observed_at DESC,
+                        sample_id DESC,
+                        ordinal DESC
                 ), bucketed AS (
                     SELECT
                         client_id,
@@ -2003,83 +1975,61 @@ impl Repository {
         if let Self::Postgres(pool) = self {
             let rows = sqlx::query(
                 r#"
-                WITH raw AS (
+                WITH accepted AS (
                     SELECT
-                        sample.client_id,
-                        extract(epoch FROM sample.observed_at)::numeric AS observed_unix,
-                        CASE
-                            WHEN result ->> 'target_id' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-                            THEN (result ->> 'target_id')::uuid
-                        END AS target_id,
-                        (result ->> 'generation')::numeric AS generation,
-                        (result ->> 'checked_unix')::numeric AS checked_unix,
-                        result ->> 'status' AS status,
-                        NULLIF(result ->> 'latency_avg_ms', '')::double precision
-                            AS latency_avg_ms,
-                        (result ->> 'loss_ratio')::double precision AS loss_ratio,
-                        result ->> 'reason' AS reason,
-                        sample.observed_at
-                    FROM telemetry_samples sample
-                    CROSS JOIN LATERAL jsonb_array_elements(
-                        CASE
-                            WHEN jsonb_typeof(sample.payload -> 'ping_results') = 'array'
-                            THEN sample.payload -> 'ping_results'
-                            ELSE '[]'::jsonb
-                        END
-                    ) AS result
-                    WHERE sample.client_id = $1
-                      AND (
-                            $2::BIGINT IS NULL
-                            OR sample.observed_at >= to_timestamp(GREATEST($2 - 300, 0))
-                      )
-                      AND (
-                            $3::BIGINT IS NULL
-                            OR sample.observed_at <= to_timestamp($3 + 3900)
-                      )
-                ), accepted AS (
+                        fact.client_id,
+                        fact.target_id,
+                        fact.generation,
+                        fact.checked_unix,
+                        fact.status,
+                        fact.latency_avg_ms,
+                        fact.loss_ratio,
+                        left(fact.reason, 512) AS reason,
+                        fact.observed_at,
+                        fact.sample_id,
+                        fact.ordinal
+                    FROM telemetry_ping_facts fact
+                    WHERE fact.client_id = $1
+                      AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
+                      AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
+                      AND ($2::BIGINT IS NULL OR fact.checked_unix >= $2)
+                      AND ($3::BIGINT IS NULL OR fact.checked_unix <= $3)
+                ), deduplicated AS (
+                    SELECT DISTINCT ON (
+                        client_id,
+                        checked_unix,
+                        target_id,
+                        generation
+                    )
+                        *
+                    FROM accepted
+                    ORDER BY
+                        client_id,
+                        checked_unix,
+                        target_id,
+                        generation,
+                        observed_at DESC,
+                        sample_id DESC,
+                        ordinal DESC
+                ), selected AS (
                     SELECT
-                        raw.client_id,
+                        deduplicated.client_id,
                         target.id AS target_id,
                         target.name AS target_name,
                         assignment.is_primary,
                         target.generation,
-                        raw.checked_unix::bigint AS checked_unix,
-                        raw.status,
-                        raw.latency_avg_ms,
-                        raw.loss_ratio,
-                        left(raw.reason, 512) AS reason,
-                        raw.observed_at
-                    FROM raw
+                        deduplicated.checked_unix,
+                        deduplicated.status,
+                        deduplicated.latency_avg_ms,
+                        deduplicated.loss_ratio,
+                        deduplicated.reason
+                    FROM deduplicated
                     JOIN ping_targets target
-                      ON target.id = raw.target_id
-                     AND target.generation::numeric = raw.generation
+                      ON target.id = deduplicated.target_id
+                     AND target.generation = deduplicated.generation
                     JOIN ping_target_assignments assignment
                       ON assignment.target_id = target.id
-                     AND assignment.client_id = raw.client_id
-                    WHERE raw.generation > 0
-                      AND raw.checked_unix > 0
-                      AND raw.checked_unix <= raw.observed_unix + 300
-                      AND raw.observed_unix - raw.checked_unix <= 3900
-                      AND ($2::BIGINT IS NULL OR raw.checked_unix >= $2)
-                      AND ($3::BIGINT IS NULL OR raw.checked_unix <= $3)
-                      AND raw.loss_ratio BETWEEN 0 AND 1
-                      AND (raw.reason IS NULL OR length(raw.reason) <= 4096)
-                      AND (
-                            (raw.status = 'ok'
-                                AND raw.latency_avg_ms BETWEEN 0 AND 3600000
-                                AND raw.loss_ratio = 0)
-                            OR (raw.status = 'degraded'
-                                AND raw.latency_avg_ms BETWEEN 0 AND 3600000
-                                AND raw.loss_ratio > 0 AND raw.loss_ratio < 1)
-                            OR (raw.status IN ('down', 'error')
-                                AND raw.latency_avg_ms IS NULL
-                                AND raw.loss_ratio = 1)
-                      )
-                ), deduplicated AS (
-                    SELECT DISTINCT ON (target_id, generation, checked_unix)
-                        *
-                    FROM accepted
-                    ORDER BY target_id, generation, checked_unix, observed_at DESC
+                     AND assignment.client_id = deduplicated.client_id
                 ), bucketed AS (
                     SELECT
                         client_id,
@@ -2100,7 +2050,7 @@ impl Repository {
                         (array_agg(status ORDER BY checked_unix DESC))[1] AS latest_status,
                         (array_agg(reason ORDER BY checked_unix DESC))[1] AS latest_reason,
                         max(checked_unix)::bigint AS latest_checked_unix
-                    FROM deduplicated
+                    FROM selected
                     GROUP BY client_id, target_id, target_name, generation, chart_epoch
                 ), ranked AS (
                     SELECT

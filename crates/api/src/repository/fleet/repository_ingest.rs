@@ -1056,9 +1056,24 @@ impl Repository {
                 .await?;
                 lock_postgres_traffic_counter_streams(&mut tx, &event.telemetry.client_id).await?;
                 let metrics = &received_metrics;
+                let sample_id = Uuid::new_v4();
                 upsert_postgres_telemetry_sample(
                     &mut tx,
-                    Uuid::new_v4(),
+                    sample_id,
+                    &event.telemetry.client_id,
+                    metrics,
+                )
+                .await?;
+                insert_postgres_telemetry_counter_facts(
+                    &mut tx,
+                    sample_id,
+                    &event.telemetry.client_id,
+                    metrics,
+                )
+                .await?;
+                insert_postgres_telemetry_ping_facts(
+                    &mut tx,
+                    sample_id,
                     &event.telemetry.client_id,
                     metrics,
                 )
@@ -1487,15 +1502,43 @@ async fn upsert_postgres_telemetry_sample(
     client_id: &str,
     metrics: &AgentMetrics,
 ) -> Result<()> {
+    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    /*
+     * The historical PostgreSQL raw projection treated a missing connection
+     * snapshot as the saturated BIGINT sentinel. Retain that observable value
+     * in the typed projection instead of silently converting it to zero.
+     */
+    let tcp_sockets = metrics
+        .connections
+        .as_ref()
+        .map(|connections| u64_to_i64(connections.tcp))
+        .unwrap_or(i64::MAX);
+    let udp_sockets = metrics
+        .connections
+        .as_ref()
+        .map(|connections| u64_to_i64(connections.udp))
+        .unwrap_or(i64::MAX);
     sqlx::query(
         r#"
         INSERT INTO telemetry_samples (
             id,
             client_id,
             observed_at,
+            cpu_utilization_ratio,
+            cpu_cores,
             cpu_load_1,
+            cpu_load_5,
+            cpu_load_15,
             memory_total_bytes,
             memory_available_bytes,
+            swap_total_bytes,
+            swap_available_bytes,
+            disk_total_bytes,
+            disk_available_bytes,
+            network_rx_bytes,
+            network_tx_bytes,
+            tcp_sockets,
+            udp_sockets,
             payload
         ) VALUES (
             $1,
@@ -1504,17 +1547,230 @@ async fn upsert_postgres_telemetry_sample(
             $4,
             $5,
             $6,
-            $7
+            $7,
+            $8,
+            $9,
+            $10,
+            $11,
+            $12,
+            $13,
+            $14,
+            $15,
+            $16,
+            $17,
+            $18,
+            $19
         )
         "#,
     )
     .bind(id)
     .bind(client_id)
     .bind(metrics.observed_unix as f64)
+    .bind(metrics.cpu.utilization_ratio)
+    .bind(i32::from(metrics.cpu.cores))
     .bind(metrics.cpu.load.one)
+    .bind(metrics.cpu.load.five)
+    .bind(metrics.cpu.load.fifteen)
     .bind(u64_to_i64(metrics.memory.total_bytes))
     .bind(u64_to_i64(metrics.memory.available_bytes))
+    .bind(metrics.memory.swap_total_bytes.map(u64_to_i64))
+    .bind(metrics.memory.swap_available_bytes.map(u64_to_i64))
+    .bind(disk_total)
+    .bind(disk_available)
+    .bind(network_rx)
+    .bind(network_tx)
+    .bind(tcp_sockets)
+    .bind(udp_sockets)
     .bind(SqlJson(metrics))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_postgres_telemetry_counter_facts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sample_id: Uuid,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    let mut source_kinds = Vec::with_capacity(metrics.networks.len() + metrics.tunnels.len());
+    let mut ordinals = Vec::with_capacity(source_kinds.capacity());
+    let mut interfaces = Vec::with_capacity(source_kinds.capacity());
+    let mut rx_bytes = Vec::with_capacity(source_kinds.capacity());
+    let mut tx_bytes = Vec::with_capacity(source_kinds.capacity());
+
+    for (ordinal, network) in metrics.networks.iter().enumerate() {
+        source_kinds.push("host");
+        ordinals.push(i32::try_from(ordinal).unwrap_or(i32::MAX));
+        interfaces.push(network.interface.as_str());
+        rx_bytes.push(u64_to_i64(network.rx_bytes));
+        tx_bytes.push(u64_to_i64(network.tx_bytes));
+    }
+    for (ordinal, tunnel) in metrics.tunnels.iter().enumerate() {
+        source_kinds.push("tunnel");
+        ordinals.push(i32::try_from(ordinal).unwrap_or(i32::MAX));
+        interfaces.push(tunnel.interface.as_str());
+        rx_bytes.push(u64_to_i64(tunnel.rx_bytes));
+        tx_bytes.push(u64_to_i64(tunnel.tx_bytes));
+    }
+    if source_kinds.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_counter_facts (
+            sample_id,
+            client_id,
+            observed_at,
+            source_kind,
+            ordinal,
+            interface,
+            rx_bytes,
+            tx_bytes
+        )
+        SELECT
+            $1,
+            $2,
+            to_timestamp($3::double precision),
+            fact.source_kind,
+            fact.ordinal,
+            fact.interface,
+            fact.rx_bytes,
+            fact.tx_bytes
+        FROM UNNEST(
+            $4::TEXT[],
+            $5::INTEGER[],
+            $6::TEXT[],
+            $7::BIGINT[],
+            $8::BIGINT[]
+        ) AS fact(source_kind, ordinal, interface, rx_bytes, tx_bytes)
+        "#,
+    )
+    .bind(sample_id)
+    .bind(client_id)
+    .bind(metrics.observed_unix as f64)
+    .bind(&source_kinds)
+    .bind(&ordinals)
+    .bind(&interfaces)
+    .bind(&rx_bytes)
+    .bind(&tx_bytes)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn insert_postgres_telemetry_ping_facts(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sample_id: Uuid,
+    client_id: &str,
+    metrics: &AgentMetrics,
+) -> Result<()> {
+    if metrics.ping_results.is_empty() {
+        return Ok(());
+    }
+
+    let ordinals = metrics
+        .ping_results
+        .iter()
+        .enumerate()
+        .map(|(ordinal, _)| i32::try_from(ordinal).unwrap_or(i32::MAX))
+        .collect::<Vec<_>>();
+    let target_ids = metrics
+        .ping_results
+        .iter()
+        .map(|result| Uuid::parse_str(result.target_id.trim()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let generations = metrics
+        .ping_results
+        .iter()
+        .map(|result| u64_to_i64(result.generation))
+        .collect::<Vec<_>>();
+    let checked_unix = metrics
+        .ping_results
+        .iter()
+        .map(|result| u64_to_i64(result.checked_unix))
+        .collect::<Vec<_>>();
+    let statuses = metrics
+        .ping_results
+        .iter()
+        .map(|result| result.status.as_str())
+        .collect::<Vec<_>>();
+    let latency_avg_ms = metrics
+        .ping_results
+        .iter()
+        .map(|result| result.latency_avg_ms)
+        .collect::<Vec<_>>();
+    let loss_ratios = metrics
+        .ping_results
+        .iter()
+        .map(|result| result.loss_ratio)
+        .collect::<Vec<_>>();
+    let reasons = metrics
+        .ping_results
+        .iter()
+        .map(|result| result.reason.as_deref())
+        .collect::<Vec<_>>();
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_ping_facts (
+            sample_id,
+            client_id,
+            observed_at,
+            ordinal,
+            target_id,
+            generation,
+            checked_unix,
+            status,
+            latency_avg_ms,
+            loss_ratio,
+            reason
+        )
+        SELECT
+            $1,
+            $2,
+            to_timestamp($3::double precision),
+            fact.ordinal,
+            fact.target_id,
+            fact.generation,
+            fact.checked_unix,
+            fact.status,
+            fact.latency_avg_ms,
+            fact.loss_ratio,
+            fact.reason
+        FROM UNNEST(
+            $4::INTEGER[],
+            $5::UUID[],
+            $6::BIGINT[],
+            $7::BIGINT[],
+            $8::TEXT[],
+            $9::DOUBLE PRECISION[],
+            $10::DOUBLE PRECISION[],
+            $11::TEXT[]
+        ) AS fact(
+            ordinal,
+            target_id,
+            generation,
+            checked_unix,
+            status,
+            latency_avg_ms,
+            loss_ratio,
+            reason
+        )
+        "#,
+    )
+    .bind(sample_id)
+    .bind(client_id)
+    .bind(metrics.observed_unix as f64)
+    .bind(&ordinals)
+    .bind(&target_ids)
+    .bind(&generations)
+    .bind(&checked_unix)
+    .bind(&statuses)
+    .bind(&latency_avg_ms)
+    .bind(&loss_ratios)
+    .bind(&reasons)
     .execute(&mut **tx)
     .await?;
     Ok(())

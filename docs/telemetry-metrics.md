@@ -10,8 +10,11 @@ measurement it does not contain.
 Monitoring has two retained tiers, not competing minute/hour/day histories:
 
 - Accepted high-resolution telemetry samples preserve the agent payload at its
-  configured collection cadence. They support realtime and short-range queries
-  and default to 90 days of retention.
+  configured collection cadence. Transactionally derived scalar, counter, and
+  Ping facts provide an indexed read projection of the same accepted sample;
+  they do not form another history tier or alter the response source. The raw
+  sample and its facts support realtime and short-range queries and default to
+  90 days of retention.
 - Minute-derived resource, network, traffic-counter, and Ping history is the
   authoritative long-term source. It defaults to 3,650 days of retention.
 - Resource, network, and Ping rows for adjacent, exact-equivalent logical minutes
@@ -46,6 +49,12 @@ Operators manage the two tiers independently under Audit > Retention & export:
 `telemetry_samples` is the high-resolution policy, while
 `telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
 `traffic_counter_samples` are long-term policies.
+
+High-resolution fact rows share the sample's retention lifecycle and are
+deleted with it. They are written only after the authenticated ingest sequence
+is accepted and in the same database transaction as the retained JSON payload
+and long-term rollups. Duplicate or stale frames therefore cannot create an
+orphan fact, and the JSON payload remains the audit/export representation.
 
 ## Resource Metrics
 

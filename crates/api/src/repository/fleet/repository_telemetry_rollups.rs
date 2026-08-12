@@ -335,81 +335,21 @@ impl Repository {
                             extract(epoch FROM sample.observed_at)::numeric / $4::numeric
                         )::bigint * $4::bigint AS chart_epoch,
                         sample.observed_at,
-                        NULLIF(sample.payload #>> '{cpu,utilization_ratio}', '')
-                            ::double precision AS cpu_usage,
-                        COALESCE((sample.payload #>> '{cpu,cores}')::integer, 0)
-                            AS cpu_cores,
+                        sample.cpu_utilization_ratio AS cpu_usage,
+                        sample.cpu_cores,
                         sample.cpu_load_1,
-                        COALESCE((sample.payload #>> '{cpu,load,five}')::double precision, 0)
-                            AS cpu_load_5,
-                        COALESCE((sample.payload #>> '{cpu,load,fifteen}')::double precision, 0)
-                            AS cpu_load_15,
+                        sample.cpu_load_5,
+                        sample.cpu_load_15,
                         sample.memory_total_bytes,
                         sample.memory_available_bytes,
-                        CASE
-                            WHEN sample.payload #>> '{memory,swap_total_bytes}' IS NOT NULL
-                             AND sample.payload #>> '{memory,swap_available_bytes}' IS NOT NULL
-                            THEN LEAST(
-                                (sample.payload #>> '{memory,swap_total_bytes}')::numeric,
-                                9223372036854775807
-                            )::bigint
-                        END AS swap_total_bytes,
-                        CASE
-                            WHEN sample.payload #>> '{memory,swap_total_bytes}' IS NOT NULL
-                             AND sample.payload #>> '{memory,swap_available_bytes}' IS NOT NULL
-                            THEN LEAST(
-                                (sample.payload #>> '{memory,swap_available_bytes}')::numeric,
-                                9223372036854775807
-                            )::bigint
-                        END AS swap_available_bytes,
-                        LEAST(COALESCE((
-                            SELECT sum((disk ->> 'total_bytes')::numeric)
-                            FROM jsonb_array_elements(
-                                CASE
-                                    WHEN jsonb_typeof(sample.payload -> 'disks') = 'array'
-                                    THEN sample.payload -> 'disks'
-                                    ELSE '[]'::jsonb
-                                END
-                            ) AS disk
-                        ), 0), 9223372036854775807)::bigint AS disk_total_bytes,
-                        LEAST(COALESCE((
-                            SELECT sum((disk ->> 'available_bytes')::numeric)
-                            FROM jsonb_array_elements(
-                                CASE
-                                    WHEN jsonb_typeof(sample.payload -> 'disks') = 'array'
-                                    THEN sample.payload -> 'disks'
-                                    ELSE '[]'::jsonb
-                                END
-                            ) AS disk
-                        ), 0), 9223372036854775807)::bigint AS disk_available_bytes,
-                        LEAST(COALESCE((
-                            SELECT sum((network ->> 'rx_bytes')::numeric)
-                            FROM jsonb_array_elements(
-                                CASE
-                                    WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
-                                    THEN sample.payload -> 'networks'
-                                    ELSE '[]'::jsonb
-                                END
-                            ) AS network
-                        ), 0), 9223372036854775807)::bigint AS network_rx_bytes,
-                        LEAST(COALESCE((
-                            SELECT sum((network ->> 'tx_bytes')::numeric)
-                            FROM jsonb_array_elements(
-                                CASE
-                                    WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
-                                    THEN sample.payload -> 'networks'
-                                    ELSE '[]'::jsonb
-                                END
-                            ) AS network
-                        ), 0), 9223372036854775807)::bigint AS network_tx_bytes,
-                        LEAST(
-                            NULLIF(sample.payload #>> '{connections,tcp}', '')::numeric,
-                            9223372036854775807
-                        )::bigint AS tcp_sockets,
-                        LEAST(
-                            NULLIF(sample.payload #>> '{connections,udp}', '')::numeric,
-                            9223372036854775807
-                        )::bigint AS udp_sockets
+                        sample.swap_total_bytes,
+                        sample.swap_available_bytes,
+                        sample.disk_total_bytes,
+                        sample.disk_available_bytes,
+                        sample.network_rx_bytes,
+                        sample.network_tx_bytes,
+                        sample.tcp_sockets,
+                        sample.udp_sockets
                     FROM telemetry_samples sample
                     WHERE sample.client_id = ANY($1::TEXT[])
                       AND sample.observed_at >= to_timestamp($2)
@@ -421,14 +361,14 @@ impl Repository {
                         LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
                         LEAST(count(cpu_usage)::bigint, 2147483647)::integer
                             AS cpu_usage_sample_count,
-                        avg(cpu_usage)::double precision AS cpu_usage_avg,
+                        avg(cpu_usage ORDER BY observed_at)::double precision AS cpu_usage_avg,
                         max(cpu_usage)::double precision AS cpu_usage_max,
                         max(cpu_cores)::integer AS cpu_cores_max,
-                        avg(cpu_load_1)::double precision AS cpu_load_1_avg,
+                        avg(cpu_load_1 ORDER BY observed_at)::double precision AS cpu_load_1_avg,
                         max(cpu_load_1)::double precision AS cpu_load_1_max,
-                        avg(cpu_load_5)::double precision AS cpu_load_5_avg,
+                        avg(cpu_load_5 ORDER BY observed_at)::double precision AS cpu_load_5_avg,
                         max(cpu_load_5)::double precision AS cpu_load_5_max,
-                        avg(cpu_load_15)::double precision AS cpu_load_15_avg,
+                        avg(cpu_load_15 ORDER BY observed_at)::double precision AS cpu_load_15_avg,
                         max(cpu_load_15)::double precision AS cpu_load_15_max,
                         max(memory_total_bytes)::bigint AS memory_total_bytes_max,
                         round(avg(memory_available_bytes::numeric))::bigint
@@ -437,7 +377,7 @@ impl Repository {
                         avg(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
                             ELSE (memory_total_bytes - memory_available_bytes)::double precision
                                 / memory_total_bytes::double precision
-                        END)::double precision AS memory_used_ratio_avg,
+                        END ORDER BY observed_at)::double precision AS memory_used_ratio_avg,
                         max(CASE WHEN memory_total_bytes = 0 THEN 0::double precision
                             ELSE (memory_total_bytes - memory_available_bytes)::double precision
                                 / memory_total_bytes::double precision
@@ -462,7 +402,7 @@ impl Repository {
                                 THEN (swap_total_bytes - swap_available_bytes)::double precision
                                 / swap_total_bytes::double precision
                             ELSE NULL
-                        END)::double precision AS swap_used_ratio_avg,
+                        END ORDER BY observed_at)::double precision AS swap_used_ratio_avg,
                         max(CASE
                             WHEN swap_total_bytes > 0
                                 THEN (swap_total_bytes - swap_available_bytes)::double precision
@@ -476,7 +416,7 @@ impl Repository {
                         avg(CASE WHEN disk_total_bytes = 0 THEN 0::double precision
                             ELSE (disk_total_bytes - disk_available_bytes)::double precision
                                 / disk_total_bytes::double precision
-                        END)::double precision AS disk_used_ratio_avg,
+                        END ORDER BY observed_at)::double precision AS disk_used_ratio_avg,
                         max(CASE WHEN disk_total_bytes = 0 THEN 0::double precision
                             ELSE (disk_total_bytes - disk_available_bytes)::double precision
                                 / disk_total_bytes::double precision
@@ -485,24 +425,36 @@ impl Repository {
                         max(network_tx_bytes)::bigint AS network_tx_bytes_max,
                         LEAST(count(tcp_sockets)::bigint, 2147483647)::integer
                             AS connections_sample_count,
-                        (array_agg(tcp_sockets ORDER BY observed_at DESC)
-                            FILTER (WHERE tcp_sockets IS NOT NULL))[1]
-                            AS tcp_sockets_latest,
-                        (array_agg(udp_sockets ORDER BY observed_at DESC)
-                            FILTER (WHERE tcp_sockets IS NOT NULL))[1]
-                            AS udp_sockets_latest,
                         max(observed_at) FILTER (WHERE tcp_sockets IS NOT NULL)
                             AS connections_observed_at,
                         max(observed_at) AS latest_observed_at
                     FROM expanded
                     GROUP BY client_id, chart_epoch
-                ), ranked AS (
+                ), latest_connections AS (
+                    SELECT DISTINCT ON (client_id, chart_epoch)
+                        client_id,
+                        chart_epoch,
+                        tcp_sockets AS tcp_sockets_latest,
+                        udp_sockets AS udp_sockets_latest
+                    FROM expanded
+                    WHERE tcp_sockets IS NOT NULL
+                    ORDER BY client_id, chart_epoch, observed_at DESC
+                ), complete AS (
                     SELECT
                         bucketed.*,
+                        latest_connections.tcp_sockets_latest,
+                        latest_connections.udp_sockets_latest
+                    FROM bucketed
+                    LEFT JOIN latest_connections
+                      ON latest_connections.client_id = bucketed.client_id
+                     AND latest_connections.chart_epoch = bucketed.chart_epoch
+                ), ranked AS (
+                    SELECT
+                        complete.*,
                         row_number() OVER (
                             PARTITION BY client_id ORDER BY chart_epoch DESC
                         ) AS point_rank
-                    FROM bucketed
+                    FROM complete
                 ), globally_bounded AS (
                     SELECT *
                     FROM ranked
@@ -614,44 +566,40 @@ impl Repository {
         let (all_client_ids, exact_client_ids, exact_interfaces) = selection.query_parts();
         let points_per_series = points_per_series.clamp(2, 1_440) as usize;
         let step_secs = normalized_dashboard_step_secs(step_secs);
-        // Include one maximum telemetry interval before the visible range so
-        // the first visible counter delta has an explicit baseline.
+        /*
+         * Include one maximum telemetry interval before the visible range so
+         * the first visible counter delta has an explicit baseline.
+         */
         let query_start = start_unix.saturating_sub(3_600);
         if let Self::Postgres(pool) = self {
             let rows = sqlx::query(
                 r#"
                 WITH expanded AS (
                     SELECT
-                        sample.id AS sample_id,
-                        sample.client_id,
-                        network ->> 'interface' AS interface,
-                        extract(epoch FROM sample.observed_at)::bigint AS sample_epoch,
-                        sample.observed_at,
-                        LEAST((network ->> 'rx_bytes')::numeric, 9223372036854775807)
-                            ::bigint AS rx_bytes,
-                        LEAST((network ->> 'tx_bytes')::numeric, 9223372036854775807)
-                            ::bigint AS tx_bytes
-                    FROM telemetry_samples sample
-                    CROSS JOIN LATERAL jsonb_array_elements(
-                        CASE
-                            WHEN jsonb_typeof(sample.payload -> 'networks') = 'array'
-                            THEN sample.payload -> 'networks'
-                            ELSE '[]'::jsonb
-                        END
-                    ) AS network
-                    WHERE (
-                            sample.client_id = ANY($1::TEXT[])
+                        fact.sample_id,
+                        fact.client_id,
+                        fact.interface,
+                        extract(epoch FROM fact.observed_at)::bigint AS sample_epoch,
+                        fact.observed_at,
+                        fact.ordinal,
+                        fact.rx_bytes,
+                        fact.tx_bytes
+                    FROM telemetry_counter_facts fact
+                    WHERE fact.client_id = ANY($10::TEXT[])
+                      AND (
+                            fact.client_id = ANY($1::TEXT[])
                             OR EXISTS (
                                 SELECT 1
                                 FROM UNNEST($8::TEXT[], $9::TEXT[])
                                     AS selected(client_id, interface)
-                                WHERE selected.client_id = sample.client_id
-                                  AND selected.interface = network ->> 'interface'
+                                WHERE selected.client_id = fact.client_id
+                                  AND selected.interface = fact.interface
                             )
                       )
-                      AND sample.observed_at >= to_timestamp($2)
-                      AND sample.observed_at <= to_timestamp($3)
-                      AND length(network ->> 'interface') BETWEEN 1 AND 128
+                      AND fact.source_kind = 'host'
+                      AND fact.observed_at >= to_timestamp($2)
+                      AND fact.observed_at <= to_timestamp($3)
+                      AND length(fact.interface) BETWEEN 1 AND 128
                 ), sequenced AS (
                     SELECT
                         expanded.*,
@@ -660,7 +608,7 @@ impl Repository {
                     FROM expanded
                     WINDOW samples AS (
                         PARTITION BY client_id, interface
-                        ORDER BY sample_epoch, observed_at, sample_id
+                        ORDER BY sample_epoch, observed_at, sample_id, ordinal
                     )
                 ), marked AS (
                     SELECT
@@ -678,7 +626,7 @@ impl Repository {
                     FROM sequenced
                     WINDOW samples AS (
                         PARTITION BY client_id, interface
-                        ORDER BY sample_epoch, observed_at, sample_id
+                        ORDER BY sample_epoch, observed_at, sample_id, ordinal
                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                     )
                 ), visible_bucketed AS (
@@ -690,13 +638,13 @@ impl Repository {
                         min(sample_epoch)::bigint AS first_sample_epoch,
                         max(sample_epoch)::bigint AS effective_epoch,
                         LEAST(count(*)::bigint, 2147483647)::integer AS sample_count,
-                        (array_agg(rx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC))[1]
+                        (array_agg(rx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
                             AS rx_bytes,
-                        (array_agg(tx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC))[1]
+                        (array_agg(tx_bytes ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
                             AS tx_bytes,
-                        (array_agg(rx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC))[1]
+                        (array_agg(rx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
                             AS rx_counter_epoch,
-                        (array_agg(tx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC))[1]
+                        (array_agg(tx_counter_epoch ORDER BY sample_epoch DESC, observed_at DESC, sample_id DESC, ordinal DESC))[1]
                             AS tx_counter_epoch,
                         max(observed_at) AS updated_at
                     FROM marked
@@ -848,6 +796,7 @@ impl Repository {
             .bind(DASHBOARD_TELEMETRY_RESULT_LIMIT as i64)
             .bind(&exact_client_ids)
             .bind(&exact_interfaces)
+            .bind(&client_ids)
             .fetch_all(pool)
             .await?;
             let rows = rows

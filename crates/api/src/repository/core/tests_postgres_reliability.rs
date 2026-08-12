@@ -12,10 +12,11 @@ use vpsman_common::{
     pair_port_expressions, payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello,
     AgentMetrics, AgentUpdateHeartbeat, CommandOutput, CpuStat, DiskStat, GatewayAgentHelloIngest,
     GatewayTelemetryIngest, JobCommand, LoadAverage, MemoryStat, NetworkStat, OspfControlMode,
-    OspfCostPolicy, OutputStream, PortForwardProtocol, PortForwardRuntimeSnapshot,
-    PortForwardRuntimeStatus, RuntimeTunnelControl, RuntimeTunnelManager, TelemetryEnvelope,
-    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
-    TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
+    OspfCostPolicy, OutputStream, PingTargetResult, PortForwardProtocol,
+    PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, RuntimeTunnelControl,
+    RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope, TunnelAddressFamily,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -2557,6 +2558,28 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     let gateway_session_id = Uuid::new_v4();
     insert_client(&db.pool, client_id, Some(process_incarnation_id)).await;
     start_test_gateway_session(&db.repo, "gateway-a", client_id, gateway_session_id).await;
+    let ping_target_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_targets (id, name, host, probe_kind, selector_expression)
+        VALUES ($1, 'Telemetry sequence Ping', '192.0.2.90', 'icmp', '*')
+        "#,
+    )
+    .bind(ping_target_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_target_assignments (target_id, client_id, is_primary)
+        VALUES ($1, $2, TRUE)
+        "#,
+    )
+    .bind(ping_target_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let mut event = GatewayTelemetryIngest {
         gateway_id: "gateway-a".to_string(),
         gateway_session_id,
@@ -2587,6 +2610,26 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
                     mountpoint: "/".to_string(),
                     total_bytes: 200,
                     available_bytes: 50,
+                }],
+                networks: vec![NetworkStat {
+                    interface: "eth0".to_string(),
+                    rx_bytes: 100,
+                    tx_bytes: 200,
+                }],
+                tunnels: vec![RuntimeTunnelStat {
+                    interface: "wg0".to_string(),
+                    rx_bytes: 300,
+                    tx_bytes: 400,
+                    ..RuntimeTunnelStat::default()
+                }],
+                ping_results: vec![PingTargetResult {
+                    target_id: ping_target_id.to_string(),
+                    generation: 1,
+                    checked_unix: 1,
+                    status: "ok".to_string(),
+                    latency_avg_ms: Some(12.5),
+                    loss_ratio: 0.0,
+                    reason: None,
                 }],
                 ..AgentMetrics::default()
             },
@@ -2647,6 +2690,78 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .await
     .unwrap();
     assert_eq!(sample_count, 4);
+    let (first_observed, last_observed): (f64, f64) = sqlx::query_as(
+        r#"
+        SELECT
+            extract(epoch FROM min(observed_at))::double precision,
+            extract(epoch FROM max(observed_at))::double precision
+        FROM telemetry_samples
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let raw_resources = db
+        .repo
+        .list_dashboard_raw_telemetry_rollups(
+            10,
+            first_observed as u64,
+            last_observed as u64,
+            60,
+            &[client_id.to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        raw_resources
+            .iter()
+            .map(|point| point.sample_count)
+            .sum::<i32>(),
+        4
+    );
+    assert!(raw_resources.iter().all(|point| {
+        point.connections_sample_count == point.sample_count
+            && point.tcp_sockets_latest == Some(i64::MAX)
+            && point.udp_sockets_latest == Some(i64::MAX)
+    }));
+    let ping_fact_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM telemetry_ping_facts WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(ping_fact_count, 4);
+    let counter_fact_counts = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT source_kind, count(*)::bigint
+        FROM telemetry_counter_facts
+        WHERE client_id = $1
+        GROUP BY source_kind
+        ORDER BY source_kind
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        counter_fact_counts,
+        vec![("host".to_string(), 4), ("tunnel".to_string(), 4)]
+    );
+    let ping_history = db
+        .repo
+        .list_raw_ping_results(client_id, None, None, 10, 60)
+        .await
+        .unwrap();
+    assert!(!ping_history.is_empty());
+    assert!(ping_history.iter().all(|point| {
+        point.target_id == ping_target_id
+            && point.latest_status == "ok"
+            && point.latency_avg_ms == Some(12.5)
+    }));
     let resource_rollup = sqlx::query(
         r#"
         SELECT
@@ -2757,6 +2872,271 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .await
     .unwrap();
     assert_eq!(webhook_event_count, 4);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_raw_ping_retention_reveals_the_previous_containing_sample() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "raw-ping-retention-client";
+    let target_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO ping_targets (id, name, host, probe_kind, selector_expression)
+        VALUES ($1, 'Raw Ping retention', '192.0.2.91', 'icmp', '*')
+        "#,
+    )
+    .bind(target_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_target_assignments (target_id, client_id, is_primary)
+        VALUES ($1, $2, TRUE)
+        "#,
+    )
+    .bind(target_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let checked_unix = 1_800_000_000;
+    let older_metrics = AgentMetrics {
+        observed_unix: checked_unix + 10,
+        hostname: client_id.to_string(),
+        ping_results: vec![PingTargetResult {
+            target_id: target_id.to_string(),
+            generation: 1,
+            checked_unix,
+            status: "ok".to_string(),
+            latency_avg_ms: Some(10.0),
+            loss_ratio: 0.0,
+            reason: None,
+        }],
+        ..AgentMetrics::default()
+    };
+    let newer_metrics = AgentMetrics {
+        observed_unix: checked_unix + 20,
+        ping_results: vec![PingTargetResult {
+            status: "degraded".to_string(),
+            latency_avg_ms: Some(20.0),
+            loss_ratio: 0.5,
+            reason: Some("packet_loss".to_string()),
+            ..older_metrics.ping_results[0].clone()
+        }],
+        ..older_metrics.clone()
+    };
+    let _older_sample =
+        insert_raw_telemetry_fixture(&db.pool, client_id, checked_unix + 10, &older_metrics).await;
+    let newer_sample =
+        insert_raw_telemetry_fixture(&db.pool, client_id, checked_unix + 20, &newer_metrics).await;
+    let _invalid_newest_sample =
+        insert_raw_telemetry_fixture(&db.pool, client_id, checked_unix + 4_000, &newer_metrics)
+            .await;
+
+    let newest = db
+        .repo
+        .list_raw_ping_results(client_id, None, None, 10, 60)
+        .await
+        .unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].sample_count, 1);
+    assert_eq!(newest[0].latest_status, "degraded");
+    assert_eq!(newest[0].latency_avg_ms, Some(20.0));
+    assert_eq!(newest[0].loss_ratio_avg, 0.5);
+    assert_eq!(newest[0].latest_reason.as_deref(), Some("packet_loss"));
+
+    sqlx::query("DELETE FROM telemetry_samples WHERE id = $1")
+        .bind(newer_sample)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let retained = db
+        .repo
+        .list_raw_ping_results(client_id, None, None, 10, 60)
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].sample_count, 1);
+    assert_eq!(retained[0].latest_status, "ok");
+    assert_eq!(retained[0].latency_avg_ms, Some(10.0));
+    assert_eq!(retained[0].loss_ratio_avg, 0.0);
+    assert_eq!(retained[0].latest_reason, None);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_raw_ping_filters_occurrences_before_dedup_and_metadata_after() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "raw-ping-dedup-client";
+    let active_target_id = Uuid::new_v4();
+    let secondary_target_id = Uuid::new_v4();
+    let unassigned_target_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO ping_targets (
+            id, name, host, probe_kind, selector_expression, generation
+        ) VALUES
+            ($1, 'Raw Ping active', '192.0.2.101', 'icmp', '*', 2),
+            ($2, 'Raw Ping secondary', '192.0.2.102', 'icmp', '*', 1),
+            ($3, 'Raw Ping unassigned', '192.0.2.103', 'icmp', '*', 1)
+        "#,
+    )
+    .bind(active_target_id)
+    .bind(secondary_target_id)
+    .bind(unassigned_target_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO ping_target_assignments (target_id, client_id, is_primary)
+        VALUES ($1, $3, TRUE), ($2, $3, FALSE)
+        "#,
+    )
+    .bind(active_target_id)
+    .bind(secondary_target_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let checked_unix = 1_800_000_000;
+    let older_metrics = AgentMetrics {
+        observed_unix: checked_unix + 10,
+        hostname: client_id.to_string(),
+        ping_results: vec![
+            PingTargetResult {
+                target_id: active_target_id.to_string(),
+                generation: 2,
+                checked_unix,
+                status: "ok".to_string(),
+                latency_avg_ms: Some(10.0),
+                loss_ratio: 0.0,
+                reason: None,
+            },
+            PingTargetResult {
+                target_id: active_target_id.to_string(),
+                generation: 1,
+                checked_unix: checked_unix + 60,
+                status: "down".to_string(),
+                latency_avg_ms: None,
+                loss_ratio: 1.0,
+                reason: Some("stale_generation".to_string()),
+            },
+            PingTargetResult {
+                target_id: secondary_target_id.to_string(),
+                generation: 1,
+                checked_unix: checked_unix + 60,
+                status: "degraded".to_string(),
+                latency_avg_ms: Some(30.0),
+                loss_ratio: 0.25,
+                reason: Some("packet_loss".to_string()),
+            },
+            PingTargetResult {
+                target_id: unassigned_target_id.to_string(),
+                generation: 1,
+                checked_unix: checked_unix + 120,
+                status: "down".to_string(),
+                latency_avg_ms: None,
+                loss_ratio: 1.0,
+                reason: Some("unassigned".to_string()),
+            },
+        ],
+        ..AgentMetrics::default()
+    };
+    let newer_metrics = AgentMetrics {
+        observed_unix: checked_unix + 20,
+        ping_results: vec![PingTargetResult {
+            status: "degraded".to_string(),
+            latency_avg_ms: Some(20.0),
+            loss_ratio: 0.5,
+            reason: Some("newest_valid".to_string()),
+            ..older_metrics.ping_results[0].clone()
+        }],
+        ..older_metrics.clone()
+    };
+    let invalid_newest_metrics = AgentMetrics {
+        observed_unix: checked_unix + 4_000,
+        ping_results: vec![PingTargetResult {
+            status: "down".to_string(),
+            latency_avg_ms: None,
+            loss_ratio: 1.0,
+            reason: Some("invalid_occurrence".to_string()),
+            ..older_metrics.ping_results[0].clone()
+        }],
+        ..older_metrics.clone()
+    };
+    insert_raw_telemetry_fixture(
+        &db.pool,
+        client_id,
+        older_metrics.observed_unix,
+        &older_metrics,
+    )
+    .await;
+    insert_raw_telemetry_fixture(
+        &db.pool,
+        client_id,
+        newer_metrics.observed_unix,
+        &newer_metrics,
+    )
+    .await;
+    insert_raw_telemetry_fixture(
+        &db.pool,
+        client_id,
+        invalid_newest_metrics.observed_unix,
+        &invalid_newest_metrics,
+    )
+    .await;
+    sqlx::query("UPDATE ping_targets SET name = 'Raw Ping current' WHERE id = $1")
+        .bind(active_target_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let rows = db
+        .repo
+        .list_raw_ping_results(
+            client_id,
+            Some(checked_unix),
+            Some(checked_unix + 120),
+            10,
+            60,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let active = rows
+        .iter()
+        .find(|row| row.target_id == active_target_id)
+        .unwrap();
+    assert_eq!(active.target_name, "Raw Ping current");
+    assert!(active.is_primary);
+    assert_eq!(active.generation, 2);
+    assert_eq!(active.sample_count, 1);
+    assert_eq!(active.latest_status, "degraded");
+    assert_eq!(active.latency_avg_ms, Some(20.0));
+    assert_eq!(active.loss_ratio_avg, 0.5);
+    assert_eq!(active.latest_reason.as_deref(), Some("newest_valid"));
+    let secondary = rows
+        .iter()
+        .find(|row| row.target_id == secondary_target_id)
+        .unwrap();
+    assert!(!secondary.is_primary);
+    assert_eq!(secondary.generation, 1);
+    assert_eq!(secondary.latest_status, "degraded");
+    assert_eq!(secondary.latest_reason.as_deref(), Some("packet_loss"));
+    assert!(rows.iter().all(|row| row.target_id != unassigned_target_id));
 
     db.cleanup().await;
 }
@@ -2875,11 +3255,11 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         .await
         .unwrap();
     }
-    for (offset, rx_bytes, tx_bytes) in [
-        (0, 100_u64, 200_u64),
-        (10, 150, 240),
-        (60, 10, 5),
-        (120, 30, 25),
+    for (offset, rx_bytes, tx_bytes, tunnel_rx_bytes, tunnel_tx_bytes) in [
+        (0, 100_u64, 200_u64, 1_000_u64, 2_000_u64),
+        (10, 150, 240, 1_050, 2_040),
+        (60, 10, 5, 1_060, 2_050),
+        (120, 30, 25, 1_080, 2_070),
     ] {
         let metrics = AgentMetrics {
             observed_unix: base + offset,
@@ -2889,25 +3269,15 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
                 rx_bytes,
                 tx_bytes,
             }],
+            tunnels: vec![RuntimeTunnelStat {
+                interface: "wg0".to_string(),
+                rx_bytes: tunnel_rx_bytes,
+                tx_bytes: tunnel_tx_bytes,
+                ..RuntimeTunnelStat::default()
+            }],
             ..AgentMetrics::default()
         };
-        sqlx::query(
-            r#"
-            INSERT INTO telemetry_samples (
-                id, client_id, observed_at, cpu_load_1,
-                memory_total_bytes, memory_available_bytes, payload
-            ) VALUES (
-                $1, $2, to_timestamp($3::double precision), 0, 0, 0, $4
-            )
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(client_id)
-        .bind((base + offset) as f64)
-        .bind(serde_json::json!(metrics))
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        insert_raw_telemetry_fixture(&db.pool, client_id, base + offset, &metrics).await;
     }
 
     let minute = db
@@ -2923,6 +3293,34 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
     assert_eq!(minute[1].rx_bytes, Some(20));
     assert_eq!(minute[1].tx_bytes, Some(20));
 
+    sqlx::query(
+        r#"
+        UPDATE vps_rule_values
+        SET value_raw = 'eth0,tunnel:wg0', value_json = $2
+        WHERE client_id = $1 AND key = 'traffic.selectors'
+        "#,
+    )
+    .bind(client_id)
+    .bind(serde_json::json!({
+        "selectors": [
+            {
+                "source": "host",
+                "interface": "eth0",
+                "direction": "total",
+                "canonical": "eth0"
+            },
+            {
+                "source": "tunnel",
+                "interface": "wg0",
+                "direction": "total",
+                "canonical": "tunnel:wg0"
+            }
+        ]
+    }))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
     let raw = db
         .repo
         .list_traffic_history(client_id, base + 10, base + 120, 60, true)
@@ -2930,15 +3328,13 @@ async fn postgres_authoritative_traffic_history_tracks_counter_epochs_and_raw_ra
         .unwrap();
     assert_eq!(
         raw.iter().filter_map(|point| point.rx_bytes).sum::<i64>(),
-        70
+        150
     );
     assert_eq!(
         raw.iter().filter_map(|point| point.tx_bytes).sum::<i64>(),
-        60
+        130
     );
-    assert!(raw
-        .iter()
-        .any(|point| point.sample_count == 0 && point.reset_count == 1));
+    assert!(raw.iter().any(|point| point.reset_count == 1));
 
     let operator = postgres_network_operator(&db.repo).await;
     let share = crate::model_monitoring::MonitoringShareRecord {
@@ -3315,28 +3711,25 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         (previous, 100_u64, 200_u64, 1_000_u64, 2_000_u64),
         (current, 160_u64, 320_u64, 1_600_u64, 3_200_u64),
     ] {
-        sqlx::query(
-            r#"
-            INSERT INTO telemetry_samples (
-                id, client_id, observed_at, cpu_load_1,
-                memory_total_bytes, memory_available_bytes, payload
-            ) VALUES (
-                $1, 'rate-selection-telemetry', to_timestamp($2::double precision),
-                0, 0, 0, $3
-            )
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(observed as f64)
-        .bind(serde_json::json!({
-            "networks": [
-                {"interface": "eth0", "rx_bytes": eth0_rx, "tx_bytes": eth0_tx},
-                {"interface": "lo", "rx_bytes": lo_rx, "tx_bytes": lo_tx},
-            ]
-        }))
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        let metrics = AgentMetrics {
+            observed_unix: observed,
+            hostname: "rate-selection-telemetry".to_string(),
+            networks: vec![
+                NetworkStat {
+                    interface: "eth0".to_string(),
+                    rx_bytes: eth0_rx,
+                    tx_bytes: eth0_tx,
+                },
+                NetworkStat {
+                    interface: "lo".to_string(),
+                    rx_bytes: lo_rx,
+                    tx_bytes: lo_tx,
+                },
+            ],
+            ..AgentMetrics::default()
+        };
+        insert_raw_telemetry_fixture(&db.pool, "rate-selection-telemetry", observed, &metrics)
+            .await;
     }
     let mut rate_selection = NetworkRateInterfaceSelection::default();
     rate_selection.select_exact(
@@ -3469,25 +3862,17 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         (reset_at, 100, 2_100),
         (current, 160, 2_200),
     ] {
-        sqlx::query(
-            r#"
-            INSERT INTO telemetry_samples (
-                id, client_id, observed_at, cpu_load_1,
-                memory_total_bytes, memory_available_bytes, payload
-            ) VALUES (
-                $1, 'raw-reset-telemetry', to_timestamp($2::double precision),
-                0, 0, 0, $3
-            )
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(observed as f64)
-        .bind(serde_json::json!({
-            "networks": [{"interface": "eth0", "rx_bytes": rx, "tx_bytes": tx}]
-        }))
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        let metrics = AgentMetrics {
+            observed_unix: observed,
+            hostname: "raw-reset-telemetry".to_string(),
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: rx,
+                tx_bytes: tx,
+            }],
+            ..AgentMetrics::default()
+        };
+        insert_raw_telemetry_fixture(&db.pool, "raw-reset-telemetry", observed, &metrics).await;
     }
     assert!(db
         .repo
@@ -3544,25 +3929,17 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
         (intra_minute.saturating_add(20), 1_200, 2_200),
         (intra_minute.saturating_add(65), 1_300, 2_300),
     ] {
-        sqlx::query(
-            r#"
-            INSERT INTO telemetry_samples (
-                id, client_id, observed_at, cpu_load_1,
-                memory_total_bytes, memory_available_bytes, payload
-            ) VALUES (
-                $1, 'intra-reset-telemetry', to_timestamp($2::double precision),
-                0, 0, 0, $3
-            )
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(observed as f64)
-        .bind(serde_json::json!({
-            "networks": [{"interface": "eth0", "rx_bytes": rx, "tx_bytes": tx}]
-        }))
-        .execute(&db.pool)
-        .await
-        .unwrap();
+        let metrics = AgentMetrics {
+            observed_unix: observed,
+            hostname: "intra-reset-telemetry".to_string(),
+            networks: vec![NetworkStat {
+                interface: "eth0".to_string(),
+                rx_bytes: rx,
+                tx_bytes: tx,
+            }],
+            ..AgentMetrics::default()
+        };
+        insert_raw_telemetry_fixture(&db.pool, "intra-reset-telemetry", observed, &metrics).await;
     }
     assert!(db
         .repo
@@ -5812,6 +6189,168 @@ async fn insert_client(pool: &PgPool, client_id: &str, incarnation: Option<Uuid>
     .execute(pool)
     .await
     .unwrap();
+}
+
+async fn insert_raw_telemetry_fixture(
+    pool: &PgPool,
+    client_id: &str,
+    observed_unix: u64,
+    metrics: &AgentMetrics,
+) -> Uuid {
+    let sample_id = Uuid::new_v4();
+    let disk_total = metrics
+        .disks
+        .iter()
+        .fold(0_u128, |total, disk| {
+            total.saturating_add(disk.total_bytes as u128)
+        })
+        .min(i64::MAX as u128) as i64;
+    let disk_available = metrics
+        .disks
+        .iter()
+        .fold(0_u128, |total, disk| {
+            total.saturating_add(disk.available_bytes as u128)
+        })
+        .min(i64::MAX as u128) as i64;
+    let network_rx = metrics
+        .networks
+        .iter()
+        .fold(0_u128, |total, network| {
+            total.saturating_add(network.rx_bytes as u128)
+        })
+        .min(i64::MAX as u128) as i64;
+    let network_tx = metrics
+        .networks
+        .iter()
+        .fold(0_u128, |total, network| {
+            total.saturating_add(network.tx_bytes as u128)
+        })
+        .min(i64::MAX as u128) as i64;
+    let to_i64 = |value: u64| value.min(i64::MAX as u64) as i64;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_samples (
+            id, client_id, observed_at,
+            cpu_utilization_ratio, cpu_cores, cpu_load_1, cpu_load_5, cpu_load_15,
+            memory_total_bytes, memory_available_bytes,
+            swap_total_bytes, swap_available_bytes,
+            disk_total_bytes, disk_available_bytes,
+            network_rx_bytes, network_tx_bytes,
+            tcp_sockets, udp_sockets, payload
+        ) VALUES (
+            $1, $2, to_timestamp($3::double precision),
+            $4, $5, $6, $7, $8,
+            $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+        )
+        "#,
+    )
+    .bind(sample_id)
+    .bind(client_id)
+    .bind(observed_unix as f64)
+    .bind(metrics.cpu.utilization_ratio)
+    .bind(i32::from(metrics.cpu.cores))
+    .bind(metrics.cpu.load.one)
+    .bind(metrics.cpu.load.five)
+    .bind(metrics.cpu.load.fifteen)
+    .bind(to_i64(metrics.memory.total_bytes))
+    .bind(to_i64(metrics.memory.available_bytes))
+    .bind(metrics.memory.swap_total_bytes.map(to_i64))
+    .bind(metrics.memory.swap_available_bytes.map(to_i64))
+    .bind(disk_total)
+    .bind(disk_available)
+    .bind(network_rx)
+    .bind(network_tx)
+    .bind(
+        metrics
+            .connections
+            .as_ref()
+            .map(|connections| to_i64(connections.tcp))
+            .unwrap_or(i64::MAX),
+    )
+    .bind(
+        metrics
+            .connections
+            .as_ref()
+            .map(|connections| to_i64(connections.udp))
+            .unwrap_or(i64::MAX),
+    )
+    .bind(serde_json::json!(metrics))
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for (ordinal, network) in metrics.networks.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_counter_facts (
+                sample_id, client_id, observed_at, source_kind,
+                ordinal, interface, rx_bytes, tx_bytes
+            ) VALUES (
+                $1, $2, to_timestamp($3::double precision), 'host', $4, $5, $6, $7
+            )
+            "#,
+        )
+        .bind(sample_id)
+        .bind(client_id)
+        .bind(observed_unix as f64)
+        .bind(ordinal as i32)
+        .bind(&network.interface)
+        .bind(to_i64(network.rx_bytes))
+        .bind(to_i64(network.tx_bytes))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for (ordinal, tunnel) in metrics.tunnels.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_counter_facts (
+                sample_id, client_id, observed_at, source_kind,
+                ordinal, interface, rx_bytes, tx_bytes
+            ) VALUES (
+                $1, $2, to_timestamp($3::double precision), 'tunnel', $4, $5, $6, $7
+            )
+            "#,
+        )
+        .bind(sample_id)
+        .bind(client_id)
+        .bind(observed_unix as f64)
+        .bind(ordinal as i32)
+        .bind(&tunnel.interface)
+        .bind(to_i64(tunnel.rx_bytes))
+        .bind(to_i64(tunnel.tx_bytes))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for (ordinal, ping) in metrics.ping_results.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_ping_facts (
+                sample_id, client_id, observed_at, ordinal, target_id,
+                generation, checked_unix, status, latency_avg_ms, loss_ratio, reason
+            ) VALUES (
+                $1, $2, to_timestamp($3::double precision), $4, $5,
+                $6, $7, $8, $9, $10, $11
+            )
+            "#,
+        )
+        .bind(sample_id)
+        .bind(client_id)
+        .bind(observed_unix as f64)
+        .bind(ordinal as i32)
+        .bind(Uuid::parse_str(&ping.target_id).unwrap())
+        .bind(ping.generation as i64)
+        .bind(ping.checked_unix as i64)
+        .bind(&ping.status)
+        .bind(ping.latency_avg_ms)
+        .bind(ping.loss_ratio)
+        .bind(&ping.reason)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sample_id
 }
 
 async fn start_test_gateway_session(
