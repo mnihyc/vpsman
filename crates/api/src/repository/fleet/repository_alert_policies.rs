@@ -17,13 +17,13 @@ use crate::{
         PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse, PolicyDryRunRulePreview,
         PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord,
         TrafficAccountingQuery, TrafficAccountingRecord, TrafficAccountingSelectorBreakdown,
-        TrafficCounterSampleRecord, VpsRuleChangePreview, VpsRuleQuery, VpsRuleValueRecord,
-        VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest,
-        VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE,
-        VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
-        VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        TrafficCounterRollupRecord, TrafficCounterSampleRecord, VpsRuleChangePreview, VpsRuleQuery,
+        VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
+        VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE,
+        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
+        VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
@@ -32,7 +32,9 @@ use crate::{
         lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
         require_visible_postgres_clients_in_tx,
     },
-    repository_network_traffic_import::is_intentional_vnstat_import_boundary,
+    repository_network_traffic_import::{
+        is_intentional_vnstat_import_boundary, is_vnstat_import_source,
+    },
     repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
     selector_expression::{agent_matches_selector_expression, parse_selector_expression},
     unix_now,
@@ -92,10 +94,9 @@ struct TrafficStreamRequest {
 
 const NO_RESET_TRAFFIC_START_UNIX: i64 = 0;
 
-// Counter epochs are monotonic by every canonical ingest/import path. For an
-// unbounded cycle, the valid deltas in one epoch therefore reduce exactly to
-// its last counter minus its first. Each lateral lookup below reads one index
-// endpoint per reset epoch instead of sorting every retained minute sample.
+// Long-term rows are a non-overlapping ledger of valid counter transitions.
+// Exact retained rows cover the recent tail; promoted rows cover older time.
+// Intentional vnStat-to-live boundaries contribute neither bytes nor resets.
 pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
     WITH requested AS (
         SELECT client_id, source_kind, interface
@@ -112,17 +113,13 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
             requested.interface,
             sample.rx_bytes AS latest_rx,
             sample.tx_bytes AS latest_tx,
-            sample.rx_counter_epoch,
-            sample.tx_counter_epoch,
             EXTRACT(EPOCH FROM sample.observed_at)::bigint AS last_sample_unix
         FROM requested
         JOIN LATERAL (
             SELECT
                 sample.observed_at,
                 sample.rx_bytes,
-                sample.tx_bytes,
-                sample.rx_counter_epoch,
-                sample.tx_counter_epoch
+                sample.tx_bytes
             FROM traffic_counter_samples sample
             WHERE sample.client_id = requested.client_id
               AND sample.source_kind = requested.source_kind
@@ -132,176 +129,142 @@ pub(crate) const NO_RESET_TRAFFIC_COUNTER_USAGE_SQL: &str = r#"
             LIMIT 1
         ) sample ON TRUE
     ),
-    rx_usage AS (
+    raw_selected AS (
         SELECT
-            latest.client_id,
-            latest.source_kind,
-            latest.interface,
-            epoch_usage.cycle_rx,
-            epoch_usage.rx_counter_epochs_seen
-        FROM latest
-        JOIN LATERAL (
-            SELECT
-                COALESCE(SUM(
-                    GREATEST(epoch.last_bytes - epoch.first_bytes, 0)
-                ), 0)::bigint AS cycle_rx,
-                (1 + COUNT(*) FILTER (
-                    WHERE epoch.previous_source IS NOT NULL
-                      AND NOT (
-                          epoch.previous_source LIKE 'vnstat_import:%'
-                          AND epoch.first_source NOT LIKE 'vnstat_import:%'
-                      )
-                ))::bigint AS rx_counter_epochs_seen
-            FROM (
-                SELECT
-                    first_sample.rx_bytes AS first_bytes,
-                    first_sample.sample_source AS first_source,
-                    last_sample.rx_bytes AS last_bytes,
-                    previous_sample.sample_source AS previous_source
-                FROM generate_series(
-                    (
-                        SELECT sample.rx_counter_epoch
-                        FROM traffic_counter_samples sample
-                        WHERE sample.client_id = latest.client_id
-                          AND sample.source_kind = latest.source_kind
-                          AND sample.interface = latest.interface
-                          AND sample.observed_at <= to_timestamp($4)
-                        ORDER BY sample.rx_counter_epoch ASC, sample.observed_at ASC
-                        LIMIT 1
-                    ),
-                    latest.rx_counter_epoch
-                ) AS epochs(counter_epoch)
-                JOIN LATERAL (
-                    SELECT sample.rx_bytes, sample.sample_source
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.rx_counter_epoch = epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.observed_at ASC
-                    LIMIT 1
-                ) first_sample ON TRUE
-                JOIN LATERAL (
-                    SELECT sample.rx_bytes
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.rx_counter_epoch = epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.observed_at DESC
-                    LIMIT 1
-                ) last_sample ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT sample.sample_source
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.rx_counter_epoch < epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.rx_counter_epoch DESC, sample.observed_at DESC
-                    LIMIT 1
-                ) previous_sample ON TRUE
-            ) epoch
-        ) epoch_usage ON TRUE
+            sample.client_id,
+            sample.source_kind,
+            sample.interface,
+            sample.observed_at,
+            sample.rx_bytes,
+            sample.tx_bytes,
+            sample.rx_counter_epoch,
+            sample.tx_counter_epoch,
+            sample.sample_source,
+            sample.inbound_promoted
+        FROM traffic_counter_samples sample
+        JOIN requested
+          ON requested.client_id = sample.client_id
+         AND requested.source_kind = sample.source_kind
+         AND requested.interface = sample.interface
+        WHERE sample.observed_at <= to_timestamp($4)
     ),
-    tx_usage AS (
+    raw_sequenced AS (
         SELECT
-            latest.client_id,
-            latest.source_kind,
-            latest.interface,
-            epoch_usage.cycle_tx,
-            epoch_usage.tx_counter_epochs_seen
-        FROM latest
-        JOIN LATERAL (
-            SELECT
-                COALESCE(SUM(
-                    GREATEST(epoch.last_bytes - epoch.first_bytes, 0)
-                ), 0)::bigint AS cycle_tx,
-                (1 + COUNT(*) FILTER (
-                    WHERE epoch.previous_source IS NOT NULL
-                      AND NOT (
-                          epoch.previous_source LIKE 'vnstat_import:%'
-                          AND epoch.first_source NOT LIKE 'vnstat_import:%'
-                      )
-                ))::bigint AS tx_counter_epochs_seen
-            FROM (
-                SELECT
-                    first_sample.tx_bytes AS first_bytes,
-                    first_sample.sample_source AS first_source,
-                    last_sample.tx_bytes AS last_bytes,
-                    previous_sample.sample_source AS previous_source
-                FROM generate_series(
-                    (
-                        SELECT sample.tx_counter_epoch
-                        FROM traffic_counter_samples sample
-                        WHERE sample.client_id = latest.client_id
-                          AND sample.source_kind = latest.source_kind
-                          AND sample.interface = latest.interface
-                          AND sample.observed_at <= to_timestamp($4)
-                        ORDER BY sample.tx_counter_epoch ASC, sample.observed_at ASC
-                        LIMIT 1
-                    ),
-                    latest.tx_counter_epoch
-                ) AS epochs(counter_epoch)
-                JOIN LATERAL (
-                    SELECT sample.tx_bytes, sample.sample_source
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.tx_counter_epoch = epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.observed_at ASC
-                    LIMIT 1
-                ) first_sample ON TRUE
-                JOIN LATERAL (
-                    SELECT sample.tx_bytes
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.tx_counter_epoch = epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.observed_at DESC
-                    LIMIT 1
-                ) last_sample ON TRUE
-                LEFT JOIN LATERAL (
-                    SELECT sample.sample_source
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = latest.client_id
-                      AND sample.source_kind = latest.source_kind
-                      AND sample.interface = latest.interface
-                      AND sample.tx_counter_epoch < epochs.counter_epoch
-                      AND sample.observed_at <= to_timestamp($4)
-                    ORDER BY sample.tx_counter_epoch DESC, sample.observed_at DESC
-                    LIMIT 1
-                ) previous_sample ON TRUE
-            ) epoch
-        ) epoch_usage ON TRUE
+            raw_selected.*,
+            LAG(rx_bytes) OVER stream AS previous_rx_bytes,
+            LAG(tx_bytes) OVER stream AS previous_tx_bytes,
+            LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+            LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+            LAG(sample_source) OVER stream AS previous_sample_source
+        FROM raw_selected
+        WINDOW stream AS (
+            PARTITION BY client_id, source_kind, interface
+            ORDER BY observed_at
+        )
+    ),
+    raw_usage AS (
+        SELECT
+            client_id,
+            source_kind,
+            interface,
+            COALESCE(SUM(
+                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
+                           AND rx_bytes >= previous_rx_bytes
+                     THEN rx_bytes - previous_rx_bytes ELSE 0 END
+            ), 0)::bigint AS cycle_rx,
+            COALESCE(SUM(
+                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
+                           AND tx_bytes >= previous_tx_bytes
+                     THEN tx_bytes - previous_tx_bytes ELSE 0 END
+            ), 0)::bigint AS cycle_tx,
+            COUNT(*) FILTER (
+                WHERE previous_rx_counter_epoch IS NOT NULL
+                  AND rx_counter_epoch <> previous_rx_counter_epoch
+                  AND NOT (
+                      previous_sample_source LIKE 'vnstat_import:%'
+                      AND sample_source NOT LIKE 'vnstat_import:%'
+                  )
+            )::bigint AS rx_resets,
+            COUNT(*) FILTER (
+                WHERE previous_tx_counter_epoch IS NOT NULL
+                  AND tx_counter_epoch <> previous_tx_counter_epoch
+                  AND NOT (
+                      previous_sample_source LIKE 'vnstat_import:%'
+                      AND sample_source NOT LIKE 'vnstat_import:%'
+                  )
+            )::bigint AS tx_resets
+        FROM raw_sequenced
+        WHERE NOT inbound_promoted
+        GROUP BY client_id, source_kind, interface
+    ),
+    retained_usage AS (
+        SELECT
+            rollup.client_id,
+            rollup.source_kind,
+            rollup.interface,
+            COALESCE(SUM(rollup.rx_bytes), 0)::bigint AS cycle_rx,
+            COALESCE(SUM(rollup.tx_bytes), 0)::bigint AS cycle_tx,
+            COALESCE(SUM(rollup.rx_reset_count), 0)::bigint AS rx_resets,
+            COALESCE(SUM(rollup.tx_reset_count), 0)::bigint AS tx_resets
+        FROM traffic_counter_rollups rollup
+        JOIN requested
+          ON requested.client_id = rollup.client_id
+         AND requested.source_kind = rollup.source_kind
+         AND requested.interface = rollup.interface
+        WHERE rollup.bucket_start <= to_timestamp($4)
+          AND NOT EXISTS (
+                SELECT 1
+                FROM traffic_counter_rollups finer
+                WHERE finer.client_id = rollup.client_id
+                  AND finer.source_kind = rollup.source_kind
+                  AND finer.interface = rollup.interface
+                  AND finer.origin_kind = rollup.origin_kind
+                  AND finer.bucket_secs < rollup.bucket_secs
+                  AND finer.bucket_start < rollup.bucket_start
+                        + make_interval(secs => rollup.bucket_secs)
+                  AND finer.bucket_start
+                        + make_interval(secs => finer.bucket_secs)
+                        > rollup.bucket_start
+          )
+          AND NOT EXISTS (
+                SELECT 1
+                FROM traffic_counter_samples exact
+                WHERE exact.client_id = rollup.client_id
+                  AND exact.source_kind = rollup.source_kind
+                  AND exact.interface = rollup.interface
+                  AND NOT exact.inbound_promoted
+                  AND (CASE WHEN exact.sample_source LIKE 'vnstat_import:%'
+                            THEN 'vnstat_import' ELSE 'live' END) = rollup.origin_kind
+                  AND exact.observed_at >= rollup.bucket_start
+                  AND exact.observed_at < rollup.bucket_start
+                        + make_interval(secs => rollup.bucket_secs)
+          )
+        GROUP BY rollup.client_id, rollup.source_kind, rollup.interface
     )
     SELECT
         latest.client_id,
         latest.source_kind,
         latest.interface,
-        rx_usage.cycle_rx,
-        tx_usage.cycle_tx,
+        COALESCE(raw_usage.cycle_rx, 0)
+            + COALESCE(retained_usage.cycle_rx, 0) AS cycle_rx,
+        COALESCE(raw_usage.cycle_tx, 0)
+            + COALESCE(retained_usage.cycle_tx, 0) AS cycle_tx,
         latest.latest_rx,
         latest.latest_tx,
         latest.last_sample_unix,
-        rx_usage.rx_counter_epochs_seen,
-        tx_usage.tx_counter_epochs_seen
+        1 + COALESCE(raw_usage.rx_resets, 0)
+            + COALESCE(retained_usage.rx_resets, 0) AS rx_counter_epochs_seen,
+        1 + COALESCE(raw_usage.tx_resets, 0)
+            + COALESCE(retained_usage.tx_resets, 0) AS tx_counter_epochs_seen
     FROM latest
-    JOIN rx_usage
-      ON rx_usage.client_id = latest.client_id
-     AND rx_usage.source_kind = latest.source_kind
-     AND rx_usage.interface = latest.interface
-    JOIN tx_usage
-      ON tx_usage.client_id = latest.client_id
-     AND tx_usage.source_kind = latest.source_kind
-     AND tx_usage.interface = latest.interface
+    LEFT JOIN raw_usage
+      ON raw_usage.client_id = latest.client_id
+     AND raw_usage.source_kind = latest.source_kind
+     AND raw_usage.interface = latest.interface
+    LEFT JOIN retained_usage
+      ON retained_usage.client_id = latest.client_id
+     AND retained_usage.source_kind = latest.source_kind
+     AND retained_usage.interface = latest.interface
     ORDER BY latest.client_id ASC, latest.source_kind ASC, latest.interface ASC
 "#;
 
@@ -722,20 +685,33 @@ impl Repository {
             return Ok(None);
         }
         match self {
-            Self::Memory(memory) => Ok(memory
-                .traffic_counter_samples
-                .read()
-                .await
-                .iter()
-                .filter(|sample| sample.client_id == client_id)
-                .filter(|sample| {
-                    streams.iter().any(|stream| {
-                        stream.source_kind == sample.source_kind
-                            && stream.interface == sample.interface
+            Self::Memory(memory) => {
+                let samples = memory.traffic_counter_samples.read().await;
+                let rollups = memory.traffic_counter_rollups.read().await;
+                Ok(samples
+                    .iter()
+                    .filter(|sample| sample.client_id == client_id)
+                    .filter(|sample| {
+                        streams.iter().any(|stream| {
+                            stream.source_kind == sample.source_kind
+                                && stream.interface == sample.interface
+                        })
                     })
-                })
-                .filter_map(|sample| u64::try_from(sample.observed_unix).ok())
-                .min()),
+                    .filter_map(|sample| u64::try_from(sample.observed_unix).ok())
+                    .chain(
+                        rollups
+                            .iter()
+                            .filter(|rollup| rollup.client_id == client_id)
+                            .filter(|rollup| {
+                                streams.iter().any(|stream| {
+                                    stream.source_kind == rollup.source_kind
+                                        && stream.interface == rollup.interface
+                                })
+                            })
+                            .filter_map(|rollup| u64::try_from(rollup.bucket_start_unix).ok()),
+                    )
+                    .min())
+            }
             Self::Postgres(pool) => {
                 let source_kinds = streams
                     .iter()
@@ -752,12 +728,22 @@ impl Repository {
                         FROM UNNEST($2::text[], $3::text[])
                             AS stream(source_kind, interface)
                     )
-                    SELECT extract(epoch FROM min(sample.observed_at))::double precision
-                    FROM traffic_counter_samples sample
-                    JOIN requested
-                      ON requested.source_kind = sample.source_kind
-                     AND requested.interface = sample.interface
-                    WHERE sample.client_id = $1
+                    SELECT min(history.observed_unix)::double precision
+                    FROM (
+                        SELECT extract(epoch FROM sample.observed_at) AS observed_unix
+                        FROM traffic_counter_samples sample
+                        JOIN requested
+                          ON requested.source_kind = sample.source_kind
+                         AND requested.interface = sample.interface
+                        WHERE sample.client_id = $1
+                        UNION ALL
+                        SELECT extract(epoch FROM rollup.bucket_start) AS observed_unix
+                        FROM traffic_counter_rollups rollup
+                        JOIN requested
+                          ON requested.source_kind = rollup.source_kind
+                         AND requested.interface = rollup.interface
+                        WHERE rollup.client_id = $1
+                    ) history
                     "#,
                 )
                 .bind(client_id)
@@ -787,25 +773,49 @@ impl Repository {
         let step_secs = step_secs.max(60);
         match self {
             Self::Memory(memory) => {
-                let samples = if raw {
-                    raw_memory_traffic_samples(
+                if raw {
+                    let live_samples = raw_memory_traffic_samples(
                         &memory.telemetry_samples.read().await,
                         client_id,
                         &streams,
-                    )?
-                } else {
-                    memory
+                    )?;
+                    let exact_samples = memory
                         .traffic_counter_samples
                         .read()
                         .await
                         .iter()
                         .filter(|sample| sample.client_id == client_id)
                         .cloned()
-                        .collect()
-                };
-                Ok(aggregate_memory_traffic_history(
-                    samples, &streams, start_unix, end_unix, step_secs,
-                ))
+                        .collect::<Vec<_>>();
+                    Ok(aggregate_memory_raw_traffic_history(
+                        live_samples,
+                        &exact_samples,
+                        &streams,
+                        start_unix,
+                        end_unix,
+                        step_secs,
+                    ))
+                } else {
+                    let samples = memory
+                        .traffic_counter_samples
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|sample| sample.client_id == client_id)
+                        .cloned()
+                        .collect();
+                    let rollups = memory
+                        .traffic_counter_rollups
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|rollup| rollup.client_id == client_id)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    Ok(aggregate_memory_traffic_history(
+                        samples, &rollups, &streams, start_unix, end_unix, step_secs,
+                    ))
+                }
             }
             Self::Postgres(pool) => {
                 let source_kinds = streams
@@ -884,7 +894,7 @@ impl Repository {
                                 PARTITION BY source_kind, interface
                                 ORDER BY observed_at, sample_id, ordinal
                             )
-                        ), deltas AS (
+                        ), raw_deltas AS (
                             SELECT
                                 floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
                                     * $7::numeric AS bucket_epoch,
@@ -901,6 +911,110 @@ impl Repository {
                             WHERE observed_at >= to_timestamp($5)
                               AND observed_at <= to_timestamp($6)
                               AND previous_rx_bytes IS NOT NULL
+                        ), import_range AS (
+                            SELECT
+                                requested.source_kind,
+                                requested.interface,
+                                requested.direction_mask,
+                                sample.observed_at,
+                                sample.rx_bytes,
+                                sample.tx_bytes,
+                                sample.rx_counter_epoch,
+                                sample.tx_counter_epoch,
+                                sample.sample_source
+                            FROM traffic_counter_samples sample
+                            JOIN requested
+                              ON requested.source_kind = sample.source_kind
+                             AND requested.interface = sample.interface
+                            WHERE sample.client_id = $1
+                              AND sample.observed_at >= to_timestamp($5)
+                              AND sample.observed_at <= to_timestamp($6)
+                              AND sample.sample_source LIKE 'vnstat_import:%'
+                              -- Promoted exact rows are retained only as
+                              -- sequencing boundaries; their inbound delta is
+                              -- already represented by a rollup.
+                              AND NOT sample.inbound_promoted
+                        ), import_first AS (
+                            SELECT
+                                source_kind,
+                                interface,
+                                direction_mask,
+                                min(observed_at) AS observed_at
+                            FROM import_range
+                            GROUP BY source_kind, interface, direction_mask
+                        ), import_baseline AS (
+                            SELECT
+                                import_first.source_kind,
+                                import_first.interface,
+                                import_first.direction_mask,
+                                previous.observed_at,
+                                previous.rx_bytes,
+                                previous.tx_bytes,
+                                previous.rx_counter_epoch,
+                                previous.tx_counter_epoch,
+                                previous.sample_source
+                            FROM import_first
+                            JOIN LATERAL (
+                                SELECT
+                                    sample.observed_at,
+                                    sample.rx_bytes,
+                                    sample.tx_bytes,
+                                    sample.rx_counter_epoch,
+                                    sample.tx_counter_epoch,
+                                    sample.sample_source
+                                FROM traffic_counter_samples sample
+                                WHERE sample.client_id = $1
+                                  AND sample.source_kind = import_first.source_kind
+                                  AND sample.interface = import_first.interface
+                                  AND sample.observed_at < import_first.observed_at
+                                ORDER BY sample.observed_at DESC
+                                LIMIT 1
+                            ) previous ON TRUE
+                        ), import_selected AS (
+                            SELECT * FROM import_range
+                            UNION ALL
+                            SELECT * FROM import_baseline
+                        ), import_sequenced AS (
+                            SELECT
+                                import_selected.*,
+                                lag(rx_bytes) OVER stream AS previous_rx_bytes,
+                                lag(tx_bytes) OVER stream AS previous_tx_bytes,
+                                lag(rx_counter_epoch) OVER stream
+                                    AS previous_rx_counter_epoch,
+                                lag(tx_counter_epoch) OVER stream
+                                    AS previous_tx_counter_epoch
+                            FROM import_selected
+                            WINDOW stream AS (
+                                PARTITION BY source_kind, interface
+                                ORDER BY observed_at
+                            )
+                        ), import_deltas AS (
+                            SELECT
+                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
+                                    * $7::numeric AS bucket_epoch,
+                                direction_mask,
+                                rx_bytes,
+                                tx_bytes,
+                                previous_rx_bytes,
+                                previous_tx_bytes,
+                                (direction_mask & 1) <> 0 AS selected_rx,
+                                (direction_mask & 2) <> 0 AS selected_tx,
+                                (rx_counter_epoch = previous_rx_counter_epoch
+                                  AND rx_bytes >= previous_rx_bytes) AS valid_rx,
+                                (tx_counter_epoch = previous_tx_counter_epoch
+                                  AND tx_bytes >= previous_tx_bytes) AS valid_tx
+                            FROM import_sequenced
+                            WHERE observed_at >= to_timestamp($5)
+                              AND observed_at <= to_timestamp($6)
+                              AND sample_source LIKE 'vnstat_import:%'
+                              AND previous_rx_bytes IS NOT NULL
+                        ), deltas AS (
+                            -- Keep raw live and imported durable sequences
+                            -- independent; importing is restricted to the
+                            -- pre-live interval, so these facts are additive.
+                            SELECT * FROM raw_deltas
+                            UNION ALL
+                            SELECT * FROM import_deltas
                         )
                         SELECT
                             to_timestamp(bucket_epoch)::text AS bucket_start,
@@ -962,7 +1076,7 @@ impl Repository {
                             SELECT source_kind, interface, direction_mask
                             FROM UNNEST($2::text[], $3::text[], $4::integer[])
                                 AS stream(source_kind, interface, direction_mask)
-                        ), range_samples AS (
+                        ), raw_range AS (
                             SELECT
                                 sample.source_kind,
                                 sample.interface,
@@ -980,7 +1094,8 @@ impl Repository {
                             WHERE sample.client_id = $1
                               AND sample.observed_at >= to_timestamp($5)
                               AND sample.observed_at <= to_timestamp($6)
-                        ), baseline AS (
+                              AND NOT sample.inbound_promoted
+                        ), raw_baseline AS (
                             SELECT
                                 requested.source_kind,
                                 requested.interface,
@@ -993,6 +1108,16 @@ impl Repository {
                                 previous.sample_source
                             FROM requested
                             JOIN LATERAL (
+                                SELECT min(sample.observed_at) AS observed_at
+                                FROM traffic_counter_samples sample
+                                WHERE sample.client_id = $1
+                                  AND sample.source_kind = requested.source_kind
+                                  AND sample.interface = requested.interface
+                                  AND sample.observed_at >= to_timestamp($5)
+                                  AND sample.observed_at <= to_timestamp($6)
+                                  AND NOT sample.inbound_promoted
+                            ) first_raw ON first_raw.observed_at IS NOT NULL
+                            JOIN LATERAL (
                                 SELECT
                                     observed_at,
                                     rx_bytes,
@@ -1004,99 +1129,205 @@ impl Repository {
                                 WHERE sample.client_id = $1
                                   AND sample.source_kind = requested.source_kind
                                   AND sample.interface = requested.interface
-                                  AND sample.observed_at < to_timestamp($5)
+                                  AND sample.observed_at < first_raw.observed_at
                                 ORDER BY sample.observed_at DESC
                                 LIMIT 1
                             ) previous ON TRUE
-                        ), selected AS (
-                            SELECT * FROM range_samples
+                        ), raw_selected AS (
+                            SELECT * FROM raw_range
                             UNION ALL
-                            SELECT * FROM baseline
-                        ), sequenced AS (
+                            SELECT * FROM raw_baseline
+                        ), raw_sequenced AS (
                             SELECT
-                                selected.*,
+                                raw_selected.*,
                                 lag(rx_bytes) OVER stream AS previous_rx_bytes,
                                 lag(tx_bytes) OVER stream AS previous_tx_bytes,
                                 lag(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
                                 lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
                                 lag(sample_source) OVER stream AS previous_sample_source
-                            FROM selected
+                            FROM raw_selected
                             WINDOW stream AS (
                                 PARTITION BY source_kind, interface
                                 ORDER BY observed_at
                             )
-                        ), deltas AS (
+                        ), raw_native AS (
                             SELECT
-                                floor(extract(epoch FROM observed_at)::numeric / $7::numeric)
-                                    * $7::numeric AS bucket_epoch,
+                                floor(extract(epoch FROM observed_at)::numeric / 60::numeric)
+                                    * 60::numeric AS bucket_epoch,
+                                60::integer AS native_secs,
                                 direction_mask,
-                                rx_bytes,
-                                tx_bytes,
-                                previous_rx_bytes,
-                                previous_tx_bytes,
-                                sample_source,
-                                previous_sample_source,
-                                (previous_sample_source LIKE 'vnstat_import:%'
-                                  AND sample_source NOT LIKE 'vnstat_import:%')
-                                    AS intentional_import_boundary,
-                                (direction_mask & 1) <> 0 AS selected_rx,
-                                (direction_mask & 2) <> 0 AS selected_tx,
-                                ((direction_mask & 1) = 0 OR (
-                                    rx_counter_epoch = previous_rx_counter_epoch
-                                    AND rx_bytes >= previous_rx_bytes
-                                )) AS valid_rx,
-                                ((direction_mask & 2) = 0 OR (
-                                    tx_counter_epoch = previous_tx_counter_epoch
-                                    AND tx_bytes >= previous_tx_bytes
-                                )) AS valid_tx
-                            FROM sequenced
+                                CASE WHEN rx_counter_epoch = previous_rx_counter_epoch
+                                           AND rx_bytes >= previous_rx_bytes
+                                     THEN rx_bytes - previous_rx_bytes ELSE 0 END::bigint
+                                    AS rx_bytes,
+                                CASE WHEN tx_counter_epoch = previous_tx_counter_epoch
+                                           AND tx_bytes >= previous_tx_bytes
+                                     THEN tx_bytes - previous_tx_bytes ELSE 0 END::bigint
+                                    AS tx_bytes,
+                                (rx_counter_epoch = previous_rx_counter_epoch
+                                  AND rx_bytes >= previous_rx_bytes)::integer AS rx_valid_count,
+                                (tx_counter_epoch = previous_tx_counter_epoch
+                                  AND tx_bytes >= previous_tx_bytes)::integer AS tx_valid_count,
+                                ((rx_counter_epoch = previous_rx_counter_epoch
+                                    AND rx_bytes >= previous_rx_bytes)
+                                  OR (tx_counter_epoch = previous_tx_counter_epoch
+                                    AND tx_bytes >= previous_tx_bytes))::integer
+                                    AS any_valid_count,
+                                (NOT (
+                                    previous_sample_source LIKE 'vnstat_import:%'
+                                    AND sample_source NOT LIKE 'vnstat_import:%'
+                                 ) AND rx_counter_epoch <> previous_rx_counter_epoch)::integer
+                                    AS rx_reset_count,
+                                (NOT (
+                                    previous_sample_source LIKE 'vnstat_import:%'
+                                    AND sample_source NOT LIKE 'vnstat_import:%'
+                                 ) AND tx_counter_epoch <> previous_tx_counter_epoch)::integer
+                                    AS tx_reset_count,
+                                (NOT (
+                                    previous_sample_source LIKE 'vnstat_import:%'
+                                    AND sample_source NOT LIKE 'vnstat_import:%'
+                                 ) AND (
+                                    rx_counter_epoch <> previous_rx_counter_epoch
+                                    OR tx_counter_epoch <> previous_tx_counter_epoch
+                                 ))::integer AS any_reset_count
+                            FROM raw_sequenced
                             WHERE observed_at >= to_timestamp($5)
                               AND observed_at <= to_timestamp($6)
                               AND previous_rx_bytes IS NOT NULL
+                        ), retained_native AS (
+                            SELECT
+                                extract(epoch FROM rollup.bucket_start)::numeric
+                                    AS bucket_epoch,
+                                rollup.bucket_secs AS native_secs,
+                                requested.direction_mask,
+                                rollup.rx_bytes,
+                                rollup.tx_bytes,
+                                rollup.rx_valid_count,
+                                rollup.tx_valid_count,
+                                rollup.any_valid_count,
+                                rollup.rx_reset_count,
+                                rollup.tx_reset_count,
+                                rollup.any_reset_count
+                            FROM traffic_counter_rollups rollup
+                            JOIN requested
+                              ON requested.source_kind = rollup.source_kind
+                             AND requested.interface = rollup.interface
+                            WHERE rollup.client_id = $1
+                              AND rollup.bucket_start
+                                    < to_timestamp($6)
+                                        + make_interval(secs => 1)
+                              AND rollup.bucket_start
+                                    + make_interval(secs => rollup.bucket_secs)
+                                    > to_timestamp($5)
+                              AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM traffic_counter_rollups finer
+                                    WHERE finer.client_id = rollup.client_id
+                                      AND finer.source_kind = rollup.source_kind
+                                      AND finer.interface = rollup.interface
+                                      AND finer.origin_kind = rollup.origin_kind
+                                      AND finer.bucket_secs < rollup.bucket_secs
+                                      AND finer.bucket_start < rollup.bucket_start
+                                            + make_interval(secs => rollup.bucket_secs)
+                                      AND finer.bucket_start
+                                            + make_interval(secs => finer.bucket_secs)
+                                            > rollup.bucket_start
+                                    -- Keep this interval-existence check
+                                    -- correlated. PostgreSQL otherwise
+                                    -- flattens it into a quadratic hash
+                                    -- anti-join for long retained ranges.
+                                    OFFSET 0
+                              )
+                              AND NOT EXISTS (
+                                    SELECT 1
+                                    FROM traffic_counter_samples exact
+                                    WHERE exact.client_id = rollup.client_id
+                                      AND exact.source_kind = rollup.source_kind
+                                      AND exact.interface = rollup.interface
+                                      AND NOT exact.inbound_promoted
+                                      AND (CASE
+                                            WHEN exact.sample_source LIKE 'vnstat_import:%'
+                                            THEN 'vnstat_import' ELSE 'live'
+                                          END) = rollup.origin_kind
+                                      AND exact.observed_at >= rollup.bucket_start
+                                      AND exact.observed_at < rollup.bucket_start
+                                            + make_interval(secs => rollup.bucket_secs)
+                                    -- Preserve indexed per-bucket probes for
+                                    -- the exact tail instead of comparing
+                                    -- every exact row with every rollup.
+                                    OFFSET 0
+                              )
+                        ), native AS (
+                            SELECT * FROM raw_native
+                            UNION ALL
+                            SELECT * FROM retained_native
+                        ), output AS (
+                            SELECT
+                                floor(
+                                    bucket_epoch
+                                    / GREATEST($7::integer, native_secs)::numeric
+                                ) * GREATEST($7::integer, native_secs)::numeric
+                                    AS output_epoch,
+                                GREATEST($7::integer, native_secs) AS output_secs,
+                                direction_mask,
+                                rx_bytes,
+                                tx_bytes,
+                                rx_valid_count,
+                                tx_valid_count,
+                                any_valid_count,
+                                rx_reset_count,
+                                tx_reset_count,
+                                any_reset_count
+                            FROM native
                         )
                         SELECT
-                            to_timestamp(bucket_epoch)::text AS bucket_start,
-                            $7::integer AS bucket_secs,
-                            count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            )::integer AS sample_count,
-                            count(*) FILTER (
-                                WHERE NOT intentional_import_boundary
-                                  AND ((selected_rx AND NOT valid_rx)
-                                   OR (selected_tx AND NOT valid_tx))
-                            )::integer AS reset_count,
+                            to_timestamp(output_epoch)::text AS bucket_start,
+                            output_secs AS bucket_secs,
+                            LEAST(sum(CASE direction_mask
+                                WHEN 1 THEN rx_valid_count
+                                WHEN 2 THEN tx_valid_count
+                                ELSE any_valid_count
+                            END), 2147483647)::integer AS sample_count,
+                            LEAST(sum(CASE direction_mask
+                                WHEN 1 THEN rx_reset_count
+                                WHEN 2 THEN tx_reset_count
+                                ELSE any_reset_count
+                            END), 2147483647)::integer AS reset_count,
                             CASE
-                            WHEN count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            ) = 0 THEN NULL
-                            WHEN bool_or(selected_rx) AND count(*) FILTER (
-                                WHERE selected_rx AND valid_rx
-                            ) = 0 THEN NULL
-                            ELSE
-                                COALESCE(sum(
-                                    CASE WHEN selected_rx AND valid_rx
-                                        THEN rx_bytes - previous_rx_bytes ELSE 0 END
-                                ), 0)::bigint
+                            WHEN sum(CASE direction_mask
+                                WHEN 1 THEN rx_valid_count
+                                WHEN 2 THEN tx_valid_count
+                                ELSE any_valid_count
+                            END) = 0
+                              OR (bool_or((direction_mask & 1) <> 0)
+                                  AND sum(CASE
+                                      WHEN (direction_mask & 1) <> 0
+                                      THEN rx_valid_count ELSE 0
+                                  END) = 0)
+                            THEN NULL
+                            ELSE COALESCE(sum(CASE
+                                WHEN (direction_mask & 1) <> 0 THEN rx_bytes ELSE 0
+                            END), 0)::bigint
                             END AS rx_bytes,
                             CASE
-                            WHEN count(*) FILTER (
-                                WHERE (selected_rx AND valid_rx)
-                                   OR (selected_tx AND valid_tx)
-                            ) = 0 THEN NULL
-                            WHEN bool_or(selected_tx) AND count(*) FILTER (
-                                WHERE selected_tx AND valid_tx
-                            ) = 0 THEN NULL
-                            ELSE
-                                COALESCE(sum(
-                                    CASE WHEN selected_tx AND valid_tx
-                                        THEN tx_bytes - previous_tx_bytes ELSE 0 END
-                                ), 0)::bigint
+                            WHEN sum(CASE direction_mask
+                                WHEN 1 THEN rx_valid_count
+                                WHEN 2 THEN tx_valid_count
+                                ELSE any_valid_count
+                            END) = 0
+                              OR (bool_or((direction_mask & 2) <> 0)
+                                  AND sum(CASE
+                                      WHEN (direction_mask & 2) <> 0
+                                      THEN tx_valid_count ELSE 0
+                                  END) = 0)
+                            THEN NULL
+                            ELSE COALESCE(sum(CASE
+                                WHEN (direction_mask & 2) <> 0 THEN tx_bytes ELSE 0
+                            END), 0)::bigint
                             END AS tx_bytes
-                        FROM deltas
-                        GROUP BY bucket_epoch
-                        ORDER BY bucket_epoch
+                        FROM output
+                        GROUP BY output_epoch, output_secs
+                        ORDER BY output_epoch, output_secs
                         "#,
                     )
                     .bind(client_id)
@@ -2406,6 +2637,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => Ok(aggregate_memory_traffic_counter_usage(
                 &memory.traffic_counter_samples.read().await,
+                &memory.traffic_counter_rollups.read().await,
                 requests,
                 now_unix,
             )),
@@ -3582,6 +3814,7 @@ fn memory_no_reset_direction_usage(
 
 fn aggregate_memory_no_reset_traffic_counter_usage(
     samples: &[TrafficCounterSampleRecord],
+    rollups: &[TrafficCounterRollupRecord],
     requests: &[TrafficStreamRequest],
     now_unix: i64,
 ) -> Vec<TrafficCounterStreamUsage> {
@@ -3623,10 +3856,23 @@ fn aggregate_memory_no_reset_traffic_counter_usage(
         .zip(accumulators)
         .filter_map(|(request, accumulator)| {
             let latest = accumulator.latest?;
-            let (cycle_rx, rx_counter_epochs_seen) =
+            let (mut cycle_rx, mut rx_counter_epochs_seen) =
                 memory_no_reset_direction_usage(&accumulator.rx_epochs, true);
-            let (cycle_tx, tx_counter_epochs_seen) =
+            let (mut cycle_tx, mut tx_counter_epochs_seen) =
                 memory_no_reset_direction_usage(&accumulator.tx_epochs, false);
+            for rollup in rollups.iter().filter(|rollup| {
+                rollup.client_id == request.client_id
+                    && rollup.source_kind == request.source_kind
+                    && rollup.interface == request.interface
+                    && rollup.bucket_start_unix <= now_unix
+            }) {
+                cycle_rx = cycle_rx.saturating_add(rollup.rx_bytes);
+                cycle_tx = cycle_tx.saturating_add(rollup.tx_bytes);
+                rx_counter_epochs_seen =
+                    rx_counter_epochs_seen.saturating_add(i64::from(rollup.rx_reset_count));
+                tx_counter_epochs_seen =
+                    tx_counter_epochs_seen.saturating_add(i64::from(rollup.tx_reset_count));
+            }
             Some(TrafficCounterStreamUsage {
                 client_id: request.client_id.clone(),
                 source_kind: request.source_kind.clone(),
@@ -3645,6 +3891,7 @@ fn aggregate_memory_no_reset_traffic_counter_usage(
 
 fn aggregate_memory_traffic_counter_usage(
     samples: &[TrafficCounterSampleRecord],
+    rollups: &[TrafficCounterRollupRecord],
     requests: &[TrafficStreamRequest],
     now_unix: i64,
 ) -> Vec<TrafficCounterStreamUsage> {
@@ -3658,8 +3905,12 @@ fn aggregate_memory_traffic_counter_usage(
         .filter(|request| request.cycle_start_unix != NO_RESET_TRAFFIC_START_UNIX)
         .cloned()
         .collect::<Vec<_>>();
-    let mut rows =
-        aggregate_memory_no_reset_traffic_counter_usage(samples, &no_reset_requests, now_unix);
+    let mut rows = aggregate_memory_no_reset_traffic_counter_usage(
+        samples,
+        rollups,
+        &no_reset_requests,
+        now_unix,
+    );
     if monthly_requests.is_empty() {
         rows.sort_by(|left, right| {
             left.client_id
@@ -3836,8 +4087,83 @@ fn raw_memory_traffic_samples(
     Ok(rows)
 }
 
+fn aggregate_memory_raw_traffic_history(
+    live_samples: Vec<TrafficCounterSampleRecord>,
+    exact_samples: &[TrafficCounterSampleRecord],
+    streams: &[TrafficHistoryStream],
+    start_unix: u64,
+    end_unix: u64,
+    step_secs: i32,
+) -> Vec<TrafficHistoryPointView> {
+    // vnStat import is authoritative for the interval before live collection
+    // starts. Sequence it independently so the join cannot invent a transition
+    // between imported durable counters and partial-minute live observations.
+    let imported_samples = exact_samples
+        .iter()
+        .filter(|sample| is_vnstat_import_source(&sample.sample_source))
+        .cloned()
+        .collect::<Vec<_>>();
+    merge_traffic_history_points(
+        aggregate_memory_traffic_history(
+            live_samples,
+            &[],
+            streams,
+            start_unix,
+            end_unix,
+            step_secs,
+        ),
+        aggregate_memory_traffic_history(
+            imported_samples,
+            &[],
+            streams,
+            start_unix,
+            end_unix,
+            step_secs,
+        ),
+    )
+}
+
+fn merge_traffic_history_points(
+    primary: Vec<TrafficHistoryPointView>,
+    additional: Vec<TrafficHistoryPointView>,
+) -> Vec<TrafficHistoryPointView> {
+    let mut buckets = BTreeMap::<(i64, i32), TrafficHistoryPointView>::new();
+    for point in primary.into_iter().chain(additional) {
+        let bucket_unix = point.bucket_start.parse::<i64>().unwrap_or_default();
+        let entry = buckets
+            .entry((bucket_unix, point.bucket_secs))
+            .or_insert_with(|| TrafficHistoryPointView {
+                bucket_start: point.bucket_start.clone(),
+                bucket_secs: point.bucket_secs,
+                sample_count: 0,
+                reset_count: 0,
+                rx_bytes: None,
+                tx_bytes: None,
+                total_bytes: None,
+            });
+        entry.sample_count = entry.sample_count.saturating_add(point.sample_count);
+        entry.reset_count = entry.reset_count.saturating_add(point.reset_count);
+        entry.rx_bytes = add_optional_traffic_bytes(entry.rx_bytes, point.rx_bytes);
+        entry.tx_bytes = add_optional_traffic_bytes(entry.tx_bytes, point.tx_bytes);
+        entry.total_bytes = entry
+            .rx_bytes
+            .zip(entry.tx_bytes)
+            .map(|(rx, tx)| rx.saturating_add(tx));
+    }
+    buckets.into_values().collect()
+}
+
+fn add_optional_traffic_bytes(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
 fn aggregate_memory_traffic_history(
     samples: Vec<TrafficCounterSampleRecord>,
+    rollups: &[TrafficCounterRollupRecord],
     streams: &[TrafficHistoryStream],
     start_unix: u64,
     end_unix: u64,
@@ -3858,7 +4184,7 @@ fn aggregate_memory_traffic_history(
     let start_unix = i64::try_from(start_unix).unwrap_or(i64::MAX);
     let end_unix = i64::try_from(end_unix).unwrap_or(i64::MAX);
     let step = i64::from(step_secs.max(60));
-    let mut buckets = BTreeMap::<i64, Bucket>::new();
+    let mut buckets = BTreeMap::<(i64, i64), Bucket>::new();
     for stream in streams {
         let mut selected = samples
             .iter()
@@ -3880,7 +4206,7 @@ fn aggregate_memory_traffic_history(
                 continue;
             }
             let bucket = buckets
-                .entry(sample.observed_unix.div_euclid(step) * step)
+                .entry((sample.observed_unix.div_euclid(step) * step, step))
                 .or_default();
             let selected_rx = stream.direction_mask & 1 != 0;
             let selected_tx = stream.direction_mask & 2 != 0;
@@ -3912,9 +4238,52 @@ fn aggregate_memory_traffic_history(
             }
         }
     }
+    for stream in streams {
+        for rollup in rollups.iter().filter(|rollup| {
+            rollup.source_kind == stream.source_kind
+                && rollup.interface == stream.interface
+                && rollup.bucket_start_unix <= end_unix
+                && rollup
+                    .bucket_start_unix
+                    .saturating_add(i64::from(rollup.bucket_secs))
+                    > start_unix
+        }) {
+            let output_step = step.max(i64::from(rollup.bucket_secs));
+            let bucket = buckets
+                .entry((
+                    rollup.bucket_start_unix.div_euclid(output_step) * output_step,
+                    output_step,
+                ))
+                .or_default();
+            let selected_rx = stream.direction_mask & 1 != 0;
+            let selected_tx = stream.direction_mask & 2 != 0;
+            bucket.selected_rx |= selected_rx;
+            bucket.selected_tx |= selected_tx;
+            let valid_count = match stream.direction_mask {
+                0b01 => rollup.rx_valid_count,
+                0b10 => rollup.tx_valid_count,
+                _ => rollup.any_valid_count,
+            };
+            let reset_count = match stream.direction_mask {
+                0b01 => rollup.rx_reset_count,
+                0b10 => rollup.tx_reset_count,
+                _ => rollup.any_reset_count,
+            };
+            bucket.sample_count = bucket.sample_count.saturating_add(valid_count);
+            bucket.reset_count = bucket.reset_count.saturating_add(reset_count);
+            if selected_rx {
+                bucket.valid_rx_count = bucket.valid_rx_count.saturating_add(rollup.rx_valid_count);
+                bucket.rx_bytes = bucket.rx_bytes.saturating_add(rollup.rx_bytes);
+            }
+            if selected_tx {
+                bucket.valid_tx_count = bucket.valid_tx_count.saturating_add(rollup.tx_valid_count);
+                bucket.tx_bytes = bucket.tx_bytes.saturating_add(rollup.tx_bytes);
+            }
+        }
+    }
     buckets
         .into_iter()
-        .map(|(bucket_start, bucket)| {
+        .map(|((bucket_start, bucket_secs), bucket)| {
             let has_samples = bucket.sample_count > 0;
             let rx_bytes = (has_samples && (!bucket.selected_rx || bucket.valid_rx_count > 0))
                 .then_some(bucket.rx_bytes);
@@ -3922,7 +4291,7 @@ fn aggregate_memory_traffic_history(
                 .then_some(bucket.tx_bytes);
             TrafficHistoryPointView {
                 bucket_start: bucket_start.to_string(),
-                bucket_secs: step_secs.max(60),
+                bucket_secs: i32::try_from(bucket_secs).unwrap_or(i32::MAX),
                 sample_count: bucket.sample_count,
                 reset_count: bucket.reset_count,
                 rx_bytes,

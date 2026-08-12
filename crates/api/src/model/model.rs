@@ -245,6 +245,8 @@ pub(crate) struct TelemetryNetworkRateView {
     pub(crate) rx_counter_epoch: i64,
     #[serde(skip_serializing)]
     pub(crate) tx_counter_epoch: i64,
+    #[serde(skip_serializing)]
+    pub(crate) latest_observed_at: String,
     pub(crate) rx_bytes_delta: i64,
     pub(crate) tx_bytes_delta: i64,
     pub(crate) rx_bps_avg: f64,
@@ -450,7 +452,14 @@ pub(crate) struct NetworkObservationTrendView {
     pub(crate) interface_name: Option<String>,
     pub(crate) client_id: String,
     pub(crate) peer_client_id: Option<String>,
+    pub(crate) bucket_start: Option<String>,
+    pub(crate) bucket_secs: Option<i64>,
+    pub(crate) retained: bool,
     pub(crate) sample_count: i64,
+    /// Number of exact samples or retained source buckets represented by this trend.
+    pub(crate) source_bucket_count: i64,
+    /// Coarsest retained bucket used by the result; `None` means exact evidence only.
+    pub(crate) effective_resolution_secs: Option<i64>,
     pub(crate) automatic_count: i64,
     pub(crate) manual_count: i64,
     pub(crate) healthy_count: i64,

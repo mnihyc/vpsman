@@ -298,10 +298,11 @@ absent. Selecting a card opens the canonical VPS detail with shared
 **15m**, **1h**, **8h**, **1d**, **7d**, **30d**, **90d**, **180d**, **1y**,
 **All**, and **Custom** ranges. 15m is the rolling realtime view.
 
-Accepted high-resolution samples default to 90 days. Authoritative
-minute-derived resource, network, traffic-counter, and Ping history defaults to
-3,650 days; exact-equivalent adjacent resource/network/Ping minutes may be
-stored as a longer lossless span. There is no competing hourly history.
+Accepted high-resolution samples default to 7 days. Authoritative resource,
+network, Ping, system, and reset-safe traffic history is promoted through
+UTC-aligned age tiers, from one-minute recent evidence to daily evidence through
+3,650 days. The API reports the effective source resolution, and charts never
+split a coarse retained bucket into fabricated fine points.
 
 **Observability > Ping targets** manages reusable ICMP/TCP definitions, frozen
 VPS assignments, and an explicit primary target for each card.

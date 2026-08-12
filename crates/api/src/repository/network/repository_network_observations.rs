@@ -225,6 +225,22 @@ impl Repository {
                     );
                 }
 
+                let retained_rows = sqlx::query(
+                    r#"
+                    SELECT series.plan_id,
+                           LEAST(
+                               COALESCE(SUM(rollup.sample_count), 0),
+                               9223372036854775807::numeric
+                           )::bigint AS cleared_count
+                    FROM network_observation_rollups rollup
+                    JOIN network_observation_series series ON series.id = rollup.series_id
+                    WHERE series.plan_id = ANY($1::uuid[])
+                    GROUP BY series.plan_id
+                    "#,
+                )
+                .bind(&plan_ids)
+                .fetch_all(&mut *tx)
+                .await?;
                 let rows = sqlx::query(
                     r#"
                     WITH deleted AS (
@@ -240,13 +256,23 @@ impl Repository {
                 .bind(&plan_ids)
                 .fetch_all(&mut *tx)
                 .await?;
-                let cleared_by_plan = rows
-                    .iter()
-                    .map(|row| {
-                        let count = row.try_get::<i64, _>("cleared_count")?;
-                        Ok((row.try_get("plan_id")?, u64::try_from(count)?))
-                    })
-                    .collect::<Result<HashMap<Uuid, u64>>>()?;
+                sqlx::query(
+                    "DELETE FROM network_observation_series WHERE plan_id = ANY($1::uuid[])",
+                )
+                .bind(&plan_ids)
+                .execute(&mut *tx)
+                .await?;
+                let mut cleared_by_plan = HashMap::<Uuid, u64>::new();
+                for row in rows {
+                    let count = row.try_get::<i64, _>("cleared_count")?;
+                    cleared_by_plan.insert(row.try_get("plan_id")?, u64::try_from(count)?);
+                }
+                for row in retained_rows {
+                    let count = u64::try_from(row.try_get::<i64, _>("cleared_count")?)?;
+                    let plan_id = row.try_get("plan_id")?;
+                    let total = cleared_by_plan.entry(plan_id).or_default();
+                    *total = total.saturating_add(count);
+                }
                 let results = targets
                     .iter()
                     .map(|(plan_id, _)| {
@@ -374,7 +400,7 @@ impl Repository {
                                     COALESCE(observation.endpoint_side, observation.client_id)
                                 ORDER BY observation.observed_at DESC, observation.id DESC
                             ) AS evidence_rank
-                        FROM network_observations observation
+                        FROM network_observation_exact_evidence observation
                         WHERE observation.observed_at >= to_timestamp($1)
                           AND observation.observed_at <= to_timestamp($2)
                           AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
@@ -437,7 +463,7 @@ impl Repository {
                 let rows = sqlx::query(&format!(
                     r#"
                     SELECT {OBSERVATION_COLUMNS}
-                    FROM network_observations observation
+                    FROM network_observation_exact_evidence observation
                     WHERE observation.observed_at >= to_timestamp($1)
                       AND observation.observed_at <= to_timestamp($2)
                       AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
@@ -547,7 +573,7 @@ impl Repository {
                                 PARTITION BY plan_id, kind, COALESCE(endpoint_side, client_id)
                                 ORDER BY observed_at DESC, id DESC
                             ) AS evidence_rank
-                        FROM network_observations
+                        FROM network_observation_exact_evidence
                         WHERE observed_at >= to_timestamp($1)
                           AND observed_at <= to_timestamp($2)
                           AND plan_id = ANY($3::uuid[])
@@ -602,12 +628,34 @@ impl Repository {
         &self,
         filter: &NetworkObservationFilter,
     ) -> Result<Vec<NetworkObservationTrendView>> {
-        let mut observations_filter = filter.clone();
-        observations_filter.limit = filter.limit.max(1).saturating_mul(2_000).min(250_000);
-        let observations = self
-            .list_network_observations_filtered(&observations_filter)
-            .await?;
-        let mut trends = summarize_network_observation_trends(&observations);
+        let mut trends = match self {
+            Self::Memory(_) => {
+                let mut observations_filter = filter.clone();
+                observations_filter.limit = filter.limit.max(1).saturating_mul(2_000).min(250_000);
+                let observations = self
+                    .list_network_observations_filtered(&observations_filter)
+                    .await?;
+                summarize_network_observation_trends(&observations)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(NETWORK_OBSERVATION_TRENDS_QUERY)
+                    .bind(filter.start_unix)
+                    .bind(filter.end_unix)
+                    .bind(&filter.plan_ids)
+                    .bind(filter.client_id.as_deref())
+                    .bind(filter.source.as_deref())
+                    .bind(filter.kind.as_deref())
+                    .bind(filter.health.as_deref())
+                    .bind(filter.search.as_deref())
+                    .bind(filter.visible_only)
+                    .bind(filter.limit.max(1))
+                    .fetch_all(pool)
+                    .await?;
+                rows.into_iter()
+                    .map(network_observation_trend_from_row)
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+        };
         trends.sort_by(|left, right| {
             compare_timestamps_desc(&left.latest_observed_at, &right.latest_observed_at)
                 .then_with(|| left.kind.cmp(&right.kind))
@@ -615,6 +663,26 @@ impl Repository {
         });
         trends.truncate(filter.limit.max(1) as usize);
         Ok(trends)
+    }
+
+    pub(crate) async fn export_network_observation_rollups(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>> {
+        match self {
+            Self::Memory(_) => Ok(Vec::new()),
+            Self::Postgres(pool) => sqlx::query(NETWORK_OBSERVATION_ROLLUPS_EXPORT_QUERY)
+                .bind(limit.max(1))
+                .fetch_all(pool)
+                .await?
+                .into_iter()
+                .map(|row| {
+                    row.try_get::<SqlJson<serde_json::Value>, _>("record")
+                        .map(|value| value.0)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Into::into),
+        }
     }
 
     async fn bind_network_observations_to_job_snapshot(
@@ -741,7 +809,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 for observation in observations {
-                    insert_network_observation(&mut tx, &observation, true).await?;
+                    insert_network_observation(&mut tx, &observation, true, None).await?;
                 }
                 tx.commit().await?;
             }
@@ -844,7 +912,14 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 for observation in accepted {
-                    insert_network_observation(&mut tx, &observation, false).await?;
+                    let series_id =
+                        upsert_automatic_observation_series(&mut tx, &observation).await?;
+                    if insert_network_observation(&mut tx, &observation, false, Some(series_id))
+                        .await?
+                    {
+                        upsert_latest_automatic_observation(&mut tx, series_id, &observation)
+                            .await?;
+                    }
                 }
                 tx.commit().await?;
             }
@@ -853,11 +928,490 @@ impl Repository {
     }
 }
 
+const NETWORK_OBSERVATION_TRENDS_QUERY: &str = r#"
+WITH raw_evidence AS (
+    SELECT
+        observation.kind,
+        observation.plan_id,
+        observation.topology_identity_hash,
+        observation.plan_name,
+        observation.interface_name,
+        observation.client_id,
+        observation.peer_client_id,
+        observation.observed_at AS bucket_start,
+        NULL::integer AS bucket_secs,
+        FALSE AS retained,
+        1::bigint AS sample_count,
+        1::bigint AS source_bucket_count,
+        NULL::integer AS effective_resolution_secs,
+        (observation.source = 'automatic')::integer::bigint AS automatic_count,
+        (observation.source = 'manual')::integer::bigint AS manual_count,
+        (observation.healthy IS TRUE)::integer::bigint AS healthy_count,
+        (observation.healthy IS FALSE)::integer::bigint AS degraded_count,
+        COALESCE(observation.latency_avg_ms, 0.0) AS latency_sum_ms,
+        (observation.latency_avg_ms IS NOT NULL)::integer::bigint AS latency_sample_count,
+        observation.latency_avg_ms AS latency_min_ms,
+        observation.latency_avg_ms AS latency_max_ms,
+        COALESCE(observation.packet_loss_ratio, 0.0) AS packet_loss_sum_ratio,
+        (observation.packet_loss_ratio IS NOT NULL)::integer::bigint
+            AS packet_loss_sample_count,
+        COALESCE(observation.throughput_mbps, 0.0) AS throughput_sum_mbps,
+        (observation.throughput_mbps IS NOT NULL)::integer::bigint
+            AS throughput_sample_count,
+        observation.throughput_mbps AS throughput_max_mbps,
+        COALESCE(observation.bytes, 0)::numeric AS bytes_total,
+        observation.observed_at AS latest_observed_at
+    FROM network_observations observation
+    WHERE observation.observed_at >= to_timestamp($1)
+      AND observation.observed_at <= to_timestamp($2)
+      AND (cardinality($3::uuid[]) = 0 OR observation.plan_id = ANY($3::uuid[]))
+      AND ($4::text IS NULL
+           OR observation.client_id = $4
+           OR observation.peer_client_id = $4)
+      AND ($5::text IS NULL OR observation.source = $5)
+      AND ($6::text IS NULL OR observation.kind = $6)
+      AND (
+        $7::text IS NULL
+        OR ($7 = 'healthy' AND observation.healthy IS TRUE)
+        OR ($7 = 'unhealthy' AND observation.healthy IS FALSE)
+        OR ($7 = 'unknown' AND observation.healthy IS NULL)
+      )
+      AND (
+        $8::text IS NULL
+        OR concat_ws(' ', observation.client_id, observation.peer_client_id,
+            observation.plan_name, observation.interface_name, observation.target,
+            observation.reason, observation.kind, observation.source) ILIKE '%' || $8 || '%'
+      )
+      AND (
+        NOT $9
+        OR (
+            EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.client_id)
+            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = observation.peer_client_id)
+            AND EXISTS (
+                SELECT 1 FROM tunnel_plans plan
+                WHERE plan.id = observation.plan_id AND plan.deleted_at IS NULL
+            )
+        )
+      )
+),
+filtered_rollups AS (
+    SELECT rollup.*, series.plan_id, series.topology_identity_hash,
+           series.plan_name, series.interface_name, series.client_id,
+           series.peer_client_id, series.target
+    FROM network_observation_rollups rollup
+    JOIN network_observation_series series ON series.id = rollup.series_id
+    WHERE rollup.bucket_start <= to_timestamp($2)
+      AND rollup.bucket_start + make_interval(secs => rollup.bucket_secs) > to_timestamp($1)
+      AND (cardinality($3::uuid[]) = 0 OR series.plan_id = ANY($3::uuid[]))
+      AND ($4::text IS NULL OR series.client_id = $4 OR series.peer_client_id = $4)
+      AND ($5::text IS NULL OR $5 = 'automatic')
+      AND ($6::text IS NULL OR $6 = 'tunnel_reachability')
+      AND (
+        $7::text IS NULL
+        OR ($7 = 'healthy' AND rollup.health_state = 1)
+        OR ($7 = 'unhealthy' AND rollup.health_state = 0)
+        OR ($7 = 'unknown' AND rollup.health_state = -1)
+      )
+      AND (
+        $8::text IS NULL
+        OR concat_ws(' ', series.client_id, series.peer_client_id,
+            series.plan_name, series.interface_name, series.target,
+            NULLIF(rollup.reason_key, ''), 'tunnel_reachability', 'automatic')
+            ILIKE '%' || $8 || '%'
+      )
+      AND (
+        NOT $9
+        OR (
+            EXISTS (SELECT 1 FROM visible_clients WHERE id = series.client_id)
+            AND EXISTS (SELECT 1 FROM visible_clients WHERE id = series.peer_client_id)
+            AND EXISTS (
+                SELECT 1 FROM tunnel_plans plan
+                WHERE plan.id = series.plan_id AND plan.deleted_at IS NULL
+            )
+        )
+      )
+),
+retained_evidence AS (
+    SELECT
+        'tunnel_reachability'::text AS kind,
+        rollup.plan_id,
+        rollup.topology_identity_hash,
+        rollup.plan_name,
+        rollup.interface_name,
+        rollup.client_id,
+        rollup.peer_client_id,
+        rollup.bucket_start,
+        rollup.bucket_secs,
+        TRUE AS retained,
+        rollup.sample_count,
+        (row_number() OVER (
+            PARTITION BY rollup.series_id, rollup.bucket_secs, rollup.bucket_start
+            ORDER BY rollup.health_state, rollup.reason_key
+        ) = 1)::integer::bigint AS source_bucket_count,
+        rollup.bucket_secs AS effective_resolution_secs,
+        rollup.sample_count AS automatic_count,
+        0::bigint AS manual_count,
+        CASE WHEN rollup.health_state = 1 THEN rollup.sample_count ELSE 0 END
+            AS healthy_count,
+        CASE WHEN rollup.health_state = 0 THEN rollup.sample_count ELSE 0 END
+            AS degraded_count,
+        rollup.latency_sum_ms,
+        rollup.latency_sample_count,
+        rollup.latency_min_ms,
+        rollup.latency_max_ms,
+        rollup.packet_loss_sum_ratio,
+        rollup.packet_loss_sample_count,
+        0.0::double precision AS throughput_sum_mbps,
+        0::bigint AS throughput_sample_count,
+        NULL::double precision AS throughput_max_mbps,
+        0::numeric AS bytes_total,
+        rollup.latest_observed_at
+    FROM filtered_rollups rollup
+),
+evidence AS (
+    SELECT * FROM raw_evidence
+    UNION ALL
+    SELECT * FROM retained_evidence
+),
+summarized AS (
+SELECT
+    kind,
+    plan_id,
+    topology_identity_hash,
+    plan_name,
+    interface_name,
+    client_id,
+    peer_client_id,
+    bucket_start::text AS bucket_start,
+    bucket_secs::bigint AS bucket_secs,
+    BOOL_OR(retained) AS retained,
+    SUM(sample_count)::bigint AS sample_count,
+    CASE WHEN bucket_secs IS NULL
+         THEN SUM(source_bucket_count)
+         ELSE 1
+    END::bigint AS source_bucket_count,
+    MAX(effective_resolution_secs)::bigint AS effective_resolution_secs,
+    SUM(automatic_count)::bigint AS automatic_count,
+    SUM(manual_count)::bigint AS manual_count,
+    SUM(healthy_count)::bigint AS healthy_count,
+    SUM(degraded_count)::bigint AS degraded_count,
+    SUM(latency_sum_ms)::double precision AS latency_sum_ms,
+    SUM(latency_sample_count)::bigint AS latency_sample_count,
+    MIN(latency_min_ms)::double precision AS latency_min_ms,
+    MAX(latency_max_ms)::double precision AS latency_max_ms,
+    SUM(packet_loss_sum_ratio)::double precision AS packet_loss_sum_ratio,
+    SUM(packet_loss_sample_count)::bigint AS packet_loss_sample_count,
+    SUM(throughput_sum_mbps)::double precision AS throughput_sum_mbps,
+    SUM(throughput_sample_count)::bigint AS throughput_sample_count,
+    MAX(throughput_max_mbps)::double precision AS throughput_max_mbps,
+    LEAST(SUM(bytes_total), 9223372036854775807::numeric)::bigint AS bytes_total,
+    MAX(latest_observed_at)::text AS latest_observed_at
+FROM evidence
+GROUP BY kind, plan_id, topology_identity_hash, plan_name, interface_name,
+         client_id, peer_client_id, bucket_start, bucket_secs
+),
+ranked AS (
+    SELECT summarized.*,
+           row_number() OVER (
+               PARTITION BY kind, plan_id, topology_identity_hash,
+                            interface_name, client_id, peer_client_id
+               ORDER BY bucket_start DESC, latest_observed_at DESC
+           ) AS series_rank,
+           COUNT(*) OVER (
+               PARTITION BY kind, plan_id, topology_identity_hash,
+                            interface_name, client_id, peer_client_id
+           ) AS series_points,
+           COUNT(*) OVER () AS total_points,
+           COUNT(*) OVER (
+               PARTITION BY kind, plan_id, topology_identity_hash,
+                            interface_name, client_id, peer_client_id
+           )::numeric / NULLIF(COUNT(*) OVER ()::numeric, 0)
+               AS series_share
+    FROM summarized
+),
+budgeted AS (
+    SELECT ranked.*,
+           GREATEST(2, FLOOR($10 * series_share)::bigint) AS series_budget
+    FROM ranked
+)
+SELECT
+    kind, plan_id, topology_identity_hash, plan_name, interface_name,
+    client_id, peer_client_id, bucket_start, bucket_secs, retained,
+    sample_count, source_bucket_count, effective_resolution_secs,
+    automatic_count, manual_count, healthy_count, degraded_count,
+    latency_sum_ms, latency_sample_count, latency_min_ms, latency_max_ms,
+    packet_loss_sum_ratio, packet_loss_sample_count, throughput_sum_mbps,
+    throughput_sample_count, throughput_max_mbps, bytes_total,
+    latest_observed_at
+FROM budgeted
+WHERE series_rank = 1
+   OR series_rank = series_points
+   OR FLOOR((series_rank - 1)::numeric * (series_budget - 1) / series_points)
+      <> FLOOR((series_rank - 2)::numeric * (series_budget - 1) / series_points)
+ORDER BY
+    CASE WHEN series_rank = 1 OR series_rank = series_points THEN 0 ELSE 1 END,
+    series_rank,
+    latest_observed_at DESC
+LIMIT $10
+"#;
+
+const NETWORK_OBSERVATION_ROLLUPS_EXPORT_QUERY: &str = r#"
+SELECT
+    to_jsonb(rollup) || jsonb_build_object(
+        'kind', 'tunnel_reachability',
+        'source', 'automatic',
+        'retained', TRUE,
+        'effective_resolution_secs', rollup.bucket_secs,
+        'plan_id', series.plan_id,
+        'topology_identity_hash', series.topology_identity_hash,
+        'plan_name', series.plan_name,
+        'interface_name', series.interface_name,
+        'client_id', series.client_id,
+        'peer_client_id', series.peer_client_id,
+        'endpoint_side', series.endpoint_side,
+        'address_family', series.address_family,
+        'target', series.target
+    ) AS record
+FROM network_observation_rollups rollup
+JOIN network_observation_series series ON series.id = rollup.series_id
+ORDER BY rollup.bucket_start DESC, series.id, rollup.bucket_secs
+LIMIT $1
+"#;
+
+fn network_observation_trend_from_row(
+    row: PgRow,
+) -> Result<NetworkObservationTrendView, sqlx::Error> {
+    let latency_count = row.try_get::<i64, _>("latency_sample_count")?;
+    let packet_loss_count = row.try_get::<i64, _>("packet_loss_sample_count")?;
+    let throughput_count = row.try_get::<i64, _>("throughput_sample_count")?;
+    Ok(NetworkObservationTrendView {
+        kind: row.try_get("kind")?,
+        plan_id: row.try_get("plan_id")?,
+        topology_identity_hash: row.try_get("topology_identity_hash")?,
+        plan_name: row.try_get("plan_name")?,
+        interface_name: row.try_get("interface_name")?,
+        client_id: row.try_get("client_id")?,
+        peer_client_id: row.try_get("peer_client_id")?,
+        bucket_start: row.try_get("bucket_start")?,
+        bucket_secs: row.try_get("bucket_secs")?,
+        retained: row.try_get("retained")?,
+        sample_count: row.try_get("sample_count")?,
+        source_bucket_count: row.try_get("source_bucket_count")?,
+        effective_resolution_secs: row.try_get("effective_resolution_secs")?,
+        automatic_count: row.try_get("automatic_count")?,
+        manual_count: row.try_get("manual_count")?,
+        healthy_count: row.try_get("healthy_count")?,
+        degraded_count: row.try_get("degraded_count")?,
+        latency_avg_ms: average(row.try_get("latency_sum_ms")?, latency_count),
+        latency_min_ms: row.try_get("latency_min_ms")?,
+        latency_max_ms: row.try_get("latency_max_ms")?,
+        packet_loss_avg_ratio: average(row.try_get("packet_loss_sum_ratio")?, packet_loss_count),
+        throughput_avg_mbps: average(row.try_get("throughput_sum_mbps")?, throughput_count),
+        throughput_max_mbps: row.try_get("throughput_max_mbps")?,
+        bytes_total: row.try_get("bytes_total")?,
+        latest_observed_at: row.try_get("latest_observed_at")?,
+    })
+}
+
+async fn upsert_automatic_observation_series(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    observation: &NetworkObservationView,
+) -> Result<i64> {
+    let plan_id = observation
+        .plan_id
+        .ok_or_else(|| anyhow::anyhow!("automatic reachability plan is missing"))?;
+    let topology_identity_hash =
+        required_observation_field(&observation.topology_identity_hash, "topology identity")?;
+    let endpoint_side = required_observation_field(&observation.endpoint_side, "endpoint side")?;
+    let address_family = required_observation_field(&observation.address_family, "address family")?;
+    sqlx::query(
+        r#"
+        UPDATE network_observation_series
+        SET active = FALSE
+        WHERE plan_id = $1
+          AND client_id = $2
+          AND endpoint_side = $3
+          AND address_family = $4
+          AND topology_identity_hash <> $5
+          AND active = TRUE
+        "#,
+    )
+    .bind(plan_id)
+    .bind(&observation.client_id)
+    .bind(endpoint_side)
+    .bind(address_family)
+    .bind(topology_identity_hash)
+    .execute(&mut **tx)
+    .await?;
+    let row = sqlx::query(
+        r#"
+        INSERT INTO network_observation_series (
+            plan_id, topology_identity_hash, plan_name, interface_name,
+            client_id, peer_client_id, endpoint_side, address_family, target
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT (
+            plan_id, topology_identity_hash, client_id, peer_client_id,
+            endpoint_side, address_family, interface_name, target
+        ) DO UPDATE SET
+            plan_name = EXCLUDED.plan_name,
+            active = TRUE,
+            last_seen_at = now()
+        RETURNING id
+        "#,
+    )
+    .bind(plan_id)
+    .bind(topology_identity_hash)
+    .bind(required_observation_field(
+        &observation.plan_name,
+        "plan name",
+    )?)
+    .bind(required_observation_field(
+        &observation.interface_name,
+        "interface",
+    )?)
+    .bind(&observation.client_id)
+    .bind(required_observation_field(
+        &observation.peer_client_id,
+        "peer client",
+    )?)
+    .bind(endpoint_side)
+    .bind(address_family)
+    .bind(required_observation_field(&observation.target, "target")?)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.try_get("id")?)
+}
+
+pub(crate) async fn reconcile_postgres_automatic_observation_series_for_client(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE network_observation_series series
+        SET active = FALSE
+        WHERE series.client_id = $1
+          AND series.active = TRUE
+          AND NOT EXISTS (
+              SELECT 1
+              FROM telemetry_tunnels telemetry
+              JOIN tunnel_plans plan
+                ON plan.id = series.plan_id
+               AND plan.enabled = TRUE
+               AND plan.deleted_at IS NULL
+              WHERE telemetry.client_id = series.client_id
+                AND telemetry.telemetry_plan_id = series.plan_id::text
+                AND telemetry.interface = series.interface_name
+                AND telemetry.telemetry_endpoint_side = series.endpoint_side
+                AND telemetry.telemetry_peer_client_id = series.peer_client_id
+                AND telemetry.latency_monitoring_enabled IS TRUE
+                AND telemetry.latency_primary_family = series.address_family
+                AND telemetry.latency_target = series.target
+          )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+pub(crate) async fn deactivate_postgres_automatic_observation_series_for_plan(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    plan_id: Uuid,
+    current_topology_identity_hash: Option<&str>,
+) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE network_observation_series
+        SET active = FALSE
+        WHERE plan_id = $1
+          AND active = TRUE
+          AND ($2::text IS NULL OR topology_identity_hash <> $2)
+        "#,
+    )
+    .bind(plan_id)
+    .bind(current_topology_identity_hash)
+    .execute(&mut **tx)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+fn required_observation_field<'a>(value: &'a Option<String>, name: &str) -> Result<&'a str> {
+    value
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("automatic reachability {name} is missing"))
+}
+
+async fn upsert_latest_automatic_observation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    series_id: i64,
+    observation: &NetworkObservationView,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO network_observation_latest (
+            series_id, observation_id, stale_after_secs, healthy,
+            transmitted, received, latency_min_ms, latency_avg_ms,
+            latency_max_ms, latency_mdev_ms, packet_loss_ratio, reason,
+            metadata, observed_at, received_at
+        ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+            to_timestamp($14),to_timestamp($15)
+        )
+        ON CONFLICT (series_id) DO UPDATE SET
+            observation_id = EXCLUDED.observation_id,
+            stale_after_secs = EXCLUDED.stale_after_secs,
+            healthy = EXCLUDED.healthy,
+            transmitted = EXCLUDED.transmitted,
+            received = EXCLUDED.received,
+            latency_min_ms = EXCLUDED.latency_min_ms,
+            latency_avg_ms = EXCLUDED.latency_avg_ms,
+            latency_max_ms = EXCLUDED.latency_max_ms,
+            latency_mdev_ms = EXCLUDED.latency_mdev_ms,
+            packet_loss_ratio = EXCLUDED.packet_loss_ratio,
+            reason = EXCLUDED.reason,
+            metadata = EXCLUDED.metadata,
+            observed_at = EXCLUDED.observed_at,
+            received_at = EXCLUDED.received_at,
+            updated_at = now()
+        WHERE (EXCLUDED.observed_at, EXCLUDED.observation_id)
+            > (network_observation_latest.observed_at,
+               network_observation_latest.observation_id)
+        "#,
+    )
+    .bind(series_id)
+    .bind(observation.id)
+    .bind(observation.stale_after_secs.unwrap_or(180))
+    .bind(observation.healthy.unwrap_or(false))
+    .bind(observation.transmitted.unwrap_or(0))
+    .bind(observation.received.unwrap_or(0))
+    .bind(observation.latency_min_ms)
+    .bind(observation.latency_avg_ms)
+    .bind(observation.latency_max_ms)
+    .bind(observation.latency_mdev_ms)
+    .bind(observation.packet_loss_ratio.unwrap_or(1.0))
+    .bind(&observation.reason)
+    .bind(SqlJson(&observation.metadata))
+    .bind(
+        observation_timestamp_unix(&observation.observed_at)
+            .unwrap_or_else(|| Utc::now().timestamp()),
+    )
+    .bind(
+        observation_timestamp_unix(&observation.received_at)
+            .unwrap_or_else(|| Utc::now().timestamp()),
+    )
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn insert_network_observation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     observation: &NetworkObservationView,
     manual_upsert: bool,
-) -> Result<()> {
+    automatic_series_id: Option<i64>,
+) -> Result<bool> {
     let conflict = if manual_upsert {
         "ON CONFLICT (job_id, client_id, seq) WHERE job_id IS NOT NULL AND seq IS NOT NULL DO UPDATE SET kind = EXCLUDED.kind, source = EXCLUDED.source, role = EXCLUDED.role, plan_id = EXCLUDED.plan_id, topology_identity_hash = EXCLUDED.topology_identity_hash, plan_name = EXCLUDED.plan_name, interface_name = EXCLUDED.interface_name, peer_client_id = EXCLUDED.peer_client_id, target = EXCLUDED.target, endpoint_side = EXCLUDED.endpoint_side, address_family = EXCLUDED.address_family, stale_after_secs = EXCLUDED.stale_after_secs, healthy = EXCLUDED.healthy, transmitted = EXCLUDED.transmitted, received = EXCLUDED.received, latency_min_ms = EXCLUDED.latency_min_ms, latency_avg_ms = EXCLUDED.latency_avg_ms, latency_max_ms = EXCLUDED.latency_max_ms, latency_mdev_ms = EXCLUDED.latency_mdev_ms, packet_loss_ratio = EXCLUDED.packet_loss_ratio, reason = EXCLUDED.reason, throughput_mbps = EXCLUDED.throughput_mbps, bytes = EXCLUDED.bytes, metadata = EXCLUDED.metadata, observed_at = EXCLUDED.observed_at, received_at = EXCLUDED.received_at"
     } else {
@@ -871,14 +1425,14 @@ async fn insert_network_observation(
             target, endpoint_side, address_family, stale_after_secs, healthy,
             transmitted, received, latency_min_ms, latency_avg_ms, latency_max_ms,
             latency_mdev_ms, packet_loss_ratio, reason, throughput_mbps, bytes,
-            metadata, observed_at, received_at
+            automatic_series_id, metadata, observed_at, received_at
         ) VALUES (
             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,to_timestamp($29),to_timestamp($30)
+            $18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,to_timestamp($30),to_timestamp($31)
         ) {conflict}
         "#
     );
-    sqlx::query(&query)
+    let result = sqlx::query(&query)
         .bind(observation.id)
         .bind(observation.job_id)
         .bind(&observation.client_id)
@@ -906,6 +1460,7 @@ async fn insert_network_observation(
         .bind(&observation.reason)
         .bind(observation.throughput_mbps)
         .bind(observation.bytes)
+        .bind(automatic_series_id)
         .bind(SqlJson(&observation.metadata))
         .bind(
             observation_timestamp_unix(&observation.observed_at)
@@ -917,7 +1472,7 @@ async fn insert_network_observation(
         )
         .execute(&mut **tx)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 fn network_observation_from_row(row: PgRow) -> Result<NetworkObservationView, sqlx::Error> {
@@ -1029,11 +1584,14 @@ struct TrendKey {
     interface_name: Option<String>,
     client_id: String,
     peer_client_id: Option<String>,
+    bucket_start: String,
 }
 
 struct TrendAccumulator {
     key: TrendKey,
     sample_count: i64,
+    source_bucket_count: i64,
+    effective_resolution_secs: Option<i64>,
     automatic_count: i64,
     manual_count: i64,
     healthy_count: i64,
@@ -1062,8 +1620,11 @@ impl TrendAccumulator {
                 interface_name: observation.interface_name.clone(),
                 client_id: observation.client_id.clone(),
                 peer_client_id: observation.peer_client_id.clone(),
+                bucket_start: observation.observed_at.clone(),
             },
             sample_count: 0,
+            source_bucket_count: 0,
+            effective_resolution_secs: None,
             automatic_count: 0,
             manual_count: 0,
             healthy_count: 0,
@@ -1084,6 +1645,7 @@ impl TrendAccumulator {
 
     fn add(&mut self, observation: &NetworkObservationView) {
         self.sample_count += 1;
+        self.source_bucket_count += 1;
         if observation.source == "automatic" {
             self.automatic_count += 1;
         } else {
@@ -1135,7 +1697,12 @@ impl TrendAccumulator {
             interface_name: self.key.interface_name,
             client_id: self.key.client_id,
             peer_client_id: self.key.peer_client_id,
+            bucket_start: Some(self.key.bucket_start),
+            bucket_secs: None,
+            retained: false,
             sample_count: self.sample_count,
+            source_bucket_count: self.source_bucket_count,
+            effective_resolution_secs: self.effective_resolution_secs,
             automatic_count: self.automatic_count,
             manual_count: self.manual_count,
             healthy_count: self.healthy_count,
@@ -1165,6 +1732,7 @@ pub(crate) fn summarize_network_observation_trends(
             interface_name: observation.interface_name.clone(),
             client_id: observation.client_id.clone(),
             peer_client_id: observation.peer_client_id.clone(),
+            bucket_start: observation.observed_at.clone(),
         };
         groups
             .entry(key)

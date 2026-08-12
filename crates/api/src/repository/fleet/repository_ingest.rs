@@ -26,6 +26,7 @@ use crate::repository_jobs::{
 };
 use crate::repository_key_lifecycle::public_key_sha256_hex;
 use crate::repository_monitoring::{accepted_postgres_ping_results, upsert_postgres_ping_results};
+use crate::repository_network_observations::reconcile_postgres_automatic_observation_series_for_client;
 use crate::repository_network_traffic_import::{
     is_intentional_vnstat_import_boundary, lock_postgres_traffic_counter_streams,
 };
@@ -876,9 +877,16 @@ impl Repository {
         let mut received_metrics = event.telemetry.metrics.clone();
         let reported_observed_unix = received_metrics.observed_unix;
         let received_unix = crate::unix_now();
+        let mut ping_source_checked_unix = Vec::with_capacity(received_metrics.ping_results.len());
         for result in &mut received_metrics.ping_results {
+            let source_checked_unix = result.checked_unix;
             let check_age = reported_observed_unix.saturating_sub(result.checked_unix);
             result.checked_unix = received_unix.saturating_sub(check_age);
+            // The source timestamp is the stable identity of a logical probe.
+            // The rebased timestamp remains the trusted chart timestamp, but it
+            // can move by a second when an unchanged cached result is received
+            // again with different transport latency.
+            ping_source_checked_unix.push(source_checked_unix);
         }
         for observation in &mut received_metrics.tunnel_reachability {
             let measurement_age = reported_observed_unix.saturating_sub(observation.measured_unix);
@@ -944,13 +952,15 @@ impl Repository {
                     event.remote_ip.as_deref(),
                 )
                 .await;
-                received_metrics.ping_results = self
+                let (accepted_ping_results, accepted_ping_source_checked_unix) = self
                     .accepted_ping_results_memory(
                         &event.telemetry.client_id,
                         received_metrics.observed_unix,
                         &received_metrics.ping_results,
+                        &ping_source_checked_unix,
                     )
                     .await?;
+                received_metrics.ping_results = accepted_ping_results;
                 upsert_memory_telemetry_sample(
                     &memory.telemetry_samples,
                     Uuid::new_v4(),
@@ -982,6 +992,7 @@ impl Repository {
                     &event.telemetry.client_id,
                     received_metrics.observed_unix,
                     &received_metrics.ping_results,
+                    &accepted_ping_source_checked_unix,
                 )
                 .await?;
                 let mut tunnels = memory.telemetry_tunnels.write().await;
@@ -1047,13 +1058,16 @@ impl Repository {
                         return Ok(false);
                     }
                 }
-                received_metrics.ping_results = accepted_postgres_ping_results(
-                    &mut tx,
-                    &event.telemetry.client_id,
-                    received_metrics.observed_unix,
-                    &received_metrics.ping_results,
-                )
-                .await?;
+                let (accepted_ping_results, accepted_ping_source_checked_unix) =
+                    accepted_postgres_ping_results(
+                        &mut tx,
+                        &event.telemetry.client_id,
+                        received_metrics.observed_unix,
+                        &received_metrics.ping_results,
+                        &ping_source_checked_unix,
+                    )
+                    .await?;
+                received_metrics.ping_results = accepted_ping_results;
                 lock_postgres_traffic_counter_streams(&mut tx, &event.telemetry.client_id).await?;
                 let metrics = &received_metrics;
                 let sample_id = Uuid::new_v4();
@@ -1076,6 +1090,7 @@ impl Repository {
                     sample_id,
                     &event.telemetry.client_id,
                     metrics,
+                    &accepted_ping_source_checked_unix,
                 )
                 .await?;
                 upsert_postgres_telemetry_rollup(
@@ -1102,6 +1117,7 @@ impl Repository {
                     &event.telemetry.client_id,
                     metrics.observed_unix,
                     &metrics.ping_results,
+                    &accepted_ping_source_checked_unix,
                 )
                 .await?;
                 upsert_postgres_telemetry_tunnels(&mut tx, &event.telemetry.client_id, metrics)
@@ -1665,6 +1681,7 @@ async fn insert_postgres_telemetry_ping_facts(
     sample_id: Uuid,
     client_id: &str,
     metrics: &AgentMetrics,
+    source_checked_unix: &[u64],
 ) -> Result<()> {
     if metrics.ping_results.is_empty() {
         return Ok(());
@@ -1691,6 +1708,11 @@ async fn insert_postgres_telemetry_ping_facts(
         .iter()
         .map(|result| u64_to_i64(result.checked_unix))
         .collect::<Vec<_>>();
+    let source_checked_unix = source_checked_unix
+        .iter()
+        .copied()
+        .map(u64_to_i64)
+        .collect::<Vec<_>>();
     let statuses = metrics
         .ping_results
         .iter()
@@ -1714,13 +1736,25 @@ async fn insert_postgres_telemetry_ping_facts(
 
     sqlx::query(
         r#"
+        INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+        SELECT DISTINCT $1, fact.target_id, fact.generation
+        FROM UNNEST($2::UUID[], $3::BIGINT[]) AS fact(target_id, generation)
+        ON CONFLICT (client_id, target_id, generation) DO NOTHING
+        "#,
+    )
+    .bind(client_id)
+    .bind(&target_ids)
+    .bind(&generations)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
         INSERT INTO telemetry_ping_facts (
-            sample_id,
-            client_id,
+            series_id,
             observed_at,
-            ordinal,
-            target_id,
-            generation,
+            evidence_id,
+            source_checked_unix,
             checked_unix,
             status,
             latency_avg_ms,
@@ -1728,36 +1762,52 @@ async fn insert_postgres_telemetry_ping_facts(
             reason
         )
         SELECT
-            $1,
-            $2,
+            series.id,
             to_timestamp($3::double precision),
-            fact.ordinal,
-            fact.target_id,
-            fact.generation,
+            $1,
+            fact.source_checked_unix,
             fact.checked_unix,
             fact.status,
             fact.latency_avg_ms,
             fact.loss_ratio,
             fact.reason
-        FROM UNNEST(
-            $4::INTEGER[],
-            $5::UUID[],
-            $6::BIGINT[],
-            $7::BIGINT[],
-            $8::TEXT[],
-            $9::DOUBLE PRECISION[],
-            $10::DOUBLE PRECISION[],
-            $11::TEXT[]
-        ) AS fact(
-            ordinal,
-            target_id,
-            generation,
-            checked_unix,
-            status,
-            latency_avg_ms,
-            loss_ratio,
-            reason
-        )
+        FROM (
+            SELECT DISTINCT ON (target_id, generation, source_checked_unix) *
+            FROM UNNEST(
+                $4::INTEGER[],
+                $5::UUID[],
+                $6::BIGINT[],
+                $7::BIGINT[],
+                $8::BIGINT[],
+                $9::TEXT[],
+                $10::DOUBLE PRECISION[],
+                $11::DOUBLE PRECISION[],
+                $12::TEXT[]
+            ) AS input(
+                ordinal,
+                target_id,
+                generation,
+                source_checked_unix,
+                checked_unix,
+                status,
+                latency_avg_ms,
+                loss_ratio,
+                reason
+            )
+            ORDER BY target_id, generation, source_checked_unix, ordinal DESC
+        ) fact
+        JOIN telemetry_ping_series series
+          ON series.client_id = $2
+         AND series.target_id = fact.target_id
+         AND series.generation = fact.generation
+        WHERE fact.checked_unix <= floor($3::double precision)::bigint + 300
+          AND floor($3::double precision)::bigint - fact.checked_unix <= 3900
+        ON CONFLICT (series_id, source_checked_unix) DO UPDATE SET
+            evidence_id = EXCLUDED.evidence_id,
+            status = EXCLUDED.status,
+            latency_avg_ms = EXCLUDED.latency_avg_ms,
+            loss_ratio = EXCLUDED.loss_ratio,
+            reason = EXCLUDED.reason
         "#,
     )
     .bind(sample_id)
@@ -1766,6 +1816,7 @@ async fn insert_postgres_telemetry_ping_facts(
     .bind(&ordinals)
     .bind(&target_ids)
     .bind(&generations)
+    .bind(&source_checked_unix)
     .bind(&checked_unix)
     .bind(&statuses)
     .bind(&latency_avg_ms)
@@ -2013,6 +2064,7 @@ async fn upsert_memory_telemetry_network_rates(
             rate.tx_bytes_last = tx_bytes;
             rate.rx_counter_epoch = rx_counter_epoch;
             rate.tx_counter_epoch = tx_counter_epoch;
+            rate.latest_observed_at = observed_at.clone();
             rate.rx_bytes_delta = 0;
             rate.tx_bytes_delta = 0;
             rate.rx_bps_avg = 0.0;
@@ -2033,6 +2085,7 @@ async fn upsert_memory_telemetry_network_rates(
             tx_bytes_last: tx_bytes,
             rx_counter_epoch,
             tx_counter_epoch,
+            latest_observed_at: observed_at.clone(),
             rx_bytes_delta: 0,
             tx_bytes_delta: 0,
             rx_bps_avg: 0.0,
@@ -2154,30 +2207,40 @@ async fn upsert_postgres_telemetry_rollup(
             bucket_secs,
             sample_count,
             cpu_usage_sample_count,
+            cpu_usage_sum,
             cpu_usage_avg,
             cpu_usage_max,
             cpu_cores_max,
             cpu_load_1_avg,
+            cpu_load_1_sum,
             cpu_load_1_max,
             cpu_load_5_avg,
+            cpu_load_5_sum,
             cpu_load_5_max,
             cpu_load_15_avg,
+            cpu_load_15_sum,
             cpu_load_15_max,
             memory_total_bytes_max,
             memory_available_bytes_avg,
+            memory_available_bytes_sum,
             memory_available_bytes_min,
             memory_used_ratio_avg,
+            memory_used_ratio_sum,
             memory_used_ratio_max,
             swap_sample_count,
             swap_total_bytes_max,
             swap_available_bytes_avg,
+            swap_available_bytes_sum,
             swap_available_bytes_min,
             swap_used_ratio_avg,
+            swap_used_ratio_sum,
             swap_used_ratio_max,
             disk_total_bytes_max,
             disk_available_bytes_avg,
+            disk_available_bytes_sum,
             disk_available_bytes_min,
             disk_used_ratio_avg,
+            disk_used_ratio_sum,
             disk_used_ratio_max,
             network_rx_bytes_max,
             network_tx_bytes_max,
@@ -2194,29 +2257,39 @@ async fn upsert_postgres_telemetry_rollup(
             $3,
             1,
             $4,
+            COALESCE($5, 0),
             $5,
             $6,
             $7,
             $8,
             $8,
+            $8,
             $9,
             $9,
+            $9,
+            $10,
             $10,
             $10,
             $11,
             $12,
+            $12::numeric,
             $12,
+            $13,
             $13,
             $13,
             $14,
             $15,
             $16,
+            COALESCE($16, 0)::numeric,
             $16,
             $17,
+            COALESCE($17, 0),
             $17,
             $18,
             $19,
+            $19::numeric,
             $19,
+            $20,
             $20,
             $20,
             $21,
@@ -2235,15 +2308,11 @@ async fn upsert_postgres_telemetry_rollup(
             sample_count = telemetry_rollups.sample_count + EXCLUDED.sample_count,
             cpu_usage_sample_count = telemetry_rollups.cpu_usage_sample_count
                 + EXCLUDED.cpu_usage_sample_count,
+            cpu_usage_sum = telemetry_rollups.cpu_usage_sum + EXCLUDED.cpu_usage_sum,
             cpu_usage_avg = CASE
                 WHEN telemetry_rollups.cpu_usage_sample_count + EXCLUDED.cpu_usage_sample_count = 0
                     THEN NULL
-                ELSE (
-                    COALESCE(telemetry_rollups.cpu_usage_avg, 0)
-                        * telemetry_rollups.cpu_usage_sample_count::double precision
-                    + COALESCE(EXCLUDED.cpu_usage_avg, 0)
-                        * EXCLUDED.cpu_usage_sample_count::double precision
-                ) / (
+                ELSE (telemetry_rollups.cpu_usage_sum + EXCLUDED.cpu_usage_sum) / (
                     telemetry_rollups.cpu_usage_sample_count
                     + EXCLUDED.cpu_usage_sample_count
                 )::double precision
@@ -2254,40 +2323,36 @@ async fn upsert_postgres_telemetry_rollup(
                 ELSE GREATEST(telemetry_rollups.cpu_usage_max, EXCLUDED.cpu_usage_max)
             END,
             cpu_cores_max = GREATEST(telemetry_rollups.cpu_cores_max, EXCLUDED.cpu_cores_max),
-            cpu_load_1_avg = (
-                telemetry_rollups.cpu_load_1_avg * telemetry_rollups.sample_count::double precision
-                + EXCLUDED.cpu_load_1_avg * EXCLUDED.sample_count::double precision
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_1_sum = telemetry_rollups.cpu_load_1_sum + EXCLUDED.cpu_load_1_sum,
+            cpu_load_1_avg = (telemetry_rollups.cpu_load_1_sum + EXCLUDED.cpu_load_1_sum)
+                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             cpu_load_1_max = GREATEST(telemetry_rollups.cpu_load_1_max, EXCLUDED.cpu_load_1_max),
-            cpu_load_5_avg = (
-                telemetry_rollups.cpu_load_5_avg * telemetry_rollups.sample_count::double precision
-                + EXCLUDED.cpu_load_5_avg * EXCLUDED.sample_count::double precision
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_5_sum = telemetry_rollups.cpu_load_5_sum + EXCLUDED.cpu_load_5_sum,
+            cpu_load_5_avg = (telemetry_rollups.cpu_load_5_sum + EXCLUDED.cpu_load_5_sum)
+                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             cpu_load_5_max = GREATEST(telemetry_rollups.cpu_load_5_max, EXCLUDED.cpu_load_5_max),
-            cpu_load_15_avg = (
-                telemetry_rollups.cpu_load_15_avg * telemetry_rollups.sample_count::double precision
-                + EXCLUDED.cpu_load_15_avg * EXCLUDED.sample_count::double precision
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
+            cpu_load_15_sum = telemetry_rollups.cpu_load_15_sum + EXCLUDED.cpu_load_15_sum,
+            cpu_load_15_avg = (telemetry_rollups.cpu_load_15_sum + EXCLUDED.cpu_load_15_sum)
+                / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             cpu_load_15_max = GREATEST(telemetry_rollups.cpu_load_15_max, EXCLUDED.cpu_load_15_max),
             memory_total_bytes_max = GREATEST(
                 telemetry_rollups.memory_total_bytes_max,
                 EXCLUDED.memory_total_bytes_max
             ),
+            memory_available_bytes_sum = telemetry_rollups.memory_available_bytes_sum
+                + EXCLUDED.memory_available_bytes_sum,
             memory_available_bytes_avg = round((
-                telemetry_rollups.memory_available_bytes_avg::numeric
-                    * telemetry_rollups.sample_count::numeric
-                + EXCLUDED.memory_available_bytes_avg::numeric
-                    * EXCLUDED.sample_count::numeric
+                telemetry_rollups.memory_available_bytes_sum
+                + EXCLUDED.memory_available_bytes_sum
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
             memory_available_bytes_min = LEAST(
                 telemetry_rollups.memory_available_bytes_min,
                 EXCLUDED.memory_available_bytes_min
             ),
+            memory_used_ratio_sum = telemetry_rollups.memory_used_ratio_sum
+                + EXCLUDED.memory_used_ratio_sum,
             memory_used_ratio_avg = (
-                telemetry_rollups.memory_used_ratio_avg
-                    * telemetry_rollups.sample_count::double precision
-                + EXCLUDED.memory_used_ratio_avg
-                    * EXCLUDED.sample_count::double precision
+                telemetry_rollups.memory_used_ratio_sum + EXCLUDED.memory_used_ratio_sum
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             memory_used_ratio_max = GREATEST(
                 telemetry_rollups.memory_used_ratio_max,
@@ -2305,6 +2370,8 @@ async fn upsert_postgres_telemetry_rollup(
                     EXCLUDED.swap_total_bytes_max
                 )
             END,
+            swap_available_bytes_sum = telemetry_rollups.swap_available_bytes_sum
+                + EXCLUDED.swap_available_bytes_sum,
             swap_available_bytes_avg = CASE
                 WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
                     THEN CASE
@@ -2314,10 +2381,8 @@ async fn upsert_postgres_telemetry_rollup(
                         ELSE 0
                     END
                 ELSE round((
-                    COALESCE(telemetry_rollups.swap_available_bytes_avg, 0)::numeric
-                        * telemetry_rollups.swap_sample_count::numeric
-                    + COALESCE(EXCLUDED.swap_available_bytes_avg, 0)::numeric
-                        * EXCLUDED.swap_sample_count::numeric
+                    telemetry_rollups.swap_available_bytes_sum
+                    + EXCLUDED.swap_available_bytes_sum
                 ) / (
                     telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
                 )::numeric)::bigint
@@ -2339,15 +2404,12 @@ async fn upsert_postgres_telemetry_rollup(
                     EXCLUDED.swap_available_bytes_min
                 )
             END,
+            swap_used_ratio_sum = telemetry_rollups.swap_used_ratio_sum
+                + EXCLUDED.swap_used_ratio_sum,
             swap_used_ratio_avg = CASE
                 WHEN telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count = 0
                     THEN NULL
-                ELSE (
-                    COALESCE(telemetry_rollups.swap_used_ratio_avg, 0)
-                        * telemetry_rollups.swap_sample_count::double precision
-                    + COALESCE(EXCLUDED.swap_used_ratio_avg, 0)
-                        * EXCLUDED.swap_sample_count::double precision
-                ) / (
+                ELSE (telemetry_rollups.swap_used_ratio_sum + EXCLUDED.swap_used_ratio_sum) / (
                     telemetry_rollups.swap_sample_count + EXCLUDED.swap_sample_count
                 )::double precision
             END,
@@ -2365,21 +2427,20 @@ async fn upsert_postgres_telemetry_rollup(
                 telemetry_rollups.disk_total_bytes_max,
                 EXCLUDED.disk_total_bytes_max
             ),
+            disk_available_bytes_sum = telemetry_rollups.disk_available_bytes_sum
+                + EXCLUDED.disk_available_bytes_sum,
             disk_available_bytes_avg = round((
-                telemetry_rollups.disk_available_bytes_avg::numeric
-                    * telemetry_rollups.sample_count::numeric
-                + EXCLUDED.disk_available_bytes_avg::numeric
-                    * EXCLUDED.sample_count::numeric
+                telemetry_rollups.disk_available_bytes_sum
+                + EXCLUDED.disk_available_bytes_sum
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
             disk_available_bytes_min = LEAST(
                 telemetry_rollups.disk_available_bytes_min,
                 EXCLUDED.disk_available_bytes_min
             ),
+            disk_used_ratio_sum = telemetry_rollups.disk_used_ratio_sum
+                + EXCLUDED.disk_used_ratio_sum,
             disk_used_ratio_avg = (
-                telemetry_rollups.disk_used_ratio_avg
-                    * telemetry_rollups.sample_count::double precision
-                + EXCLUDED.disk_used_ratio_avg
-                    * EXCLUDED.sample_count::double precision
+                telemetry_rollups.disk_used_ratio_sum + EXCLUDED.disk_used_ratio_sum
             ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
             disk_used_ratio_max = GREATEST(
                 telemetry_rollups.disk_used_ratio_max,
@@ -2475,6 +2536,37 @@ async fn upsert_postgres_telemetry_rollup(
     .bind(metrics.observed_unix as f64)
     .execute(&mut **tx)
     .await?;
+    sqlx::query(
+        r#"
+        DELETE FROM telemetry_resource_latest latest
+        USING telemetry_rollups source
+        WHERE source.client_id = $1
+          AND source.bucket_secs = $2
+          AND source.bucket_start = to_timestamp($3::double precision)
+          AND latest.client_id = source.client_id
+          AND latest.latest_observed_at <= source.latest_observed_at
+        "#,
+    )
+    .bind(client_id)
+    .bind(TELEMETRY_BUCKET_SECS)
+    .bind(bucket_start_unix(metrics.observed_unix) as f64)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_resource_latest
+        SELECT source.* FROM telemetry_rollups source
+        WHERE source.client_id = $1
+          AND source.bucket_secs = $2
+          AND source.bucket_start = to_timestamp($3::double precision)
+        ON CONFLICT (client_id) DO NOTHING
+        "#,
+    )
+    .bind(client_id)
+    .bind(TELEMETRY_BUCKET_SECS)
+    .bind(bucket_start_unix(metrics.observed_unix) as f64)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
@@ -2510,12 +2602,15 @@ async fn upsert_postgres_telemetry_network_rates(
                 bucket_start,
                 bucket_secs,
                 sample_count,
+                rx_bytes_sum,
+                tx_bytes_sum,
                 rx_bytes_avg,
                 tx_bytes_avg,
                 rx_bytes_last,
                 tx_bytes_last,
                 rx_counter_epoch,
                 tx_counter_epoch,
+                latest_observed_at,
                 updated_at
             )
             SELECT
@@ -2524,12 +2619,15 @@ async fn upsert_postgres_telemetry_network_rates(
                 to_timestamp($3::double precision),
                 $4,
                 1,
+                $5::numeric,
+                $6::numeric,
                 $5,
                 $6,
                 $5,
                 $6,
                 sample.rx_counter_epoch,
                 sample.tx_counter_epoch,
+                to_timestamp($7::double precision),
                 now()
             FROM traffic_counter_samples sample
             WHERE sample.client_id = $1
@@ -2538,18 +2636,22 @@ async fn upsert_postgres_telemetry_network_rates(
               AND sample.observed_at = to_timestamp($3::double precision)
             ON CONFLICT (client_id, interface, bucket_secs, bucket_start) DO UPDATE SET
                 sample_count = telemetry_network_rates.sample_count + EXCLUDED.sample_count,
-                rx_bytes_avg = round((
-                    telemetry_network_rates.rx_bytes_avg::numeric * telemetry_network_rates.sample_count::numeric
-                    + EXCLUDED.rx_bytes_avg::numeric * EXCLUDED.sample_count::numeric
-                ) / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
-                tx_bytes_avg = round((
-                    telemetry_network_rates.tx_bytes_avg::numeric * telemetry_network_rates.sample_count::numeric
-                    + EXCLUDED.tx_bytes_avg::numeric * EXCLUDED.sample_count::numeric
-                ) / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+                rx_bytes_sum = telemetry_network_rates.rx_bytes_sum + EXCLUDED.rx_bytes_sum,
+                tx_bytes_sum = telemetry_network_rates.tx_bytes_sum + EXCLUDED.tx_bytes_sum,
+                rx_bytes_avg = round((telemetry_network_rates.rx_bytes_sum
+                    + EXCLUDED.rx_bytes_sum)
+                    / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
+                tx_bytes_avg = round((telemetry_network_rates.tx_bytes_sum
+                    + EXCLUDED.tx_bytes_sum)
+                    / (telemetry_network_rates.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
                 rx_bytes_last = EXCLUDED.rx_bytes_last,
                 tx_bytes_last = EXCLUDED.tx_bytes_last,
                 rx_counter_epoch = EXCLUDED.rx_counter_epoch,
                 tx_counter_epoch = EXCLUDED.tx_counter_epoch,
+                latest_observed_at = GREATEST(
+                    telemetry_network_rates.latest_observed_at,
+                    EXCLUDED.latest_observed_at
+                ),
                 updated_at = now()
             "#,
         )
@@ -2559,6 +2661,7 @@ async fn upsert_postgres_telemetry_network_rates(
         .bind(TELEMETRY_BUCKET_SECS)
         .bind(u64_to_i64(network.rx_bytes))
         .bind(u64_to_i64(network.tx_bytes))
+        .bind(metrics.observed_unix as f64)
         .execute(&mut **tx)
         .await?;
     }
@@ -2681,7 +2784,8 @@ async fn insert_traffic_counter_sample(
                     EXCLUDED.tx_counter_epoch
                 )
             END,
-            sample_source = EXCLUDED.sample_source
+            sample_source = EXCLUDED.sample_source,
+            inbound_promoted = FALSE
         "#,
     )
     .bind(client_id)
@@ -2824,6 +2928,7 @@ async fn upsert_postgres_telemetry_tunnels(
         .execute(&mut **tx)
         .await?;
     }
+    reconcile_postgres_automatic_observation_series_for_client(tx, client_id).await?;
     Ok(())
 }
 

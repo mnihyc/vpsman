@@ -23,8 +23,8 @@ use crate::{
         CreateMonitoringShareRequest, CreateMonitoringShareResponse, CurrentPingView,
         DeletePingTargetRequest, DeletePingTargetResponse, ExtendMonitoringSharesRequest,
         MakePrimaryPingTargetRequest, MonitoringCardView, MonitoringCardsPageView,
-        MonitoringRangeView, MonitoringShareListQuery, MonitoringShareRecord,
-        MonitoringShareTargetChangeView, MonitoringShareTargetRecord,
+        MonitoringRangeView, MonitoringResolutionView, MonitoringShareListQuery,
+        MonitoringShareRecord, MonitoringShareTargetChangeView, MonitoringShareTargetRecord,
         MonitoringShareTargetReplacement, MonitoringShareUrlResponse, MonitoringShareView,
         MonitoringShareVisibilityView, MonitoringSharesMutationResponse, PingRollupView,
         PingTargetAssignmentChangeView, PingTargetAssignmentReplacement, PingTargetDetailView,
@@ -1289,7 +1289,7 @@ async fn client_monitoring_view(
         state
             .repo
             .list_dashboard_raw_telemetry_rollups(
-                range.points,
+                range.effective_points,
                 range.start_unix,
                 range.end_unix,
                 range.step_secs,
@@ -1304,7 +1304,7 @@ async fn client_monitoring_view(
         state
             .repo
             .list_dashboard_telemetry_rollups(
-                range.points,
+                range.effective_points,
                 Some(range.start_unix),
                 Some(range.end_unix),
                 None,
@@ -1321,7 +1321,7 @@ async fn client_monitoring_view(
         state
             .repo
             .list_dashboard_raw_telemetry_network_rates_selected(
-                range.points,
+                range.effective_points,
                 range.start_unix,
                 range.end_unix,
                 range.step_secs,
@@ -1336,7 +1336,7 @@ async fn client_monitoring_view(
         state
             .repo
             .list_dashboard_telemetry_network_rates_selected(
-                range.points,
+                range.effective_points,
                 Some(range.start_unix),
                 Some(range.end_unix),
                 None,
@@ -1356,7 +1356,7 @@ async fn client_monitoring_view(
                 client_id,
                 Some(range.start_unix),
                 Some(range.end_unix),
-                range.points,
+                range.effective_points,
                 range.step_secs,
             )
             .await
@@ -1371,7 +1371,7 @@ async fn client_monitoring_view(
                 client_id,
                 Some(range.start_unix),
                 Some(range.end_unix),
-                range.points,
+                range.effective_points,
                 range.step_secs,
             )
             .await
@@ -1396,7 +1396,7 @@ async fn client_monitoring_view(
             range.start_unix,
             range.end_unix,
             range.step_secs,
-            range.source == "raw",
+            range.source == "raw" && range.resolutions.traffic == 60,
         )
         .await
         .map_err(ApiError::internal_mapper(
@@ -1502,7 +1502,7 @@ async fn monitoring_range(
     }
     let span = end_unix.saturating_sub(start_unix);
     let intervals = (points - 1) as u64;
-    let step_secs = span
+    let requested_step_secs = span
         .saturating_add(intervals.saturating_sub(1))
         .checked_div(intervals.max(1))
         .unwrap_or(60)
@@ -1541,15 +1541,108 @@ async fn monitoring_range(
                     "Monitoring-history coverage could not be determined.",
                 ))?
     };
-    let source = if raw_covers_start { "raw" } else { "minute" };
+    let source = if raw_covers_start { "raw" } else { "retained" };
+    let effective_resolution_secs = if raw_covers_start {
+        60
+    } else {
+        retained_resolution_for_age(now.saturating_sub(start_unix))
+    };
+    let step_secs = tier_aligned_step_secs(
+        span,
+        requested_step_secs,
+        effective_resolution_secs,
+        points as u64,
+    );
+    let effective_points = aligned_timeline_point_count(start_unix, end_unix, step_secs);
+    let traffic_uses_exact_source =
+        traffic_uses_exact_source(raw_covers_start, now.saturating_sub(start_unix));
+    let traffic_resolution = if traffic_uses_exact_source {
+        60
+    } else {
+        retained_traffic_resolution_for_age(now.saturating_sub(start_unix))
+    };
     Ok(MonitoringRangeView {
         window: window.to_string(),
         source: source.to_string(),
         start_unix,
         end_unix,
+        requested_step_secs: requested_step_secs.min(i32::MAX as u64) as i32,
+        effective_resolution_secs: effective_resolution_secs.min(i32::MAX as u64) as i32,
         step_secs: step_secs.min(i32::MAX as u64) as i32,
         points,
+        effective_points,
+        resolutions: MonitoringResolutionView {
+            resources: effective_resolution_secs.min(i32::MAX as u64) as i32,
+            network: effective_resolution_secs.min(i32::MAX as u64) as i32,
+            ping: effective_resolution_secs.min(i32::MAX as u64) as i32,
+            traffic: traffic_resolution.min(i32::MAX as u64) as i32,
+        },
     })
+}
+
+fn traffic_uses_exact_source(raw_telemetry_covers_start: bool, age_secs: u64) -> bool {
+    const DAY: u64 = 24 * 60 * 60;
+    raw_telemetry_covers_start && age_secs <= 32 * DAY
+}
+
+fn retained_resolution_for_age(age_secs: u64) -> u64 {
+    const DAY: u64 = 24 * 60 * 60;
+    match age_secs {
+        value if value <= 2 * DAY => 60,
+        value if value <= 8 * DAY => 5 * 60,
+        value if value <= 31 * DAY => 30 * 60,
+        value if value <= 91 * DAY => 60 * 60,
+        value if value <= 181 * DAY => 3 * 60 * 60,
+        value if value <= 366 * DAY => 6 * 60 * 60,
+        _ => DAY,
+    }
+}
+
+fn retained_traffic_resolution_for_age(age_secs: u64) -> u64 {
+    const DAY: u64 = 24 * 60 * 60;
+    match age_secs {
+        value if value <= 32 * DAY => 60,
+        value if value <= 91 * DAY => 60 * 60,
+        value if value <= 181 * DAY => 3 * 60 * 60,
+        value if value <= 366 * DAY => 6 * 60 * 60,
+        _ => DAY,
+    }
+}
+
+fn aligned_timeline_point_count(start_unix: u64, end_unix: u64, step_secs: u64) -> i64 {
+    let step_secs = step_secs.max(60);
+    // Both monitoring UIs floor each bound to an epoch-aligned chart slot.
+    // Counting elapsed intervals alone can omit the first honest slot when an
+    // unaligned narrow range crosses a coarse retained boundary.
+    let first_slot = start_unix / step_secs;
+    let last_slot = end_unix / step_secs;
+    last_slot
+        .saturating_sub(first_slot)
+        .saturating_add(1)
+        .min(1_440) as i64
+}
+
+fn tier_aligned_step_secs(
+    span: u64,
+    requested: u64,
+    resolution: u64,
+    requested_points: u64,
+) -> u64 {
+    let resolution = resolution.max(60);
+    let requested = requested.max(resolution);
+    let lower = requested / resolution * resolution;
+    let lower_points = span
+        .checked_div(lower.max(1))
+        .unwrap_or(0)
+        .saturating_add(1);
+    if lower >= resolution && lower_points <= requested_points.saturating_add(12) {
+        return lower;
+    }
+    requested
+        .saturating_add(resolution.saturating_sub(1))
+        .checked_div(resolution)
+        .unwrap_or(1)
+        .saturating_mul(resolution)
 }
 
 pub(crate) fn public_monitoring_share(
@@ -1680,8 +1773,12 @@ fn public_monitoring_detail(
             source: detail.range.source,
             start_unix: detail.range.start_unix,
             end_unix: detail.range.end_unix,
+            requested_step_secs: detail.range.requested_step_secs,
+            effective_resolution_secs: detail.range.effective_resolution_secs,
             step_secs: detail.range.step_secs,
             points: detail.range.points,
+            effective_points: detail.range.effective_points,
+            resolutions: detail.range.resolutions,
         },
         resources: visibility.resources.then(|| {
             detail
@@ -1789,13 +1886,8 @@ fn public_network_metric(
 }
 
 fn network_rate_is_current(row: &TelemetryNetworkRateView, now_unix: u64) -> bool {
-    parse_timestamp_unix(&row.bucket_start)
-        .map(|bucket_start| {
-            let effective_at = bucket_start.saturating_add(
-                u64::try_from(row.bucket_secs.saturating_sub(60)).unwrap_or_default(),
-            );
-            now_unix.abs_diff(effective_at) <= CURRENT_NETWORK_RATE_MAX_AGE_SECS
-        })
+    parse_timestamp_unix(&row.latest_observed_at)
+        .map(|effective_at| now_unix.abs_diff(effective_at) <= CURRENT_NETWORK_RATE_MAX_AGE_SECS)
         .unwrap_or(false)
 }
 

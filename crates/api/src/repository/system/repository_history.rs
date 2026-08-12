@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{AuditLogView, AuthContext, BackupRequestStatus},
-    model_alert_policies::TrafficCounterSampleRecord,
+    model_alert_policies::{TrafficCounterRollupRecord, TrafficCounterSampleRecord},
     model_history::{
         HistoryDomain, HistoryRetentionPolicyView, HistoryRetentionPruneOutcome,
         HistoryRetentionPrunePlan, UpsertHistoryRetentionPolicyRequest,
@@ -256,14 +256,14 @@ impl Repository {
                         })
                     }
                     HistoryDomain::TelemetrySamples => {
-                        let matched_rows = prune_memory_vec(
+                        let matched_rows = prune_memory_telemetry_samples(
                             &memory.telemetry_samples,
+                            &memory.telemetry_ping_source_checks,
                             cutoff_unix,
                             limit,
                             dry_run,
-                            |row| &row.observed_at,
                         )
-                        .await?;
+                        .await;
                         Ok(HistoryRetentionPruneOutcome {
                             matched_rows,
                             pruned_rows: if dry_run { 0 } else { matched_rows },
@@ -319,8 +319,9 @@ impl Repository {
                         })
                     }
                     HistoryDomain::TrafficCounterSamples => {
-                        let matched_rows = prune_memory_traffic_counter_samples(
+                        let matched_rows = prune_memory_traffic_history(
                             &memory.traffic_counter_samples,
+                            &memory.traffic_counter_rollups,
                             cutoff_unix,
                             limit,
                             dry_run,
@@ -333,12 +334,13 @@ impl Repository {
                         })
                     }
                     HistoryDomain::SystemMetricRollups => {
-                        let matched_rows = prune_memory_vec(
+                        let matched_rows = prune_memory_bucket_vec(
                             &memory.system_metric_rollups,
                             cutoff_unix,
                             limit,
                             dry_run,
                             |row| &row.bucket_start,
+                            |row| row.bucket_secs,
                         )
                         .await?;
                         Ok(HistoryRetentionPruneOutcome {
@@ -783,6 +785,84 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn export_traffic_counter_rollups(
+        &self,
+        limit: i64,
+        client_id: Option<&str>,
+    ) -> Result<Vec<TrafficCounterRollupRecord>> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rows = memory
+                    .traffic_counter_rollups
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| client_id.is_none_or(|expected| row.client_id == expected))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| {
+                    right
+                        .bucket_start_unix
+                        .cmp(&left.bucket_start_unix)
+                        .then_with(|| left.client_id.cmp(&right.client_id))
+                        .then_with(|| left.source_kind.cmp(&right.source_kind))
+                        .then_with(|| left.interface.cmp(&right.interface))
+                });
+                rows.truncate(limit.clamp(1, 1000) as usize);
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client_id, source_kind, interface, origin_kind,
+                        bucket_start::text AS bucket_start,
+                        extract(epoch FROM bucket_start)::bigint AS bucket_start_unix,
+                        bucket_secs, rx_bytes, tx_bytes,
+                        rx_valid_count, tx_valid_count, any_valid_count,
+                        rx_reset_count, tx_reset_count, any_reset_count,
+                        extract(epoch FROM first_observed_at)::bigint
+                            AS first_observed_unix,
+                        extract(epoch FROM latest_observed_at)::bigint
+                            AS latest_observed_unix
+                    FROM traffic_counter_rollups
+                    WHERE ($1::text IS NULL OR client_id = $1)
+                    ORDER BY bucket_start DESC, client_id, source_kind, interface,
+                             origin_kind, bucket_secs
+                    LIMIT $2
+                    "#,
+                )
+                .bind(client_id)
+                .bind(limit.clamp(1, 1000))
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(TrafficCounterRollupRecord {
+                            client_id: row.try_get("client_id")?,
+                            source_kind: row.try_get("source_kind")?,
+                            interface: row.try_get("interface")?,
+                            origin_kind: row.try_get("origin_kind")?,
+                            bucket_start: row.try_get("bucket_start")?,
+                            bucket_start_unix: row.try_get("bucket_start_unix")?,
+                            bucket_secs: row.try_get("bucket_secs")?,
+                            rx_bytes: row.try_get("rx_bytes")?,
+                            tx_bytes: row.try_get("tx_bytes")?,
+                            rx_valid_count: row.try_get("rx_valid_count")?,
+                            tx_valid_count: row.try_get("tx_valid_count")?,
+                            any_valid_count: row.try_get("any_valid_count")?,
+                            rx_reset_count: row.try_get("rx_reset_count")?,
+                            tx_reset_count: row.try_get("tx_reset_count")?,
+                            any_reset_count: row.try_get("any_reset_count")?,
+                            first_observed_unix: row.try_get("first_observed_unix")?,
+                            latest_observed_unix: row.try_get("latest_observed_unix")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
     pub(crate) async fn export_job_outputs(
         &self,
         limit: i64,
@@ -1092,6 +1172,67 @@ async fn prune_memory_vec<T>(
     Ok(matched_rows as i64)
 }
 
+async fn prune_memory_telemetry_samples(
+    samples: &tokio::sync::RwLock<Vec<crate::model::TelemetrySampleView>>,
+    ping_source_checks: &tokio::sync::RwLock<
+        HashMap<crate::repository::MemoryPingSourceCheckKey, u64>,
+    >,
+    cutoff_unix: u64,
+    limit: usize,
+    dry_run: bool,
+) -> i64 {
+    // Match PostgreSQL's compound raw-telemetry lifecycle: samples and Ping
+    // logical identities consume one deterministic batch budget. Holding both
+    // write locks through selection and deletion makes the Memory apply atomic.
+    let mut samples = samples.write().await;
+    let mut ping_source_checks = ping_source_checks.write().await;
+    let mut candidates = samples
+        .iter()
+        .enumerate()
+        .filter_map(|(index, sample)| {
+            let observed_unix = sample.observed_at.parse::<u64>().ok()?;
+            (observed_unix < cutoff_unix).then_some((
+                observed_unix,
+                0_u8,
+                sample.id.to_string(),
+                Some(index),
+                None,
+            ))
+        })
+        .collect::<Vec<_>>();
+    candidates.extend(ping_source_checks.iter().filter_map(|(key, retained_at)| {
+        (*retained_at < cutoff_unix).then_some((
+            *retained_at,
+            1_u8,
+            format!("{}:{}:{}:{}", key.0, key.1, key.2, key.3),
+            None,
+            Some(key.clone()),
+        ))
+    }));
+    candidates.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    candidates.truncate(limit);
+    let matched_rows = candidates.len() as i64;
+    if !dry_run {
+        let mut sample_indices = candidates
+            .iter()
+            .filter_map(|candidate| candidate.3)
+            .collect::<Vec<_>>();
+        sample_indices.sort_unstable_by_key(|index| Reverse(*index));
+        for index in sample_indices {
+            samples.remove(index);
+        }
+        for key in candidates.into_iter().filter_map(|candidate| candidate.4) {
+            ping_source_checks.remove(&key);
+        }
+    }
+    matched_rows
+}
+
 async fn prune_memory_bucket_vec<T>(
     rows: &tokio::sync::RwLock<Vec<T>>,
     cutoff_unix: u64,
@@ -1122,16 +1263,18 @@ async fn prune_memory_bucket_vec<T>(
     Ok(matched_rows as i64)
 }
 
-async fn prune_memory_traffic_counter_samples(
-    rows: &tokio::sync::RwLock<Vec<TrafficCounterSampleRecord>>,
+async fn prune_memory_traffic_history(
+    exact_rows: &tokio::sync::RwLock<Vec<TrafficCounterSampleRecord>>,
+    rollup_rows: &tokio::sync::RwLock<Vec<TrafficCounterRollupRecord>>,
     cutoff_unix: u64,
     limit: usize,
     dry_run: bool,
 ) -> i64 {
-    let mut rows = rows.write().await;
+    let mut exact_rows = exact_rows.write().await;
+    let mut rollup_rows = rollup_rows.write().await;
     let cutoff_unix = i64::try_from(cutoff_unix).unwrap_or(i64::MAX);
     let mut baselines = HashMap::<(String, String, String), (i64, usize)>::new();
-    for (index, row) in rows.iter().enumerate() {
+    for (index, row) in exact_rows.iter().enumerate() {
         if row.observed_unix >= cutoff_unix {
             continue;
         }
@@ -1151,7 +1294,7 @@ async fn prune_memory_traffic_counter_samples(
         .into_values()
         .map(|(_, index)| index)
         .collect::<HashSet<_>>();
-    let mut matched_indices = rows
+    let mut candidates = exact_rows
         .iter()
         .enumerate()
         .filter(|(index, row)| {
@@ -1159,27 +1302,69 @@ async fn prune_memory_traffic_counter_samples(
         })
         .map(|(index, row)| {
             (
+                false,
                 index,
                 row.observed_unix,
                 row.client_id.clone(),
                 row.source_kind.clone(),
                 row.interface.clone(),
+                String::new(),
+                0,
             )
         })
         .collect::<Vec<_>>();
-    matched_indices.sort_by(|left, right| {
-        left.1
-            .cmp(&right.1)
-            .then_with(|| left.2.cmp(&right.2))
+    candidates.extend(
+        rollup_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row.bucket_start_unix
+                    .saturating_add(i64::from(row.bucket_secs.max(1)))
+                    <= cutoff_unix
+            })
+            .map(|(index, row)| {
+                (
+                    true,
+                    index,
+                    row.bucket_start_unix,
+                    row.client_id.clone(),
+                    row.source_kind.clone(),
+                    row.interface.clone(),
+                    row.origin_kind.clone(),
+                    row.bucket_secs,
+                )
+            }),
+    );
+    candidates.sort_by(|left, right| {
+        left.2
+            .cmp(&right.2)
+            .then_with(|| left.0.cmp(&right.0))
             .then_with(|| left.3.cmp(&right.3))
             .then_with(|| left.4.cmp(&right.4))
+            .then_with(|| left.5.cmp(&right.5))
+            .then_with(|| left.6.cmp(&right.6))
+            .then_with(|| left.7.cmp(&right.7))
     });
-    matched_indices.truncate(limit);
-    let matched_rows = matched_indices.len() as i64;
+    candidates.truncate(limit);
+    let matched_rows = candidates.len() as i64;
     if !dry_run {
-        matched_indices.sort_unstable_by_key(|(index, ..)| Reverse(*index));
-        for (index, ..) in matched_indices {
-            rows.remove(index);
+        let mut exact_indices = candidates
+            .iter()
+            .filter(|candidate| !candidate.0)
+            .map(|candidate| candidate.1)
+            .collect::<Vec<_>>();
+        exact_indices.sort_unstable_by_key(|index| Reverse(*index));
+        for index in exact_indices {
+            exact_rows.remove(index);
+        }
+        let mut rollup_indices = candidates
+            .iter()
+            .filter(|candidate| candidate.0)
+            .map(|candidate| candidate.1)
+            .collect::<Vec<_>>();
+        rollup_indices.sort_unstable_by_key(|index| Reverse(*index));
+        for index in rollup_indices {
+            rollup_rows.remove(index);
         }
     }
     matched_rows
@@ -1458,10 +1643,10 @@ async fn prune_postgres_history_domain(
             prune_telemetry_ping_rollups(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::TrafficCounterSamples, true) => {
-            prune_traffic_counter_samples(pool, cutoff_unix, limit, true).await
+            prune_traffic_history(pool, cutoff_unix, limit, true).await
         }
         (HistoryDomain::TrafficCounterSamples, false) => {
-            prune_traffic_counter_samples(pool, cutoff_unix, limit, false).await
+            prune_traffic_history(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::SystemMetricRollups, true) => {
             prune_system_metric_rollups(pool, cutoff_unix, limit, true).await
@@ -1482,28 +1667,10 @@ async fn prune_postgres_history_domain(
             prune_backup_artifacts(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::NetworkObservations, true) => {
-            select_id_count(
-                pool,
-                "network_observations",
-                "observed_at",
-                "id",
-                "TRUE",
-                cutoff_unix,
-                limit,
-            )
-            .await
+            prune_network_observation_history(pool, cutoff_unix, limit, true).await
         }
         (HistoryDomain::NetworkObservations, false) => {
-            delete_by_id(
-                pool,
-                "network_observations",
-                "observed_at",
-                "id",
-                "TRUE",
-                cutoff_unix,
-                limit,
-            )
-            .await
+            prune_network_observation_history(pool, cutoff_unix, limit, false).await
         }
         (HistoryDomain::TopologyHistory, true) => {
             select_id_count(
@@ -1636,35 +1803,269 @@ async fn prune_telemetry_samples(
     limit: i32,
     dry_run: bool,
 ) -> Result<HistoryRetentionPruneOutcome> {
+    // Raw resource samples and logical Ping facts share the raw-telemetry
+    // lifecycle and therefore one hard batch limit. A single statement keeps
+    // preview/apply candidate ordering identical and makes mixed-table deletes
+    // atomic; current state and retained rollups are intentionally excluded.
+    let row = sqlx::query(
+        r#"
+        WITH candidates AS MATERIALIZED (
+            SELECT source_kind, source_time, sample_id, series_id, source_checked_unix
+            FROM (
+                SELECT
+                    0::smallint AS source_kind,
+                    sample.observed_at AS source_time,
+                    sample.id AS sample_id,
+                    NULL::bigint AS series_id,
+                    NULL::bigint AS source_checked_unix
+                FROM telemetry_samples sample
+                WHERE sample.observed_at < to_timestamp($1)
+                UNION ALL
+                SELECT
+                    1::smallint AS source_kind,
+                    fact.observed_at AS source_time,
+                    NULL::uuid AS sample_id,
+                    fact.series_id,
+                    fact.source_checked_unix
+                FROM telemetry_ping_facts fact
+                WHERE fact.observed_at < to_timestamp($1)
+            ) eligible
+            ORDER BY source_time ASC, source_kind ASC,
+                     sample_id ASC NULLS LAST,
+                     series_id ASC NULLS LAST,
+                     source_checked_unix ASC NULLS LAST
+            LIMIT $2
+        ),
+        locked_samples AS MATERIALIZED (
+            SELECT sample.id
+            FROM telemetry_samples sample
+            JOIN candidates
+              ON candidates.source_kind = 0
+             AND sample.id = candidates.sample_id
+            WHERE NOT $3
+            FOR UPDATE OF sample SKIP LOCKED
+        ),
+        locked_ping_facts AS MATERIALIZED (
+            SELECT fact.series_id, fact.source_checked_unix
+            FROM telemetry_ping_facts fact
+            JOIN candidates
+              ON candidates.source_kind = 1
+             AND fact.series_id = candidates.series_id
+             AND fact.source_checked_unix = candidates.source_checked_unix
+            WHERE NOT $3
+            FOR UPDATE OF fact SKIP LOCKED
+        ),
+        deleted_samples AS (
+            DELETE FROM telemetry_samples sample
+            USING locked_samples
+            WHERE sample.id = locked_samples.id
+            RETURNING sample.id
+        ),
+        deleted_ping_facts AS (
+            DELETE FROM telemetry_ping_facts fact
+            USING locked_ping_facts
+            WHERE fact.series_id = locked_ping_facts.series_id
+              AND fact.source_checked_unix = locked_ping_facts.source_checked_unix
+            RETURNING fact.series_id
+        ),
+        deleted AS (
+            SELECT id::text AS source_key FROM deleted_samples
+            UNION ALL
+            SELECT series_id::text AS source_key FROM deleted_ping_facts
+        )
+        SELECT
+            CASE WHEN $3
+                THEN (SELECT count(*)::bigint FROM candidates)
+                ELSE (SELECT count(*)::bigint FROM deleted)
+            END AS matched_rows,
+            CASE WHEN $3
+                THEN 0::bigint
+                ELSE (SELECT count(*)::bigint FROM deleted)
+            END AS pruned_rows
+        "#,
+    )
+    .bind(cutoff_unix as i64)
+    .bind(limit)
+    .bind(dry_run)
+    .fetch_one(pool)
+    .await?;
+    Ok(HistoryRetentionPruneOutcome {
+        matched_rows: row.try_get("matched_rows")?,
+        pruned_rows: row.try_get("pruned_rows")?,
+        object_keys: Vec::new(),
+    })
+}
+
+async fn prune_network_observation_history(
+    pool: &sqlx::PgPool,
+    cutoff_unix: u64,
+    limit: i32,
+    dry_run: bool,
+) -> Result<HistoryRetentionPruneOutcome> {
+    // One history item is either an exact observation or one physical retained
+    // health/reason component. The shared limit remains a hard upper bound.
+    // Latest active snapshots are not candidates: they represent current state,
+    // not an independently retained history row.
     let query = if dry_run {
         r#"
-        SELECT id
-        FROM telemetry_samples
-        WHERE observed_at < to_timestamp($1)
-        ORDER BY observed_at ASC, id ASC
-        LIMIT $2
+        WITH candidates AS (
+            SELECT *
+            FROM (
+                SELECT 0 AS source_kind,
+                       observation.observed_at AS source_time,
+                       observation.id::text AS source_key
+                FROM network_observations observation
+                WHERE observation.observed_at < to_timestamp($1)
+                UNION ALL
+                SELECT 1 AS source_kind,
+                       rollup.bucket_start AS source_time,
+                       concat_ws(':', rollup.series_id, rollup.bucket_secs,
+                           extract(epoch FROM rollup.bucket_start)::bigint,
+                           rollup.health_state, rollup.reason_key) AS source_key
+                FROM network_observation_rollups rollup
+                WHERE rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+                    <= to_timestamp($1)
+                UNION ALL
+                SELECT 2 AS source_kind,
+                       latest.observed_at AS source_time,
+                       latest.observation_id::text AS source_key
+                FROM network_observation_latest latest
+                JOIN network_observation_series series ON series.id = latest.series_id
+                WHERE series.active = FALSE
+                  AND latest.observed_at < to_timestamp($1)
+            ) eligible
+            ORDER BY source_time, source_kind, source_key
+            LIMIT $2
+        )
+        SELECT source_key FROM candidates
         "#
     } else {
         r#"
-        WITH doomed AS (
-            SELECT ctid
-            FROM telemetry_samples
-            WHERE observed_at < to_timestamp($1)
-            ORDER BY observed_at ASC, id ASC
+        WITH candidates AS MATERIALIZED (
+            SELECT source_kind, observation_id, series_id, bucket_secs,
+                   bucket_start, health_state, reason_key
+            FROM (
+                SELECT 0 AS source_kind,
+                       observation.observed_at AS source_time,
+                       observation.id AS observation_id,
+                       NULL::bigint AS series_id,
+                       NULL::integer AS bucket_secs,
+                       NULL::timestamptz AS bucket_start,
+                       NULL::smallint AS health_state,
+                       NULL::text AS reason_key
+                FROM network_observations observation
+                WHERE observation.observed_at < to_timestamp($1)
+                UNION ALL
+                SELECT 1 AS source_kind,
+                       rollup.bucket_start AS source_time,
+                       NULL::uuid AS observation_id,
+                       rollup.series_id,
+                       rollup.bucket_secs,
+                       rollup.bucket_start,
+                       rollup.health_state,
+                       rollup.reason_key
+                FROM network_observation_rollups rollup
+                WHERE rollup.bucket_start + make_interval(secs => rollup.bucket_secs)
+                    <= to_timestamp($1)
+                UNION ALL
+                SELECT 2 AS source_kind,
+                       latest.observed_at AS source_time,
+                       NULL::uuid AS observation_id,
+                       latest.series_id,
+                       NULL::integer AS bucket_secs,
+                       NULL::timestamptz AS bucket_start,
+                       NULL::smallint AS health_state,
+                       NULL::text AS reason_key
+                FROM network_observation_latest latest
+                JOIN network_observation_series series ON series.id = latest.series_id
+                WHERE series.active = FALSE
+                  AND latest.observed_at < to_timestamp($1)
+            ) eligible
+            ORDER BY source_time, source_kind,
+                     observation_id, series_id, bucket_secs, bucket_start,
+                     health_state, reason_key
             LIMIT $2
-            FOR UPDATE SKIP LOCKED
+        ),
+        deleted_exact AS (
+            DELETE FROM network_observations observation
+            USING candidates
+            WHERE candidates.source_kind = 0
+              AND observation.id = candidates.observation_id
+            RETURNING observation.id
+        ),
+        deleted_tiered AS (
+            DELETE FROM network_observation_rollups rollup
+            USING candidates
+            WHERE candidates.source_kind = 1
+              AND rollup.series_id = candidates.series_id
+              AND rollup.bucket_secs = candidates.bucket_secs
+              AND rollup.bucket_start = candidates.bucket_start
+              AND rollup.health_state = candidates.health_state
+              AND rollup.reason_key = candidates.reason_key
+            RETURNING rollup.series_id
+        ),
+        deleted_inactive_latest AS (
+            DELETE FROM network_observation_latest latest
+            USING candidates
+            WHERE candidates.source_kind = 2
+              AND latest.series_id = candidates.series_id
+            RETURNING latest.series_id
         )
-        DELETE FROM telemetry_samples sample
-        USING doomed
-        WHERE sample.ctid = doomed.ctid
-        RETURNING sample.id
+        SELECT id::text AS source_key FROM deleted_exact
+        UNION ALL
+        SELECT series_id::text AS source_key FROM deleted_tiered
+        UNION ALL
+        SELECT series_id::text AS source_key FROM deleted_inactive_latest
         "#
     };
-    let rows = sqlx::query(query)
+    let rows = if dry_run {
+        sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+    } else {
+        let mut tx = pool.begin().await?;
+        let rows = sqlx::query(query)
+            .bind(cutoff_unix as i64)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"
+            WITH candidates AS (
+                SELECT series.id
+                FROM network_observation_series series
+                WHERE series.active = FALSE
+                  AND series.last_seen_at < to_timestamp($1)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM network_observations observation
+                      WHERE observation.automatic_series_id = series.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM network_observation_rollups rollup
+                      WHERE rollup.series_id = series.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM network_observation_latest latest
+                      WHERE latest.series_id = series.id
+                  )
+                ORDER BY series.last_seen_at, series.id
+                FOR UPDATE OF series SKIP LOCKED
+                LIMIT $2
+            )
+            DELETE FROM network_observation_series series
+            USING candidates
+            WHERE series.id = candidates.id
+            "#,
+        )
         .bind(cutoff_unix as i64)
         .bind(limit)
-        .fetch_all(pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        rows
+    };
     Ok(HistoryRetentionPruneOutcome {
         matched_rows: rows.len() as i64,
         pruned_rows: if dry_run { 0 } else { rows.len() as i64 },
@@ -1725,7 +2126,8 @@ async fn prune_system_metric_rollups(
         r#"
         SELECT metric, bucket_secs, bucket_start
         FROM system_metric_rollups
-        WHERE bucket_start < to_timestamp($1)
+        WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
+            <= to_timestamp($1)
         ORDER BY bucket_start ASC, metric ASC
         LIMIT $2
         "#
@@ -1734,7 +2136,8 @@ async fn prune_system_metric_rollups(
         WITH doomed AS (
             SELECT metric, bucket_secs, bucket_start
             FROM system_metric_rollups
-            WHERE bucket_start < to_timestamp($1)
+            WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1))
+                <= to_timestamp($1)
             ORDER BY bucket_start ASC, metric ASC
             LIMIT $2
         )
@@ -1810,29 +2213,27 @@ async fn prune_telemetry_ping_rollups(
 ) -> Result<HistoryRetentionPruneOutcome> {
     let query = if dry_run {
         r#"
-        SELECT client_id, target_id, generation, bucket_secs, bucket_start
+        SELECT series_id, bucket_secs, bucket_start
         FROM telemetry_ping_rollups
         WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
-        ORDER BY bucket_start ASC, client_id ASC, target_id ASC, generation ASC
+        ORDER BY bucket_start ASC, series_id ASC
         LIMIT $2
         "#
     } else {
         r#"
         WITH doomed AS (
-            SELECT client_id, target_id, generation, bucket_secs, bucket_start
+            SELECT series_id, bucket_secs, bucket_start
             FROM telemetry_ping_rollups
             WHERE bucket_start + make_interval(secs => GREATEST(bucket_secs, 1)) <= to_timestamp($1)
-            ORDER BY bucket_start ASC, client_id ASC, target_id ASC, generation ASC
+            ORDER BY bucket_start ASC, series_id ASC
             LIMIT $2
         )
         DELETE FROM telemetry_ping_rollups rollup
         USING doomed
-        WHERE rollup.client_id = doomed.client_id
-          AND rollup.target_id = doomed.target_id
-          AND rollup.generation = doomed.generation
+        WHERE rollup.series_id = doomed.series_id
           AND rollup.bucket_secs = doomed.bucket_secs
           AND rollup.bucket_start = doomed.bucket_start
-        RETURNING rollup.client_id
+        RETURNING rollup.series_id
         "#
     };
     let rows = sqlx::query(query)
@@ -1847,7 +2248,7 @@ async fn prune_telemetry_ping_rollups(
     })
 }
 
-async fn prune_traffic_counter_samples(
+async fn prune_traffic_history(
     pool: &sqlx::PgPool,
     cutoff_unix: u64,
     limit: i32,
@@ -1855,37 +2256,16 @@ async fn prune_traffic_counter_samples(
 ) -> Result<HistoryRetentionPruneOutcome> {
     let query = if dry_run {
         r#"
-        SELECT
-            sample.client_id,
-            sample.source_kind,
-            sample.interface,
-            sample.observed_at
-        FROM traffic_counter_samples sample
-        WHERE sample.observed_at < to_timestamp($1)
-          AND EXISTS (
-              SELECT 1
-              FROM traffic_counter_samples newer
-              WHERE newer.client_id = sample.client_id
-                AND newer.source_kind = sample.source_kind
-                AND newer.interface = sample.interface
-                AND newer.observed_at < to_timestamp($1)
-                AND newer.observed_at > sample.observed_at
-          )
-        ORDER BY
-            sample.observed_at ASC,
-            sample.client_id ASC,
-            sample.source_kind ASC,
-            sample.interface ASC
-        LIMIT $2
-        "#
-    } else {
-        r#"
-        WITH doomed AS (
+        WITH candidates AS (
             SELECT
+                'exact'::text AS row_kind,
+                sample.ctid AS row_id,
+                sample.observed_at AS sort_at,
                 sample.client_id,
                 sample.source_kind,
                 sample.interface,
-                sample.observed_at
+                ''::text AS origin_kind,
+                0::integer AS bucket_secs
             FROM traffic_counter_samples sample
             WHERE sample.observed_at < to_timestamp($1)
               AND EXISTS (
@@ -1897,21 +2277,86 @@ async fn prune_traffic_counter_samples(
                     AND newer.observed_at < to_timestamp($1)
                     AND newer.observed_at > sample.observed_at
               )
-            ORDER BY
-                sample.observed_at ASC,
-                sample.client_id ASC,
-                sample.source_kind ASC,
-                sample.interface ASC
-            LIMIT $2
-            FOR UPDATE OF sample SKIP LOCKED
+            UNION ALL
+            SELECT
+                'rollup'::text,
+                rollup.ctid,
+                rollup.bucket_start,
+                rollup.client_id,
+                rollup.source_kind,
+                rollup.interface,
+                rollup.origin_kind,
+                rollup.bucket_secs
+            FROM traffic_counter_rollups rollup
+            WHERE rollup.bucket_start
+                    + make_interval(secs => GREATEST(rollup.bucket_secs, 1))
+                  <= to_timestamp($1)
         )
-        DELETE FROM traffic_counter_samples sample
-        USING doomed
-        WHERE sample.client_id = doomed.client_id
-          AND sample.source_kind = doomed.source_kind
-          AND sample.interface = doomed.interface
-          AND sample.observed_at = doomed.observed_at
-        RETURNING sample.client_id
+        SELECT row_kind
+        FROM candidates
+        ORDER BY sort_at, row_kind, client_id, source_kind, interface,
+                 origin_kind, bucket_secs
+        LIMIT $2
+        "#
+    } else {
+        r#"
+        WITH candidates AS (
+            SELECT
+                'exact'::text AS row_kind,
+                sample.ctid AS row_id,
+                sample.observed_at AS sort_at,
+                sample.client_id,
+                sample.source_kind,
+                sample.interface,
+                ''::text AS origin_kind,
+                0::integer AS bucket_secs
+            FROM traffic_counter_samples sample
+            WHERE sample.observed_at < to_timestamp($1)
+              AND EXISTS (
+                  SELECT 1
+                  FROM traffic_counter_samples newer
+                  WHERE newer.client_id = sample.client_id
+                    AND newer.source_kind = sample.source_kind
+                    AND newer.interface = sample.interface
+                    AND newer.observed_at < to_timestamp($1)
+                    AND newer.observed_at > sample.observed_at
+              )
+            UNION ALL
+            SELECT
+                'rollup'::text,
+                rollup.ctid,
+                rollup.bucket_start,
+                rollup.client_id,
+                rollup.source_kind,
+                rollup.interface,
+                rollup.origin_kind,
+                rollup.bucket_secs
+            FROM traffic_counter_rollups rollup
+            WHERE rollup.bucket_start
+                    + make_interval(secs => GREATEST(rollup.bucket_secs, 1))
+                  <= to_timestamp($1)
+        ), doomed AS MATERIALIZED (
+            SELECT *
+            FROM candidates
+            ORDER BY sort_at, row_kind, client_id, source_kind, interface,
+                     origin_kind, bucket_secs
+            LIMIT $2
+        ), deleted_exact AS (
+            DELETE FROM traffic_counter_samples sample
+            USING doomed
+            WHERE doomed.row_kind = 'exact'
+              AND sample.ctid = doomed.row_id
+            RETURNING sample.client_id
+        ), deleted_rollups AS (
+            DELETE FROM traffic_counter_rollups rollup
+            USING doomed
+            WHERE doomed.row_kind = 'rollup'
+              AND rollup.ctid = doomed.row_id
+            RETURNING rollup.client_id
+        )
+        SELECT client_id FROM deleted_exact
+        UNION ALL
+        SELECT client_id FROM deleted_rollups
         "#
     };
     let rows = sqlx::query(query)

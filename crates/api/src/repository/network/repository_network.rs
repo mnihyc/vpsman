@@ -8,8 +8,8 @@ use sqlx::{types::Json as SqlJson, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    RuntimeTunnelManager, TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan,
-    TunnelPlanInput,
+    tunnel_topology_identity_hash, RuntimeTunnelManager, TunnelBuiltinCredentials,
+    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::{
@@ -19,6 +19,7 @@ use crate::{
     repository_key_lifecycle::{
         require_visible_memory_clients, require_visible_postgres_clients_in_tx,
     },
+    repository_network_observations::deactivate_postgres_automatic_observation_series_for_plan,
     repository_tunnel_credentials::{
         generate_tunnel_builtin_credentials, next_credential_generation,
         reconcile_tunnel_builtin_credentials,
@@ -872,6 +873,14 @@ impl Repository {
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
+                let topology_identity_hash =
+                    enabled.then(|| tunnel_topology_identity_hash(plan_id, plan));
+                deactivate_postgres_automatic_observation_series_for_plan(
+                    &mut tx,
+                    plan_id,
+                    topology_identity_hash.as_deref(),
+                )
+                .await?;
                 let updated = TunnelPlanView {
                     id: plan_id,
                     name: plan.name.clone(),
@@ -1033,6 +1042,12 @@ impl Repository {
                 .await?;
                 let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
                 let updated = tunnel_plan_from_row(&row)?;
+                if !enabled {
+                    deactivate_postgres_automatic_observation_series_for_plan(
+                        &mut tx, plan_id, None,
+                    )
+                    .await?;
+                }
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -1348,6 +1363,8 @@ impl Repository {
                     deleted_reason: Some("operator_retired".to_string()),
                     ..existing
                 };
+                deactivate_postgres_automatic_observation_series_for_plan(&mut tx, plan_id, None)
+                    .await?;
                 insert_tunnel_audit(
                     &mut tx,
                     operator,

@@ -515,6 +515,8 @@ plan_json="$(api_post "/api/v1/tunnel-plans" '{
     "right": "10.251.0.1",
     "prefix_len": 31
   },
+  "left_mtu": 1476,
+  "right_mtu": 1476,
   "bandwidth_mbps": 1000,
   "confirmed": true
 }')"
@@ -545,6 +547,8 @@ plan_json="$(api_put "/api/v1/tunnel-plans/$plan_id" '{
     "right": "10.251.0.1",
     "prefix_len": 31
   },
+  "left_mtu": 1476,
+  "right_mtu": 1476,
   "bandwidth_mbps": 1500,
   "expected_revision": 1,
   "confirmed": true

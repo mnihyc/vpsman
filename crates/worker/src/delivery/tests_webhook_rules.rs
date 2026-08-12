@@ -1,29 +1,100 @@
 use super::*;
+use crate::test_support::PgWorkerTestDb;
 
 #[test]
 fn webhook_rule_worker_config_clamps_operational_bounds_and_validates_retention() {
     assert_eq!(
-        WebhookRuleWorkerConfig::new(0, 0, 1, 0, 0).unwrap(),
+        WebhookRuleWorkerConfig::new(0, 0, 1, 1, 0, 0).unwrap(),
         WebhookRuleWorkerConfig {
             delivery_limit: 1,
             materialize_limit: 1,
             retention_days: 1,
+            telemetry_event_retention_days: 1,
             retention_prune_limit: 1,
             webhook_timeout_secs: 1,
         }
     );
     assert_eq!(
-        WebhookRuleWorkerConfig::new(10_000, 10_000, 3_650, 20_000, 120).unwrap(),
+        WebhookRuleWorkerConfig::new(10_000, 10_000, 3_650, 3_650, 20_000, 120).unwrap(),
         WebhookRuleWorkerConfig {
             delivery_limit: 200,
             materialize_limit: 1000,
             retention_days: 3_650,
+            telemetry_event_retention_days: 3_650,
             retention_prune_limit: 10_000,
             webhook_timeout_secs: 60,
         }
     );
-    assert!(WebhookRuleWorkerConfig::new(25, 100, 0, 1_000, 5).is_err());
-    assert!(WebhookRuleWorkerConfig::new(25, 100, 3_651, 1_000, 5).is_err());
+    assert!(WebhookRuleWorkerConfig::new(25, 100, 0, 1, 1_000, 5).is_err());
+    assert!(WebhookRuleWorkerConfig::new(25, 100, 3_651, 7, 1_000, 5).is_err());
+    assert_eq!(
+        WebhookRuleWorkerConfig::new(25, 100, 3, 7, 1_000, 5)
+            .unwrap()
+            .telemetry_event_retention_days,
+        3
+    );
+}
+
+#[tokio::test]
+async fn postgres_prunes_only_processed_telemetry_events_past_the_short_retention() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let old_processed = Uuid::from_u128(1);
+    let old_unprocessed = Uuid::from_u128(2);
+    let recent_processed = Uuid::from_u128(3);
+    let old_non_telemetry = Uuid::from_u128(4);
+    sqlx::query(
+        r#"
+        INSERT INTO webhook_events (
+            id,
+            kind,
+            event_id,
+            payload,
+            occurred_at,
+            processed_at
+        ) VALUES
+            ($1, 'telemetry.rollup', 'old-processed', '{}'::jsonb,
+                now() - interval '8 days', now() - interval '8 days'),
+            ($2, 'telemetry.rollup', 'old-unprocessed', '{}'::jsonb,
+                now() - interval '8 days', NULL),
+            ($3, 'telemetry.rollup', 'recent-processed', '{}'::jsonb,
+                now() - interval '6 days', now() - interval '6 days'),
+            ($4, 'alert.open', 'old-non-telemetry', '{}'::jsonb,
+                now() - interval '8 days', now() - interval '8 days')
+        "#,
+    )
+    .bind(old_processed)
+    .bind(old_unprocessed)
+    .bind(recent_processed)
+    .bind(old_non_telemetry)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let config = WebhookRuleWorkerConfig::new(25, 100, 90, 7, 1_000, 5).unwrap();
+    assert_eq!(
+        prune_processed_telemetry_events(&db.pool, config)
+            .await
+            .unwrap(),
+        1
+    );
+    let remaining = sqlx::query_scalar::<_, String>(
+        "SELECT event_id FROM webhook_events ORDER BY event_id ASC",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        remaining,
+        vec![
+            "old-non-telemetry".to_string(),
+            "old-unprocessed".to_string(),
+            "recent-processed".to_string(),
+        ]
+    );
+
+    db.cleanup().await;
 }
 
 #[test]

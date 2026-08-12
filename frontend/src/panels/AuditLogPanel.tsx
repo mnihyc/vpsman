@@ -137,6 +137,9 @@ export function AuditLogPanel({
   );
   const minimumRetentionDays =
     selectedPolicy?.domain === "traffic_counter_samples" ? 32 : 1;
+  const selectedUsesTieredHorizon = isTieredMonitoringDomain(
+    selectedPolicy?.domain,
+  );
   const [retentionDays, setRetentionDays] = useState("365");
   const [pruneLimit, setPruneLimit] = useState("1000");
   const [metadataOnly, setMetadataOnly] = useState(false);
@@ -928,12 +931,14 @@ export function AuditLogPanel({
             tone={error ? "danger" : retentionStatusTone}
           />
           <p className="retentionPanelNote">
-            <strong>Monitoring lifecycle.</strong> Accepted high-resolution
-            samples support realtime and short-range views; minute-derived
-            resource, network, traffic-counter, and Ping history is the
-            long-term authority. Equal adjacent resource, network, and Ping
-            minutes may share a variable-length span without changing coverage
-            or query results.
+            <strong>Monitoring lifecycle.</strong> Accepted resource, network,
+            and Ping samples remain exact for 7 days. Their retained history,
+            system metrics, and automatic tunnel reachability use fixed age
+            tiers: 1m through 2d, 5m through 8d, 30m through 31d, 1h through
+            91d, 3h through 181d, 6h through 366d, then 1d. Missing fine detail
+            is not fabricated. Traffic counters remain exact through 32d, then
+            use 1h/3h/6h/1d transition tiers. For tiered domains, Retention days
+            is the final history horizon, not the exact-row duration.
           </p>
           <div
             className="retentionSummaryStrip"
@@ -995,7 +1000,11 @@ export function AuditLogPanel({
                     <small>{historyDomainDescription(policy.domain)}</small>
                   </span>
                   <span className="retentionPolicyValue">
-                    <small>Retention days</small>
+                    <small>
+                      {isTieredMonitoringDomain(policy.domain)
+                        ? "Final horizon"
+                        : "Retention days"}
+                    </small>
                     <strong>{policy.retention_days} days</strong>
                   </span>
                   <span className="retentionPolicyValue">
@@ -1040,7 +1049,11 @@ export function AuditLogPanel({
               </label>
               <div className="retentionFieldGrid">
                 <label>
-                  <span>Retention days</span>
+                  <span>
+                    {selectedUsesTieredHorizon
+                      ? "Final retention horizon"
+                      : "Retention days"}
+                  </span>
                   <input
                     min={minimumRetentionDays}
                     max={3650}
@@ -1057,6 +1070,12 @@ export function AuditLogPanel({
                       monthly cycle.
                     </small>
                   )}
+                  {selectedUsesTieredHorizon && (
+                    <small>
+                      Exact-row duration and intermediate tier cutovers are
+                      fixed; this value controls the last retained day.
+                    </small>
+                  )}
                 </label>
                 <label>
                   <span>Prune limit</span>
@@ -1070,6 +1089,9 @@ export function AuditLogPanel({
                       clearRetentionReviewFeedback();
                     }}
                   />
+                  <small>
+                    Maximum retained-history rows removed per cleanup pass.
+                  </small>
                 </label>
               </div>
               <label className="checkControl">
@@ -1727,23 +1749,36 @@ function historyDomainDescription(domain: string | null | undefined): string {
     client_status_history: "VPS connection and lifecycle history",
     gateway_sessions: "Gateway connection session history",
     job_outputs: "Command output and retained job evidence",
-    network_observations: "Tunnel health, probe, and observation history",
-    system_metric_rollups: "Control-plane capacity rollups",
+    network_observations:
+      "Exact manual, speed, and status evidence; automatic reachability is exact through 2d, then retained in fixed age tiers",
+    system_metric_rollups:
+      "Control-plane capacity history in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_network_rates:
-      "Authoritative minute-derived RX/TX counter history; equal adjacent minutes may share one span",
+      "Authoritative RX/TX rate history in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_ping_rollups:
-      "Authoritative minute-derived general Ping history, separated by target generation",
+      "Authoritative Ping history by target generation in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_rollups:
-      "Authoritative minute-derived CPU, load, memory, and aggregate disk history",
+      "Authoritative CPU, load, memory, and disk history in fixed 1m/5m/30m/1h/3h/6h/1d age tiers",
     telemetry_samples:
-      "Accepted high-resolution resource, network, traffic, and Ping samples for realtime and short-range views",
+      "Accepted exact resource, network, traffic, and Ping source samples retained for 7 days",
     traffic_counter_samples:
-      "Minute-derived counters for configured authoritative traffic-accounting streams",
+      "Authoritative traffic counters exact through 32d, then retained at 1h/3h/6h/1d transition tiers",
     topology_history: "Topology graph and trend history",
   };
   return domain
     ? (descriptions[domain] ?? "Retained history domain")
     : "Retained history domain";
+}
+
+function isTieredMonitoringDomain(domain: string | null | undefined): boolean {
+  return [
+    "network_observations",
+    "system_metric_rollups",
+    "telemetry_network_rates",
+    "telemetry_ping_rollups",
+    "telemetry_rollups",
+    "traffic_counter_samples",
+  ].includes(domain ?? "");
 }
 
 function historyPruneStatusLabel(status: string): string {

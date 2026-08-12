@@ -222,7 +222,18 @@ export function TopologyEvidencePanel({
     Number(Boolean(health)) +
     Number(Boolean(searchQuery.trim()));
   const selectedRangeLabel = networkEvidenceWindowLabel(evidenceWindow);
-  const status = `${observations.length} observations / ${trends.length} trend groups in ${selectedRangeLabel}`;
+  const retainedResolution = trends.reduce(
+    (coarsest, trend) =>
+      trend.retained && typeof trend.effective_resolution_secs === "number"
+        ? Math.max(coarsest, trend.effective_resolution_secs)
+        : coarsest,
+    0,
+  );
+  const status = `${observations.length} exact observations / ${trends.length} trend points in ${selectedRangeLabel}${
+    retainedResolution > 0
+      ? ` · tiered ${formatTrendResolution(retainedResolution)} coarsest source`
+      : ""
+  }`;
   const evidenceFeedbackMessage =
     refreshError ??
     error ??
@@ -1681,8 +1692,12 @@ function buildTrendRow(
       : trend.latency_min_ms !== null && trend.latency_max_ms !== null
         ? `${formatMetric(trend.latency_min_ms)}-${formatMetric(trend.latency_max_ms)} ms; ${formatLoss(trend.packet_loss_avg_ratio)} loss`
         : `${trend.healthy_count} healthy / ${trend.degraded_count} degraded`;
+  const retentionDetail =
+    trend.retained && typeof trend.effective_resolution_secs === "number"
+      ? `; tiered ${formatTrendResolution(trend.effective_resolution_secs)} source bucket`
+      : "";
   return {
-    id: `${trend.kind}:${trend.plan_name ?? ""}:${trend.client_id}:${trend.peer_client_id ?? ""}`,
+    id: `${trend.kind}:${trend.plan_name ?? ""}:${trend.client_id}:${trend.peer_client_id ?? ""}:${trend.bucket_start ?? trend.latest_observed_at}`,
     kind: trend.kind,
     sampleCount: trend.sample_count,
     signalLabel:
@@ -1695,7 +1710,7 @@ function buildTrendRow(
         : humanStatus(signalStatus),
     signalStatus,
     metric,
-    metricDetail,
+    metricDetail: `${metricDetail}${retentionDetail}`,
     target: trend.plan_name ?? trend.interface_name ?? "network",
     targetDetail: endpointLabel(
       trend.client_id,
@@ -1704,6 +1719,13 @@ function buildTrendRow(
     ),
     latestObservedAt: trend.latest_observed_at,
   };
+}
+
+function formatTrendResolution(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
 }
 
 function latestObservationRows(

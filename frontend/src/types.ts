@@ -247,7 +247,10 @@ export type SystemDashboardGatewayEventsRecord = {
 export type SystemDashboardRecord = {
   generated_at: string;
   window: string;
+  requested_step_secs: number;
+  effective_resolution_secs: number;
   bucket_secs: number;
+  effective_points: number;
   current: SystemDashboardSnapshotRecord;
   capacity: SystemDashboardCapacityRecord;
   series: SystemMetricSeriesRecord[];
@@ -1067,11 +1070,20 @@ export type MonitoringCardsPageView = {
 
 export type MonitoringRangeView = {
   window: string;
-  source: "raw" | "minute" | string;
+  source: "raw" | "retained" | string;
   start_unix: number;
   end_unix: number;
+  requested_step_secs: number;
+  effective_resolution_secs: number;
   step_secs: number;
   points: number;
+  effective_points: number;
+  resolutions: {
+    resources: number;
+    network: number;
+    ping: number;
+    traffic: number;
+  };
 };
 
 export type ClientMonitoringView = {
@@ -1228,8 +1240,12 @@ export type PublicMonitoringRangeView = {
   source: string;
   start_unix: number;
   end_unix: number;
+  requested_step_secs: number;
+  effective_resolution_secs: number;
   step_secs: number;
   points: number;
+  effective_points: number;
+  resolutions: MonitoringRangeView["resolutions"];
 };
 
 export type PublicTrafficHistoryPointView = {
@@ -2503,7 +2519,12 @@ export type NetworkObservationTrendRecord = {
   interface_name: string | null;
   client_id: string;
   peer_client_id: string | null;
+  bucket_start?: string | null;
+  bucket_secs?: number | null;
+  retained?: boolean;
   sample_count: number;
+  source_bucket_count?: number;
+  effective_resolution_secs?: number | null;
   automatic_count: number;
   manual_count: number;
   healthy_count: number;

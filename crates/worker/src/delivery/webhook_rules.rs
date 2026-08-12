@@ -61,6 +61,7 @@ pub(crate) struct WebhookRuleWorkerConfig {
     pub(crate) delivery_limit: i64,
     pub(crate) materialize_limit: i64,
     pub(crate) retention_days: i64,
+    pub(crate) telemetry_event_retention_days: i64,
     pub(crate) retention_prune_limit: i64,
     pub(crate) webhook_timeout_secs: u64,
 }
@@ -70,6 +71,7 @@ impl WebhookRuleWorkerConfig {
         delivery_limit: i64,
         materialize_limit: i64,
         retention_days: i64,
+        telemetry_event_retention_days: i64,
         retention_prune_limit: i64,
         webhook_timeout_secs: u64,
     ) -> Result<Self> {
@@ -81,6 +83,7 @@ impl WebhookRuleWorkerConfig {
             delivery_limit: delivery_limit.clamp(1, 200),
             materialize_limit: materialize_limit.clamp(1, 1000),
             retention_days,
+            telemetry_event_retention_days: telemetry_event_retention_days.clamp(1, retention_days),
             retention_prune_limit: retention_prune_limit.clamp(1, 10_000),
             webhook_timeout_secs: webhook_timeout_secs.clamp(1, 60),
         })
@@ -89,7 +92,7 @@ impl WebhookRuleWorkerConfig {
 
 impl Default for WebhookRuleWorkerConfig {
     fn default() -> Self {
-        Self::new(25, 100, 90, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
+        Self::new(25, 100, 90, 7, 1_000, DEFAULT_WEBHOOK_TIMEOUT_SECS)
             .expect("default webhook retention config is valid")
     }
 }
@@ -210,7 +213,8 @@ pub(crate) async fn process_webhook_rules(
     let (event_deliveries, legacy_manual_events_skipped) =
         process_webhook_events(pool, config).await?;
     let (processed, delivered, failed) = process_queued_deliveries(pool, config).await?;
-    let pruned = drop_old_event_partitions(pool, config).await?
+    let pruned = prune_processed_telemetry_events(pool, config).await?
+        + drop_old_event_partitions(pool, config).await?
         + prune_default_partition_rows(pool, config).await?
         + prune_deliveries(pool, config).await?;
     Ok(WebhookRuleWorkerRun {
@@ -221,6 +225,35 @@ pub(crate) async fn process_webhook_rules(
         failed,
         pruned,
     })
+}
+
+async fn prune_processed_telemetry_events(
+    pool: &PgPool,
+    config: WebhookRuleWorkerConfig,
+) -> Result<usize> {
+    let rows = sqlx::query(
+        r#"
+        WITH candidates AS (
+            SELECT occurred_at, id
+            FROM webhook_events
+            WHERE kind = 'telemetry.rollup'
+              AND processed_at IS NOT NULL
+              AND occurred_at <= now() - ($1::bigint * interval '1 day')
+            ORDER BY occurred_at ASC, id ASC
+            LIMIT $2
+        )
+        DELETE FROM webhook_events events
+        USING candidates
+        WHERE events.occurred_at = candidates.occurred_at
+          AND events.id = candidates.id
+        RETURNING events.id
+        "#,
+    )
+    .bind(config.telemetry_event_retention_days)
+    .bind(config.retention_prune_limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.len())
 }
 
 pub(crate) async fn materialize_interval_events(

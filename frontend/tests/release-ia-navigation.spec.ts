@@ -61,6 +61,7 @@ const customMockTests = new Set([
   "system maintenance presents an empty cleanup preview as a neutral no-op",
   "config surfaces unavailable runtime apply evidence without trusting health claims",
   "malformed notification channels remain visible and fail closed",
+  "VPS monitoring reports per-domain retained resolutions",
 ]);
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -3121,6 +3122,49 @@ test("VPS detail sections stay scoped to their resource history entry", async ({
   }
 });
 
+test("VPS monitoring reports per-domain retained resolutions", async ({
+  page,
+}) => {
+  await installConsoleApiMock(page, {
+    monitoringRangeOverride: {
+      effective_points: 4,
+      effective_resolution_secs: 300,
+      resolutions: {
+        network: 300,
+        ping: 300,
+        resources: 300,
+        traffic: 60,
+      },
+      source: "retained",
+      step_secs: 300,
+    },
+  });
+  await page.goto("/#/fleet/instance-detail/agent-sfo-01");
+  await waitForConsoleShell(page);
+
+  const detail = page.getByLabel("Canonical VPS detail");
+  const sectionSelector = detail
+    .locator(".detailTabSelect:visible")
+    .getByLabel("VPS detail section");
+  const resourcesTab = detail
+    .locator(".detailTabs:visible")
+    .getByRole("tab", { name: "Resources", exact: true });
+  await expect(sectionSelector.or(resourcesTab)).toBeVisible();
+  if ((await sectionSelector.count()) === 1) {
+    await sectionSelector.selectOption("Resources");
+  } else {
+    await resourcesTab.click();
+  }
+
+  const monitoring = detail.getByRole("region", {
+    name: "Monitoring history for edge-sfo-01",
+  });
+  await expect(monitoring).toContainText("retained tiered history");
+  await expect(monitoring).toContainText(
+    "resources/network/Ping 5m; traffic 1m coarsest source resolutions",
+  );
+});
+
 test("VPS detail workflow actions preserve the exact resource target", async ({
   page,
 }, testInfo) => {
@@ -5090,7 +5134,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   ).toBeVisible();
   await expect(
     page.getByText(
-      /Metric definition: Each chart point averages retained 60-second Linux 1-minute load/,
+      /Metric definition: Each chart point averages available Linux 1-minute load evidence/,
     ),
   ).toBeVisible();
 
@@ -5239,7 +5283,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   ).toBeVisible();
   await expect(
     page.getByText(
-      /Metric definition: Each chart point averages retained 60-second used-memory ratios/,
+      /Metric definition: Each chart point averages available used-memory ratio evidence/,
     ),
   ).toBeVisible();
   const memoryFigureLabel = await page
@@ -5251,7 +5295,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   await controls.getByRole("button", { name: "Disk" }).click();
   await expect(
     page.getByText(
-      /Metric definition: Each chart point derives free space from retained per-snapshot aggregate-filesystem used ratios/,
+      /Metric definition: Each chart point derives free space from available aggregate-filesystem used-ratio evidence/,
     ),
   ).toBeVisible();
   const diskFigureLabel = await page
@@ -6370,6 +6414,12 @@ test("audit retention explains export scope and prune impact separately from mai
   await expect(
     page.getByRole("heading", { level: 2, name: "History retention" }),
   ).toBeVisible();
+  await expect(
+    page.getByText(/Missing fine detail is not fabricated/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/Retention days is the final history horizon/),
+  ).toBeVisible();
 
   const summary = page.getByLabel("History retention summary");
   await expect(summary).toContainText("Policy domains");
@@ -6379,6 +6429,7 @@ test("audit retention explains export scope and prune impact separately from mai
   const policies = page.getByLabel("History retention policy table");
   await expect(policies).toContainText("Domain");
   await expect(policies).toContainText("Retention days");
+  await expect(policies).toContainText("Final horizon");
   await expect(policies).toContainText("Metadata only");
   await expect(policies).toContainText("Export enabled");
   await expect(policies).toContainText("Audit logs");
@@ -7517,6 +7568,12 @@ test("network tests keeps diagnostics and trends mutation-free", async ({
   const trendCharts = page.getByLabel("Network test trend charts");
   await expect(trendCharts).toBeVisible();
   await expect(trendCharts).toContainText(
+    "Retained tiered history · 5m coarsest source resolution",
+  );
+  await expect(trendCharts).toContainText(
+    /Metric definition: Each point is the mean RTT from one exact bounded ICMP probe run or from the source runs represented by one retained evidence bucket/,
+  );
+  await expect(trendCharts).toContainText(
     "No trend line yet; capture another run to compare movement.",
   );
   await expect(trendCharts).toContainText(
@@ -7948,6 +8005,18 @@ test("system overview keeps platform health separate from fleet monitoring", asy
   await expect(systemOverview).toContainText("Worker");
   await expect(systemOverview).toContainText("Diagnostics");
   await expect(systemOverview).not.toContainText("Capacity forecast");
+
+  const systemChart = page.getByLabel(
+    "Selected chart - Dispatch queue system metrics data coverage",
+  );
+  await expect(systemChart).toContainText("gaps");
+  await expect(
+    page
+      .getByRole("figure", {
+        name: /Selected chart - Dispatch queue system metrics/,
+      })
+      .first(),
+  ).toHaveAttribute("data-gap-policy", "preserve");
 
   const main = page.getByRole("main");
   await expect(main.locator(".vpsMonitorGrid")).toHaveCount(0);

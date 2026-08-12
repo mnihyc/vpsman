@@ -4,19 +4,20 @@ use chrono::{TimeZone, Utc};
 use serde_json::json;
 
 use super::{
-    aggregate_memory_traffic_counter_usage, aggregate_memory_traffic_history,
-    claim_traffic_selector_directions, derive_cycle_usage, next_policy_rule_state,
-    parse_billing_cycle, parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
-    parse_persisted_traffic_selector_list, parse_port_speed,
+    aggregate_memory_raw_traffic_history, aggregate_memory_traffic_counter_usage,
+    aggregate_memory_traffic_history, claim_traffic_selector_directions, derive_cycle_usage,
+    next_policy_rule_state, parse_billing_cycle, parse_billing_price, parse_byte_size,
+    parse_network_rate_interfaces, parse_persisted_traffic_selector_list, parse_port_speed,
     parse_stored_network_rate_selector_spec, parse_traffic_selector, parse_traffic_selector_list,
     parse_vps_rule_value, policy_identifier_value, policy_state_is_alert_eligible,
     policy_webhook_repair_is_recent, resolve_network_rate_interface_selection,
     traffic_accounting_for_client, traffic_cycle_starts_for_clients, validate_billing_rule_group,
     NetworkRateSelectorReference, NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord,
-    PolicyRuleStateRecord, TrafficCounterSampleRecord, TrafficCounterStreamUsage,
-    TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
-    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
-    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    PolicyRuleStateRecord, TrafficCounterRollupRecord, TrafficCounterSampleRecord,
+    TrafficCounterStreamUsage, TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord,
+    NO_RESET_TRAFFIC_START_UNIX, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+    VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
 
 #[test]
@@ -240,6 +241,7 @@ fn traffic_stream_aggregation_preserves_usage_across_resets_and_epochs() {
     let full_usage = derive_cycle_usage(&samples, 100, 150);
     let aggregated = aggregate_memory_traffic_counter_usage(
         &samples,
+        &[],
         &[TrafficStreamRequest {
             client_id: "edge-a".to_string(),
             source_kind: "host".to_string(),
@@ -290,6 +292,7 @@ fn no_reset_traffic_uses_epoch_lower_bound_and_preserves_counter_reset_gaps() {
 
     let usage = aggregate_memory_traffic_counter_usage(
         &samples,
+        &[],
         &[TrafficStreamRequest {
             client_id: "edge-a".to_string(),
             source_kind: "host".to_string(),
@@ -395,6 +398,7 @@ fn traffic_history_ignores_resets_in_unselected_direction() {
     let samples = vec![sample(90, 100, 200, 0, 0), sample(120, 120, 10, 0, 1)];
     let rx = aggregate_memory_traffic_history(
         samples.clone(),
+        &[],
         &[TrafficHistoryStream {
             source_kind: "host".to_string(),
             interface: "eth0".to_string(),
@@ -411,6 +415,7 @@ fn traffic_history_ignores_resets_in_unselected_direction() {
 
     let tx = aggregate_memory_traffic_history(
         samples,
+        &[],
         &[TrafficHistoryStream {
             source_kind: "host".to_string(),
             interface: "eth0".to_string(),
@@ -427,6 +432,7 @@ fn traffic_history_ignores_resets_in_unselected_direction() {
 
     let total = aggregate_memory_traffic_history(
         vec![sample(90, 100, 200, 0, 0), sample(120, 120, 10, 0, 1)],
+        &[],
         &[TrafficHistoryStream {
             source_kind: "host".to_string(),
             interface: "eth0".to_string(),
@@ -442,6 +448,136 @@ fn traffic_history_ignores_resets_in_unselected_direction() {
     assert_eq!(total[0].rx_bytes, Some(20));
     assert_eq!(total[0].tx_bytes, None);
     assert_eq!(total[0].total_bytes, None);
+}
+
+#[test]
+fn retained_traffic_history_returns_native_bucket_without_interpolation() {
+    let history = aggregate_memory_traffic_history(
+        vec![sample(7_200, 100, 200, 0, 0), sample(7_260, 110, 220, 0, 0)],
+        &[traffic_rollup(0, 3_600, 300, 600, 4, 1)],
+        &[TrafficHistoryStream {
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            direction_mask: 0b11,
+        }],
+        0,
+        7_300,
+        60,
+    );
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].bucket_start, "0");
+    assert_eq!(history[0].bucket_secs, 3_600);
+    assert_eq!(history[0].sample_count, 4);
+    assert_eq!(history[0].reset_count, 1);
+    assert_eq!(history[0].rx_bytes, Some(300));
+    assert_eq!(history[0].tx_bytes, Some(600));
+    assert_eq!(history[1].bucket_secs, 60);
+    assert_eq!(history[1].rx_bytes, Some(10));
+    assert_eq!(history[1].tx_bytes, Some(20));
+}
+
+#[test]
+fn raw_traffic_history_adds_exact_imports_without_cross_source_transitions() {
+    let live_samples = vec![sample(730, 100, 200, 0, 0), sample(745, 130, 240, 0, 0)];
+    let mut imported_samples = vec![
+        sample(540, 0, 0, 0, 0),
+        sample(600, 10, 20, 0, 0),
+        sample(660, 25, 50, 0, 0),
+    ];
+    for sample in &mut imported_samples {
+        sample.sample_source = "vnstat_import:test".to_string();
+    }
+    // Durable live rows are deliberately different from the raw observations:
+    // source=raw must not substitute or add them.
+    imported_samples.extend([
+        sample(700, 1_000, 2_000, 1, 1),
+        sample(760, 1_500, 2_600, 1, 1),
+    ]);
+
+    let history = aggregate_memory_raw_traffic_history(
+        live_samples,
+        &imported_samples,
+        &[TrafficHistoryStream {
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            direction_mask: 0b11,
+        }],
+        600,
+        899,
+        300,
+    );
+
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].sample_count, 3);
+    assert_eq!(history[0].reset_count, 0);
+    assert_eq!(history[0].rx_bytes, Some(55));
+    assert_eq!(history[0].tx_bytes, Some(90));
+    assert_eq!(history[0].total_bytes, Some(145));
+}
+
+#[test]
+fn retained_traffic_history_masks_unselected_direction_counts_and_bytes() {
+    let mut rollup = traffic_rollup(0, 3_600, 300, 600, 4, 1);
+    rollup.rx_valid_count = 4;
+    rollup.tx_valid_count = 0;
+    rollup.rx_reset_count = 0;
+    rollup.tx_reset_count = 1;
+
+    let rx = aggregate_memory_traffic_history(
+        Vec::new(),
+        &[rollup.clone()],
+        &[TrafficHistoryStream {
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            direction_mask: 0b01,
+        }],
+        0,
+        3_599,
+        60,
+    );
+    assert_eq!(rx[0].sample_count, 4);
+    assert_eq!(rx[0].reset_count, 0);
+    assert_eq!(rx[0].rx_bytes, Some(300));
+    assert_eq!(rx[0].tx_bytes, Some(0));
+
+    let tx = aggregate_memory_traffic_history(
+        Vec::new(),
+        &[rollup],
+        &[TrafficHistoryStream {
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            direction_mask: 0b10,
+        }],
+        0,
+        3_599,
+        60,
+    );
+    assert_eq!(tx[0].sample_count, 0);
+    assert_eq!(tx[0].reset_count, 1);
+    assert_eq!(tx[0].rx_bytes, None);
+    assert_eq!(tx[0].tx_bytes, None);
+}
+
+#[test]
+fn no_reset_accounting_adds_retained_ledger_without_changing_latest_counter() {
+    let usage = aggregate_memory_traffic_counter_usage(
+        &[sample(7_200, 100, 200, 0, 0), sample(7_260, 110, 220, 0, 0)],
+        &[traffic_rollup(0, 3_600, 300, 600, 4, 1)],
+        &[TrafficStreamRequest {
+            client_id: "edge-a".to_string(),
+            source_kind: "host".to_string(),
+            interface: "eth0".to_string(),
+            cycle_start_unix: NO_RESET_TRAFFIC_START_UNIX,
+        }],
+        7_260,
+    );
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].cycle_rx, 310);
+    assert_eq!(usage[0].cycle_tx, 620);
+    assert_eq!(usage[0].latest_rx, 110);
+    assert_eq!(usage[0].latest_tx, 220);
+    assert_eq!(usage[0].rx_counter_epochs_seen, 2);
+    assert_eq!(usage[0].tx_counter_epochs_seen, 2);
 }
 
 #[test]
@@ -762,5 +898,34 @@ fn sample(
         rx_counter_epoch,
         tx_counter_epoch,
         sample_source: "test".to_string(),
+    }
+}
+
+fn traffic_rollup(
+    bucket_start_unix: i64,
+    bucket_secs: i32,
+    rx_bytes: i64,
+    tx_bytes: i64,
+    any_valid_count: i32,
+    any_reset_count: i32,
+) -> TrafficCounterRollupRecord {
+    TrafficCounterRollupRecord {
+        client_id: "edge-a".to_string(),
+        source_kind: "host".to_string(),
+        interface: "eth0".to_string(),
+        origin_kind: "live".to_string(),
+        bucket_start: bucket_start_unix.to_string(),
+        bucket_start_unix,
+        bucket_secs,
+        rx_bytes,
+        tx_bytes,
+        rx_valid_count: any_valid_count,
+        tx_valid_count: any_valid_count,
+        any_valid_count,
+        rx_reset_count: any_reset_count,
+        tx_reset_count: any_reset_count,
+        any_reset_count,
+        first_observed_unix: bucket_start_unix,
+        latest_observed_unix: bucket_start_unix + i64::from(bucket_secs) - 1,
     }
 }

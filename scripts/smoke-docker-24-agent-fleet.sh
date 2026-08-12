@@ -376,6 +376,19 @@ api_get "/api/v1/tags" | jq -e \
   any(.[]; .name == "audit:docker-fleet" and (.clients | length) == $expected)
 ' >/dev/null
 
+# Fresh agents intentionally have no aggregate-rate interface selection. Make
+# this dashboard fixture explicit: an empty list means every reported host
+# interface, rather than inheriting an absent traffic selector.
+network_rate_rule_json="$(vpsctl_json vps-rules upsert \
+  --selector 'tag:audit:docker-fleet' \
+  --set 'network.rate.interfaces=[]' \
+  --confirmed)"
+jq -e --argjson expected "$agent_count" '
+  .matched_vps_count == $expected and
+  .changed_row_count == $expected and
+  .invalid_row_count == 0
+' <<<"$network_rate_rule_json" >/dev/null
+
 api_get "/api/v1/telemetry/rollups?limit=5000&bucket_secs=$rollup_bucket_secs" | jq -e --argjson expected "$agent_count" --argjson bucket "$rollup_bucket_secs" '
   ([.[] | select(.bucket_secs == $bucket and .sample_count >= 2) | .client_id] | unique | length) >= $expected and
   all(.[] | select(.bucket_secs == $bucket and .sample_count >= 2);

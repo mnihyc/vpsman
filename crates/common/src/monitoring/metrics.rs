@@ -2,10 +2,35 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // Accepted raw telemetry samples support realtime and short-range inspection.
-// One-minute rollups are the authoritative long-term historical source.
-pub const DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS: i32 = 90;
+// Tiered rollups are the authoritative long-term historical source.
+pub const DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS: i32 = 7;
 pub const DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS: i32 = 3_650;
 pub const DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT: i32 = 10_000;
+pub const DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT: i32 = 5_000;
+pub const TELEMETRY_HISTORY_TIERS: [HistoryTier; 7] = [
+    HistoryTier::new(60, 2),
+    HistoryTier::new(5 * 60, 8),
+    HistoryTier::new(30 * 60, 31),
+    HistoryTier::new(60 * 60, 91),
+    HistoryTier::new(3 * 60 * 60, 181),
+    HistoryTier::new(6 * 60 * 60, 366),
+    HistoryTier::new(24 * 60 * 60, 3_650),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HistoryTier {
+    pub bucket_secs: i32,
+    pub retain_days: i32,
+}
+
+impl HistoryTier {
+    pub const fn new(bucket_secs: i32, retain_days: i32) -> Self {
+        Self {
+            bucket_secs,
+            retain_days,
+        }
+    }
+}
 // Monthly traffic cycles span at most 31 days; the extra day keeps retention
 // strictly behind the active cycle boundary.
 pub const MIN_TRAFFIC_COUNTER_RETENTION_DAYS: i32 = 32;

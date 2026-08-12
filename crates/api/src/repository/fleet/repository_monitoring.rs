@@ -1,10 +1,10 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use sqlx::Row;
 use uuid::Uuid;
 use vpsman_common::{
-    AgentMetrics, AgentPingProbeKind, AgentPingTarget, PingTargetResult, MAX_AGENT_PING_TARGETS,
+    AgentPingProbeKind, AgentPingTarget, PingTargetResult, MAX_AGENT_PING_TARGETS,
 };
 
 use crate::{
@@ -21,10 +21,6 @@ use crate::{
     repository_key_lifecycle::{
         lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
         require_visible_postgres_clients_in_tx,
-    },
-    repository_telemetry_rollups::{
-        fragment_final_minute_timestamp, logical_span_fragments, proportional_fragment_count,
-        LogicalSpanFragment,
     },
     security::{constant_time_eq, generate_token},
     util::parse_timestamp_unix,
@@ -1284,27 +1280,23 @@ impl Repository {
                     let Some(target) = targets.get(&assignment.target_id) else {
                         continue;
                     };
-                    let latest = rollups
-                        .iter()
-                        .filter(|rollup| {
-                            rollup.client_id == assignment.client_id
-                                && rollup.target_id == assignment.target_id
-                                && rollup.generation == target.generation
-                        })
-                        .max_by(|left, right| {
-                            monitoring_timestamp_unix(&left.latest_checked_at)
-                                .cmp(&monitoring_timestamp_unix(&right.latest_checked_at))
-                        });
-                    let rolling_loss_ratio = latest.and_then(|latest| {
-                        current_ping_loss_ratio(
-                            latest,
-                            rollups.iter().filter(|rollup| {
+                    let authoritative = retain_authoritative_ping_rows(
+                        rollups
+                            .iter()
+                            .filter(|rollup| {
                                 rollup.client_id == assignment.client_id
                                     && rollup.target_id == assignment.target_id
                                     && rollup.generation == target.generation
-                            }),
-                        )
+                            })
+                            .cloned()
+                            .collect(),
+                    );
+                    let latest = authoritative.iter().max_by(|left, right| {
+                        monitoring_timestamp_unix(&left.latest_checked_at)
+                            .cmp(&monitoring_timestamp_unix(&right.latest_checked_at))
                     });
+                    let rolling_loss_ratio = latest
+                        .and_then(|latest| current_ping_loss_ratio(latest, authoritative.iter()));
                     rows.push((
                         assignment.client_id.clone(),
                         current_ping_view(target, latest, rolling_loss_ratio),
@@ -1332,133 +1324,19 @@ impl Repository {
                         t.name AS target_name,
                         t.enabled,
                         t.generation,
-                        latest.latest_status,
-                        latest.latency_avg_ms,
-                        latest.loss_ratio_avg,
-                        rolling.loss_ratio AS rolling_loss_ratio,
-                        latest.latest_reason,
-                        latest.latest_checked_at::text AS latest_checked_at
+                        current.latest_status,
+                        current.latency_avg_ms,
+                        current.rolling_loss_ratio AS loss_ratio_avg,
+                        current.rolling_loss_ratio,
+                        current.latest_reason,
+                        current.latest_checked_at::text AS latest_checked_at
                     FROM ping_target_assignments a
                     JOIN ping_targets t ON t.id = a.target_id
-                    LEFT JOIN LATERAL (
-                        SELECT
-                            p.latest_status,
-                            p.latency_avg_ms,
-                            p.loss_ratio_avg,
-                            p.latest_reason,
-                            p.latest_checked_at
-                        FROM telemetry_ping_rollups p
-                        WHERE p.client_id = a.client_id
-                          AND p.target_id = a.target_id
-                          AND p.generation = t.generation
-                        ORDER BY p.latest_checked_at DESC, p.bucket_start DESC
-                        LIMIT 1
-                    ) latest ON TRUE
-                    LEFT JOIN LATERAL (
-                        WITH bounds AS (
-                            SELECT
-                                extract(epoch FROM latest.latest_checked_at)::bigint AS end_unix,
-                                GREATEST(
-                                    extract(epoch FROM latest.latest_checked_at)::bigint
-                                        - ($3::bigint - 1),
-                                    0
-                                ) AS start_unix
-                        ), recent_physical AS (
-                            SELECT
-                                p.bucket_start,
-                                p.bucket_secs,
-                                p.sample_count,
-                                p.loss_ratio_avg
-                            FROM telemetry_ping_rollups p
-                            CROSS JOIN bounds
-                            WHERE p.client_id = a.client_id
-                              AND p.target_id = a.target_id
-                              AND p.generation = t.generation
-                              AND p.bucket_secs >= 60
-                              AND p.bucket_secs % 60 = 0
-                              AND p.bucket_start >= to_timestamp(bounds.start_unix)
-                              AND p.bucket_start <= to_timestamp(bounds.end_unix)
-                        ), preceding_physical AS (
-                            SELECT
-                                preceding.bucket_start,
-                                preceding.bucket_secs,
-                                preceding.sample_count,
-                                preceding.loss_ratio_avg
-                            FROM bounds
-                            CROSS JOIN LATERAL (
-                                SELECT
-                                    candidate.bucket_start
-                                FROM telemetry_ping_rollups candidate
-                                WHERE candidate.client_id = a.client_id
-                                  AND candidate.target_id = a.target_id
-                                  AND candidate.generation = t.generation
-                                  AND candidate.bucket_secs >= 60
-                                  AND candidate.bucket_secs % 60 = 0
-                                  AND candidate.bucket_start
-                                        < to_timestamp(bounds.start_unix)
-                                ORDER BY candidate.bucket_start DESC
-                                LIMIT 1
-                            ) preceding_start
-                            JOIN telemetry_ping_rollups preceding
-                              ON preceding.client_id = a.client_id
-                             AND preceding.target_id = a.target_id
-                             AND preceding.generation = t.generation
-                             AND preceding.bucket_start = preceding_start.bucket_start
-                             AND preceding.bucket_secs >= 60
-                             AND preceding.bucket_secs % 60 = 0
-                            WHERE preceding.bucket_start
-                                    + make_interval(secs => preceding.bucket_secs - 60)
-                                    >= to_timestamp(bounds.start_unix)
-                        ), bounded_physical AS (
-                            /* The indexed 15-minute range plus one preceding adaptive span
-                               covers every non-overlapping physical rollup that can contribute. */
-                            SELECT * FROM recent_physical
-                            UNION ALL
-                            SELECT * FROM preceding_physical
-                        ), candidates AS (
-                            SELECT
-                                p.loss_ratio_avg,
-                                p.sample_count::bigint AS sample_count,
-                                extract(epoch FROM p.bucket_start)::bigint AS source_start,
-                                (p.bucket_secs / 60)::bigint AS source_minutes,
-                                bounds.start_unix,
-                                bounds.end_unix
-                            FROM bounded_physical p
-                            CROSS JOIN bounds
-                        ), physical AS (
-                            SELECT
-                                candidates.*,
-                                CASE
-                                    WHEN start_unix <= source_start THEN 0::bigint
-                                    ELSE LEAST(
-                                        source_minutes,
-                                        (start_unix - source_start + 59) / 60
-                                    )
-                                END AS first_minute,
-                                CASE
-                                    WHEN end_unix < source_start THEN 0::bigint
-                                    ELSE LEAST(
-                                        source_minutes,
-                                        (end_unix - source_start) / 60 + 1
-                                    )
-                                END AS end_minute
-                            FROM candidates
-                        ), selected AS (
-                            SELECT
-                                loss_ratio_avg,
-                                sample_count * end_minute / source_minutes
-                                    - sample_count * first_minute / source_minutes
-                                    AS sample_count
-                            FROM physical
-                            WHERE first_minute < end_minute
-                        )
-                        SELECT
-                            sum(loss_ratio_avg * sample_count::double precision)
-                                / NULLIF(sum(sample_count)::double precision, 0)
-                                AS loss_ratio
-                        FROM selected
-                        WHERE sample_count > 0
-                    ) rolling ON latest.latest_checked_at IS NOT NULL
+                    LEFT JOIN telemetry_ping_series series
+                      ON series.client_id = a.client_id
+                     AND series.target_id = a.target_id
+                     AND series.generation = t.generation
+                    LEFT JOIN telemetry_ping_current current ON current.series_id = series.id
                     WHERE a.client_id = ANY($1::TEXT[])
                       AND (NOT $2::BOOLEAN OR a.is_primary)
                     ORDER BY a.client_id, lower(t.name), t.id
@@ -1466,7 +1344,6 @@ impl Repository {
                 )
                 .bind(client_ids)
                 .bind(primary_only)
-                .bind(CURRENT_PING_LOSS_WINDOW_SECS as i64)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
@@ -1511,6 +1388,7 @@ impl Repository {
         client_id: &str,
         observed_unix: u64,
         results: &[PingTargetResult],
+        source_checked_unix: &[u64],
     ) -> Result<()> {
         let Self::Memory(memory) = self else {
             return Ok(());
@@ -1523,8 +1401,16 @@ impl Repository {
             .map(|target| (target.id, target.clone()))
             .collect::<HashMap<_, _>>();
         let assignments = memory.ping_target_assignments.read().await.clone();
+        if results.len() != source_checked_unix.len() {
+            bail!("Ping result/source timestamp cardinality mismatch");
+        }
+        let mut source_checks = memory.telemetry_ping_source_checks.write().await;
         let mut stored = memory.telemetry_ping_rollups.write().await;
-        for result in results.iter().take(MAX_AGENT_PING_TARGETS) {
+        for (result, source_checked_unix) in results
+            .iter()
+            .zip(source_checked_unix)
+            .take(MAX_AGENT_PING_TARGETS)
+        {
             let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
                 continue;
             };
@@ -1536,11 +1422,23 @@ impl Repository {
                 || !assignments.iter().any(|assignment| {
                     assignment.target_id == target_id && assignment.client_id == client_id
                 })
+                || !(1..=i64::MAX as u64).contains(source_checked_unix)
                 || !valid_ping_result(result, observed_unix)
             {
                 continue;
             }
-            upsert_memory_ping_rollup(&mut stored, client_id, target, result);
+            let source_key = (
+                client_id.to_string(),
+                target_id,
+                target.generation,
+                *source_checked_unix,
+            );
+            if let Some(retained_at) = source_checks.get_mut(&source_key) {
+                *retained_at = observed_unix;
+                continue;
+            }
+            source_checks.insert(source_key, observed_unix);
+            upsert_memory_ping_rollup(&mut stored, client_id, target, result, *source_checked_unix);
         }
         Ok(())
     }
@@ -1550,9 +1448,13 @@ impl Repository {
         client_id: &str,
         observed_unix: u64,
         results: &[PingTargetResult],
-    ) -> Result<Vec<PingTargetResult>> {
+        source_checked_unix: &[u64],
+    ) -> Result<(Vec<PingTargetResult>, Vec<u64>)> {
+        if results.len() != source_checked_unix.len() {
+            bail!("Ping result/source timestamp cardinality mismatch");
+        }
         let Self::Memory(memory) = self else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let enabled_generations = memory
             .ping_targets
@@ -1570,17 +1472,47 @@ impl Repository {
             .filter(|assignment| assignment.client_id == client_id)
             .map(|assignment| assignment.target_id)
             .collect::<HashSet<_>>();
-        Ok(results
+        let mut deduplicated = BTreeMap::<(Uuid, i64, u64), (PingTargetResult, u64)>::new();
+        for (result, source_checked_unix) in results
             .iter()
+            .zip(source_checked_unix)
             .take(MAX_AGENT_PING_TARGETS)
-            .filter_map(|result| {
-                let target_id = Uuid::parse_str(result.target_id.trim()).ok()?;
-                (assigned.contains(&target_id)
-                    && enabled_generations.contains(&(target_id, result.generation as i64))
-                    && valid_ping_result(result, observed_unix))
-                .then(|| result.clone())
-            })
-            .collect())
+        {
+            let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
+                continue;
+            };
+            let generation = result.generation as i64;
+            if assigned.contains(&target_id)
+                && enabled_generations.contains(&(target_id, generation))
+                && (1..=i64::MAX as u64).contains(source_checked_unix)
+                && valid_ping_result(result, observed_unix)
+            {
+                deduplicated.insert(
+                    (target_id, generation, *source_checked_unix),
+                    (result.clone(), *source_checked_unix),
+                );
+            }
+        }
+        let mut source_checks = memory.telemetry_ping_source_checks.write().await;
+        let mut accepted = Vec::with_capacity(deduplicated.len());
+        for ((target_id, generation, source_checked_unix), (result, _)) in deduplicated {
+            let source_key = (
+                client_id.to_string(),
+                target_id,
+                generation,
+                source_checked_unix,
+            );
+            if let Some(retained_at) = source_checks.get_mut(&source_key) {
+                // Agent cache entries are immutable for one source check. A
+                // conflicting duplicate inside this envelope was already
+                // resolved last-input-wins above; later envelopes only refresh
+                // the bounded retention clock and must not add chart evidence.
+                *retained_at = observed_unix;
+            } else {
+                accepted.push((result, source_checked_unix));
+            }
+        }
+        Ok(accepted.into_iter().unzip())
     }
 
     pub(crate) async fn list_ping_rollups(
@@ -1610,7 +1542,7 @@ impl Repository {
                     .filter(|assignment| assignment.client_id == client_id)
                     .map(|assignment| (assignment.target_id, assignment.is_primary))
                     .collect::<HashMap<_, _>>();
-                let rows = memory
+                let physical_rows = memory
                     .telemetry_ping_rollups
                     .read()
                     .await
@@ -1625,9 +1557,12 @@ impl Repository {
                         let mut row = row.clone();
                         row.target_name = target.name.clone();
                         row.is_primary = is_primary;
-                        Some(fragment_ping_rollup(row, start_unix, end_unix, step_secs))
+                        Some(row)
                     })
-                    .flatten()
+                    .collect::<Vec<_>>();
+                let rows = retain_authoritative_ping_rows(physical_rows)
+                    .into_iter()
+                    .flat_map(|row| fragment_ping_rollup(row, start_unix, end_unix, step_secs))
                     .collect::<Vec<_>>();
                 let mut rows = aggregate_memory_ping_rollups(rows, step_secs);
                 retain_fair_ping_points(&mut rows, points_per_target, 50_000);
@@ -1636,81 +1571,76 @@ impl Repository {
             Self::Postgres(pool) => {
                 let rows = sqlx::query(
                     r#"
-                    WITH candidates AS (
+                    WITH scoped_series AS MATERIALIZED (
                         SELECT
-                            p.client_id,
-                            p.target_id,
+                            series.id AS series_id,
+                            series.client_id,
+                            series.target_id,
                             t.name AS target_name,
                             a.is_primary,
-                            p.generation,
+                            series.generation
+                        FROM telemetry_ping_series series
+                        JOIN ping_targets t
+                          ON t.id = series.target_id
+                         AND t.generation = series.generation
+                        JOIN ping_target_assignments a
+                          ON a.target_id = series.target_id
+                         AND a.client_id = series.client_id
+                        WHERE series.client_id = $1
+                    ), physical AS MATERIALIZED (
+                        SELECT
+                            series.series_id,
+                            series.client_id,
+                            series.target_id,
+                            series.target_name,
+                            series.is_primary,
+                            series.generation,
                             extract(epoch FROM p.bucket_start)::bigint AS source_start,
-                            (p.bucket_secs / 60)::bigint AS source_minutes,
+                            p.bucket_secs,
                             p.sample_count,
                             p.success_count,
+                            p.latency_sum_ms,
                             p.latency_avg_ms,
                             p.latency_min_ms,
                             p.latency_max_ms,
                             p.loss_ratio_avg,
+                            p.loss_ratio_sum,
                             p.loss_ratio_max,
                             p.latest_status,
                             p.latest_reason,
                             p.latest_checked_at
                         FROM telemetry_ping_rollups p
-                        JOIN ping_targets t ON t.id = p.target_id
-                        JOIN ping_target_assignments a
-                          ON a.target_id = p.target_id AND a.client_id = p.client_id
+                        JOIN scoped_series series ON series.series_id = p.series_id
                         WHERE
-                            p.client_id = $1
-                            AND p.generation = t.generation
-                            AND p.bucket_secs >= 60
+                            p.bucket_secs >= 60
                             AND p.bucket_secs % 60 = 0
                             AND ($2::BIGINT IS NULL OR p.bucket_start
-                                + make_interval(secs => p.bucket_secs - 60) >= to_timestamp($2))
+                                + make_interval(secs => p.bucket_secs) > to_timestamp($2))
                             AND ($3::BIGINT IS NULL OR p.bucket_start <= to_timestamp($3))
-                    ), physical AS (
+                    ), coverage AS MATERIALIZED (
                         SELECT
-                            candidates.*,
-                            CASE
-                                WHEN $2::BIGINT IS NULL OR $2 <= source_start THEN 0::bigint
-                                ELSE LEAST(
-                                    source_minutes,
-                                    ($2 - source_start + 59) / 60
-                                )
-                            END AS first_minute,
-                            CASE
-                                WHEN $3::BIGINT IS NULL THEN source_minutes
-                                WHEN $3 < source_start THEN 0::bigint
-                                ELSE LEAST(
-                                    source_minutes,
-                                    ($3 - source_start) / 60 + 1
-                                )
-                            END AS end_minute
-                        FROM candidates
-                    ), fragments AS (
-                        SELECT
-                            physical.*,
-                            chart_epoch,
-                            GREATEST(
-                                first_minute,
-                                ceil((chart_epoch - source_start)::numeric / 60)::bigint
-                            ) AS fragment_first_minute,
-                            LEAST(
-                                end_minute,
-                                ceil((chart_epoch + $4::bigint - source_start)::numeric / 60)::bigint
-                            ) AS fragment_end_minute
+                            series_id,
+                            bucket_secs,
+                            range_agg(int8range(
+                                source_start,
+                                source_start + bucket_secs::bigint,
+                                '[)'
+                            )) AS covered_spans
                         FROM physical
-                        CROSS JOIN LATERAL generate_series(
-                            floor(
-                                (source_start + first_minute * 60)::numeric
-                                    / $4::numeric
-                            )::bigint * $4::bigint,
-                            floor(
-                                (source_start + (end_minute - 1) * 60)::numeric
-                                    / $4::numeric
-                            )::bigint * $4::bigint,
-                            $4::bigint
-                        ) AS generated(chart_epoch)
-                        WHERE first_minute < end_minute
+                        GROUP BY series_id, bucket_secs
+                    ), candidates AS (
+                        SELECT row.*
+                        FROM physical row
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM coverage coarser
+                            WHERE coarser.series_id = row.series_id
+                              AND coarser.bucket_secs > row.bucket_secs
+                              AND coarser.covered_spans && int8range(
+                                    row.source_start,
+                                    row.source_start + row.bucket_secs::bigint,
+                                    '[)'
+                              )
+                        )
                     ), selected AS (
                         SELECT
                             client_id,
@@ -1718,30 +1648,24 @@ impl Repository {
                             target_name,
                             is_primary,
                             generation,
-                            to_timestamp(chart_epoch) AS chart_bucket_start,
-                            (
-                                sample_count::bigint * fragment_end_minute / source_minutes
-                                - sample_count::bigint * fragment_first_minute / source_minutes
-                            )::integer AS sample_count,
-                            (
-                                success_count::bigint * fragment_end_minute / source_minutes
-                                - success_count::bigint * fragment_first_minute / source_minutes
-                            )::integer AS success_count,
+                            to_timestamp(
+                                floor(source_start::numeric / GREATEST($4, bucket_secs)::numeric)
+                                    * GREATEST($4, bucket_secs)
+                            ) AS chart_bucket_start,
+                            GREATEST($4, bucket_secs)::integer AS chart_bucket_secs,
+                            sample_count,
+                            success_count,
+                            latency_sum_ms,
                             latency_avg_ms,
                             latency_min_ms,
                             latency_max_ms,
                             loss_ratio_avg,
+                            loss_ratio_sum,
                             loss_ratio_max,
                             latest_status,
                             latest_reason,
-                            latest_checked_at - make_interval(
-                                secs => (
-                                    (source_minutes - fragment_end_minute) * 60
-                                )::double precision
-                            ) AS latest_checked_at
-                        FROM fragments
-                        WHERE sample_count::bigint * fragment_end_minute / source_minutes
-                            - sample_count::bigint * fragment_first_minute / source_minutes > 0
+                            latest_checked_at
+                        FROM candidates
                     ), bucketed AS (
                         SELECT
                             client_id,
@@ -1750,15 +1674,15 @@ impl Repository {
                             bool_or(is_primary) AS is_primary,
                             generation,
                             chart_bucket_start,
-                            $4::INTEGER AS bucket_secs,
+                            chart_bucket_secs AS bucket_secs,
                             LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
                             LEAST(sum(success_count)::bigint, 2147483647)::integer AS success_count,
-                            sum(latency_avg_ms * success_count::double precision)
+                            sum(latency_sum_ms)
                                 / NULLIF(sum(success_count)::double precision, 0)
                                 AS latency_avg_ms,
                             min(latency_min_ms)::double precision AS latency_min_ms,
                             max(latency_max_ms)::double precision AS latency_max_ms,
-                            sum(loss_ratio_avg * sample_count::double precision)
+                            sum(loss_ratio_sum)
                                 / NULLIF(sum(sample_count)::double precision, 0)
                                 AS loss_ratio_avg,
                             max(loss_ratio_max)::double precision AS loss_ratio_max,
@@ -1769,7 +1693,8 @@ impl Repository {
                             max(latest_checked_at) AS latest_checked_at
                         FROM selected
                         GROUP BY
-                            client_id, target_id, target_name, generation, chart_bucket_start
+                            client_id, target_id, target_name, generation, chart_bucket_start,
+                            chart_bucket_secs
                     ), ranked AS (
                         SELECT
                             bucketed.*,
@@ -1833,48 +1758,30 @@ impl Repository {
                 r#"
                 WITH accepted AS (
                     SELECT
-                        fact.client_id,
+                        series.client_id,
                         target.id AS target_id,
                         target.name AS target_name,
                         target.generation,
+                        fact.source_checked_unix,
                         fact.checked_unix,
                         fact.status,
                         fact.latency_avg_ms,
                         fact.loss_ratio,
-                        left(fact.reason, 512) AS reason,
-                        fact.observed_at,
-                        fact.sample_id,
-                        fact.ordinal
+                        left(fact.reason, 512) AS reason
                     FROM telemetry_ping_facts fact
+                    JOIN telemetry_ping_series series ON series.id = fact.series_id
                     JOIN ping_targets target
-                      ON target.id = fact.target_id
-                     AND target.generation = fact.generation
+                      ON target.id = series.target_id
+                     AND target.generation = series.generation
                     JOIN ping_target_assignments assignment
                       ON assignment.target_id = target.id
-                     AND assignment.client_id = fact.client_id
+                     AND assignment.client_id = series.client_id
                      AND assignment.is_primary
-                    WHERE fact.client_id = ANY($1::TEXT[])
+                    WHERE series.client_id = ANY($1::TEXT[])
                       AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
                       AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
                       AND fact.checked_unix >= $2
                       AND fact.checked_unix <= $3
-                ), deduplicated AS (
-                    SELECT DISTINCT ON (
-                        client_id,
-                        target_id,
-                        generation,
-                        checked_unix
-                    )
-                        *
-                    FROM accepted
-                    ORDER BY
-                        client_id,
-                        target_id,
-                        generation,
-                        checked_unix,
-                        observed_at DESC,
-                        sample_id DESC,
-                        ordinal DESC
                 ), bucketed AS (
                     SELECT
                         client_id,
@@ -1891,10 +1798,12 @@ impl Repository {
                         max(latency_avg_ms)::double precision AS latency_max_ms,
                         avg(loss_ratio)::double precision AS loss_ratio_avg,
                         max(loss_ratio)::double precision AS loss_ratio_max,
-                        (array_agg(status ORDER BY checked_unix DESC))[1] AS latest_status,
-                        (array_agg(reason ORDER BY checked_unix DESC))[1] AS latest_reason,
+                        (array_agg(status ORDER BY checked_unix DESC,
+                            source_checked_unix DESC))[1] AS latest_status,
+                        (array_agg(reason ORDER BY checked_unix DESC,
+                            source_checked_unix DESC))[1] AS latest_reason,
                         max(checked_unix)::bigint AS latest_checked_unix
-                    FROM deduplicated
+                    FROM accepted
                     GROUP BY client_id, target_id, target_name, generation, chart_epoch
                 ), ranked AS (
                     SELECT
@@ -1977,59 +1886,42 @@ impl Repository {
                 r#"
                 WITH accepted AS (
                     SELECT
-                        fact.client_id,
-                        fact.target_id,
-                        fact.generation,
+                        series.client_id,
+                        series.target_id,
+                        series.generation,
+                        fact.source_checked_unix,
                         fact.checked_unix,
                         fact.status,
                         fact.latency_avg_ms,
                         fact.loss_ratio,
-                        left(fact.reason, 512) AS reason,
-                        fact.observed_at,
-                        fact.sample_id,
-                        fact.ordinal
+                        left(fact.reason, 512) AS reason
                     FROM telemetry_ping_facts fact
-                    WHERE fact.client_id = $1
+                    JOIN telemetry_ping_series series ON series.id = fact.series_id
+                    WHERE series.client_id = $1
                       AND fact.checked_unix <= extract(epoch FROM fact.observed_at)::bigint + 300
                       AND extract(epoch FROM fact.observed_at)::bigint - fact.checked_unix <= 3900
                       AND ($2::BIGINT IS NULL OR fact.checked_unix >= $2)
                       AND ($3::BIGINT IS NULL OR fact.checked_unix <= $3)
-                ), deduplicated AS (
-                    SELECT DISTINCT ON (
-                        client_id,
-                        checked_unix,
-                        target_id,
-                        generation
-                    )
-                        *
-                    FROM accepted
-                    ORDER BY
-                        client_id,
-                        checked_unix,
-                        target_id,
-                        generation,
-                        observed_at DESC,
-                        sample_id DESC,
-                        ordinal DESC
                 ), selected AS (
                     SELECT
-                        deduplicated.client_id,
+                        accepted.client_id,
                         target.id AS target_id,
                         target.name AS target_name,
                         assignment.is_primary,
                         target.generation,
-                        deduplicated.checked_unix,
-                        deduplicated.status,
-                        deduplicated.latency_avg_ms,
-                        deduplicated.loss_ratio,
-                        deduplicated.reason
-                    FROM deduplicated
+                        accepted.source_checked_unix,
+                        accepted.checked_unix,
+                        accepted.status,
+                        accepted.latency_avg_ms,
+                        accepted.loss_ratio,
+                        accepted.reason
+                    FROM accepted
                     JOIN ping_targets target
-                      ON target.id = deduplicated.target_id
-                     AND target.generation = deduplicated.generation
+                      ON target.id = accepted.target_id
+                     AND target.generation = accepted.generation
                     JOIN ping_target_assignments assignment
                       ON assignment.target_id = target.id
-                     AND assignment.client_id = deduplicated.client_id
+                     AND assignment.client_id = accepted.client_id
                 ), bucketed AS (
                     SELECT
                         client_id,
@@ -2047,8 +1939,10 @@ impl Repository {
                         max(latency_avg_ms)::double precision AS latency_max_ms,
                         avg(loss_ratio)::double precision AS loss_ratio_avg,
                         max(loss_ratio)::double precision AS loss_ratio_max,
-                        (array_agg(status ORDER BY checked_unix DESC))[1] AS latest_status,
-                        (array_agg(reason ORDER BY checked_unix DESC))[1] AS latest_reason,
+                        (array_agg(status ORDER BY checked_unix DESC,
+                            source_checked_unix DESC))[1] AS latest_status,
+                        (array_agg(reason ORDER BY checked_unix DESC,
+                            source_checked_unix DESC))[1] AS latest_reason,
                         max(checked_unix)::bigint AS latest_checked_unix
                     FROM selected
                     GROUP BY client_id, target_id, target_name, generation, chart_epoch
@@ -2094,87 +1988,17 @@ impl Repository {
             .await?;
             return rows.into_iter().map(ping_rollup_from_row).collect();
         }
-        let targets = self
-            .list_ping_target_records()
-            .await?
-            .into_iter()
-            .map(|target| (target.id, target))
-            .collect::<HashMap<_, _>>();
-        let assigned = self
-            .list_ping_target_assignment_records(None)
-            .await?
-            .into_iter()
-            .filter(|assignment| assignment.client_id == client_id)
-            .map(|assignment| (assignment.target_id, assignment.is_primary))
-            .collect::<HashMap<_, _>>();
-        let samples = match self {
-            Self::Memory(memory) => memory
-                .telemetry_samples
-                .read()
-                .await
-                .iter()
-                .filter(|sample| sample.client_id == client_id)
-                .filter(|sample| {
-                    let observed = monitoring_timestamp_unix(&sample.observed_at);
-                    start_unix.is_none_or(|start| observed >= start.saturating_sub(300))
-                        && end_unix.is_none_or(|end| observed <= end.saturating_add(3_900))
-                })
-                .cloned()
-                .collect::<Vec<_>>(),
-            Self::Postgres(_) => unreachable!(),
-        };
-        let mut seen = BTreeSet::<(Uuid, u64, u64)>::new();
-        let mut rows = Vec::new();
-        for sample in samples {
-            let metrics: AgentMetrics =
-                serde_json::from_value(sample.payload).with_context(|| {
-                    format!(
-                        "invalid raw telemetry payload for {} at {}",
-                        sample.client_id, sample.observed_at
-                    )
-                })?;
-            for result in metrics.ping_results {
-                let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
-                    continue;
-                };
-                let Some(target) = targets.get(&target_id) else {
-                    continue;
-                };
-                let Some(is_primary) = assigned.get(&target_id).copied() else {
-                    continue;
-                };
-                if result.generation as i64 != target.generation
-                    || !valid_ping_result(&result, metrics.observed_unix)
-                    || start_unix.is_some_and(|start| result.checked_unix < start)
-                    || end_unix.is_some_and(|end| result.checked_unix > end)
-                    || !seen.insert((target_id, result.generation, result.checked_unix))
-                {
-                    continue;
-                }
-                rows.push(PingRollupView {
-                    client_id: client_id.to_string(),
-                    target_id,
-                    target_name: target.name.clone(),
-                    is_primary,
-                    generation: result.generation as i64,
-                    bucket_start: result.checked_unix.to_string(),
-                    bucket_secs: 0,
-                    sample_count: 1,
-                    success_count: i32::from(result.latency_avg_ms.is_some()),
-                    latency_avg_ms: result.latency_avg_ms,
-                    latency_min_ms: result.latency_avg_ms,
-                    latency_max_ms: result.latency_avg_ms,
-                    loss_ratio_avg: result.loss_ratio,
-                    loss_ratio_max: result.loss_ratio,
-                    latest_status: result.status,
-                    latest_reason: result.reason.as_deref().map(|reason| truncate(reason, 512)),
-                    latest_checked_at: result.checked_unix.to_string(),
-                });
-            }
-        }
-        let mut rows = aggregate_memory_ping_rollups(rows, step_secs);
-        retain_fair_ping_points(&mut rows, points_per_target, 50_000);
-        Ok(rows)
+        // Memory keeps the same logical 60-second Ping facts in its exact
+        // rollup vector. Reading that source preserves source-clock identity
+        // ties that the rebased AgentMetrics JSON cannot represent by itself.
+        self.list_ping_rollups(
+            client_id,
+            start_unix,
+            end_unix,
+            points_per_target as i64,
+            step_secs,
+        )
+        .await
     }
 
     pub(crate) async fn list_ping_rollups_for_export(
@@ -2224,11 +2048,11 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        p.client_id,
-                        p.target_id,
+                        series.client_id,
+                        series.target_id,
                         t.name AS target_name,
                         COALESCE(a.is_primary, FALSE) AS is_primary,
-                        p.generation,
+                        series.generation,
                         p.bucket_start::text AS bucket_start,
                         p.bucket_secs,
                         p.sample_count,
@@ -2242,11 +2066,12 @@ impl Repository {
                         p.latest_reason,
                         p.latest_checked_at::text AS latest_checked_at
                     FROM telemetry_ping_rollups p
-                    JOIN ping_targets t ON t.id = p.target_id
+                    JOIN telemetry_ping_series series ON series.id = p.series_id
+                    JOIN ping_targets t ON t.id = series.target_id
                     LEFT JOIN ping_target_assignments a
-                      ON a.target_id = p.target_id AND a.client_id = p.client_id
-                    WHERE $1::TEXT IS NULL OR p.client_id = $1
-                    ORDER BY p.bucket_start DESC, p.client_id, lower(t.name), p.target_id
+                      ON a.target_id = series.target_id AND a.client_id = series.client_id
+                    WHERE $1::TEXT IS NULL OR series.client_id = $1
+                    ORDER BY p.bucket_start DESC, series.client_id, lower(t.name), series.target_id
                     LIMIT $2
                     "#,
                 )
@@ -3310,9 +3135,16 @@ pub(crate) async fn upsert_postgres_ping_results(
     client_id: &str,
     observed_unix: u64,
     results: &[PingTargetResult],
+    source_checked_unix: &[u64],
 ) -> Result<()> {
-    for result in results.iter().take(MAX_AGENT_PING_TARGETS) {
-        if !valid_ping_result(result, observed_unix) {
+    for (result, source_checked_unix) in results
+        .iter()
+        .zip(source_checked_unix)
+        .take(MAX_AGENT_PING_TARGETS)
+    {
+        if !valid_ping_result(result, observed_unix)
+            || !(1..=i64::MAX as u64).contains(source_checked_unix)
+        {
             continue;
         }
         let Ok(target_id) = Uuid::parse_str(result.target_id.trim()) else {
@@ -3340,67 +3172,121 @@ pub(crate) async fn upsert_postgres_ping_results(
         if !accepted {
             continue;
         }
-        let success_count = i32::from(result.latency_avg_ms.is_some());
         sqlx::query(
             r#"
-            INSERT INTO telemetry_ping_rollups (
-                client_id, target_id, generation, bucket_start, bucket_secs,
-                sample_count, success_count,
-                latency_avg_ms, latency_min_ms, latency_max_ms,
-                loss_ratio_avg, loss_ratio_max,
-                latest_status, latest_reason, latest_checked_at, updated_at
-            ) VALUES (
-                $1, $2, $3, to_timestamp($4::double precision), 60,
-                1, $5, $6, $6, $6, $7, $7, $8, $9,
-                to_timestamp($10::double precision), now()
+            WITH series AS (
+                INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (client_id, target_id, generation) DO UPDATE
+                    SET generation = EXCLUDED.generation
+                RETURNING id
+            ), affected_bucket AS (
+                SELECT fact.checked_unix / 60 * 60 AS bucket_start_unix
+                FROM series
+                JOIN telemetry_ping_facts fact ON fact.series_id = series.id
+                WHERE fact.source_checked_unix = $4
+            ), aggregated AS (
+                SELECT
+                    series.id AS series_id,
+                    affected_bucket.bucket_start_unix,
+                    count(*)::integer AS sample_count,
+                    count(fact.latency_avg_ms)::integer AS success_count,
+                    sum(COALESCE(fact.latency_avg_ms, 0))::double precision AS latency_sum_ms,
+                    avg(fact.latency_avg_ms)::double precision AS latency_avg_ms,
+                    min(fact.latency_avg_ms)::double precision AS latency_min_ms,
+                    max(fact.latency_avg_ms)::double precision AS latency_max_ms,
+                    avg(fact.loss_ratio)::double precision AS loss_ratio_avg,
+                    sum(fact.loss_ratio)::double precision AS loss_ratio_sum,
+                    max(fact.loss_ratio)::double precision AS loss_ratio_max,
+                    (array_agg(fact.status ORDER BY fact.checked_unix DESC,
+                        fact.observed_at DESC, fact.evidence_id DESC,
+                        fact.source_checked_unix DESC))[1] AS latest_status,
+                    (array_agg(left(fact.reason, 512) ORDER BY fact.checked_unix DESC,
+                        fact.observed_at DESC, fact.evidence_id DESC,
+                        fact.source_checked_unix DESC))[1] AS latest_reason,
+                    max(fact.checked_unix)::bigint AS latest_checked_unix
+                FROM series
+                JOIN telemetry_ping_facts fact ON fact.series_id = series.id
+                CROSS JOIN affected_bucket
+                WHERE fact.checked_unix >= affected_bucket.bucket_start_unix
+                  AND fact.checked_unix < affected_bucket.bucket_start_unix + 60
+                GROUP BY series.id, affected_bucket.bucket_start_unix
             )
-            ON CONFLICT (client_id, target_id, generation, bucket_secs, bucket_start) DO UPDATE SET
-                sample_count = telemetry_ping_rollups.sample_count + 1,
-                success_count = telemetry_ping_rollups.success_count + EXCLUDED.success_count,
-                latency_avg_ms = CASE
-                    WHEN telemetry_ping_rollups.success_count + EXCLUDED.success_count = 0 THEN NULL
-                    ELSE (
-                        COALESCE(telemetry_ping_rollups.latency_avg_ms, 0)
-                            * telemetry_ping_rollups.success_count::double precision
-                        + COALESCE(EXCLUDED.latency_avg_ms, 0)
-                            * EXCLUDED.success_count::double precision
-                    ) / (telemetry_ping_rollups.success_count + EXCLUDED.success_count)::double precision
-                END,
-                latency_min_ms = CASE
-                    WHEN telemetry_ping_rollups.latency_min_ms IS NULL THEN EXCLUDED.latency_min_ms
-                    WHEN EXCLUDED.latency_min_ms IS NULL THEN telemetry_ping_rollups.latency_min_ms
-                    ELSE LEAST(telemetry_ping_rollups.latency_min_ms, EXCLUDED.latency_min_ms)
-                END,
-                latency_max_ms = CASE
-                    WHEN telemetry_ping_rollups.latency_max_ms IS NULL THEN EXCLUDED.latency_max_ms
-                    WHEN EXCLUDED.latency_max_ms IS NULL THEN telemetry_ping_rollups.latency_max_ms
-                    ELSE GREATEST(telemetry_ping_rollups.latency_max_ms, EXCLUDED.latency_max_ms)
-                END,
-                loss_ratio_avg = (
-                    telemetry_ping_rollups.loss_ratio_avg * telemetry_ping_rollups.sample_count::double precision
-                    + EXCLUDED.loss_ratio_avg
-                ) / (telemetry_ping_rollups.sample_count + 1)::double precision,
-                loss_ratio_max = GREATEST(
-                    telemetry_ping_rollups.loss_ratio_max,
-                    EXCLUDED.loss_ratio_max
-                ),
+            INSERT INTO telemetry_ping_rollups (
+                series_id, bucket_start, bucket_secs,
+                sample_count, success_count, latency_sum_ms,
+                latency_avg_ms, latency_min_ms, latency_max_ms,
+                loss_ratio_avg, loss_ratio_sum, loss_ratio_max,
+                latest_status, latest_reason, latest_checked_at, updated_at
+            ) SELECT
+                series_id, to_timestamp(bucket_start_unix::double precision), 60,
+                sample_count, success_count, latency_sum_ms,
+                latency_avg_ms, latency_min_ms, latency_max_ms,
+                loss_ratio_avg, loss_ratio_sum, loss_ratio_max,
+                latest_status, latest_reason, to_timestamp(latest_checked_unix), now()
+            FROM aggregated
+            ON CONFLICT (series_id, bucket_secs, bucket_start) DO UPDATE SET
+                sample_count = EXCLUDED.sample_count,
+                success_count = EXCLUDED.success_count,
+                latency_sum_ms = EXCLUDED.latency_sum_ms,
+                latency_avg_ms = EXCLUDED.latency_avg_ms,
+                latency_min_ms = EXCLUDED.latency_min_ms,
+                latency_max_ms = EXCLUDED.latency_max_ms,
+                loss_ratio_avg = EXCLUDED.loss_ratio_avg,
+                loss_ratio_sum = EXCLUDED.loss_ratio_sum,
+                loss_ratio_max = EXCLUDED.loss_ratio_max,
                 latest_status = EXCLUDED.latest_status,
                 latest_reason = EXCLUDED.latest_reason,
                 latest_checked_at = EXCLUDED.latest_checked_at,
                 updated_at = now()
-            WHERE telemetry_ping_rollups.latest_checked_at < EXCLUDED.latest_checked_at
             "#,
         )
         .bind(client_id)
         .bind(target_id)
         .bind(result.generation as i64)
-        .bind((result.checked_unix / 60 * 60) as f64)
-        .bind(success_count)
-        .bind(result.latency_avg_ms)
-        .bind(result.loss_ratio)
-        .bind(&result.status)
-        .bind(result.reason.as_deref().map(|reason| truncate(reason, 512)))
-        .bind(result.checked_unix as f64)
+        .bind(*source_checked_unix as i64)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            r#"
+            WITH series AS (
+                SELECT id FROM telemetry_ping_series
+                WHERE client_id = $1 AND target_id = $2 AND generation = $3
+            ), latest AS (
+                SELECT fact.*
+                FROM telemetry_ping_facts fact, series
+                WHERE fact.series_id = series.id
+                ORDER BY fact.checked_unix DESC, fact.observed_at DESC,
+                    fact.evidence_id DESC, fact.source_checked_unix DESC
+                LIMIT 1
+            ), rolling AS (
+                SELECT avg(fact.loss_ratio)::double precision AS loss_ratio
+                FROM telemetry_ping_facts fact, latest
+                WHERE fact.series_id = latest.series_id
+                  AND fact.checked_unix >= latest.checked_unix - ($4 - 1)
+                  AND fact.checked_unix <= latest.checked_unix
+            )
+            INSERT INTO telemetry_ping_current (
+                series_id, latest_status, latency_avg_ms, rolling_loss_ratio,
+                latest_reason, latest_checked_at, updated_at
+            ) SELECT latest.series_id, latest.status, latest.latency_avg_ms,
+                COALESCE(rolling.loss_ratio, latest.loss_ratio), left(latest.reason, 512),
+                to_timestamp(latest.checked_unix::double precision), now()
+            FROM latest CROSS JOIN rolling
+            ON CONFLICT (series_id) DO UPDATE SET
+                latest_status = EXCLUDED.latest_status,
+                latency_avg_ms = EXCLUDED.latency_avg_ms,
+                rolling_loss_ratio = EXCLUDED.rolling_loss_ratio,
+                latest_reason = EXCLUDED.latest_reason,
+                latest_checked_at = EXCLUDED.latest_checked_at,
+                updated_at = now()
+            WHERE telemetry_ping_current.latest_checked_at <= EXCLUDED.latest_checked_at
+            "#,
+        )
+        .bind(client_id)
+        .bind(target_id)
+        .bind(result.generation as i64)
+        .bind(CURRENT_PING_LOSS_WINDOW_SECS as i64)
         .execute(&mut **tx)
         .await?;
     }
@@ -3412,25 +3298,33 @@ pub(crate) async fn accepted_postgres_ping_results(
     client_id: &str,
     observed_unix: u64,
     results: &[PingTargetResult],
-) -> Result<Vec<PingTargetResult>> {
+    source_checked_unix: &[u64],
+) -> Result<(Vec<PingTargetResult>, Vec<u64>)> {
+    if results.len() != source_checked_unix.len() {
+        bail!("Ping result/source timestamp cardinality mismatch");
+    }
     let candidates = results
         .iter()
+        .zip(source_checked_unix)
         .take(MAX_AGENT_PING_TARGETS)
-        .filter_map(|result| {
+        .filter_map(|(result, source_checked_unix)| {
             let target_id = Uuid::parse_str(result.target_id.trim()).ok()?;
-            valid_ping_result(result, observed_unix).then_some((
+            (valid_ping_result(result, observed_unix)
+                && (1..=i64::MAX as u64).contains(source_checked_unix))
+            .then_some((
                 target_id,
                 result.generation as i64,
                 result,
+                *source_checked_unix,
             ))
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let target_ids = candidates
         .iter()
-        .map(|(target_id, _, _)| *target_id)
+        .map(|(target_id, _, _, _)| *target_id)
         .collect::<Vec<_>>();
     let accepted = sqlx::query(
         r#"
@@ -3454,11 +3348,18 @@ pub(crate) async fn accepted_postgres_ping_results(
         ))
     })
     .collect::<Result<HashSet<_>>>()?;
-    Ok(candidates
-        .into_iter()
-        .filter(|(target_id, generation, _)| accepted.contains(&(*target_id, *generation)))
-        .map(|(_, _, result)| result.clone())
-        .collect())
+    let mut deduplicated = BTreeMap::<(Uuid, i64, u64), (PingTargetResult, u64)>::new();
+    for (target_id, generation, result, source_checked_unix) in candidates {
+        if accepted.contains(&(target_id, generation)) {
+            // Input order is evidence order; the final occurrence is the
+            // deterministic winner used by the bulk fact upsert as well.
+            deduplicated.insert(
+                (target_id, generation, source_checked_unix),
+                (result.clone(), source_checked_unix),
+            );
+        }
+    }
+    Ok(deduplicated.into_values().unzip())
 }
 
 fn ping_target_view(
@@ -3543,16 +3444,11 @@ fn current_ping_loss_ratio<'a>(
         let Some(bucket_start) = parse_timestamp_unix(&rollup.bucket_start) else {
             continue;
         };
-        for fragment in logical_span_fragments(
-            bucket_start,
-            rollup.bucket_secs,
-            Some(window_start),
-            Some(latest_checked_at),
-            CURRENT_PING_LOSS_WINDOW_SECS as i32,
-        ) {
-            let fragment_samples = proportional_fragment_count(rollup.sample_count, fragment);
-            sample_count = sample_count.saturating_add(i64::from(fragment_samples));
-            loss_weighted_total += rollup.loss_ratio_avg * f64::from(fragment_samples);
+        if bucket_start <= latest_checked_at
+            && bucket_start.saturating_add(rollup.bucket_secs.max(60) as u64) > window_start
+        {
+            sample_count = sample_count.saturating_add(i64::from(rollup.sample_count));
+            loss_weighted_total += rollup.loss_ratio_avg * f64::from(rollup.sample_count);
         }
     }
     (sample_count > 0).then_some(loss_weighted_total / sample_count as f64)
@@ -3835,6 +3731,32 @@ struct MemoryPingAggregate {
     latest_status: String,
     latest_reason: Option<String>,
     latest_checked_at: String,
+    latest_source_checked_unix: u64,
+}
+
+fn retain_authoritative_ping_rows(rows: Vec<PingRollupView>) -> Vec<PingRollupView> {
+    rows.iter()
+        .filter(|row| {
+            let Some(row_start) = parse_timestamp_unix(&row.bucket_start) else {
+                return false;
+            };
+            !rows.iter().any(|coarser| {
+                if coarser.client_id != row.client_id
+                    || coarser.target_id != row.target_id
+                    || coarser.generation != row.generation
+                    || coarser.bucket_secs <= row.bucket_secs
+                {
+                    return false;
+                }
+                let Some(coarser_start) = parse_timestamp_unix(&coarser.bucket_start) else {
+                    return false;
+                };
+                coarser_start < row_start.saturating_add(row.bucket_secs.max(1) as u64)
+                    && coarser_start.saturating_add(coarser.bucket_secs.max(1) as u64) > row_start
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn aggregate_memory_ping_rollups(rows: Vec<PingRollupView>, step_secs: i32) -> Vec<PingRollupView> {
@@ -3877,10 +3799,14 @@ fn aggregate_memory_ping_rollups(rows: Vec<PingRollupView>, step_secs: i32) -> V
         if aggregate.latest_checked_at.is_empty()
             || parse_timestamp_unix(&row.latest_checked_at)
                 > parse_timestamp_unix(&aggregate.latest_checked_at)
+            || (parse_timestamp_unix(&row.latest_checked_at)
+                == parse_timestamp_unix(&aggregate.latest_checked_at)
+                && row.latest_source_checked_unix > aggregate.latest_source_checked_unix)
         {
             aggregate.latest_status = row.latest_status;
             aggregate.latest_reason = row.latest_reason;
             aggregate.latest_checked_at = row.latest_checked_at;
+            aggregate.latest_source_checked_unix = row.latest_source_checked_unix;
         }
     }
     groups
@@ -3909,6 +3835,7 @@ fn aggregate_memory_ping_rollups(rows: Vec<PingRollupView>, step_secs: i32) -> V
                 latest_status: aggregate.latest_status,
                 latest_reason: aggregate.latest_reason,
                 latest_checked_at: aggregate.latest_checked_at,
+                latest_source_checked_unix: aggregate.latest_source_checked_unix,
             },
         )
         .collect()
@@ -3968,33 +3895,18 @@ fn fragment_ping_rollup(
     let Some(bucket_start) = parse_timestamp_unix(&row.bucket_start) else {
         return Vec::new();
     };
-    let chart_step_secs = step_secs.max(60).saturating_add(59) / 60 * 60;
-    logical_span_fragments(
-        bucket_start,
-        row.bucket_secs,
-        start_unix,
-        end_unix,
-        chart_step_secs,
-    )
-    .into_iter()
-    .filter_map(|fragment: LogicalSpanFragment| {
-        let sample_count = proportional_fragment_count(row.sample_count, fragment);
-        if sample_count == 0 {
-            return None;
-        }
-        let success_count =
-            proportional_fragment_count(row.success_count, fragment).min(sample_count);
-        let latest_checked_at = fragment_final_minute_timestamp(&row.latest_checked_at, fragment);
-        Some(PingRollupView {
-            bucket_start: fragment.chart_bucket_start.to_string(),
-            bucket_secs: chart_step_secs,
-            sample_count,
-            success_count,
-            latest_checked_at,
-            ..row.clone()
-        })
-    })
-    .collect()
+    if start_unix
+        .is_some_and(|start| bucket_start.saturating_add(row.bucket_secs.max(60) as u64) <= start)
+        || end_unix.is_some_and(|end| bucket_start > end)
+    {
+        return Vec::new();
+    }
+    let chart_step_secs = (step_secs.max(60).saturating_add(59) / 60 * 60).max(row.bucket_secs);
+    vec![PingRollupView {
+        bucket_start: (bucket_start / chart_step_secs as u64 * chart_step_secs as u64).to_string(),
+        bucket_secs: chart_step_secs,
+        ..row
+    }]
 }
 
 fn upsert_memory_ping_rollup(
@@ -4002,6 +3914,7 @@ fn upsert_memory_ping_rollup(
     client_id: &str,
     target: &PingTargetRecord,
     result: &PingTargetResult,
+    source_checked_unix: u64,
 ) {
     let bucket_start = result.checked_unix / 60 * 60;
     if let Some(row) = stored.iter_mut().find(|row| {
@@ -4010,11 +3923,6 @@ fn upsert_memory_ping_rollup(
             && row.generation == target.generation
             && row.bucket_start == bucket_start.to_string()
     }) {
-        if parse_timestamp_unix(&row.latest_checked_at)
-            .is_some_and(|checked| checked >= result.checked_unix)
-        {
-            return;
-        }
         let prior_samples = row.sample_count.max(1);
         let prior_successes = row.success_count.max(0);
         row.sample_count = row.sample_count.saturating_add(1);
@@ -4039,9 +3947,16 @@ fn upsert_memory_ping_rollup(
         row.loss_ratio_avg = (row.loss_ratio_avg * f64::from(prior_samples) + result.loss_ratio)
             / f64::from(prior_samples + 1);
         row.loss_ratio_max = row.loss_ratio_max.max(result.loss_ratio);
-        row.latest_status = result.status.clone();
-        row.latest_reason = result.reason.as_deref().map(|reason| truncate(reason, 512));
-        row.latest_checked_at = result.checked_unix.to_string();
+        let latest_checked_unix = parse_timestamp_unix(&row.latest_checked_at).unwrap_or_default();
+        if result.checked_unix > latest_checked_unix
+            || (result.checked_unix == latest_checked_unix
+                && source_checked_unix > row.latest_source_checked_unix)
+        {
+            row.latest_status = result.status.clone();
+            row.latest_reason = result.reason.as_deref().map(|reason| truncate(reason, 512));
+            row.latest_checked_at = result.checked_unix.to_string();
+            row.latest_source_checked_unix = source_checked_unix;
+        }
         return;
     }
     stored.push(PingRollupView {
@@ -4062,6 +3977,7 @@ fn upsert_memory_ping_rollup(
         latest_status: result.status.clone(),
         latest_reason: result.reason.as_deref().map(|reason| truncate(reason, 512)),
         latest_checked_at: result.checked_unix.to_string(),
+        latest_source_checked_unix: source_checked_unix,
     });
 }
 
@@ -4084,6 +4000,7 @@ fn ping_rollup_from_row(row: sqlx::postgres::PgRow) -> Result<PingRollupView> {
         latest_status: row.try_get("latest_status")?,
         latest_reason: row.try_get("latest_reason")?,
         latest_checked_at: row.try_get("latest_checked_at")?,
+        latest_source_checked_unix: 0,
     })
 }
 

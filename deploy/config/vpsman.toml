@@ -43,6 +43,7 @@ notification_webhook_timeout_secs = 5
 webhook_rule_delivery_limit = 25
 webhook_rule_materialize_limit = 100
 webhook_rule_retention_days = 90
+webhook_rule_telemetry_event_retention_days = 7
 webhook_rule_retention_prune_limit = 1000
 webhook_rule_timeout_secs = 5
 backup_policy_prune_enabled = false

@@ -48,9 +48,13 @@ mod backup_policy_retention;
 mod build_info;
 #[path = "retention/history_retention.rs"]
 mod history_retention;
+#[path = "retention/network_observation_retention.rs"]
+mod network_observation_retention;
 #[cfg(test)]
 #[path = "runtime/test_support.rs"]
 mod test_support;
+#[path = "retention/traffic_retention.rs"]
+mod traffic_retention;
 #[path = "delivery/webhook_rules.rs"]
 mod webhook_rules;
 #[path = "runtime/worker_leases.rs"]
@@ -138,6 +142,12 @@ struct Args {
         default_value_t = 90
     )]
     webhook_rule_retention_days: i64,
+    #[arg(
+        long,
+        env = "VPSMAN_WORKER_WEBHOOK_RULE_TELEMETRY_EVENT_RETENTION_DAYS",
+        default_value_t = 7
+    )]
+    webhook_rule_telemetry_event_retention_days: i64,
     #[arg(
         long,
         env = "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_PRUNE_LIMIT",
@@ -252,6 +262,7 @@ impl WorkerRuntimeConfig {
                 args.webhook_rule_delivery_limit,
                 args.webhook_rule_materialize_limit,
                 args.webhook_rule_retention_days,
+                args.webhook_rule_telemetry_event_retention_days,
                 args.webhook_rule_retention_prune_limit,
                 args.webhook_rule_timeout_secs,
             )?,
@@ -357,6 +368,11 @@ impl Args {
             &mut self.webhook_rule_retention_days,
             "VPSMAN_WORKER_WEBHOOK_RULE_RETENTION_DAYS",
             config.worker.webhook_rule_retention_days,
+        );
+        apply_i64_default(
+            &mut self.webhook_rule_telemetry_event_retention_days,
+            "VPSMAN_WORKER_WEBHOOK_RULE_TELEMETRY_EVENT_RETENTION_DAYS",
+            config.worker.webhook_rule_telemetry_event_retention_days,
         );
         apply_i64_default(
             &mut self.webhook_rule_retention_prune_limit,
@@ -711,12 +727,40 @@ async fn main() -> Result<()> {
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
             telemetry_samples_pruned = telemetry_retention.samples_pruned,
             telemetry_resource_spans_merged = telemetry_retention.resource_spans_merged,
+            telemetry_resource_promotion_conflicts =
+                telemetry_retention.resource_promotion_conflicts,
             telemetry_rollups_pruned = telemetry_retention.rollups_pruned,
             telemetry_network_rate_spans_merged = telemetry_retention.network_rate_spans_merged,
+            telemetry_network_rate_promotion_conflicts =
+                telemetry_retention.network_rate_promotion_conflicts,
             telemetry_network_rates_pruned = telemetry_retention.network_rates_pruned,
             telemetry_ping_spans_merged = telemetry_retention.ping_spans_merged,
+            telemetry_ping_promotion_conflicts = telemetry_retention.ping_promotion_conflicts,
             telemetry_ping_rollups_pruned = telemetry_retention.ping_rollups_pruned,
+            telemetry_ping_facts_pruned = telemetry_retention.ping_facts_pruned,
+            system_metric_spans_merged = telemetry_retention.system_metric_spans_merged,
+            system_metric_promotion_conflicts =
+                telemetry_retention.system_metric_promotion_conflicts,
+            system_metric_rollups_pruned = telemetry_retention.system_metric_rollups_pruned,
             traffic_counter_samples_pruned = telemetry_retention.traffic_counter_samples_pruned,
+            traffic_raw_rows_promoted = telemetry_retention.traffic_raw_rows_promoted,
+            traffic_rollup_rows_promoted = telemetry_retention.traffic_rollup_rows_promoted,
+            traffic_rollup_rows_pruned = telemetry_retention.traffic_rollup_rows_pruned,
+            traffic_promotion_conflicts = telemetry_retention.traffic_promotion_conflicts,
+            network_observation_source_rows_promoted =
+                telemetry_retention.network_observation_source_rows_promoted,
+            network_observation_destination_rows_written =
+                telemetry_retention.network_observation_destination_rows_written,
+            network_observation_destination_conflicts =
+                telemetry_retention.network_observation_destination_conflicts,
+            network_observation_expired_exact_rows_pruned =
+                telemetry_retention.network_observation_expired_exact_rows_pruned,
+            network_observation_expired_rollup_rows_pruned =
+                telemetry_retention.network_observation_expired_rollup_rows_pruned,
+            network_observation_inactive_latest_pruned =
+                telemetry_retention.network_observation_inactive_latest_pruned,
+            network_observation_inactive_series_pruned =
+                telemetry_retention.network_observation_inactive_series_pruned,
             artifact_cleanup_jobs = artifact_cleanup.jobs,
             artifact_cleanup_deleted = artifact_cleanup.deleted_rows,
             "worker once completed"
@@ -889,22 +933,68 @@ async fn main() -> Result<()> {
                 Ok(run) => {
                     if run.samples_pruned > 0
                         || run.resource_spans_merged > 0
+                        || run.resource_promotion_conflicts > 0
                         || run.rollups_pruned > 0
                         || run.network_rate_spans_merged > 0
+                        || run.network_rate_promotion_conflicts > 0
                         || run.network_rates_pruned > 0
                         || run.ping_spans_merged > 0
+                        || run.ping_promotion_conflicts > 0
                         || run.ping_rollups_pruned > 0
+                        || run.ping_facts_pruned > 0
+                        || run.system_metric_spans_merged > 0
+                        || run.system_metric_promotion_conflicts > 0
+                        || run.system_metric_rollups_pruned > 0
                         || run.traffic_counter_samples_pruned > 0
+                        || run.traffic_raw_rows_promoted > 0
+                        || run.traffic_rollup_rows_promoted > 0
+                        || run.traffic_rollup_rows_pruned > 0
+                        || run.traffic_promotion_conflicts > 0
+                        || run.network_observation_source_rows_promoted > 0
+                        || run.network_observation_destination_rows_written > 0
+                        || run.network_observation_destination_conflicts > 0
+                        || run.network_observation_expired_exact_rows_pruned > 0
+                        || run.network_observation_expired_rollup_rows_pruned > 0
+                        || run.network_observation_inactive_latest_pruned > 0
+                        || run.network_observation_inactive_series_pruned > 0
                     {
                         info!(
                             telemetry_samples_pruned = run.samples_pruned,
                             telemetry_resource_spans_merged = run.resource_spans_merged,
+                            telemetry_resource_promotion_conflicts =
+                                run.resource_promotion_conflicts,
                             telemetry_rollups_pruned = run.rollups_pruned,
                             telemetry_network_rate_spans_merged = run.network_rate_spans_merged,
+                            telemetry_network_rate_promotion_conflicts =
+                                run.network_rate_promotion_conflicts,
                             telemetry_network_rates_pruned = run.network_rates_pruned,
                             telemetry_ping_spans_merged = run.ping_spans_merged,
+                            telemetry_ping_promotion_conflicts = run.ping_promotion_conflicts,
                             telemetry_ping_rollups_pruned = run.ping_rollups_pruned,
+                            telemetry_ping_facts_pruned = run.ping_facts_pruned,
+                            system_metric_spans_merged = run.system_metric_spans_merged,
+                            system_metric_promotion_conflicts =
+                                run.system_metric_promotion_conflicts,
+                            system_metric_rollups_pruned = run.system_metric_rollups_pruned,
                             traffic_counter_samples_pruned = run.traffic_counter_samples_pruned,
+                            traffic_raw_rows_promoted = run.traffic_raw_rows_promoted,
+                            traffic_rollup_rows_promoted = run.traffic_rollup_rows_promoted,
+                            traffic_rollup_rows_pruned = run.traffic_rollup_rows_pruned,
+                            traffic_promotion_conflicts = run.traffic_promotion_conflicts,
+                            network_observation_source_rows_promoted =
+                                run.network_observation_source_rows_promoted,
+                            network_observation_destination_rows_written =
+                                run.network_observation_destination_rows_written,
+                            network_observation_destination_conflicts =
+                                run.network_observation_destination_conflicts,
+                            network_observation_expired_exact_rows_pruned =
+                                run.network_observation_expired_exact_rows_pruned,
+                            network_observation_expired_rollup_rows_pruned =
+                                run.network_observation_expired_rollup_rows_pruned,
+                            network_observation_inactive_latest_pruned =
+                                run.network_observation_inactive_latest_pruned,
+                            network_observation_inactive_series_pruned =
+                                run.network_observation_inactive_series_pruned,
                             "processed telemetry history retention"
                         );
                     }

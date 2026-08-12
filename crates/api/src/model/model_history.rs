@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use vpsman_common::{
-    DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT, DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
-    DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS, MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
+    DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT, DEFAULT_TELEMETRY_RETENTION_PRUNE_LIMIT,
+    DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
+    MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +87,8 @@ impl HistoryDomain {
             | Self::TelemetryNetworkRates
             | Self::TelemetryPingRollups
             | Self::TrafficCounterSamples => DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
-            Self::NetworkObservations | Self::TopologyHistory => 180,
+            Self::NetworkObservations => DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
+            Self::TopologyHistory => 180,
             Self::ClientStatusHistory | Self::GatewaySessions => 365,
             Self::AuditLogs => 365,
             Self::BackupArtifacts => 3650,
@@ -102,7 +104,8 @@ impl HistoryDomain {
 
     pub(crate) fn default_prune_limit(self) -> i32 {
         match self {
-            Self::JobOutputs | Self::NetworkObservations => 5_000,
+            Self::NetworkObservations => DEFAULT_NETWORK_OBSERVATION_RETENTION_PRUNE_LIMIT,
+            Self::JobOutputs => 5_000,
             Self::TelemetrySamples
             | Self::TelemetryRollups
             | Self::TelemetryNetworkRates

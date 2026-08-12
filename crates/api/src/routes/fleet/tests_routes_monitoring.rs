@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use super::{
-    enrich_monitoring_share_target_evidence, monitoring_range, network_rate_is_current,
-    public_billing_plan, public_network_metric, public_traffic_metric, ClientMonitoringQuery,
+    aligned_timeline_point_count, enrich_monitoring_share_target_evidence, monitoring_range,
+    network_rate_is_current, public_billing_plan, public_network_metric, public_traffic_metric,
+    retained_resolution_for_age, retained_traffic_resolution_for_age, tier_aligned_step_secs,
+    traffic_uses_exact_source, ClientMonitoringQuery,
 };
 use axum::{
     body::Body,
@@ -246,11 +248,88 @@ async fn fifteen_minutes_is_always_raw_without_a_legacy_alias() {
             .await
             .unwrap()
             .source,
-        "minute"
+        "retained"
     );
     assert!(monitoring_range(&state, &clients, &query("R"))
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn narrow_old_custom_range_counts_both_aligned_coarse_slots() {
+    const DAY: u64 = 86_400;
+    const SIX_HOURS: u64 = 6 * 60 * 60;
+    let state = router_test_state();
+    let clients = vec!["v-1".to_string()];
+    let old_epoch = crate::unix_now().saturating_sub(200 * DAY);
+    let boundary = old_epoch / SIX_HOURS * SIX_HOURS;
+    let start_unix = boundary.saturating_sub(30 * 60);
+    let end_unix = boundary.saturating_add(30 * 60);
+    let range = monitoring_range(
+        &state,
+        &clients,
+        &ClientMonitoringQuery {
+            window: Some("custom".to_string()),
+            start_unix: Some(start_unix),
+            end_unix: Some(end_unix),
+            points: Some(720),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(range.source, "retained");
+    assert_eq!(range.requested_step_secs, 60);
+    assert_eq!(range.effective_resolution_secs, SIX_HOURS as i32);
+    assert_eq!(range.step_secs, SIX_HOURS as i32);
+    assert_eq!(range.effective_points, 2);
+    assert_eq!(range.resolutions.resources, SIX_HOURS as i32);
+    assert_eq!(range.resolutions.network, SIX_HOURS as i32);
+    assert_eq!(range.resolutions.ping, SIX_HOURS as i32);
+    assert_eq!(range.resolutions.traffic, SIX_HOURS as i32);
+}
+
+#[test]
+fn retained_history_tiers_and_chart_steps_are_epoch_compatible() {
+    const DAY: u64 = 86_400;
+    assert_eq!(retained_resolution_for_age(2 * DAY), 60);
+    assert_eq!(retained_resolution_for_age(2 * DAY + 1), 300);
+    assert_eq!(retained_resolution_for_age(8 * DAY + 1), 1_800);
+    assert_eq!(retained_resolution_for_age(31 * DAY + 1), 3_600);
+    assert_eq!(retained_resolution_for_age(91 * DAY + 1), 10_800);
+    assert_eq!(retained_resolution_for_age(181 * DAY + 1), 21_600);
+    assert_eq!(retained_resolution_for_age(366 * DAY + 1), DAY);
+
+    assert_eq!(retained_traffic_resolution_for_age(32 * DAY), 60);
+    assert_eq!(retained_traffic_resolution_for_age(32 * DAY + 1), 3_600);
+    assert_eq!(retained_traffic_resolution_for_age(366 * DAY + 1), DAY);
+    assert!(traffic_uses_exact_source(true, 32 * DAY));
+    assert!(!traffic_uses_exact_source(true, 32 * DAY + 1));
+    assert!(!traffic_uses_exact_source(false, DAY));
+
+    assert_eq!(aligned_timeline_point_count(21_000, 23_000, 21_600), 2);
+    assert_eq!(aligned_timeline_point_count(21_600, 23_000, 21_600), 1);
+
+    assert_eq!(
+        tier_aligned_step_secs(30 * DAY, 61 * 60, 30 * 60, 720),
+        60 * 60
+    );
+    assert_eq!(
+        tier_aligned_step_secs(30 * DAY, 121 * 60, 30 * 60, 360),
+        120 * 60
+    );
+    assert_eq!(
+        tier_aligned_step_secs(90 * DAY, 181 * 60, 60 * 60, 720),
+        180 * 60
+    );
+    assert_eq!(
+        tier_aligned_step_secs(180 * DAY, 723 * 60, 3 * 60 * 60, 360),
+        12 * 60 * 60
+    );
+    assert_eq!(
+        tier_aligned_step_secs(365 * DAY, 732 * 60, 6 * 60 * 60, 720),
+        12 * 60 * 60
+    );
 }
 
 #[test]
@@ -267,6 +346,7 @@ fn current_card_rates_reject_stale_and_future_interface_rows() {
         tx_bytes_last: 2,
         rx_counter_epoch: 0,
         tx_counter_epoch: 0,
+        latest_observed_at: bucket_start.to_string(),
         rx_bytes_delta: 1,
         tx_bytes_delta: 2,
         rx_bps_avg: 8.0,
@@ -319,8 +399,17 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         source: "raw".to_string(),
         start_unix: 1,
         end_unix: 2,
+        requested_step_secs: 60,
+        effective_resolution_secs: 60,
         step_secs: 60,
         points: 16,
+        effective_points: 2,
+        resolutions: crate::model::MonitoringResolutionView {
+            resources: 60,
+            network: 60,
+            ping: 60,
+            traffic: 60,
+        },
     };
     let resource = PublicResourceMetricView {
         bucket_start: "1".to_string(),
@@ -485,8 +574,12 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         "range",
         &range,
         &[
+            "effective_points",
+            "effective_resolution_secs",
             "end_unix",
             "points",
+            "requested_step_secs",
+            "resolutions",
             "source",
             "start_unix",
             "step_secs",

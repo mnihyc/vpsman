@@ -380,6 +380,10 @@ jobs:
             --verify-tag
             --target "$RELEASE_COMMIT"
           )
+          release_notes_path=".github/release-notes/${RELEASE_TAG}.md"
+          if [[ -f "$release_notes_path" ]]; then
+            release_args+=(--notes "$(<"$release_notes_path")")
+          fi
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
             release_args+=(--prerelease)
           else

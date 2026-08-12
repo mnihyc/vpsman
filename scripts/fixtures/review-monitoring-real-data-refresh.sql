@@ -12,8 +12,9 @@ SET
     system_reported_at = now()
 WHERE id LIKE 'review-%';
 
-DELETE FROM telemetry_ping_rollups WHERE client_id LIKE 'review-%';
+DELETE FROM telemetry_ping_series WHERE client_id LIKE 'review-%';
 DELETE FROM telemetry_network_rates WHERE client_id LIKE 'review-%';
+DELETE FROM telemetry_resource_latest WHERE client_id LIKE 'review-%';
 DELETE FROM telemetry_rollups WHERE client_id LIKE 'review-%';
 DELETE FROM telemetry_samples WHERE client_id LIKE 'review-%';
 DELETE FROM traffic_counter_samples WHERE client_id LIKE 'review-%';
@@ -184,17 +185,26 @@ FROM telemetry_samples sample
 CROSS JOIN LATERAL jsonb_array_elements(sample.payload -> 'networks') network
 WHERE sample.client_id LIKE 'review-%';
 
-INSERT INTO telemetry_ping_facts (
-    sample_id, client_id, observed_at, ordinal, target_id, generation,
-    checked_unix, status, latency_avg_ms, loss_ratio, reason
-)
-SELECT
-    sample.id,
+INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+SELECT DISTINCT
     sample.client_id,
-    sample.observed_at,
-    (result.ordinal - 1)::integer,
     (result.value ->> 'target_id')::uuid,
-    (result.value ->> 'generation')::bigint,
+    (result.value ->> 'generation')::bigint
+FROM telemetry_samples sample
+CROSS JOIN LATERAL jsonb_array_elements(sample.payload -> 'ping_results')
+    WITH ORDINALITY result(value, ordinal)
+WHERE sample.client_id LIKE 'review-%'
+ON CONFLICT (client_id, target_id, generation) DO NOTHING;
+
+INSERT INTO telemetry_ping_facts (
+    series_id, observed_at, evidence_id, source_checked_unix, checked_unix,
+    status, latency_avg_ms, loss_ratio, reason
+)
+SELECT DISTINCT ON (series.id, (result.value ->> 'checked_unix')::bigint)
+    series.id,
+    sample.observed_at,
+    sample.id,
+    (result.value ->> 'checked_unix')::bigint,
     (result.value ->> 'checked_unix')::bigint,
     result.value ->> 'status',
     NULLIF(result.value ->> 'latency_avg_ms', '')::double precision,
@@ -203,7 +213,60 @@ SELECT
 FROM telemetry_samples sample
 CROSS JOIN LATERAL jsonb_array_elements(sample.payload -> 'ping_results')
     WITH ORDINALITY result(value, ordinal)
-WHERE sample.client_id LIKE 'review-%';
+JOIN telemetry_ping_series series
+  ON series.client_id = sample.client_id
+ AND series.target_id = (result.value ->> 'target_id')::uuid
+ AND series.generation = (result.value ->> 'generation')::bigint
+WHERE sample.client_id LIKE 'review-%'
+ORDER BY series.id, (result.value ->> 'checked_unix')::bigint, result.ordinal DESC;
+
+WITH latest AS (
+    SELECT DISTINCT ON (fact.series_id)
+        fact.series_id,
+        fact.checked_unix,
+        fact.status,
+        fact.latency_avg_ms,
+        fact.loss_ratio,
+        fact.reason
+    FROM telemetry_ping_facts fact
+    JOIN telemetry_ping_series series ON series.id = fact.series_id
+    WHERE series.client_id LIKE 'review-%'
+    ORDER BY
+        fact.series_id,
+        fact.checked_unix DESC,
+        fact.observed_at DESC,
+        fact.evidence_id DESC,
+        fact.source_checked_unix DESC
+), rolling AS (
+    SELECT
+        latest.series_id,
+        avg(fact.loss_ratio)::double precision AS loss_ratio
+    FROM latest
+    JOIN telemetry_ping_facts fact
+      ON fact.series_id = latest.series_id
+     AND fact.checked_unix >= latest.checked_unix - 899
+     AND fact.checked_unix <= latest.checked_unix
+    GROUP BY latest.series_id
+)
+INSERT INTO telemetry_ping_current (
+    series_id,
+    latest_status,
+    latency_avg_ms,
+    rolling_loss_ratio,
+    latest_reason,
+    latest_checked_at,
+    updated_at
+)
+SELECT
+    latest.series_id,
+    latest.status,
+    latest.latency_avg_ms,
+    COALESCE(rolling.loss_ratio, latest.loss_ratio),
+    left(latest.reason, 512),
+    to_timestamp(latest.checked_unix::double precision),
+    now()
+FROM latest
+JOIN rolling ON rolling.series_id = latest.series_id;
 
 WITH review_cases (
     client_id,
@@ -237,30 +300,40 @@ INSERT INTO telemetry_rollups (
     bucket_secs,
     sample_count,
     cpu_usage_sample_count,
+    cpu_usage_sum,
     cpu_usage_avg,
     cpu_usage_max,
     cpu_cores_max,
     cpu_load_1_avg,
+    cpu_load_1_sum,
     cpu_load_1_max,
     cpu_load_5_avg,
+    cpu_load_5_sum,
     cpu_load_5_max,
     cpu_load_15_avg,
+    cpu_load_15_sum,
     cpu_load_15_max,
     memory_total_bytes_max,
     memory_available_bytes_avg,
+    memory_available_bytes_sum,
     memory_available_bytes_min,
     memory_used_ratio_avg,
+    memory_used_ratio_sum,
     memory_used_ratio_max,
     swap_sample_count,
     swap_total_bytes_max,
     swap_available_bytes_avg,
+    swap_available_bytes_sum,
     swap_available_bytes_min,
     swap_used_ratio_avg,
+    swap_used_ratio_sum,
     swap_used_ratio_max,
     disk_total_bytes_max,
     disk_available_bytes_avg,
+    disk_available_bytes_sum,
     disk_available_bytes_min,
     disk_used_ratio_avg,
+    disk_used_ratio_sum,
     disk_used_ratio_max,
     network_rx_bytes_max,
     network_tx_bytes_max,
@@ -279,11 +352,15 @@ SELECT
     1,
     points.cpu_ratio,
     points.cpu_ratio,
+    points.cpu_ratio,
     points.cpu_cores,
     points.cpu_ratio * points.cpu_cores::double precision,
     points.cpu_ratio * points.cpu_cores::double precision,
+    points.cpu_ratio * points.cpu_cores::double precision,
     points.cpu_ratio * points.cpu_cores::double precision * 0.88,
     points.cpu_ratio * points.cpu_cores::double precision * 0.88,
+    points.cpu_ratio * points.cpu_cores::double precision * 0.88,
+    points.cpu_ratio * points.cpu_cores::double precision * 0.74,
     points.cpu_ratio * points.cpu_cores::double precision * 0.74,
     points.cpu_ratio * points.cpu_cores::double precision * 0.74,
     8589934592::bigint,
@@ -294,18 +371,27 @@ SELECT
     (
         8589934592::numeric
         * (0.78::numeric - points.cpu_ratio::numeric * 0.20::numeric)
+    ),
+    (
+        8589934592::numeric
+        * (0.78::numeric - points.cpu_ratio::numeric * 0.20::numeric)
     )::bigint,
+    0.22::double precision + points.cpu_ratio * 0.20::double precision,
     0.22::double precision + points.cpu_ratio * 0.20::double precision,
     0.22::double precision + points.cpu_ratio * 0.20::double precision,
     1,
     4294967296::bigint,
     3221225472::bigint,
+    3221225472::numeric,
     3221225472::bigint,
+    0.25::double precision,
     0.25::double precision,
     0.25::double precision,
     100000000000::bigint,
     64000000000::bigint - (15 - points.sample_index) * 10000000::bigint,
+    64000000000::numeric - (15 - points.sample_index) * 10000000::numeric,
     64000000000::bigint - (15 - points.sample_index) * 10000000::bigint,
+    0.36::double precision + (15 - points.sample_index) * 0.0001::double precision,
     0.36::double precision + (15 - points.sample_index) * 0.0001::double precision,
     0.36::double precision + (15 - points.sample_index) * 0.0001::double precision,
     10000000000::bigint + (15 - points.sample_index) * 150000000::bigint,
@@ -317,6 +403,15 @@ SELECT
     points.bucket_start,
     now()
 FROM points;
+
+INSERT INTO telemetry_resource_latest
+SELECT DISTINCT ON (rollup.client_id) rollup.*
+FROM telemetry_rollups rollup
+WHERE rollup.client_id LIKE 'review-%'
+ORDER BY
+    rollup.client_id,
+    rollup.latest_observed_at DESC,
+    rollup.bucket_start DESC;
 
 WITH rate_cases (client_id, rx_delta, tx_delta) AS (
     VALUES
@@ -341,12 +436,15 @@ INSERT INTO telemetry_network_rates (
     bucket_start,
     bucket_secs,
     sample_count,
+    rx_bytes_sum,
+    tx_bytes_sum,
     rx_bytes_avg,
     tx_bytes_avg,
     rx_bytes_last,
     tx_bytes_last,
     rx_counter_epoch,
     tx_counter_epoch,
+    latest_observed_at,
     updated_at
 )
 SELECT
@@ -355,12 +453,15 @@ SELECT
     points.bucket_start,
     60,
     1,
+    10000000000::numeric + points.elapsed_minutes * points.rx_delta,
+    5000000000::numeric + points.elapsed_minutes * points.tx_delta,
     10000000000::bigint + points.elapsed_minutes * points.rx_delta,
     5000000000::bigint + points.elapsed_minutes * points.tx_delta,
     10000000000::bigint + points.elapsed_minutes * points.rx_delta,
     5000000000::bigint + points.elapsed_minutes * points.tx_delta,
     0,
     0,
+    points.bucket_start,
     now()
 FROM points;
 
@@ -494,6 +595,12 @@ WITH ping_cases (
             'degraded',
             'Intermittent packet loss'
         )
+), ensured_series AS (
+    INSERT INTO telemetry_ping_series (client_id, target_id, generation)
+    SELECT DISTINCT client_id, target_id, 1 FROM ping_cases
+    ON CONFLICT (client_id, target_id, generation) DO UPDATE
+        SET generation = EXCLUDED.generation
+    RETURNING id, client_id, target_id, generation
 ), points AS (
     SELECT
         ping_cases.*,
@@ -503,17 +610,17 @@ WITH ping_cases (
     CROSS JOIN generate_series(0, 15) AS generated(sample_index)
 )
 INSERT INTO telemetry_ping_rollups (
-    client_id,
-    target_id,
-    generation,
+    series_id,
     bucket_start,
     bucket_secs,
     sample_count,
     success_count,
+    latency_sum_ms,
     latency_avg_ms,
     latency_min_ms,
     latency_max_ms,
     loss_ratio_avg,
+    loss_ratio_sum,
     loss_ratio_max,
     latest_status,
     latest_reason,
@@ -521,22 +628,26 @@ INSERT INTO telemetry_ping_rollups (
     updated_at
 )
 SELECT
-    points.client_id,
-    points.target_id,
-    1,
+    series.id,
     points.bucket_start,
     60,
     10,
     points.success_count,
+    (points.latency + ((15 - points.sample_index) % 4)) * points.success_count,
     points.latency + ((15 - points.sample_index) % 4),
     points.latency - 2,
     points.latency + 4,
     points.loss_ratio,
+    points.loss_ratio * 10,
     points.loss_ratio,
     points.status,
     points.reason,
     points.bucket_start,
     now()
-FROM points;
+FROM points
+JOIN ensured_series series
+  ON series.client_id = points.client_id
+ AND series.target_id = points.target_id
+ AND series.generation = 1;
 
 COMMIT;

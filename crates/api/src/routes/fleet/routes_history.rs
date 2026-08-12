@@ -602,11 +602,18 @@ pub(crate) async fn export_history(
             HistoryDomain::TrafficCounterSamples => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state
-                        .repo
-                        .export_traffic_counter_samples(limit, query.client_id.as_deref())
-                        .await
-                        .map_err(history_export_unavailable)?),
+                    json!({
+                        "exact": state
+                            .repo
+                            .export_traffic_counter_samples(limit, query.client_id.as_deref())
+                            .await
+                            .map_err(history_export_unavailable)?,
+                        "tiered": state
+                            .repo
+                            .export_traffic_counter_rollups(limit, query.client_id.as_deref())
+                            .await
+                            .map_err(history_export_unavailable)?,
+                    }),
                 );
             }
             HistoryDomain::SystemMetricRollups => {
@@ -644,11 +651,18 @@ pub(crate) async fn export_history(
             HistoryDomain::NetworkObservations => {
                 data.insert(
                     domain.as_str().to_string(),
-                    json!(state
-                        .repo
-                        .list_network_observations(limit, false)
-                        .await
-                        .map_err(history_export_unavailable)?),
+                    json!({
+                        "exact": state
+                            .repo
+                            .list_network_observations(limit, false)
+                            .await
+                            .map_err(history_export_unavailable)?,
+                        "tiered": state
+                            .repo
+                            .export_network_observation_rollups(limit)
+                            .await
+                            .map_err(history_export_unavailable)?,
+                    }),
                 );
             }
             HistoryDomain::TopologyHistory => {

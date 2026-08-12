@@ -1611,6 +1611,9 @@ function PublicMonitoringDetailPanel({
   ]
     .filter((label): label is string => Boolean(label))
     .join(" · ");
+  const visibleRetainedResolution = detail
+    ? coarsestVisibleMonitoringResolution(detail.range, detail)
+    : null;
   useEffect(() => {
     headingRef.current?.focus({ preventScroll: false });
   }, [card.client_key]);
@@ -1649,7 +1652,7 @@ function PublicMonitoringDetailPanel({
             {` · Read-only history`}
             {identitySummary ? ` · ${identitySummary}` : ""}
             {detail
-              ? ` · ${humanizeToken(detail.range.source)} source · ${detail.range.points} points`
+              ? ` · ${monitoringRangeEvidence(detail.range, detail)} · ${detail.range.effective_points} points`
               : ""}
           </p>
         </div>
@@ -1734,6 +1737,15 @@ function PublicMonitoringDetailPanel({
       {error ? (
         <p className="panelError" role="alert">
           {error}
+        </p>
+      ) : null}
+      {detail &&
+      visibleRetainedResolution !== null &&
+      visibleRetainedResolution > detail.range.requested_step_secs ? (
+        <p className="observabilitySparseNotice" role="status">
+          Older evidence is retained at
+          {` ${formatDuration(visibleRetainedResolution)} `}
+          resolution; missing detail is not interpolated.
         </p>
       ) : null}
       {loading ? (
@@ -2182,6 +2194,75 @@ function PublicMonitoringDetailPanel({
       ) : null}
     </section>
   );
+}
+
+function monitoringRangeEvidence(
+  range: MonitoringRange,
+  detail: PublicMonitoringDetail,
+): string {
+  if (range.source === "raw") return "fine realtime samples";
+  const visibleResolutions = visibleMonitoringResolutions(range, detail);
+  return `retained tiered history · ${monitoringResolutionEvidence(
+    visibleResolutions,
+    range.effective_resolution_secs,
+  )}`;
+}
+
+function visibleMonitoringResolutions(
+  range: MonitoringRange,
+  detail: PublicMonitoringDetail,
+): Array<[string, number]> {
+  const visibleResolutions: Array<[string, number]> = [];
+  if (detail.resources !== undefined)
+    visibleResolutions.push(["resources", range.resolutions.resources]);
+  if (detail.network !== undefined)
+    visibleResolutions.push(["network", range.resolutions.network]);
+  if (detail.ping !== undefined || detail.ping_targets !== undefined)
+    visibleResolutions.push(["Ping", range.resolutions.ping]);
+  if (detail.traffic !== undefined)
+    visibleResolutions.push(["traffic", range.resolutions.traffic]);
+  return visibleResolutions;
+}
+
+function coarsestVisibleMonitoringResolution(
+  range: MonitoringRange,
+  detail: PublicMonitoringDetail,
+): number {
+  const resolutions = visibleMonitoringResolutions(range, detail)
+    .map(([, seconds]) => seconds)
+    .filter((seconds) => Number.isFinite(seconds) && seconds > 0);
+  return resolutions.length
+    ? Math.max(...resolutions)
+    : range.effective_resolution_secs;
+}
+
+function monitoringResolutionEvidence(
+  resolutions: Array<[string, number]>,
+  fallbackSeconds: number,
+): string {
+  const groups = new Map<number, string[]>();
+  for (const [label, seconds] of resolutions) {
+    groups.set(seconds, [...(groups.get(seconds) ?? []), label]);
+  }
+  if (groups.size === 0) {
+    return `${formatDuration(fallbackSeconds)} coarsest source resolution`;
+  }
+  if (groups.size === 1) {
+    return `${formatDuration(resolutions[0][1])} coarsest source resolution`;
+  }
+  return `${Array.from(groups.entries())
+    .map(
+      ([seconds, labels]) => `${labels.join("/")} ${formatDuration(seconds)}`,
+    )
+    .join("; ")} coarsest source resolutions`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds >= 86_400 && seconds % 86_400 === 0)
+    return `${seconds / 86_400}d`;
+  if (seconds >= 3_600 && seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  if (seconds >= 60 && seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
 }
 
 function PublicMonitoringKpiStrip({

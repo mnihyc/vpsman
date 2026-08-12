@@ -1529,6 +1529,13 @@ function NetworkTestTrendCharts({
     speedTrends,
     expectedBandwidthMbps ?? null,
   );
+  const retainedResolution = trends.reduce(
+    (coarsest, trend) =>
+      trend.retained && typeof trend.effective_resolution_secs === "number"
+        ? Math.max(coarsest, trend.effective_resolution_secs)
+        : coarsest,
+    0,
+  );
 
   return (
     <section
@@ -1539,7 +1546,9 @@ function NetworkTestTrendCharts({
         <div>
           <strong>Trend evidence</strong>
           <span>
-            Persisted probe and throughput-test ranges for the selected plan.
+            {retainedResolution > 0
+              ? `Retained tiered history · ${formatTrendResolution(retainedResolution)} coarsest source resolution. Recent exact evidence remains separate.`
+              : "Persisted probe and throughput-test ranges for the selected plan."}
           </span>
         </div>
       </div>
@@ -1608,8 +1617,8 @@ function NetworkTrendChartCard({
         <strong>{title}</strong>
         <span>
           {times.length > 0
-            ? `${times.length} sample${times.length === 1 ? "" : "s"}`
-            : "No samples"}
+            ? `${times.length} evidence point${times.length === 1 ? "" : "s"}`
+            : "No evidence points"}
         </span>
       </div>
       <p className="observabilityMetricDefinition" title={definition}>
@@ -1823,13 +1832,23 @@ function sortedTrends(
 ): NetworkObservationTrendRecord[] {
   return [...trends].sort(
     (left, right) =>
-      timestampMillis(left.latest_observed_at) -
-      timestampMillis(right.latest_observed_at),
+      timestampMillis(trendTime(left)) - timestampMillis(trendTime(right)),
   );
 }
 
 function trendTimes(trends: NetworkObservationTrendRecord[]): string[] {
-  return trends.map((trend) => trend.latest_observed_at);
+  return trends.map(trendTime);
+}
+
+function trendTime(trend: NetworkObservationTrendRecord): string {
+  return trend.bucket_start ?? trend.latest_observed_at;
+}
+
+function formatTrendResolution(seconds: number): string {
+  if (seconds % 86_400 === 0) return `${seconds / 86_400}d`;
+  if (seconds % 3_600 === 0) return `${seconds / 3_600}h`;
+  if (seconds % 60 === 0) return `${seconds / 60}m`;
+  return `${seconds}s`;
 }
 
 function trendLine(

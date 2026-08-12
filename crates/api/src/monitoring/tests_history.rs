@@ -7,9 +7,10 @@ use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
         AuditLogView, AuthContext, ClientStatusHistoryView, GatewaySessionView, JobOutputView,
-        ListQuery, OperatorView, ServerJobView, TelemetryNetworkRateView,
+        ListQuery, OperatorView, PingTargetAssignmentRecord, PingTargetRecord, ServerJobView,
+        TelemetryNetworkRateView, TelemetrySampleView,
     },
-    model_alert_policies::TrafficCounterSampleRecord,
+    model_alert_policies::{TrafficCounterRollupRecord, TrafficCounterSampleRecord},
     model_history::{
         HistoryDomain, HistoryRetentionPrunePlan, HistoryRetentionPruneRequest,
         UpsertHistoryRetentionPolicyRequest,
@@ -21,8 +22,9 @@ use crate::{
     unix_now,
 };
 use vpsman_common::{
-    DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS, DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS,
-    SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING, SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
+    PingTargetResult, DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS,
+    DEFAULT_TELEMETRY_SAMPLE_RETENTION_DAYS, SERVER_JOB_STATUS_FAILED, SERVER_JOB_STATUS_RUNNING,
+    SERVER_JOB_TYPE_ARTIFACT_CLEANUP,
 };
 
 #[tokio::test]
@@ -50,6 +52,16 @@ async fn history_retention_policy_updates_and_prunes_memory_audit() {
     assert!(defaults.iter().any(|policy| {
         policy.domain == "traffic_counter_samples"
             && policy.retention_days == DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS
+            && policy.built_in_default
+    }));
+    assert!(defaults.iter().any(|policy| {
+        policy.domain == "network_observations"
+            && policy.retention_days == DEFAULT_TELEMETRY_ROLLUP_RETENTION_DAYS
+            && policy.built_in_default
+    }));
+    assert!(defaults.iter().any(|policy| {
+        policy.domain == "topology_history"
+            && policy.retention_days == 180
             && policy.built_in_default
     }));
 
@@ -324,6 +336,114 @@ async fn traffic_counter_retention_rejects_a_truncated_monthly_window() {
 }
 
 #[tokio::test]
+async fn telemetry_sample_retention_shares_memory_limit_with_ping_identities_and_allows_reuse() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    let target = PingTargetRecord {
+        id: Uuid::new_v4(),
+        name: "Retention Ping".to_string(),
+        host: "192.0.2.1".to_string(),
+        probe_kind: "icmp".to_string(),
+        port: None,
+        enabled: true,
+        selector_expression: "*".to_string(),
+        generation: 1,
+        created_by: None,
+        created_at: "1".to_string(),
+        updated_at: "1".to_string(),
+    };
+    memory.ping_targets.write().await.push(target.clone());
+    memory
+        .ping_target_assignments
+        .write()
+        .await
+        .push(PingTargetAssignmentRecord {
+            target_id: target.id,
+            client_id: "v-1".to_string(),
+            is_primary: true,
+            assigned_at: "1".to_string(),
+        });
+    let sample = |id: u128, observed_at: u64| TelemetrySampleView {
+        id: Uuid::from_u128(id),
+        client_id: "v-1".to_string(),
+        observed_at: observed_at.to_string(),
+        cpu_load_1: 0.0,
+        memory_total_bytes: 1,
+        memory_available_bytes: 1,
+        payload: serde_json::json!({}),
+    };
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .extend([sample(1, 10), sample(2, 30)]);
+    let old_source_key = ("v-1".to_string(), target.id, 1, 11);
+    let retained_source_key = ("v-1".to_string(), target.id, 1, 12);
+    memory.telemetry_ping_source_checks.write().await.extend([
+        (old_source_key.clone(), 10),
+        (retained_source_key.clone(), 20),
+    ]);
+    let plan = HistoryRetentionPrunePlan {
+        domain: HistoryDomain::TelemetrySamples,
+        prune_limit: 2,
+        enabled: true,
+    };
+
+    let preview = repo.prune_history_domain(&plan, 100, true).await.unwrap();
+    assert_eq!((preview.matched_rows, preview.pruned_rows), (2, 0));
+    assert_eq!(memory.telemetry_samples.read().await.len(), 2);
+    assert_eq!(memory.telemetry_ping_source_checks.read().await.len(), 2);
+
+    let applied = repo.prune_history_domain(&plan, 100, false).await.unwrap();
+    assert_eq!((applied.matched_rows, applied.pruned_rows), (2, 2));
+    assert_eq!(
+        memory
+            .telemetry_samples
+            .read()
+            .await
+            .iter()
+            .map(|sample| sample.id)
+            .collect::<Vec<_>>(),
+        vec![Uuid::from_u128(2)],
+    );
+    let source_checks = memory.telemetry_ping_source_checks.read().await;
+    assert!(!source_checks.contains_key(&old_source_key));
+    assert!(source_checks.contains_key(&retained_source_key));
+    drop(source_checks);
+
+    repo.record_ping_results_memory(
+        "v-1",
+        120,
+        &[PingTargetResult {
+            target_id: target.id.to_string(),
+            generation: 1,
+            checked_unix: 120,
+            status: "ok".to_string(),
+            latency_avg_ms: Some(10.0),
+            loss_ratio: 0.0,
+            reason: None,
+        }],
+        &[11],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        memory
+            .telemetry_ping_source_checks
+            .read()
+            .await
+            .get(&old_source_key),
+        Some(&120),
+    );
+    assert_eq!(
+        memory.telemetry_ping_rollups.read().await[0].sample_count,
+        1
+    );
+}
+
+#[tokio::test]
 async fn traffic_counter_retention_preserves_one_baseline_per_stream() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {
@@ -360,6 +480,36 @@ async fn traffic_counter_retention_preserves_one_baseline_per_stream() {
             .collect::<Vec<_>>();
         retained.sort_unstable();
         assert_eq!(retained, vec![20, 25, 30, 110, 115]);
+    }
+}
+
+#[tokio::test]
+async fn traffic_counter_retention_shares_limit_between_exact_and_tiered_memory_rows() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        memory.traffic_counter_samples.write().await.extend([
+            traffic_counter_sample("edge-a", "host", "eth0", 10),
+            traffic_counter_sample("edge-a", "host", "eth0", 20),
+            traffic_counter_sample("edge-a", "host", "eth0", 200),
+        ]);
+        memory
+            .traffic_counter_rollups
+            .write()
+            .await
+            .push(traffic_counter_rollup("edge-a", 0));
+    }
+    let plan = HistoryRetentionPrunePlan {
+        domain: HistoryDomain::TrafficCounterSamples,
+        prune_limit: 1,
+        enabled: true,
+    };
+    let dry_run = repo.prune_history_domain(&plan, 100, true).await.unwrap();
+    assert_eq!((dry_run.matched_rows, dry_run.pruned_rows), (1, 0));
+    let pruned = repo.prune_history_domain(&plan, 100, false).await.unwrap();
+    assert_eq!((pruned.matched_rows, pruned.pruned_rows), (1, 1));
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(memory.traffic_counter_samples.read().await.len(), 2);
+        assert_eq!(memory.traffic_counter_rollups.read().await.len(), 1);
     }
 }
 
@@ -481,6 +631,28 @@ fn traffic_counter_sample(
     }
 }
 
+fn traffic_counter_rollup(client_id: &str, bucket_start_unix: i64) -> TrafficCounterRollupRecord {
+    TrafficCounterRollupRecord {
+        client_id: client_id.to_string(),
+        source_kind: "host".to_string(),
+        interface: "eth0".to_string(),
+        origin_kind: "live".to_string(),
+        bucket_start: bucket_start_unix.to_string(),
+        bucket_start_unix,
+        bucket_secs: 3_600,
+        rx_bytes: 1,
+        tx_bytes: 2,
+        rx_valid_count: 1,
+        tx_valid_count: 1,
+        any_valid_count: 1,
+        rx_reset_count: 0,
+        tx_reset_count: 0,
+        any_reset_count: 0,
+        first_observed_unix: bucket_start_unix,
+        latest_observed_unix: bucket_start_unix,
+    }
+}
+
 fn network_rate(client_id: &str, interface: &str, bucket_start: &str) -> TelemetryNetworkRateView {
     TelemetryNetworkRateView {
         client_id: client_id.to_string(),
@@ -494,6 +666,7 @@ fn network_rate(client_id: &str, interface: &str, bucket_start: &str) -> Telemet
         tx_bytes_last: 1,
         rx_counter_epoch: 0,
         tx_counter_epoch: 0,
+        latest_observed_at: bucket_start.to_string(),
         rx_bytes_delta: 1,
         tx_bytes_delta: 1,
         rx_bps_avg: 1.0,

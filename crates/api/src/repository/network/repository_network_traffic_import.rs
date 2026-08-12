@@ -5,7 +5,7 @@ use chrono::{TimeZone, Utc};
 use sqlx::{postgres::PgRow, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 use vpsman_common::{
-    NetworkTrafficImportBucket, NetworkTrafficImportResult,
+    NetworkTrafficImportBucket, NetworkTrafficImportResult, MIN_TRAFFIC_COUNTER_RETENTION_DAYS,
     NETWORK_TRAFFIC_IMPORT_MAX_BUCKETS_PER_INTERFACE, NETWORK_TRAFFIC_IMPORT_MAX_INTERFACES,
 };
 
@@ -84,37 +84,17 @@ impl Repository {
                     &samples,
                 )?;
                 apply_memory_import(&mut samples, client_id, &prepared)?;
-                let epochs = samples
-                    .iter()
-                    .filter(|sample| {
-                        sample.client_id == client_id
-                            && sample.source_kind == "host"
-                            && resolved_interfaces.contains(&sample.interface)
-                    })
-                    .map(|sample| {
-                        (
-                            (sample.interface.clone(), sample.observed_unix),
-                            (sample.rx_counter_epoch, sample.tx_counter_epoch),
-                        )
-                    })
-                    .collect::<HashMap<_, _>>();
+                memory
+                    .traffic_counter_rollups
+                    .write()
+                    .await
+                    .retain(|rollup| {
+                        rollup.client_id != client_id
+                            || rollup.source_kind != "host"
+                            || !resolved_interfaces.contains(&rollup.interface)
+                            || rollup.origin_kind != "vnstat_import"
+                    });
                 drop(samples);
-
-                let mut rates = memory.telemetry_network_rates.write().await;
-                for rate in rates.iter_mut().filter(|rate| {
-                    rate.client_id == client_id && resolved_interfaces.contains(&rate.interface)
-                }) {
-                    let Ok(observed_at) = chrono::DateTime::parse_from_rfc3339(&rate.bucket_start)
-                    else {
-                        continue;
-                    };
-                    if let Some((rx_epoch, tx_epoch)) =
-                        epochs.get(&(rate.interface.clone(), observed_at.timestamp()))
-                    {
-                        rate.rx_counter_epoch = *rx_epoch;
-                        rate.tx_counter_epoch = *tx_epoch;
-                    }
-                }
                 Ok(import_summary(&prepared))
             }
             Self::Postgres(pool) => {
@@ -140,6 +120,22 @@ impl Repository {
                     &existing,
                 )?;
 
+                // vnStat replacement owns only the traffic-counter ledger.
+                // Live network-rate rows are independent agent telemetry and
+                // their counter epochs must not be rewritten by an import.
+                sqlx::query(
+                    r#"
+                    DELETE FROM traffic_counter_rollups
+                    WHERE client_id = $1
+                      AND source_kind = 'host'
+                      AND interface = ANY($2::text[])
+                      AND origin_kind = 'vnstat_import'
+                    "#,
+                )
+                .bind(client_id)
+                .bind(resolved_interfaces)
+                .execute(&mut *tx)
+                .await?;
                 sqlx::query(
                     r#"
                     DELETE FROM traffic_counter_samples
@@ -157,26 +153,7 @@ impl Repository {
                     insert_postgres_import_samples(&mut tx, client_id, item).await?;
                     recompute_postgres_stream_epochs(&mut tx, client_id, &item.interface).await?;
                 }
-                sqlx::query(
-                    r#"
-                    UPDATE telemetry_network_rates rate
-                    SET
-                        rx_counter_epoch = sample.rx_counter_epoch,
-                        tx_counter_epoch = sample.tx_counter_epoch,
-                        updated_at = now()
-                    FROM traffic_counter_samples sample
-                    WHERE sample.client_id = $1
-                      AND sample.source_kind = 'host'
-                      AND sample.interface = ANY($2::text[])
-                      AND rate.client_id = sample.client_id
-                      AND rate.interface = sample.interface
-                      AND rate.bucket_start = sample.observed_at
-                    "#,
-                )
-                .bind(client_id)
-                .bind(resolved_interfaces)
-                .execute(&mut *tx)
-                .await?;
+                rebuild_postgres_import_rollups(&mut tx, client_id, resolved_interfaces).await?;
                 tx.commit().await?;
                 Ok(import_summary(&prepared))
             }
@@ -226,16 +203,49 @@ const POSTGRES_IMPORT_LIVE_BOUNDARIES_SQL: &str = r#"
         boundary.sample_source
     FROM unnest($2::text[], $3::bigint[]) AS requested(interface, start_unix)
     CROSS JOIN LATERAL (
-        SELECT sample.*
-        FROM traffic_counter_samples sample
-        WHERE sample.client_id = $1
-          AND sample.source_kind = 'host'
-          AND sample.interface = requested.interface
-          AND sample.sample_source NOT LIKE 'vnstat_import:%'
-          AND sample.observed_at >= to_timestamp(requested.start_unix::double precision)
-        ORDER BY sample.observed_at ASC
+        SELECT candidate.*
+        FROM (
+            SELECT
+                sample.client_id,
+                sample.source_kind,
+                sample.interface,
+                sample.observed_at,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch,
+                sample.sample_source
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = $1
+              AND sample.source_kind = 'host'
+              AND sample.interface = requested.interface
+              AND sample.sample_source NOT LIKE 'vnstat_import:%'
+              AND sample.observed_at
+                    >= to_timestamp(requested.start_unix::double precision)
+            UNION ALL
+            SELECT
+                rollup.client_id,
+                rollup.source_kind,
+                rollup.interface,
+                GREATEST(
+                    rollup.first_observed_at,
+                    to_timestamp(requested.start_unix::double precision)
+                ),
+                0::bigint,
+                0::bigint,
+                0::bigint,
+                0::bigint,
+                'retained_live_rollup'::text
+            FROM traffic_counter_rollups rollup
+            WHERE rollup.client_id = $1
+              AND rollup.source_kind = 'host'
+              AND rollup.interface = requested.interface
+              AND rollup.origin_kind = 'live'
+              AND rollup.latest_observed_at
+                    >= to_timestamp(requested.start_unix::double precision)
+        ) candidate
+        ORDER BY candidate.observed_at ASC
         LIMIT 1
-        FOR UPDATE OF sample
     ) boundary
     ORDER BY boundary.interface ASC
 "#;
@@ -1176,7 +1186,7 @@ async fn insert_postgres_import_sample_chunk(
             .push_bind(&sample.sample_source);
     });
     builder.push(
-        " ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET rx_bytes = EXCLUDED.rx_bytes, tx_bytes = EXCLUDED.tx_bytes, rx_counter_epoch = EXCLUDED.rx_counter_epoch, tx_counter_epoch = EXCLUDED.tx_counter_epoch, sample_source = EXCLUDED.sample_source",
+        " ON CONFLICT (client_id, source_kind, interface, observed_at) DO UPDATE SET rx_bytes = EXCLUDED.rx_bytes, tx_bytes = EXCLUDED.tx_bytes, rx_counter_epoch = EXCLUDED.rx_counter_epoch, tx_counter_epoch = EXCLUDED.tx_counter_epoch, sample_source = EXCLUDED.sample_source, inbound_promoted = FALSE",
     );
     builder.build().execute(&mut **tx).await?;
     Ok(())
@@ -1243,6 +1253,217 @@ async fn recompute_postgres_stream_epochs(
     .bind(client_id)
     .bind(interface)
     .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn rebuild_postgres_import_rollups(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    client_id: &str,
+    interfaces: &[String],
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        WITH cutoff AS (
+            SELECT (
+                date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            ) - make_interval(days => $3) AS value
+        ), sequenced AS MATERIALIZED (
+            SELECT
+                sample.interface,
+                sample.observed_at,
+                sample.rx_bytes,
+                sample.tx_bytes,
+                sample.rx_counter_epoch,
+                sample.tx_counter_epoch,
+                sample.sample_source,
+                lag(sample.rx_bytes) OVER stream AS previous_rx_bytes,
+                lag(sample.tx_bytes) OVER stream AS previous_tx_bytes,
+                lag(sample.rx_counter_epoch) OVER stream
+                    AS previous_rx_counter_epoch,
+                lag(sample.tx_counter_epoch) OVER stream
+                    AS previous_tx_counter_epoch,
+                lag(sample.sample_source) OVER stream AS previous_sample_source
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = $1
+              AND sample.source_kind = 'host'
+              AND sample.interface = ANY($2::text[])
+            WINDOW stream AS (
+                PARTITION BY sample.interface
+                ORDER BY sample.observed_at
+            )
+        ), direct AS MATERIALIZED (
+            SELECT
+                interface,
+                CASE
+                    WHEN observed_at >= (
+                        date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                    ) - interval '91 days' THEN 3600
+                    WHEN observed_at >= (
+                        date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                    ) - interval '181 days' THEN 10800
+                    WHEN observed_at >= (
+                        date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+                    ) - interval '366 days' THEN 21600
+                    ELSE 86400
+                END::integer AS bucket_secs,
+                observed_at,
+                rx_bytes,
+                tx_bytes,
+                rx_counter_epoch,
+                tx_counter_epoch,
+                sample_source,
+                previous_rx_bytes,
+                previous_tx_bytes,
+                previous_rx_counter_epoch,
+                previous_tx_counter_epoch,
+                previous_sample_source
+            FROM sequenced, cutoff
+            WHERE sample_source LIKE 'vnstat_import:%'
+              AND observed_at < cutoff.value
+        ), bucketed AS (
+            SELECT
+                $1::text AS client_id,
+                'host'::text AS source_kind,
+                interface,
+                'vnstat_import'::text AS origin_kind,
+                bucket_secs,
+                date_bin(
+                    make_interval(secs => bucket_secs),
+                    observed_at,
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                ) AS bucket_start,
+                coalesce(sum(CASE
+                    WHEN rx_counter_epoch = previous_rx_counter_epoch
+                     AND rx_bytes >= previous_rx_bytes
+                    THEN rx_bytes - previous_rx_bytes ELSE 0 END), 0)::bigint
+                    AS rx_bytes,
+                coalesce(sum(CASE
+                    WHEN tx_counter_epoch = previous_tx_counter_epoch
+                     AND tx_bytes >= previous_tx_bytes
+                    THEN tx_bytes - previous_tx_bytes ELSE 0 END), 0)::bigint
+                    AS tx_bytes,
+                count(*) FILTER (
+                    WHERE rx_counter_epoch = previous_rx_counter_epoch
+                      AND rx_bytes >= previous_rx_bytes
+                )::integer AS rx_valid_count,
+                count(*) FILTER (
+                    WHERE tx_counter_epoch = previous_tx_counter_epoch
+                      AND tx_bytes >= previous_tx_bytes
+                )::integer AS tx_valid_count,
+                count(*) FILTER (
+                    WHERE (rx_counter_epoch = previous_rx_counter_epoch
+                           AND rx_bytes >= previous_rx_bytes)
+                       OR (tx_counter_epoch = previous_tx_counter_epoch
+                           AND tx_bytes >= previous_tx_bytes)
+                )::integer AS any_valid_count,
+                count(*) FILTER (
+                    WHERE previous_rx_counter_epoch IS NOT NULL
+                      AND rx_counter_epoch <> previous_rx_counter_epoch
+                      AND NOT (previous_sample_source LIKE 'vnstat_import:%'
+                               AND sample_source NOT LIKE 'vnstat_import:%')
+                )::integer AS rx_reset_count,
+                count(*) FILTER (
+                    WHERE previous_tx_counter_epoch IS NOT NULL
+                      AND tx_counter_epoch <> previous_tx_counter_epoch
+                      AND NOT (previous_sample_source LIKE 'vnstat_import:%'
+                               AND sample_source NOT LIKE 'vnstat_import:%')
+                )::integer AS tx_reset_count,
+                count(*) FILTER (
+                    WHERE previous_rx_counter_epoch IS NOT NULL
+                      AND (rx_counter_epoch <> previous_rx_counter_epoch
+                           OR tx_counter_epoch <> previous_tx_counter_epoch)
+                      AND NOT (previous_sample_source LIKE 'vnstat_import:%'
+                               AND sample_source NOT LIKE 'vnstat_import:%')
+                )::integer AS any_reset_count,
+                min(observed_at) AS first_observed_at,
+                max(observed_at) AS latest_observed_at
+            FROM direct
+            GROUP BY interface, bucket_secs, bucket_start
+        )
+        INSERT INTO traffic_counter_rollups (
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start, rx_bytes, tx_bytes,
+            rx_valid_count, tx_valid_count, any_valid_count,
+            rx_reset_count, tx_reset_count, any_reset_count,
+            first_observed_at, latest_observed_at
+        )
+        SELECT
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start, rx_bytes, tx_bytes,
+            rx_valid_count, tx_valid_count, any_valid_count,
+            rx_reset_count, tx_reset_count, any_reset_count,
+            first_observed_at, latest_observed_at
+        FROM bucketed
+        ON CONFLICT (
+            client_id, source_kind, interface, origin_kind,
+            bucket_secs, bucket_start
+        ) DO UPDATE SET
+            rx_bytes = excluded.rx_bytes,
+            tx_bytes = excluded.tx_bytes,
+            rx_valid_count = excluded.rx_valid_count,
+            tx_valid_count = excluded.tx_valid_count,
+            any_valid_count = excluded.any_valid_count,
+            rx_reset_count = excluded.rx_reset_count,
+            tx_reset_count = excluded.tx_reset_count,
+            any_reset_count = excluded.any_reset_count,
+            first_observed_at = excluded.first_observed_at,
+            latest_observed_at = excluded.latest_observed_at,
+            updated_at = now()
+        "#,
+    )
+    .bind(client_id)
+    .bind(interfaces)
+    .bind(MIN_TRAFFIC_COUNTER_RETENTION_DAYS)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        WITH cutoff AS (
+            SELECT (
+                date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+            ) - make_interval(days => $3) AS value
+        ), ranked AS MATERIALIZED (
+            SELECT
+                sample.ctid,
+                sample.sample_source LIKE 'vnstat_import:%' AS imported,
+                row_number() OVER (
+                    PARTITION BY sample.interface
+                    ORDER BY sample.observed_at DESC
+                ) AS predecessor_rank
+            FROM traffic_counter_samples sample, cutoff
+            WHERE sample.client_id = $1
+              AND sample.source_kind = 'host'
+              AND sample.interface = ANY($2::text[])
+              AND sample.observed_at < cutoff.value
+        ), marked AS (
+            UPDATE traffic_counter_samples sample
+            SET inbound_promoted = TRUE
+            FROM ranked
+            WHERE sample.ctid = ranked.ctid
+              AND ranked.imported
+              AND ranked.predecessor_rank = 1
+            RETURNING sample.ctid
+        ), deleted AS (
+            DELETE FROM traffic_counter_samples sample
+            USING ranked
+            WHERE sample.ctid = ranked.ctid
+              AND (
+                    (ranked.imported AND ranked.predecessor_rank > 1)
+                    OR (sample.inbound_promoted AND ranked.predecessor_rank > 1)
+              )
+            RETURNING sample.ctid
+        )
+        SELECT
+            (SELECT count(*) FROM marked)::bigint AS marked,
+            (SELECT count(*) FROM deleted)::bigint AS deleted
+        "#,
+    )
+    .bind(client_id)
+    .bind(interfaces)
+    .bind(MIN_TRAFFIC_COUNTER_RETENTION_DAYS)
+    .fetch_one(&mut **tx)
     .await?;
     Ok(())
 }

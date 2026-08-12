@@ -240,6 +240,8 @@ pub(crate) struct PingRollupView {
     pub(crate) latest_status: String,
     pub(crate) latest_reason: Option<String>,
     pub(crate) latest_checked_at: String,
+    #[serde(skip)]
+    pub(crate) latest_source_checked_unix: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -312,13 +314,25 @@ pub(crate) struct MonitoringCardsPageView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct MonitoringResolutionView {
+    pub(crate) resources: i32,
+    pub(crate) network: i32,
+    pub(crate) ping: i32,
+    pub(crate) traffic: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct MonitoringRangeView {
     pub(crate) window: String,
     pub(crate) source: String,
     pub(crate) start_unix: u64,
     pub(crate) end_unix: u64,
+    pub(crate) requested_step_secs: i32,
+    pub(crate) effective_resolution_secs: i32,
     pub(crate) step_secs: i32,
     pub(crate) points: i64,
+    pub(crate) effective_points: i64,
+    pub(crate) resolutions: MonitoringResolutionView,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -436,8 +450,12 @@ pub(crate) struct PublicMonitoringRangeView {
     pub(crate) source: String,
     pub(crate) start_unix: u64,
     pub(crate) end_unix: u64,
+    pub(crate) requested_step_secs: i32,
+    pub(crate) effective_resolution_secs: i32,
     pub(crate) step_secs: i32,
     pub(crate) points: i64,
+    pub(crate) effective_points: i64,
+    pub(crate) resolutions: MonitoringResolutionView,
 }
 
 #[derive(Clone, Debug, Serialize)]

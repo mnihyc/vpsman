@@ -592,6 +592,9 @@ const dashboardOverview = {
 
 const systemDashboard = {
   bucket_secs: 60,
+  effective_points: 240,
+  effective_resolution_secs: 60,
+  requested_step_secs: 60,
   capacity: {
     agent_offline_secs: 300,
     api_db_pool: 32,
@@ -1716,7 +1719,7 @@ const historyRetentionPolicies = [
     metadata_only: true,
     notes: "fixture backup metadata retention",
     prune_limit: 100,
-    retention_days: 180,
+    retention_days: 3650,
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: null,
   },
@@ -3337,6 +3340,8 @@ const networkTrends = [
   },
   {
     automatic_count: 1,
+    bucket_secs: 300,
+    bucket_start: "2026-05-31T10:05:00Z",
     bytes_total: 0,
     client_id: "agent-fra-02",
     degraded_count: 1,
@@ -3353,6 +3358,9 @@ const networkTrends = [
     plan_id: tunnelPlans[0].id,
     plan_name: "sfo-fra-gre",
     sample_count: 1,
+    retained: true,
+    source_bucket_count: 1,
+    effective_resolution_secs: 300,
     topology_identity_hash: sfoFraTopologyIdentityHash,
     throughput_avg_mbps: null,
     throughput_max_mbps: null,
@@ -3563,6 +3571,21 @@ export async function installConsoleApiMock(
     monitoringCardsDelayMs?: number;
     monitoringNetworkRateExpectedOverride?: boolean;
     monitoringPingStateCoverage?: boolean;
+    monitoringRangeOverride?: Partial<{
+      effective_points: number;
+      effective_resolution_secs: number;
+      points: number;
+      requested_step_secs: number;
+      resolutions: Partial<{
+        network: number;
+        ping: number;
+        resources: number;
+        traffic: number;
+      }>;
+      source: string;
+      step_secs: number;
+      window: string;
+    }>;
     networkSpeedSecondDispatchFailure?: boolean;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
@@ -3645,6 +3668,7 @@ export async function installConsoleApiMock(
       monitoringCardsDelayMsFixture,
       monitoringNetworkRateExpectedOverrideFixture,
       monitoringPingStateCoverageFixture,
+      monitoringRangeOverrideFixture,
       networkSpeedSecondDispatchFailureFixture,
       jobOutputsFixture,
       jobsFixture,
@@ -4941,11 +4965,26 @@ export async function installConsoleApiMock(
           primary_ping: pingTargets[0],
           range: {
             end_unix: Date.parse(starts[2]) / 1_000,
-            points: 11,
-            source: "minute",
+            effective_points:
+              monitoringRangeOverrideFixture?.effective_points ?? 3,
+            effective_resolution_secs:
+              monitoringRangeOverrideFixture?.effective_resolution_secs ?? 60,
+            points: monitoringRangeOverrideFixture?.points ?? 11,
+            requested_step_secs:
+              monitoringRangeOverrideFixture?.requested_step_secs ?? 60,
+            resolutions: {
+              network:
+                monitoringRangeOverrideFixture?.resolutions?.network ?? 60,
+              ping: monitoringRangeOverrideFixture?.resolutions?.ping ?? 60,
+              resources:
+                monitoringRangeOverrideFixture?.resolutions?.resources ?? 60,
+              traffic:
+                monitoringRangeOverrideFixture?.resolutions?.traffic ?? 60,
+            },
+            source: monitoringRangeOverrideFixture?.source ?? "raw",
             start_unix: Date.parse(starts[0]) / 1_000,
-            step_secs: 60,
-            window: "15m",
+            step_secs: monitoringRangeOverrideFixture?.step_secs ?? 60,
+            window: monitoringRangeOverrideFixture?.window ?? "15m",
           },
           resources,
           system_information: null,
@@ -9877,6 +9916,7 @@ export async function installConsoleApiMock(
         options.monitoringNetworkRateExpectedOverride,
       monitoringPingStateCoverageFixture:
         options.monitoringPingStateCoverage ?? false,
+      monitoringRangeOverrideFixture: options.monitoringRangeOverride ?? null,
       networkSpeedSecondDispatchFailureFixture:
         options.networkSpeedSecondDispatchFailure ?? false,
       jobOutputsFixture: networkJobOutputs,

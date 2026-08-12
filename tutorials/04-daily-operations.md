@@ -163,20 +163,38 @@ resource/network/Ping history, authoritative minute-derived traffic counters,
 job outputs, backup artifacts, network/topology history, client lifecycle
 history, and ended gateway sessions.
 
-`telemetry_samples` defaults to 90 days for realtime and short-range queries.
+`telemetry_samples` defaults to 7 days for realtime and short-range queries.
 `telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
-`traffic_counter_samples` default to 3,650 days as the authoritative long-term
-history. The running worker applies those policies in bounded leased batches.
-Before pruning, it may compact settled adjacent resource/network/Ping minutes
-only when every retained value is exactly equivalent; the longer stored span
-preserves minute semantics and is not an hourly tier. Traffic counters remain
-minute-derived. They require at least 32 days and retain one pre-cutoff baseline
-per VPS/source/interface stream so monthly accounting remains exact.
+the traffic-history and `network_observations` domains default to a 3,650-day
+final horizon. `topology_history` remains a separate 180-day graph-history
+policy. Exact traffic
+counter endpoints are retained for 32 days; their reset-safe transition
+aggregates are the authoritative older source. The running worker applies those
+policies in bounded leased batches.
+Before pruning, the worker transactionally promotes settled monitoring history
+through fixed UTC-aligned age tiers: 1 minute through 2 days, 5 minutes through
+8 days, 30 minutes through 31 days, 1 hour through 91 days, 3 hours through 181
+days, 6 hours through 366 days, and 1 day through 3,650 days. Traffic counters
+remain exact minute endpoints for at least 32 days and retain one pre-cutoff
+baseline per VPS/source/interface stream so active monthly accounting remains
+exact; older traffic transitions use the 1-hour-and-coarser tiers. The UI labels
+the effective source resolution and does not invent fine points from coarse
+history.
 
-A stored policy override changes the automatic age, batch limit, or enabled
-state. Other domains remain explicit maintenance workflows. Use dry-run before
-manual pruning, especially for object-backed domains such as job outputs and
-backup artifacts:
+Automatic declared-tunnel reachability remains exact for 2 days, then follows
+the retained monitoring tiers. Its separately retained latest endpoint state
+continues to drive topology and OSPF decisions. Manual probes, speed tests, and
+network-status evidence are not folded into automatic reachability rollups.
+
+A stored policy override can disable automatic pruning, set its batch limit,
+or shorten the final horizon; the canonical promotion boundaries remain fixed
+so every reader has one predictable tier contract. A longer saved raw-sample
+policy is honored. For automatic reachability, the configured prune limit is
+one total terminal-history row budget shared by exact and rollup deletion in a
+worker pass; fixed tier promotion and inactive-current lifecycle cleanup are
+separate from that terminal budget. Other domains remain explicit maintenance workflows. Use
+dry-run before manual pruning, especially for object-backed domains such as job
+outputs and backup artifacts:
 
 Dashboard network rates are interval averages derived from cumulative interface
 counters, not instantaneous samples. The console presents these RX/TX transfer
@@ -203,8 +221,11 @@ cargo run -p vpsctl -- history-retention-prune \
 
 Webhook-rule event and delivery retention honors
 `webhook_rule_retention_days` from the worker config exactly; the shipped
-default is 90 days. Permanent webhook delivery failures remain visible until
-that retention age and then prune with their linked delivery alert evidence.
+default is 90 days. Processed high-frequency `telemetry.rollup` source events
+use the separate `webhook_rule_telemetry_event_retention_days` setting, which
+defaults to 7 days. Unprocessed source events are never removed by that shorter
+policy. Permanent webhook delivery failures remain visible until the general
+retention age and then prune with their linked delivery alert evidence.
 
 For object-backed domains, keep `--metadata-only false` only when the API has
 object storage configured and the retained blobs should be deleted together

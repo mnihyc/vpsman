@@ -58,24 +58,38 @@ async fn raw_source_is_used_only_when_it_covers_retained_minute_history() {
 }
 
 #[test]
-fn merged_span_fragments_only_logical_minutes_inside_the_range() {
+fn coarse_resource_overlap_returns_one_whole_physical_bucket() {
     let mut row = rollup("a", 120);
     row.bucket_secs = 300;
     row.sample_count = 5;
 
-    let fragments = fragment_telemetry_rollup(row, Some(300), Some(360), 60);
+    let selected = fragment_telemetry_rollup(row, Some(419), Some(420), 60);
 
     assert_eq!(
-        fragments
+        selected
             .iter()
-            .map(|row| (row.bucket_start.as_str(), row.sample_count))
+            .map(|row| (row.bucket_start.as_str(), row.bucket_secs, row.sample_count))
             .collect::<Vec<_>>(),
-        vec![("300", 1), ("360", 1)]
+        vec![("0", 300, 5)]
     );
 }
 
 #[test]
-fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
+fn conflicting_resource_tiers_use_the_coarsest_whole_bucket_once() {
+    let mut coarse = rollup("a", 0);
+    coarse.bucket_secs = 300;
+    coarse.sample_count = 5;
+    let fine = rollup("a", 240);
+
+    let selected = retain_authoritative_telemetry_rows(vec![coarse, fine]);
+
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].bucket_secs, 300);
+    assert_eq!(selected[0].sample_count, 5);
+}
+
+#[test]
+fn coarse_resource_selection_preserves_authoritative_values_and_timestamps() {
     let mut compact = rollup("a", 120);
     compact.bucket_secs = 300;
     compact.sample_count = 5;
@@ -93,87 +107,17 @@ fn adaptive_resource_fragmentation_matches_uncompacted_minutes() {
     compact.swap_used_ratio_avg = Some(0.6);
     compact.swap_used_ratio_max = Some(0.6);
 
-    let uncompacted = (0..5)
-        .map(|minute| {
-            let mut row = rollup("a", 120 + minute * 60);
-            row.cpu_load_1_avg = 0.5;
-            row.cpu_load_1_max = 0.5;
-            row.latest_observed_at = (120 + minute * 60 + 17).to_string();
-            row.connections_sample_count = 1;
-            row.tcp_sockets_latest = Some(12);
-            row.udp_sockets_latest = Some(4);
-            row.connections_observed_at = Some((120 + minute * 60 + 31).to_string());
-            row.swap_sample_count = 1;
-            row.swap_total_bytes_max = Some(1_000);
-            row.swap_available_bytes_avg = Some(400);
-            row.swap_available_bytes_min = Some(400);
-            row.swap_used_ratio_avg = Some(0.6);
-            row.swap_used_ratio_max = Some(0.6);
-            row
-        })
-        .flat_map(|row| fragment_telemetry_rollup(row, Some(180), Some(360), 120))
-        .collect::<Vec<_>>();
-    let compacted = fragment_telemetry_rollup(compact, Some(180), Some(360), 120);
-
-    let left = aggregate_memory_telemetry_rollups(uncompacted, 120);
-    let right = aggregate_memory_telemetry_rollups(compacted, 120);
-    assert_eq!(rollup_counts(&left), rollup_counts(&right));
-    let timestamps = |rows: &[TelemetryRollupView]| {
-        rows.iter()
-            .map(|row| {
-                (
-                    row.bucket_start.clone(),
-                    row.latest_observed_at.clone(),
-                    row.connections_observed_at.clone(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(timestamps(&left), timestamps(&right));
-    let swap = |rows: &[TelemetryRollupView]| {
-        rows.iter()
-            .map(|row| {
-                (
-                    row.bucket_start.clone(),
-                    row.swap_sample_count,
-                    row.swap_total_bytes_max,
-                    row.swap_available_bytes_avg,
-                    row.swap_available_bytes_min,
-                    row.swap_used_ratio_avg,
-                    row.swap_used_ratio_max,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(swap(&left), swap(&right));
-    assert_eq!(
-        rollup_counts(&right),
-        vec![("120", 1), ("240", 2), ("360", 1)]
-    );
-    assert_eq!(
-        timestamps(&right),
-        vec![
-            (
-                "120".to_string(),
-                "197".to_string(),
-                Some("211".to_string())
-            ),
-            (
-                "240".to_string(),
-                "317".to_string(),
-                Some("331".to_string())
-            ),
-            (
-                "360".to_string(),
-                "377".to_string(),
-                Some("391".to_string())
-            ),
-        ]
-    );
+    let selected = fragment_telemetry_rollup(compact, Some(419), Some(420), 120);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].sample_count, 5);
+    assert_eq!(selected[0].bucket_secs, 300);
+    assert_eq!(selected[0].latest_observed_at, "377");
+    assert_eq!(selected[0].connections_observed_at.as_deref(), Some("391"));
+    assert_eq!(selected[0].swap_sample_count, 5);
 }
 
 #[test]
-fn adaptive_resource_fragmentation_preserves_explicit_no_swap_as_a_gap() {
+fn coarse_resource_selection_preserves_explicit_no_swap() {
     let mut compact = rollup("a", 120);
     compact.bucket_secs = 300;
     compact.sample_count = 5;
@@ -184,13 +128,10 @@ fn adaptive_resource_fragmentation_preserves_explicit_no_swap_as_a_gap() {
     compact.swap_used_ratio_avg = None;
     compact.swap_used_ratio_max = None;
 
-    let fragments = fragment_telemetry_rollup(compact, Some(180), Some(360), 120);
+    let selected = fragment_telemetry_rollup(compact, Some(419), Some(420), 120);
 
-    assert_eq!(
-        rollup_counts(&fragments),
-        vec![("120", 1), ("240", 2), ("360", 1)]
-    );
-    assert!(fragments.iter().all(|row| {
+    assert_eq!(selected.len(), 1);
+    assert!(selected.iter().all(|row| {
         row.swap_sample_count == 0
             && row.swap_total_bytes_max == Some(0)
             && row.swap_available_bytes_avg == Some(0)
@@ -201,34 +142,23 @@ fn adaptive_resource_fragmentation_preserves_explicit_no_swap_as_a_gap() {
 }
 
 #[test]
-fn adaptive_network_fragmentation_matches_uncompacted_minutes() {
-    let mut uncompacted = vec![network_rate_with_counter(
-        "a", "eth0", 120, 60, 1_000, 2_000,
-    )];
-    uncompacted.extend(
-        (0..5).map(|minute| {
-            network_rate_with_counter("a", "eth0", 180 + minute * 60, 60, 1_600, 2_900)
-        }),
-    );
+fn coarse_network_overlap_returns_one_whole_physical_bucket() {
     let mut compacted = vec![network_rate_with_counter(
         "a", "eth0", 120, 60, 1_000, 2_000,
     )];
     let mut wide = network_rate_with_counter("a", "eth0", 180, 300, 1_600, 2_900);
     wide.sample_count = 5;
+    wide.latest_observed_at = "420".to_string();
     compacted.push(wide);
+    compacted.push(network_rate_with_counter(
+        "a", "eth0", 240, 60, 1_500, 2_700,
+    ));
 
-    for step_secs in [60, 300] {
-        let left =
-            dashboard_network_rows_for_test(uncompacted.clone(), Some(180), Some(420), step_secs);
-        let right =
-            dashboard_network_rows_for_test(compacted.clone(), Some(180), Some(420), step_secs);
-        assert_eq!(network_rate_summary(&left), network_rate_summary(&right));
-    }
-    let minute_rows = dashboard_network_rows_for_test(compacted, Some(180), Some(420), 60);
-    assert!((minute_rows[0].rx_bps_avg - 80.0).abs() < f64::EPSILON);
-    assert!(minute_rows[1..]
-        .iter()
-        .all(|row| row.rx_bps_avg.abs() < f64::EPSILON));
+    let rows = dashboard_network_rows_for_test(compacted, Some(419), Some(421), 60);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].bucket_secs, 300);
+    assert_eq!(rows[0].sample_count, 5);
+    assert_eq!(rows[0].rx_bytes_delta, 600);
 }
 
 #[tokio::test]
@@ -254,7 +184,7 @@ async fn aggregate_rate_selection_filters_interfaces_and_keeps_both_directions()
         .list_dashboard_telemetry_network_rates_selected(
             10,
             Some(60),
-            Some(60),
+            Some(61),
             Some(60),
             60,
             &selection,
@@ -299,7 +229,7 @@ async fn network_counter_resets_are_gaps_and_advance_the_memory_baseline() {
         .list_dashboard_telemetry_network_rates(
             10,
             Some(60),
-            Some(60),
+            Some(61),
             Some(60),
             60,
             &["v-1".to_string()],
@@ -340,7 +270,7 @@ async fn network_counter_resets_are_gaps_and_advance_the_memory_baseline() {
         repo.list_dashboard_telemetry_network_rates(
             10,
             Some(120),
-            Some(120),
+            Some(121),
             Some(60),
             60,
             &["v-1".to_string()],
@@ -717,6 +647,7 @@ fn network_rate_with_counter(
         tx_bytes_last: tx_bytes_avg,
         rx_counter_epoch: 0,
         tx_counter_epoch: 0,
+        latest_observed_at: bucket_start.to_string(),
         rx_bytes_delta: 0,
         tx_bytes_delta: 0,
         rx_bps_avg: 0.0,
@@ -731,38 +662,18 @@ fn rollup_keys(rows: &[TelemetryRollupView]) -> Vec<String> {
         .collect()
 }
 
-fn rollup_counts(rows: &[TelemetryRollupView]) -> Vec<(&str, i32)> {
-    rows.iter()
-        .map(|row| (row.bucket_start.as_str(), row.sample_count))
-        .collect()
-}
-
 fn dashboard_network_rows_for_test(
     rows: Vec<TelemetryNetworkRateView>,
     start_unix: Option<u64>,
     end_unix: Option<u64>,
     step_secs: i32,
 ) -> Vec<TelemetryNetworkRateView> {
+    let rows = retain_authoritative_network_rows(rows);
     let mut rows = derive_network_rates(select_dashboard_network_rows(
         rows, start_unix, end_unix, step_secs,
     ));
     rows.retain(|row| row.sample_count > 0);
     rows
-}
-
-fn network_rate_summary(rows: &[TelemetryNetworkRateView]) -> Vec<(&str, i32, i64, i64, u64, u64)> {
-    rows.iter()
-        .map(|row| {
-            (
-                row.bucket_start.as_str(),
-                row.sample_count,
-                row.rx_bytes_delta,
-                row.tx_bytes_delta,
-                row.rx_bps_avg.to_bits(),
-                row.tx_bps_avg.to_bits(),
-            )
-        })
-        .collect()
 }
 
 fn network_keys(rows: &[TelemetryNetworkRateView]) -> Vec<String> {

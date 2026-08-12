@@ -61,14 +61,16 @@ export function formatUptime(value: number | null | undefined): string {
   return `${seconds}s`;
 }
 
-export function resourceMetricDefinition(metric: DashboardResourceMetric): string {
+export function resourceMetricDefinition(
+  metric: DashboardResourceMetric,
+): string {
   switch (metric) {
     case "cpu_load":
-      return "Each chart point averages retained 60-second Linux 1-minute load rollups in the displayed interval; load is scheduler demand, not CPU utilization.";
+      return "Each chart point averages available Linux 1-minute load evidence in the displayed interval; source resolution follows the selected history range. Load is scheduler demand, not CPU utilization.";
     case "memory_used":
-      return "Each chart point averages retained 60-second used-memory ratios computed independently from each MemTotal and MemAvailable snapshot; peak is the largest snapshot ratio.";
+      return "Each chart point averages available used-memory ratio evidence computed from MemTotal and MemAvailable snapshots in the displayed interval; peak is the largest represented snapshot ratio.";
     case "disk_free":
-      return "Each chart point derives free space from retained per-snapshot aggregate-filesystem used ratios; lowest corresponds to the largest used ratio.";
+      return "Each chart point derives free space from available aggregate-filesystem used-ratio evidence in the displayed interval; lowest corresponds to the largest represented used ratio.";
   }
 }
 
@@ -77,9 +79,9 @@ export function networkObservationMetricDefinition(
 ): string {
   switch (metric) {
     case "latency":
-      return "Each point is the mean RTT reported by one bounded ICMP probe run.";
+      return "Each point is the mean RTT from one exact bounded ICMP probe run or from the source runs represented by one retained evidence bucket.";
     case "loss":
-      return "Each point is the lost-to-transmitted packet ratio from one bounded ICMP probe run.";
+      return "Each point is the lost-to-transmitted packet ratio from one exact bounded ICMP probe run or the average ratio across source runs represented by one retained evidence bucket.";
     case "throughput":
       return "Each point is average TCP throughput for one capped test: bytes transferred x 8 / actual elapsed seconds; it is not an instantaneous interface rate.";
   }

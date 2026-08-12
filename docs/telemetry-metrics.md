@@ -7,32 +7,47 @@ measurement it does not contain.
 
 ## Time, Ranges, And Retention
 
-Monitoring has two retained tiers, not competing minute/hour/day histories:
+Monitoring has one exact short-range source and one canonical, age-tiered
+long-term source:
 
 - Accepted high-resolution telemetry samples preserve the agent payload at its
-  configured collection cadence. Transactionally derived scalar, counter, and
-  Ping facts provide an indexed read projection of the same accepted sample;
-  they do not form another history tier or alter the response source. The raw
-  sample and its facts support realtime and short-range queries and default to
-  90 days of retention.
-- Minute-derived resource, network, traffic-counter, and Ping history is the
-  authoritative long-term source. It defaults to 3,650 days of retention.
-- Resource, network, and Ping rows for adjacent, exact-equivalent logical minutes
-  may be stored as one longer minute-aligned span. This is lossless compaction,
-  not a coarser hourly value: queries preserve the constituent minute weighting,
-  sample count, coverage, extrema, latest evidence, and gaps. Traffic-counter
-  rows remain minute-derived counters and are not folded into these spans.
-- Long-term rows are materialized before an eligible high-resolution sample is
-  pruned. Retention and compaction run in bounded leased batches.
+  configured collection cadence. Transactionally derived scalar and counter
+  facts provide an indexed projection of the same accepted sample. General Ping
+  stores one deterministic winner per logical probe instead of repeating an
+  unchanged cached result in every telemetry frame. Its internal logical key
+  uses the original agent check timestamp, while charts and range filters keep
+  using the API-rebased timestamp so a misconfigured VPS clock cannot move
+  evidence across the retained timeline. Raw samples and their facts
+  support realtime and short-range queries and default to seven days of
+  retention.
+- Resource, network-rate, general-Ping, and system history retains 1-minute
+  buckets through 2 days, 5-minute through 8 days, 30-minute through 31 days,
+  1-hour through 91 days, 3-hour through 181 days, 6-hour through 366 days, and
+  1-day buckets through 3,650 days.
+- Traffic counters remain exact minute endpoints through 32 days so every
+  supported active monthly cycle remains exact. Older traffic transitions use
+  1-hour buckets through 91 days, 3-hour through 181 days, 6-hour through 366
+  days, and 1-day through 3,650 days. Counter resets and imported versus live
+  provenance remain separate.
+- vnStat imports replace only their imported traffic-ledger contribution.
+  They retain live traffic contributions and never rewrite the independent
+  live network-rate curve or its counter epochs.
+- Promotion sums sufficient statistics, counts, extrema, reset evidence, and
+  the actual latest observation. It never spreads a coarse bucket into
+  fabricated fine points. Sparse intervals therefore remain sparse.
+- Long-term rows are materialized before eligible exact evidence is pruned.
+  Promotion and pruning run in bounded, leased, transactional batches.
 
 The canonical VPS detail ranges are **15m**, **1h**, **8h**, **1d**, **7d**,
 **30d**, **90d**, **180d**, **1y**, **All**, and **Custom**. **15m** is the
-realtime view and uses the existing sample store. A range through
-90 days uses high-resolution samples only when the entire requested interval is
-still retained; 180d, 1y, All, and older custom intervals use minute history.
-All means all retained history, normally up to ten years. Server-side chart
-downsampling changes presentation density, never the authoritative retained
-tier.
+realtime view and uses the existing sample store. A range uses high-resolution
+samples only when the entire requested interval is still retained; older
+intervals use tiered retained history. All means all retained history, normally
+up to ten years. Server-side chart downsampling is aligned to the coarsest
+retained tier in the selected range. The API reports requested step, effective
+source resolution, actual chart step, and effective point count. A narrow old
+custom range may therefore contain only one or a few coarse points; the UI
+labels that resolution and never interpolates missing detail.
 
 - The API accepts telemetry in authenticated process-incarnation and transport
   sequence order. Duplicate or older frames do not create another sample.
@@ -45,16 +60,20 @@ tier.
 - Missing intervals remain gaps. Missing, stale, invalid, unsupported, and
   unconfigured values never become healthy zeroes.
 
-Operators manage the two tiers independently under Audit > Retention & export:
+Operators manage exact and long-term retention independently under Audit > Retention & export:
 `telemetry_samples` is the high-resolution policy, while
 `telemetry_rollups`, `telemetry_network_rates`, `telemetry_ping_rollups`, and
 `traffic_counter_samples` are long-term policies.
 
-High-resolution fact rows share the sample's retention lifecycle and are
-deleted with it. They are written only after the authenticated ingest sequence
-is accepted and in the same database transaction as the retained JSON payload
-and long-term rollups. Duplicate or stale frames therefore cannot create an
-orphan fact, and the JSON payload remains the audit/export representation.
+Counter fact rows share the sample's retention lifecycle and are deleted with
+it. Logical Ping evidence uses the same seven-day cutoff but is keyed by target
+series and original checked time so cached repeats do not consume another row,
+even when transport timing rebases repeated frames to adjacent server seconds.
+The original time is identity-only and is not exposed as chart time. All facts
+are written only after the authenticated ingest sequence is accepted and in the
+same database transaction as the retained JSON payload and long-term rollups.
+Duplicate or stale frames therefore cannot create history, and the JSON payload
+remains the raw audit/export representation.
 
 ## Resource Metrics
 
@@ -327,7 +346,13 @@ normally.
 Automatic OSPF control requires the newest paired endpoint reachability window
 to be fresh and the configured number of preceding paired windows to be
 contiguously healthy. Endpoint probes may be independently phased within their
-declared cadence. Older windows in that contiguous streak remain evidence even
+declared cadence. Exact automatic reachability observations remain available
+for two days. Older automatic reachability history follows the same 5-minute,
+30-minute, 1-hour, 3-hour, 6-hour, and 1-day schedule as other retained
+monitoring evidence. Latest endpoint evidence is retained separately, so
+promotion never changes current topology or OSPF decisions. Manual probes,
+speed tests, and status records remain exact rows under their existing policy.
+Older windows in an automatic contiguous streak remain evidence even
 after their individual current-state window expires; stale newest evidence
 never authorizes an update. Reviewed OSPF and manual probes continue to use the
 same retained evidence model.

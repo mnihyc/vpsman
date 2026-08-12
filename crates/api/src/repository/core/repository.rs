@@ -49,6 +49,8 @@ pub(crate) struct TelemetryIngestWatermark {
 }
 
 pub(crate) type TelemetryIngestWatermarks = Arc<RwLock<HashMap<String, TelemetryIngestWatermark>>>;
+pub(crate) type MemoryPingSourceCheckKey = (String, Uuid, i64, u64);
+pub(crate) type MemoryPingSourceChecks = Arc<RwLock<HashMap<MemoryPingSourceCheckKey, u64>>>;
 type CapabilityDegradedJobTargets = HashMap<(Uuid, String), (String, String)>;
 
 #[derive(Clone, Default)]
@@ -63,6 +65,8 @@ pub(crate) struct MemoryState {
     pub(crate) vps_rule_values: Arc<RwLock<Vec<crate::model_alert_policies::VpsRuleValueRecord>>>,
     pub(crate) traffic_counter_samples:
         Arc<RwLock<Vec<crate::model_alert_policies::TrafficCounterSampleRecord>>>,
+    pub(crate) traffic_counter_rollups:
+        Arc<RwLock<Vec<crate::model_alert_policies::TrafficCounterRollupRecord>>>,
     pub(crate) policy_groups: Arc<RwLock<Vec<crate::model_alert_policies::PolicyGroupRecord>>>,
     pub(crate) policy_rule_states:
         Arc<RwLock<Vec<crate::model_alert_policies::PolicyRuleStateRecord>>>,
@@ -120,6 +124,7 @@ pub(crate) struct MemoryState {
     pub(crate) ping_targets: Arc<RwLock<Vec<PingTargetRecord>>>,
     pub(crate) ping_target_assignments: Arc<RwLock<Vec<PingTargetAssignmentRecord>>>,
     pub(crate) telemetry_ping_rollups: Arc<RwLock<Vec<PingRollupView>>>,
+    pub(crate) telemetry_ping_source_checks: MemoryPingSourceChecks,
     pub(crate) monitoring_shares: Arc<RwLock<Vec<MonitoringShareRecord>>>,
     pub(crate) monitoring_share_visitors: Arc<RwLock<Vec<MonitoringShareVisitorRecord>>>,
     pub(crate) telemetry_tunnels: Arc<RwLock<Vec<TelemetryTunnelView>>>,

@@ -306,7 +306,10 @@ pub(crate) struct SystemDashboardGatewayEventsView {
 pub(crate) struct SystemDashboardView {
     pub(crate) generated_at: String,
     pub(crate) window: String,
+    pub(crate) requested_step_secs: i32,
+    pub(crate) effective_resolution_secs: i32,
     pub(crate) bucket_secs: i32,
+    pub(crate) effective_points: i64,
     pub(crate) current: SystemDashboardSnapshotView,
     pub(crate) capacity: SystemDashboardCapacityView,
     pub(crate) series: Vec<SystemMetricSeriesView>,
@@ -358,6 +361,7 @@ pub(crate) struct SystemMetricPointView {
 pub(crate) struct SystemMetricRollupView {
     pub(crate) metric: String,
     pub(crate) bucket_start: String,
+    pub(crate) bucket_secs: i32,
     pub(crate) sample_count: i32,
     pub(crate) avg_value: f64,
     pub(crate) max_value: f64,

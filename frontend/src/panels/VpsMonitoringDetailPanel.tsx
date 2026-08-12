@@ -36,8 +36,17 @@ type MonitoringRange = {
   source: string;
   start_unix: number;
   end_unix: number;
+  requested_step_secs: number;
+  effective_resolution_secs: number;
   step_secs: number;
   points: number;
+  effective_points: number;
+  resolutions: {
+    resources: number;
+    network: number;
+    ping: number;
+    traffic: number;
+  };
 };
 
 type CurrentPing = {
@@ -314,6 +323,15 @@ export function VpsMonitoringDetailPanel({
         message={error}
         tone="danger"
       />
+
+      {data &&
+      data.range.effective_resolution_secs > data.range.requested_step_secs ? (
+        <p className="observabilitySparseNotice" role="status">
+          This range is older than the fine-history window. Curves use retained
+          {` ${formatDuration(data.range.effective_resolution_secs)} `}
+          evidence without interpolating missing detail.
+        </p>
+      ) : null}
 
       {!forcedSection ? (
         <div
@@ -1179,8 +1197,34 @@ function rangeEvidence(range: MonitoringRange): string {
   const source =
     range.source === "raw"
       ? "fine realtime samples"
-      : "retained minute history";
-  return `${source} · ${formatDuration(range.step_secs)} chart buckets · ${formatTime(String(range.start_unix))} – ${formatTime(String(range.end_unix))}`;
+      : "retained tiered history";
+  const resolution =
+    range.source === "raw"
+      ? ""
+      : ` · ${monitoringResolutionEvidence(range.resolutions)}`;
+  return `${source}${resolution} · ${formatDuration(range.step_secs)} chart buckets · ${formatTime(String(range.start_unix))} – ${formatTime(String(range.end_unix))}`;
+}
+
+function monitoringResolutionEvidence(
+  resolutions: MonitoringRange["resolutions"],
+): string {
+  const groups = new Map<number, string[]>();
+  for (const [label, seconds] of [
+    ["resources", resolutions.resources],
+    ["network", resolutions.network],
+    ["Ping", resolutions.ping],
+    ["traffic", resolutions.traffic],
+  ] as const) {
+    groups.set(seconds, [...(groups.get(seconds) ?? []), label]);
+  }
+  if (groups.size === 1) {
+    return `${formatDuration(resolutions.resources)} coarsest source resolution`;
+  }
+  return `${Array.from(groups.entries())
+    .map(
+      ([seconds, labels]) => `${labels.join("/")} ${formatDuration(seconds)}`,
+    )
+    .join("; ")} coarsest source resolutions`;
 }
 
 function finiteNumber(value: number | null | undefined): number | null {

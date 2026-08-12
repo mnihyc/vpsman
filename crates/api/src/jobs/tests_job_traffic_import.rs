@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     gateway_client::GatewayDispatchClient,
-    model::{JobHistoryView, JobOutputView, JobTargetView},
+    model::{JobHistoryView, JobOutputView, JobTargetView, TelemetryNetworkRateView},
     model_alert_policies::TrafficCounterSampleRecord,
     repository::{MemoryState, Repository},
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
@@ -69,15 +69,26 @@ async fn persisted_import_survives_restart_phase_and_finalizes_exactly_once() {
         .message
         .as_deref()
         .is_some_and(|message| message.contains("vnStat history imported")));
+    let rate = match &state.repo {
+        Repository::Memory(memory) => memory.telemetry_network_rates.read().await[0].clone(),
+        Repository::Postgres(_) => unreachable!(),
+    };
+    assert_eq!((rate.rx_counter_epoch, rate.tx_counter_epoch), (7, 9));
 
     let imported_before_retry = match &state.repo {
-        Repository::Memory(memory) => memory
-            .traffic_counter_samples
-            .read()
-            .await
-            .iter()
-            .filter(|sample| sample.sample_source == format!("vnstat_import:{job_id}"))
-            .count(),
+        Repository::Memory(memory) => {
+            let samples = memory.traffic_counter_samples.read().await;
+            let mut imported = samples
+                .iter()
+                .filter(|sample| sample.sample_source == format!("vnstat_import:{job_id}"))
+                .collect::<Vec<_>>();
+            imported.sort_by_key(|sample| sample.observed_unix);
+            let first = imported.first().unwrap();
+            let last = imported.last().unwrap();
+            assert_eq!(last.rx_bytes - first.rx_bytes, 100);
+            assert_eq!(last.tx_bytes - first.tx_bytes, 50);
+            imported.len()
+        }
         Repository::Postgres(_) => unreachable!(),
     };
     let audit_before_retry = state
@@ -114,13 +125,19 @@ async fn persisted_import_survives_restart_phase_and_finalizes_exactly_once() {
     );
 
     let imported_after_retry = match &state.repo {
-        Repository::Memory(memory) => memory
-            .traffic_counter_samples
-            .read()
-            .await
-            .iter()
-            .filter(|sample| sample.sample_source == format!("vnstat_import:{job_id}"))
-            .count(),
+        Repository::Memory(memory) => {
+            let samples = memory.traffic_counter_samples.read().await;
+            let mut imported = samples
+                .iter()
+                .filter(|sample| sample.sample_source == format!("vnstat_import:{job_id}"))
+                .collect::<Vec<_>>();
+            imported.sort_by_key(|sample| sample.observed_unix);
+            let first = imported.first().unwrap();
+            let last = imported.last().unwrap();
+            assert_eq!(last.rx_bytes - first.rx_bytes, 100);
+            assert_eq!(last.tx_bytes - first.tx_bytes, 50);
+            imported.len()
+        }
         Repository::Postgres(_) => unreachable!(),
     };
     let audit_after_retry = state
@@ -374,6 +391,37 @@ async fn persisted_import_state() -> (AppState, uuid::Uuid, CommandOutput) {
             rx_counter_epoch: 0,
             tx_counter_epoch: 0,
             sample_source: "interface_counters".to_string(),
+        });
+    memory
+        .telemetry_network_rates
+        .write()
+        .await
+        .push(TelemetryNetworkRateView {
+            client_id: "edge-a".to_string(),
+            interface: "eth0".to_string(),
+            bucket_start: Utc
+                .timestamp_opt(start as i64, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339(),
+            bucket_secs: 60,
+            sample_count: 1,
+            rx_bytes_avg: 10,
+            tx_bytes_avg: 20,
+            rx_bytes_last: 10,
+            tx_bytes_last: 20,
+            rx_counter_epoch: 7,
+            tx_counter_epoch: 9,
+            latest_observed_at: Utc
+                .timestamp_opt(start as i64, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339(),
+            rx_bytes_delta: 0,
+            tx_bytes_delta: 0,
+            rx_bps_avg: 0.0,
+            tx_bps_avg: 0.0,
+            updated_at: "test".to_string(),
         });
     let batch = NetworkTrafficImportBatch {
         r#type: "network_traffic_import_vnstat_batch".to_string(),

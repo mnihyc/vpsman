@@ -220,6 +220,28 @@ pub(crate) struct TrafficCounterSampleRecord {
     pub(crate) sample_source: String,
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TrafficCounterRollupRecord {
+    pub(crate) client_id: String,
+    pub(crate) source_kind: String,
+    pub(crate) interface: String,
+    pub(crate) origin_kind: String,
+    pub(crate) bucket_start: String,
+    pub(crate) bucket_start_unix: i64,
+    pub(crate) bucket_secs: i32,
+    pub(crate) rx_bytes: i64,
+    pub(crate) tx_bytes: i64,
+    pub(crate) rx_valid_count: i32,
+    pub(crate) tx_valid_count: i32,
+    pub(crate) any_valid_count: i32,
+    pub(crate) rx_reset_count: i32,
+    pub(crate) tx_reset_count: i32,
+    pub(crate) any_reset_count: i32,
+    pub(crate) first_observed_unix: i64,
+    pub(crate) latest_observed_unix: i64,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct TrafficAccountingQuery {
     pub(crate) selector_expression: Option<String>,

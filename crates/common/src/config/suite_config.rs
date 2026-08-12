@@ -71,6 +71,7 @@ pub struct SuiteWorkerConfig {
     pub webhook_rule_delivery_limit: Option<i64>,
     pub webhook_rule_materialize_limit: Option<i64>,
     pub webhook_rule_retention_days: Option<i64>,
+    pub webhook_rule_telemetry_event_retention_days: Option<i64>,
     pub webhook_rule_retention_prune_limit: Option<i64>,
     pub webhook_rule_timeout_secs: Option<u64>,
     pub backup_policy_prune_enabled: Option<bool>,

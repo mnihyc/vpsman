@@ -785,6 +785,48 @@ test("public monitoring keeps grid and detail history state without exposing hid
   ).toHaveAttribute("aria-pressed", "false");
 });
 
+test("public monitoring reports mixed retained source resolutions without exposing hidden domains", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { tieredHistory: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+  await page
+    .getByRole("link", { name: /Shared edge · Online shared monitoring card/ })
+    .click();
+
+  const header = page
+    .getByRole("region", { name: "Read-only history for Shared edge" })
+    .locator(".publicMonitoringDetailHeader");
+  await expect(header).toContainText("retained tiered history");
+  await expect(header).toContainText(
+    "network/Ping 5m; traffic 1m coarsest source resolutions",
+  );
+  await expect(header).not.toContainText("resources");
+});
+
+test("public traffic-only old custom history uses only its visible source resolution", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { trafficOnlyOldCustom: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+  await page
+    .getByRole("link", { name: /Shared edge · Online shared monitoring card/ })
+    .click();
+
+  const detail = page.getByRole("region", {
+    name: "Read-only history for Shared edge",
+  });
+  const header = detail.locator(".publicMonitoringDetailHeader");
+  await expect(header).toContainText(
+    "retained tiered history · 1m coarsest source resolution",
+  );
+  await expect(header).not.toContainText("30m");
+  await expect(detail.locator(".observabilitySparseNotice")).toHaveCount(0);
+  await expect(
+    detail.getByRole("heading", { name: "Traffic volume" }),
+  ).toBeVisible();
+});
+
 test("public monitoring presents warnings, disabled Ping, unlimited quotas, resources, and narrow detail without ambiguity", async ({
   page,
 }) => {
@@ -1612,6 +1654,8 @@ async function installPublicMonitoringApiMock(
     pingTargetName = "Customer gateway",
     retainTrafficHistory = false,
     supplementalVisibility = edgeCases,
+    tieredHistory = false,
+    trafficOnlyOldCustom = false,
     trafficConfigured = true,
   }: {
     annualBilling?: boolean;
@@ -1629,6 +1673,8 @@ async function installPublicMonitoringApiMock(
     pingTargetName?: string;
     retainTrafficHistory?: boolean;
     supplementalVisibility?: boolean;
+    tieredHistory?: boolean;
+    trafficOnlyOldCustom?: boolean;
     trafficConfigured?: boolean;
   } = {},
 ) {
@@ -1824,6 +1870,14 @@ async function installPublicMonitoringApiMock(
     delete card.traffic.cycle_start;
     delete card.traffic.cycle_end;
   }
+  if (trafficOnlyOldCustom) {
+    share.visibility.network = false;
+    share.visibility.ping = false;
+    card.network = undefined;
+    card.network_history = undefined;
+    card.primary_ping = undefined;
+    card.primary_ping_history = undefined;
+  }
   const detail: PublicMonitoringDetailView = {
     client_key: publicClientKey,
     network: card.network_history,
@@ -1831,10 +1885,19 @@ async function installPublicMonitoringApiMock(
     ping_targets: card.primary_ping ? [card.primary_ping] : [],
     range: {
       end_unix: rangeEnd,
+      effective_points: tieredHistory ? 4 : 2,
+      effective_resolution_secs: tieredHistory ? 300 : 60,
       points: 2,
-      source: "minute",
+      requested_step_secs: 60,
+      resolutions: {
+        network: tieredHistory ? 300 : 60,
+        ping: tieredHistory ? 300 : 60,
+        resources: tieredHistory ? 300 : 60,
+        traffic: 60,
+      },
+      source: tieredHistory ? "retained" : "raw",
       start_unix: rangeStart,
-      step_secs: 60,
+      step_secs: tieredHistory ? 300 : 60,
       window: "15m",
     },
     traffic: [
@@ -1858,6 +1921,44 @@ async function installPublicMonitoringApiMock(
       },
     ],
   };
+  if (trafficOnlyOldCustom) {
+    detail.network = undefined;
+    detail.ping = undefined;
+    detail.ping_targets = undefined;
+    detail.resources = undefined;
+    const halfHour = 30 * 60;
+    const oldEnd =
+      Math.floor((Math.floor(now / 1_000) - 20 * 24 * 60 * 60) / halfHour) *
+      halfHour;
+    const oldStart = oldEnd - 60 * 60;
+    detail.range = {
+      ...detail.range,
+      effective_points: 3,
+      effective_resolution_secs: halfHour,
+      end_unix: oldEnd,
+      resolutions: {
+        network: halfHour,
+        ping: halfHour,
+        resources: halfHour,
+        traffic: 60,
+      },
+      source: "retained",
+      start_unix: oldStart,
+      step_secs: halfHour,
+      window: "custom",
+    };
+    detail.traffic = [oldStart, oldStart + halfHour, oldEnd].map(
+      (bucket, index) => ({
+        bucket_secs: halfHour,
+        bucket_start: new Date(bucket * 1_000).toISOString(),
+        reset_count: 0,
+        rx_bytes: 1_000 + index * 100,
+        sample_count: 30,
+        total_bytes: 1_500 + index * 150,
+        tx_bytes: 500 + index * 50,
+      }),
+    );
+  }
   if (edgeCases) {
     const visualBuckets = Array.from(
       { length: 15 },

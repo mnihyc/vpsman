@@ -4361,6 +4361,9 @@ function SystemDashboardPanel({
     series.length > 0
       ? `${series.length} rollup series; latest sample ${formatCompactTime(dashboard?.generated_at ?? "")}`
       : "No durable metric samples in this range";
+  const retainedResolutionLabel = dashboard
+    ? `${formatDurationLabel(dashboard.effective_resolution_secs)} coarsest source resolution; ${formatDurationLabel(dashboard.bucket_secs)} chart buckets`
+    : "retained history resolution loading";
   return (
     <div className="workspace singleColumn systemWorkspace">
       <div className="workspaceStack">
@@ -4369,7 +4372,7 @@ function SystemDashboardPanel({
             <h2>Control-plane overview</h2>
             <span>
               {dashboard
-                ? `${dashboard.bucket_secs}s rollups / ${dataCoverage} / generated ${generatedLabel}`
+                ? `${retainedResolutionLabel} / ${dataCoverage} / generated ${generatedLabel}`
                 : "Control-plane metrics loading"}
             </span>
           </div>
@@ -4427,6 +4430,12 @@ function SystemDashboardPanel({
           message={error}
           tone="danger"
         />
+        {dashboard &&
+        dashboard.effective_resolution_secs > dashboard.requested_step_secs ? (
+          <p className="observabilitySparseNotice" role="status">
+            {`Older system evidence is retained at ${formatDurationLabel(dashboard.effective_resolution_secs)} resolution; missing detail is not interpolated.`}
+          </p>
+        ) : null}
 
         <section
           className="dashboardSection systemDashboardOverview"
@@ -4608,12 +4617,16 @@ function SystemDashboardPanel({
                 : "Unknown",
             },
           ]}
-          lines={chartLines(series, [
-            "dispatch.queue_depth",
-            "targets.dispatching",
-            "targets.running",
-            "dispatch.retried_targets",
-          ])}
+          lines={chartLines(
+            series,
+            [
+              "dispatch.queue_depth",
+              "targets.dispatching",
+              "targets.running",
+              "dispatch.retried_targets",
+            ],
+            dashboard?.bucket_secs ?? 60,
+          )}
           valueFormatter={(value) => formatNumber(value)}
         />
       </div>
@@ -4748,12 +4761,16 @@ function SystemCapacityPanel({
           { label: "Warn", tone: "warning", value: "70% pool pressure" },
           { label: "Critical", tone: "critical", value: "85% pool pressure" },
         ]}
-        lines={chartLines(series, [
-          "db_pool.in_use_connections",
-          "db_pool.open_connections",
-          "db_pool.idle_connections",
-          "db_pool.max_connections",
-        ])}
+        lines={chartLines(
+          series,
+          [
+            "db_pool.in_use_connections",
+            "db_pool.open_connections",
+            "db_pool.idle_connections",
+            "db_pool.max_connections",
+          ],
+          dashboard?.bucket_secs ?? 60,
+        )}
         valueFormatter={(value) => formatNumber(value)}
       />
     ) : activeSubsystem === "gateway" ? (
@@ -4804,12 +4821,16 @@ function SystemCapacityPanel({
           },
           { label: "Warn", tone: "warning", value: "age or growth" },
         ]}
-        lines={chartLines(series, [
-          "gateway_events.current_queue_depth",
-          "gateway_events.oldest_event_age_secs",
-          "gateway_events.dropped_events",
-          "gateway_events.retry_attempts",
-        ])}
+        lines={chartLines(
+          series,
+          [
+            "gateway_events.current_queue_depth",
+            "gateway_events.oldest_event_age_secs",
+            "gateway_events.dropped_events",
+            "gateway_events.retry_attempts",
+          ],
+          dashboard?.bucket_secs ?? 60,
+        )}
         valueFormatter={(value) => formatNumber(value)}
       />
     ) : (
@@ -4873,12 +4894,16 @@ function SystemCapacityPanel({
             value: dispatchModel.reason,
           },
         ]}
-        lines={chartLines(series, [
-          "dispatch.queue_depth",
-          "targets.dispatching",
-          "targets.running",
-          "dispatch.retried_targets",
-        ])}
+        lines={chartLines(
+          series,
+          [
+            "dispatch.queue_depth",
+            "targets.dispatching",
+            "targets.running",
+            "dispatch.retried_targets",
+          ],
+          dashboard?.bucket_secs ?? 60,
+        )}
         valueFormatter={(value) => formatNumber(value)}
       />
     );
@@ -5051,7 +5076,7 @@ function SystemCapacityPanel({
             <h2>Capacity telemetry</h2>
             <span>
               {dashboard
-                ? `${dashboard.bucket_secs}s rollups / selected ${dashboardWindowLabel(window)}; ${sampleCoverage} / generated ${formatFullTime(dashboard.generated_at)}`
+                ? `${formatDurationLabel(dashboard.effective_resolution_secs)} coarsest source resolution; ${formatDurationLabel(dashboard.bucket_secs)} chart buckets / selected ${dashboardWindowLabel(window)}; ${sampleCoverage} / generated ${formatFullTime(dashboard.generated_at)}`
                 : "Capacity telemetry loading"}
             </span>
           </div>
@@ -5109,6 +5134,12 @@ function SystemCapacityPanel({
           message={error}
           tone="danger"
         />
+        {dashboard &&
+        dashboard.effective_resolution_secs > dashboard.requested_step_secs ? (
+          <p className="observabilitySparseNotice" role="status">
+            {`Older system evidence is retained at ${formatDurationLabel(dashboard.effective_resolution_secs)} resolution; missing detail is not interpolated.`}
+          </p>
+        ) : null}
 
         <section
           className="dashboardSection systemDashboardOverview"
@@ -7212,25 +7243,46 @@ function formatDurationLabel(totalSeconds: number): string {
 function chartLines(
   series: SystemMetricSeriesRecord[],
   metrics: string[],
+  bucketSecs: number,
 ): { lines: TimeSeriesChartLine[]; times: string[] } {
   const selected = metrics
     .map((metric) => series.find((entry) => entry.metric === metric))
     .filter((entry): entry is SystemMetricSeriesRecord => Boolean(entry));
-  const times = Array.from(
+  const observedTimes = Array.from(
     new Set(
       selected.flatMap((entry) =>
         entry.points.map((point) => point.bucket_start),
       ),
     ),
   ).sort((left, right) => Date.parse(left) - Date.parse(right));
+  const observedEpochs = observedTimes
+    .map((time) => Math.floor(Date.parse(time) / 1_000))
+    .filter(Number.isFinite);
+  const step = Math.max(60, Math.floor(bucketSecs));
+  const first = observedEpochs[0];
+  const last = observedEpochs[observedEpochs.length - 1];
+  const epochs: number[] = [];
+  if (first !== undefined && last !== undefined) {
+    for (
+      let epoch = first;
+      epoch <= last && epochs.length <= 1_442;
+      epoch += step
+    ) {
+      epochs.push(epoch);
+    }
+  }
+  const times = epochs.map((epoch) => new Date(epoch * 1_000).toISOString());
   const lines = selected.map((entry, index) => {
     const points = new Map(
-      entry.points.map((point) => [point.bucket_start, point.latest_value]),
+      entry.points.map((point) => [
+        Math.floor(Date.parse(point.bucket_start) / 1_000),
+        point.latest_value,
+      ]),
     );
     return {
       color: dashboardChartColors[index % dashboardChartColors.length],
       label: entry.label,
-      values: times.map((time) => points.get(time) ?? null),
+      values: epochs.map((epoch) => points.get(epoch) ?? null),
     };
   });
   return { lines, times };

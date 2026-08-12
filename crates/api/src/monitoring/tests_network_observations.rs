@@ -104,8 +104,14 @@ async fn memory_network_observation_ordering_handles_mixed_timestamp_formats() {
         .list_network_observation_trends(10, false)
         .await
         .unwrap();
-    assert_eq!(trends.len(), 1);
+    assert_eq!(trends.len(), 2);
     assert_eq!(trends[0].latest_observed_at, "1970-01-01T00:16:40Z");
+    assert!(trends.iter().all(|trend| trend.bucket_secs.is_none()));
+    assert_eq!(
+        trends[0].bucket_start.as_deref(),
+        Some("1970-01-01T00:16:40Z")
+    );
+    assert_eq!(trends[1].bucket_start.as_deref(), Some("999"));
 }
 
 #[tokio::test]

@@ -385,7 +385,10 @@ verify_stack() {
         SELECT count(*) FROM traffic_counter_samples WHERE client_id LIKE 'review-%'
       ),
       'ping_points', (
-        SELECT count(*) FROM telemetry_ping_rollups WHERE client_id LIKE 'review-%'
+        SELECT count(*)
+        FROM telemetry_ping_rollups AS rollup
+        JOIN telemetry_ping_series AS series ON series.id = rollup.series_id
+        WHERE series.client_id LIKE 'review-%'
       ),
       'shares', (
         SELECT count(*) FROM monitoring_share_links

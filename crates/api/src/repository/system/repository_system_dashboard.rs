@@ -241,6 +241,7 @@ impl Repository {
                         rows.push(SystemMetricRollupView {
                             metric: sample.metric.to_string(),
                             bucket_start: bucket_start_text.clone(),
+                            bucket_secs: SYSTEM_METRIC_BUCKET_SECS,
                             sample_count: 1,
                             avg_value: sample.value,
                             max_value: sample.value,
@@ -273,6 +274,7 @@ impl Repository {
                         SELECT
                             metric,
                             count(*)::integer AS sample_count,
+                            sum(value)::double precision AS value_sum,
                             avg(value)::double precision AS avg_value,
                             max(value)::double precision AS max_value,
                             (array_agg(value ORDER BY ordinality DESC))[1]
@@ -285,6 +287,7 @@ impl Repository {
                         bucket_start,
                         bucket_secs,
                         sample_count,
+                        value_sum,
                         avg_value,
                         max_value,
                         latest_value,
@@ -296,6 +299,7 @@ impl Repository {
                         to_timestamp($3::double precision),
                         $4,
                         sample_count,
+                        value_sum,
                         avg_value,
                         max_value,
                         latest_value,
@@ -305,11 +309,9 @@ impl Repository {
                     ON CONFLICT (metric, bucket_secs, bucket_start) DO UPDATE SET
                         sample_count = system_metric_rollups.sample_count
                             + EXCLUDED.sample_count,
+                        value_sum = system_metric_rollups.value_sum + EXCLUDED.value_sum,
                         avg_value = (
-                            system_metric_rollups.avg_value
-                                * system_metric_rollups.sample_count::double precision
-                            + EXCLUDED.avg_value
-                                * EXCLUDED.sample_count::double precision
+                            system_metric_rollups.value_sum + EXCLUDED.value_sum
                         ) / (
                             system_metric_rollups.sample_count + EXCLUDED.sample_count
                         )::double precision,
@@ -344,15 +346,87 @@ impl Repository {
         chart_points: i64,
     ) -> Result<Vec<SystemMetricRollupView>> {
         let step_secs = system_metric_step_secs(start_unix, end_unix, chart_points);
+        self.list_system_metric_rollups_at_step(
+            start_unix,
+            end_unix,
+            chart_points,
+            step_secs as u64,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_system_metric_rollups_at_step(
+        &self,
+        start_unix: u64,
+        end_unix: u64,
+        chart_points: i64,
+        step_secs: u64,
+    ) -> Result<Vec<SystemMetricRollupView>> {
+        let step_secs = step_secs.clamp(SYSTEM_METRIC_BUCKET_SECS as u64, i32::MAX as u64) as i64;
         match self {
             Self::Memory(memory) => {
-                let mut rows = memory.system_metric_rollups.read().await.clone();
-                rows.retain(|row| timestamp_in_bounds(&row.bucket_start, start_unix, end_unix));
+                let physical_rows = memory
+                    .system_metric_rollups
+                    .read()
+                    .await
+                    .iter()
+                    .filter_map(|row| {
+                        let start = parse_system_metric_timestamp(&row.bucket_start)?;
+                        (start <= end_unix
+                            && start.saturating_add(row.bucket_secs.max(1) as u64) > start_unix)
+                            .then_some((row.clone(), start))
+                    })
+                    .collect::<Vec<_>>();
+                let mut groups = std::collections::BTreeMap::<
+                    (u64, i32, String),
+                    (i64, f64, f64, f64, u64),
+                >::new();
+                for (row, start) in &physical_rows {
+                    if physical_rows.iter().any(|(coarser, coarser_start)| {
+                        coarser.metric == row.metric
+                            && coarser.bucket_secs > row.bucket_secs
+                            && *coarser_start < start.saturating_add(row.bucket_secs.max(1) as u64)
+                            && coarser_start.saturating_add(coarser.bucket_secs.max(1) as u64)
+                                > *start
+                    }) {
+                        continue;
+                    }
+                    let chart_step = (step_secs as i32).max(row.bucket_secs);
+                    let chart_start = *start / chart_step as u64 * chart_step as u64;
+                    let entry = groups
+                        .entry((chart_start, chart_step, row.metric.clone()))
+                        .or_insert((0, 0.0, f64::NEG_INFINITY, 0.0, 0));
+                    entry.0 = entry.0.saturating_add(i64::from(row.sample_count.max(0)));
+                    entry.1 += row.avg_value * f64::from(row.sample_count.max(0));
+                    entry.2 = entry.2.max(row.max_value);
+                    if *start >= entry.4 {
+                        entry.3 = row.latest_value;
+                        entry.4 = *start;
+                    }
+                }
+                let mut rows = groups
+                    .into_iter()
+                    .map(|((start, bucket_secs, metric), aggregate)| {
+                        let sample_count = aggregate.0.clamp(1, i64::from(i32::MAX)) as i32;
+                        SystemMetricRollupView {
+                            metric,
+                            bucket_start: chrono::DateTime::from_timestamp(start as i64, 0)
+                                .unwrap_or_else(chrono::Utc::now)
+                                .to_rfc3339(),
+                            bucket_secs,
+                            sample_count,
+                            avg_value: aggregate.1 / f64::from(sample_count),
+                            max_value: aggregate.2,
+                            latest_value: aggregate.3,
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 rows.sort_by(|left, right| {
                     left.bucket_start
                         .cmp(&right.bucket_start)
                         .then_with(|| left.metric.cmp(&right.metric))
                 });
+                rows.truncate((chart_points.clamp(1, 1440) * 64) as usize);
                 Ok(rows)
             }
             Self::Postgres(pool) => {
@@ -366,37 +440,56 @@ impl Repository {
                                     extract(epoch FROM bucket_start) / $3::double precision
                                 ) * $3::double precision
                             ) AS chart_bucket_start,
+                            GREATEST(bucket_secs, $3)::integer AS chart_bucket_secs,
                             sample_count,
-                            avg_value,
+                            value_sum,
                             max_value,
-                            latest_value
-                        FROM system_metric_rollups
+                            latest_value,
+                            latest_observed_at
+                        FROM system_metric_rollups row
                         WHERE
-                            bucket_secs = $4
-                            AND bucket_start >= to_timestamp($1::double precision)
-                            AND bucket_start <= to_timestamp($2::double precision)
+                            row.bucket_start <= to_timestamp($2::double precision)
+                            AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                                > to_timestamp($1::double precision)
+                            AND NOT EXISTS (
+                                SELECT 1
+                                FROM system_metric_rollups coarser
+                                WHERE coarser.metric = row.metric
+                                  AND coarser.bucket_secs > row.bucket_secs
+                                  AND coarser.bucket_start <= to_timestamp($2::double precision)
+                                  AND coarser.bucket_start
+                                        + make_interval(secs => coarser.bucket_secs)
+                                        > to_timestamp($1::double precision)
+                                  AND coarser.bucket_start
+                                        < row.bucket_start
+                                            + make_interval(secs => row.bucket_secs)
+                                  AND coarser.bucket_start
+                                        + make_interval(secs => coarser.bucket_secs)
+                                        > row.bucket_start
+                            )
                     )
                     SELECT
                         metric,
                         chart_bucket_start::text AS bucket_start,
+                        chart_bucket_secs AS bucket_secs,
                         LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
                         COALESCE(
-                            sum(avg_value * sample_count::double precision)
+                            sum(value_sum)
                                 / NULLIF(sum(sample_count)::double precision, 0),
                             0
                         ) AS avg_value,
                         max(max_value)::double precision AS max_value,
-                        (array_agg(latest_value ORDER BY chart_bucket_start DESC))[1] AS latest_value
+                        (array_agg(latest_value ORDER BY latest_observed_at DESC))[1]
+                            AS latest_value
                     FROM selected
-                    GROUP BY metric, chart_bucket_start
+                    GROUP BY metric, chart_bucket_start, chart_bucket_secs
                     ORDER BY chart_bucket_start ASC, metric ASC
-                    LIMIT $5
+                    LIMIT $4
                     "#,
                 )
                 .bind(start_unix as f64)
                 .bind(end_unix as f64)
                 .bind(step_secs)
-                .bind(SYSTEM_METRIC_BUCKET_SECS)
                 .bind(chart_points.clamp(1, 1440) * 64)
                 .fetch_all(pool)
                 .await?;
@@ -406,6 +499,7 @@ impl Repository {
                         Ok(SystemMetricRollupView {
                             metric: row.try_get("metric")?,
                             bucket_start: row.try_get("bucket_start")?,
+                            bucket_secs: row.try_get("bucket_secs")?,
                             sample_count: row.try_get("sample_count")?,
                             avg_value: row.try_get("avg_value")?,
                             max_value: row.try_get("max_value")?,
@@ -612,11 +706,15 @@ fn system_metric_step_secs(start_unix: u64, end_unix: u64, chart_points: i64) ->
         as i32
 }
 
-fn timestamp_in_bounds(value: &str, start_unix: u64, end_unix: u64) -> bool {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|timestamp| {
-            let unix = timestamp.timestamp().max(0) as u64;
-            unix >= start_unix && unix <= end_unix
+fn parse_system_metric_timestamp(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .and_then(|timestamp| (timestamp >= 0).then_some(timestamp as u64))
+        .or_else(|| {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .ok()
+                .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
         })
-        .unwrap_or(false)
 }

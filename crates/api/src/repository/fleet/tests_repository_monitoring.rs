@@ -304,7 +304,7 @@ fn public_share_visitor_audit_uses_canonical_request_ip_key() {
 }
 
 #[test]
-fn cached_ping_results_are_counted_once_and_fresh_checks_aggregate() {
+fn fresh_ping_results_aggregate() {
     let target = PingTargetRecord {
         id: Uuid::new_v4(),
         name: "Public resolver".to_string(),
@@ -328,8 +328,7 @@ fn cached_ping_results_are_counted_once_and_fresh_checks_aggregate() {
         reason: None,
     };
     let mut rows = Vec::new();
-    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &result);
-    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &result);
+    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &result, 120);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].sample_count, 1);
 
@@ -338,10 +337,76 @@ fn cached_ping_results_are_counted_once_and_fresh_checks_aggregate() {
         latency_avg_ms: Some(20.0),
         ..result
     };
-    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &fresh);
+    upsert_memory_ping_rollup(&mut rows, "v-1", &target, &fresh, 150);
     assert_eq!(rows[0].sample_count, 2);
     assert_eq!(rows[0].latency_avg_ms, Some(15.0));
     assert_eq!(rows[0].latest_checked_at, "150");
+}
+
+#[tokio::test]
+async fn memory_ping_source_identity_counts_equal_chart_times_and_deduplicates_cached_checks() {
+    let repo = Repository::Memory(crate::repository::MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    let target = current_ping_test_target();
+    memory.ping_targets.write().await.push(target.clone());
+    memory
+        .ping_target_assignments
+        .write()
+        .await
+        .push(PingTargetAssignmentRecord {
+            target_id: target.id,
+            client_id: "v-1".to_string(),
+            is_primary: true,
+            assigned_at: "100".to_string(),
+        });
+    let first = PingTargetResult {
+        target_id: target.id.to_string(),
+        generation: 1,
+        checked_unix: 120,
+        status: "ok".to_string(),
+        latency_avg_ms: Some(10.0),
+        loss_ratio: 0.0,
+        reason: None,
+    };
+    let second = PingTargetResult {
+        status: "degraded".to_string(),
+        latency_avg_ms: Some(20.0),
+        loss_ratio: 0.5,
+        reason: Some("higher source identity".to_string()),
+        ..first.clone()
+    };
+
+    repo.record_ping_results_memory("v-1", 120, &[first.clone(), second.clone()], &[200, 201])
+        .await
+        .unwrap();
+    repo.record_ping_results_memory("v-1", 180, &[second], &[201])
+        .await
+        .unwrap();
+
+    let rows = memory.telemetry_ping_rollups.read().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sample_count, 2);
+    assert_eq!(rows[0].success_count, 2);
+    assert_eq!(rows[0].latency_avg_ms, Some(15.0));
+    assert_eq!(rows[0].latest_status, "degraded");
+    assert_eq!(
+        rows[0].latest_reason.as_deref(),
+        Some("higher source identity")
+    );
+    assert_eq!(rows[0].latest_checked_at, "120");
+    assert_eq!(rows[0].latest_source_checked_unix, 201);
+    assert_eq!(memory.telemetry_ping_source_checks.read().await.len(), 2);
+    assert_eq!(
+        memory.telemetry_ping_source_checks.read().await.get(&(
+            "v-1".to_string(),
+            target.id,
+            1,
+            201,
+        )),
+        Some(&180),
+    );
 }
 
 #[test]
@@ -361,7 +426,7 @@ fn ping_result_timestamp_must_belong_to_the_accepted_sample_window() {
 }
 
 #[test]
-fn adaptive_ping_fragmentation_matches_uncompacted_minutes() {
+fn retained_ping_keeps_a_whole_coarse_bucket_without_fabricating_minutes() {
     let target_id = Uuid::new_v4();
     let row = |bucket_start: u64, bucket_secs: i32, sample_count: i32| PingRollupView {
         client_id: "v-1".to_string(),
@@ -384,28 +449,18 @@ fn adaptive_ping_fragmentation_matches_uncompacted_minutes() {
             + (bucket_secs.max(60) as u64 / 60).saturating_sub(1) * 60
             + 23)
             .to_string(),
+        latest_source_checked_unix: bucket_start,
     };
-    let uncompacted = (0..5)
-        .flat_map(|minute| {
-            fragment_ping_rollup(row(120 + minute * 60, 60, 1), Some(180), Some(360), 120)
-        })
-        .collect::<Vec<_>>();
-    let compacted = fragment_ping_rollup(row(120, 300, 5), Some(180), Some(360), 120);
-    let summarize = |rows: Vec<PingRollupView>| {
-        aggregate_memory_ping_rollups(rows, 120)
-            .into_iter()
-            .map(|row| {
-                (
-                    row.bucket_start,
-                    row.sample_count,
-                    row.success_count,
-                    row.latency_avg_ms.map(f64::to_bits),
-                    row.latest_checked_at,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(summarize(uncompacted), summarize(compacted));
+    let retained = fragment_ping_rollup(row(0, 300, 5), Some(60), Some(180), 120);
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].bucket_start, "0");
+    assert_eq!(retained[0].bucket_secs, 300);
+    assert_eq!(retained[0].sample_count, 5);
+    assert_eq!(retained[0].success_count, 5);
+
+    let inclusive_end = fragment_ping_rollup(row(300, 60, 1), Some(60), Some(300), 120);
+    assert_eq!(inclusive_end.len(), 1);
+    assert_eq!(inclusive_end[0].bucket_start, "240");
 }
 
 #[test]
@@ -527,7 +582,7 @@ fn current_ping_latest_hard_failure_overrides_a_healthy_rolling_window() {
 }
 
 #[test]
-fn current_ping_window_excludes_its_open_boundary_and_proportions_coarse_rows() {
+fn current_ping_window_uses_whole_authoritative_coarse_rows() {
     let target = current_ping_test_target();
     let mut coarse = current_ping_test_rollup(&target, 0, 1.0, "degraded");
     coarse.bucket_secs = 600;
@@ -538,8 +593,13 @@ fn current_ping_window_excludes_its_open_boundary_and_proportions_coarse_rows() 
     let latest = current_ping_test_rollup(&target, 1_200, 0.0, "ok");
     let rows = [coarse, outside, latest];
 
-    let loss = current_ping_loss_ratio(&rows[2], rows.iter()).unwrap();
-    assert!((loss - 0.8).abs() < 1e-12);
+    let authoritative = retain_authoritative_ping_rows(rows.to_vec());
+    let latest = authoritative
+        .iter()
+        .max_by_key(|row| parse_timestamp_unix(&row.latest_checked_at))
+        .unwrap();
+    let loss = current_ping_loss_ratio(latest, authoritative.iter()).unwrap();
+    assert!((loss - 10.0 / 11.0).abs() < 1e-12);
 }
 
 fn current_ping_test_target() -> PingTargetRecord {
@@ -582,5 +642,6 @@ fn current_ping_test_rollup(
         latest_status: status.to_string(),
         latest_reason: None,
         latest_checked_at: checked_unix.to_string(),
+        latest_source_checked_unix: checked_unix,
     }
 }

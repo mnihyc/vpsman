@@ -1349,6 +1349,7 @@ async fn record_ping(
             loss_ratio: 0.0,
             reason: None,
         }],
+        &[checked_unix],
     )
     .await
     .unwrap();

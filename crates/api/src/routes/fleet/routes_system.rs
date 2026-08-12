@@ -20,7 +20,6 @@ use crate::{
     unix_now,
 };
 
-const SYSTEM_DASHBOARD_BUCKET_SECS: i32 = 60;
 const DEFAULT_CHART_POINTS: i64 = 240;
 const MAX_CHART_POINTS: i64 = 1440;
 
@@ -43,6 +42,20 @@ pub(crate) async fn system_dashboard(
         .clamp(1, MAX_CHART_POINTS);
     let now = unix_now();
     let start = now.saturating_sub(window_seconds(window));
+    let span = now.saturating_sub(start);
+    let requested_step_secs = requested_chart_step_secs(span, chart_points);
+    let effective_resolution_secs = retained_system_resolution_for_age(span);
+    let bucket_secs = tier_aligned_system_step_secs(
+        span,
+        requested_step_secs,
+        effective_resolution_secs,
+        chart_points as u64,
+    );
+    let effective_points = span
+        .checked_div(bucket_secs.max(1) as u64)
+        .unwrap_or(0)
+        .saturating_add(1)
+        .min(MAX_CHART_POINTS as u64) as i64;
     let collected =
         collect_system_dashboard_snapshot(&state)
             .await
@@ -52,7 +65,7 @@ pub(crate) async fn system_dashboard(
             ))?;
     let rollups = state
         .repo
-        .list_system_metric_rollups(start, now, chart_points)
+        .list_system_metric_rollups_at_step(start, now, effective_points, bucket_secs as u64)
         .await
         .map_err(ApiError::internal_mapper(
             "system_metrics_unavailable",
@@ -61,7 +74,10 @@ pub(crate) async fn system_dashboard(
     Ok(Json(SystemDashboardView {
         generated_at: Utc::now().to_rfc3339(),
         window: window.to_string(),
-        bucket_secs: SYSTEM_DASHBOARD_BUCKET_SECS,
+        requested_step_secs,
+        effective_resolution_secs,
+        bucket_secs,
+        effective_points,
         current: collected.current,
         capacity: suite_capacity(&state),
         series: system_metric_series(rollups),
@@ -168,6 +184,43 @@ fn window_seconds(window: &str) -> u64 {
         "all" => u64::MAX,
         _ => unreachable!("validated system dashboard window"),
     }
+}
+
+fn requested_chart_step_secs(span: u64, points: i64) -> i32 {
+    let intervals = points.clamp(2, MAX_CHART_POINTS).saturating_sub(1) as u64;
+    let raw = span.div_ceil(intervals.max(1)).max(60);
+    raw.div_ceil(60).saturating_mul(60).min(i32::MAX as u64) as i32
+}
+
+fn retained_system_resolution_for_age(age_secs: u64) -> i32 {
+    const DAY: u64 = 24 * 60 * 60;
+    match age_secs {
+        value if value <= 2 * DAY => 60,
+        value if value <= 8 * DAY => 5 * 60,
+        value if value <= 31 * DAY => 30 * 60,
+        value if value <= 91 * DAY => 60 * 60,
+        value if value <= 181 * DAY => 3 * 60 * 60,
+        value if value <= 366 * DAY => 6 * 60 * 60,
+        _ => DAY as i32,
+    }
+}
+
+fn tier_aligned_system_step_secs(
+    span: u64,
+    requested_step_secs: i32,
+    effective_resolution_secs: i32,
+    requested_points: u64,
+) -> i32 {
+    let resolution = effective_resolution_secs.max(60) as u64;
+    let requested = (requested_step_secs.max(60) as u64).max(resolution);
+    let lower = requested / resolution * resolution;
+    if lower >= resolution && span / lower < requested_points.saturating_add(12) {
+        return lower.min(i32::MAX as u64) as i32;
+    }
+    requested
+        .div_ceil(resolution)
+        .saturating_mul(resolution)
+        .min(i32::MAX as u64) as i32
 }
 
 fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {

@@ -1234,6 +1234,7 @@ fn dashboard_test_rate(
         tx_bytes_last: tx_bytes_avg,
         rx_counter_epoch: 0,
         tx_counter_epoch: 0,
+        latest_observed_at: observed_at.to_string(),
         rx_bytes_delta: 0,
         tx_bytes_delta: 0,
         rx_bps_avg: 0.0,
