@@ -23,6 +23,14 @@ fn matches(input: &str, context: &ExpressionContext) -> bool {
     parse_and_match_expression(input, context).unwrap()
 }
 
+fn rule_context(values: &[(&str, &str, Value)]) -> VpsRuleContext {
+    let mut rules = VpsRuleContext::default();
+    for (key, raw, json) in values {
+        rules.insert(*key, *raw, json.clone());
+    }
+    rules
+}
+
 fn fixture_context(value: &Value) -> ExpressionContext {
     let vps_value = value.get("vps").expect("fixture vps");
     let tags = vps_value
@@ -244,4 +252,308 @@ fn invalid_expressions_report_errors() {
     assert!(parse_expression("provider:").is_err());
     assert!(parse_expression("status in []").is_err());
     assert!(parse_expression("tag in [/edge/i]").is_err());
+}
+
+#[test]
+fn vps_rules_support_key_presence_patterns_and_explicit_absence() {
+    let context = ExpressionContext::default().with_vps_rules(rule_context(&[
+        ("traffic.reset_day", "15", serde_json::json!({"day": 15})),
+        (
+            "network.port_speed",
+            "1.5 Gbps",
+            serde_json::json!({"bps": 1_500_000_000_i64}),
+        ),
+    ]));
+    assert!(matches("vps.rules:*", &context));
+    assert!(matches("vps.rules:traffic.reset_day", &context));
+    assert!(matches("vps.rules:traffic.*", &context));
+    assert!(matches("vps.rules in [/^network\\./]", &context));
+    assert!(!matches("vps.rules:billing.price", &context));
+    assert!(matches("!(vps.rules:billing.price)", &context));
+    assert!(!matches(
+        "vps.rules:*",
+        &ExpressionContext::default().with_vps_rules(VpsRuleContext::default())
+    ));
+}
+
+#[test]
+fn vps_rule_exact_comparisons_share_save_time_normalization() {
+    let context = ExpressionContext::default().with_vps_rules(rule_context(&[
+        (
+            "network.port_speed",
+            "1.5 Gbps",
+            serde_json::json!({"bps": 1_500_000_000_i64}),
+        ),
+        (
+            "billing.price",
+            "29.90 CNY/m",
+            serde_json::json!({
+                "disabled": false,
+                "price": "29.90",
+                "currency": "CNY",
+                "period_code": "m"
+            }),
+        ),
+        (
+            "traffic.selectors",
+            "ens3,eth0+tx",
+            serde_json::json!({"selectors": []}),
+        ),
+        (
+            "traffic.quota.total",
+            "4TB",
+            serde_json::json!({"bytes": 4_000_000_000_000_i64}),
+        ),
+    ]));
+    assert!(matches(
+        "vps.rules:network.port_speed = 1.500gbps",
+        &context
+    ));
+    assert!(!matches(
+        "vps.rules:network.port_speed != 1.500gbps",
+        &context
+    ));
+    assert!(matches(
+        "vps.rules:billing.price = \"29.9 cny / M\"",
+        &context
+    ));
+    assert!(matches(
+        "vps.rules:traffic.selectors = \"ens3, eth0+tx\"",
+        &context
+    ));
+    assert!(matches(
+        "vps.rules:traffic.quota.total = \"04.00 tb\"",
+        &context
+    ));
+}
+
+#[test]
+fn vps_rule_globs_and_regexes_match_canonical_raw_text() {
+    let context = ExpressionContext::default().with_vps_rules(rule_context(&[(
+        "network.port_speed",
+        "1.5 Gbps",
+        serde_json::json!({"bps": 1_500_000_000_i64}),
+    )]));
+    assert!(matches("vps.rules:network.port_speed = *Gbps", &context));
+    assert!(matches(
+        "vps.rules:network.port_speed in [/^1\\.5 Gbps$/]",
+        &context
+    ));
+    assert!(!matches(
+        "vps.rules:network.port_speed in [/^1\\.500gbps$/]",
+        &context
+    ));
+}
+
+#[test]
+fn vps_rule_ordering_is_typed_and_excludes_sentinels() {
+    let context = ExpressionContext::default().with_vps_rules(rule_context(&[
+        ("traffic.reset_day", "15", serde_json::json!({"day": 15})),
+        (
+            "traffic.quota.total",
+            "4TB",
+            serde_json::json!({"bytes": 4_000_000_000_000_i64}),
+        ),
+        (
+            "network.port_speed",
+            "1.5 Gbps",
+            serde_json::json!({"bps": 1_500_000_000_i64}),
+        ),
+        (
+            "billing.price",
+            "29.90 CNY/m",
+            serde_json::json!({
+                "disabled": false,
+                "price": "29.90",
+                "currency": "CNY",
+                "period_code": "m"
+            }),
+        ),
+    ]));
+    assert!(matches("vps.rules:traffic.reset_day >= 15", &context));
+    assert!(matches("vps.rules:traffic.quota.total > 3.5TiB", &context));
+    assert!(matches("vps.rules:network.port_speed > 1000Mbps", &context));
+    assert!(matches("vps.rules:billing.price < \"50 CNY/m\"", &context));
+    assert!(!matches("vps.rules:billing.price < \"50 USD/m\"", &context));
+    assert!(!matches("vps.rules:billing.price < \"50 CNY/y\"", &context));
+
+    let sentinels = ExpressionContext::default().with_vps_rules(rule_context(&[
+        ("traffic.reset_day", "-1", serde_json::json!({"day": -1})),
+        (
+            "traffic.quota.total",
+            "-1",
+            serde_json::json!({"bytes": -1, "unlimited": true}),
+        ),
+        ("billing.price", "-1", serde_json::json!({"disabled": true})),
+    ]));
+    assert!(matches("vps.rules:traffic.quota.total = -1", &sentinels));
+    assert!(!matches("vps.rules:traffic.quota.total < 1TB", &sentinels));
+}
+
+#[test]
+fn vps_rule_ordering_reparses_authoritative_raw_values_exactly() {
+    let context = ExpressionContext::default().with_vps_rules(rule_context(&[
+        (
+            "traffic.quota.total",
+            "9007199254740993B",
+            // Deliberately stale legacy JSON: ordered evaluation must use raw.
+            serde_json::json!({"bytes": 9_007_199_254_740_992_i64}),
+        ),
+        (
+            "billing.price",
+            "29.90 CNY/m",
+            // A syntactically valid but inconsistent JSON value must not win.
+            serde_json::json!({
+                "disabled": false,
+                "price": "29.90",
+                "currency": "USD",
+                "period_code": "y"
+            }),
+        ),
+    ]));
+    assert!(matches(
+        "vps.rules:traffic.quota.total >= 9007199254740993B",
+        &context
+    ));
+    assert!(matches(
+        "vps.rules:traffic.quota.total > 9007199254740992B",
+        &context
+    ));
+    assert!(matches("vps.rules:billing.price < \"50 CNY/m\"", &context));
+    assert!(!matches("vps.rules:billing.price < \"50 USD/m\"", &context));
+    assert!(!matches("vps.rules:billing.price < \"50 CNY/y\"", &context));
+}
+
+#[test]
+fn vps_rule_missing_values_keep_direct_inequality_false() {
+    let context = ExpressionContext::default().with_vps_rules(VpsRuleContext::default());
+    assert!(!matches("vps.rules:network.port_speed != 1Gbps", &context));
+    assert!(matches("!(vps.rules:network.port_speed = 1Gbps)", &context));
+}
+
+#[test]
+fn vps_rule_semantic_validation_rejects_ambiguous_or_invalid_operations() {
+    let cases = [
+        (
+            "vps.rules:billing.cycle > 7",
+            "does not support ordered comparisons",
+        ),
+        ("vps.rules:traffic.reset_day > -1", "day from 1 to 31"),
+        (
+            "vps.rules:traffic.quota.total > plenty",
+            "positive byte size",
+        ),
+        ("vps.rules:network.port_speed > 100", "positive speed"),
+        ("vps.rules:billing.price > 50", "currency and period"),
+        (
+            "vps.rules:billing.price > \"1000000000 USD/m\"",
+            "positive amount",
+        ),
+        (
+            "vps.rules:billing.price > \"50 USD/month\"",
+            "currency and period",
+        ),
+        (
+            "vps.rules:traffic.quota.total > 9223372036854775808B",
+            "positive byte size",
+        ),
+        ("vps.rules:unknown.rule = value", "unsupported VPS rule key"),
+        (
+            "vps.rules.billing.price = \"29.90 CNY/m\"",
+            "use vps.rules:<key>",
+        ),
+        ("vps.rules", "use vps.rules:<key>"),
+        ("vps.rules.billing.price", "use vps.rules:<key>"),
+    ];
+    for (expression, expected_error) in cases {
+        let error = parse_expression(expression).unwrap_err();
+        assert!(
+            error.contains(expected_error),
+            "{expression}: expected {expected_error:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn vps_rule_reference_detection_walks_boolean_expressions() {
+    let expression =
+        parse_expression("status:online && (vps.rules:traffic.reset_day >= 15 || tag:edge)")
+            .unwrap()
+            .unwrap();
+    assert!(expression_references_vps_rules(&expression));
+    assert!(!expression_references_vps_rules(
+        &parse_expression("status:online && tag:edge")
+            .unwrap()
+            .unwrap()
+    ));
+}
+
+#[test]
+fn shared_vps_rule_fixture_matches_and_normalizes() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/vps-rule-cases.json")).unwrap();
+    for case in fixture["normalization_cases"].as_array().unwrap() {
+        let parsed = parse_vps_rule_value(
+            case["key"].as_str().unwrap(),
+            case["input"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.raw, case["canonical"].as_str().unwrap());
+        assert_eq!(
+            parse_vps_rule_value(case["key"].as_str().unwrap(), &parsed.raw)
+                .unwrap()
+                .raw,
+            parsed.raw,
+            "fixture normalization must be idempotent for {}",
+            case["name"].as_str().unwrap()
+        );
+    }
+    for case in fixture["invalid_normalization_cases"].as_array().unwrap() {
+        let error = parse_vps_rule_value(
+            case["key"].as_str().unwrap(),
+            case["input"].as_str().unwrap(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains(case["error_contains"].as_str().unwrap()),
+            "invalid normalization fixture {}: {error}",
+            case["name"].as_str().unwrap()
+        );
+    }
+
+    let contexts = fixture["contexts"].as_object().unwrap();
+    for case in fixture["expression_cases"].as_array().unwrap() {
+        let expression = parse_expression(case["expression"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let expected = case["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        let actual = contexts
+            .iter()
+            .filter_map(|(name, context)| {
+                let mut rules = VpsRuleContext::default();
+                for rule in context["rules"].as_array().unwrap() {
+                    rules.insert(
+                        rule["key"].as_str().unwrap(),
+                        rule["raw"].as_str().unwrap(),
+                        rule["json"].clone(),
+                    );
+                }
+                expression_matches(
+                    &ExpressionContext::default().with_vps_rules(rules),
+                    &expression,
+                )
+                .then_some(name.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "fixture case {}", case["name"]);
+    }
+    for case in fixture["invalid_expressions"].as_array().unwrap() {
+        let error = parse_expression(case["expression"].as_str().unwrap()).unwrap_err();
+        assert!(error.contains(case["error_contains"].as_str().unwrap()));
+    }
 }

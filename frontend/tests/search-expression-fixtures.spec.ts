@@ -2,21 +2,34 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildAgentSelectorSuggestionValues } from "../src/components/SearchExpressionInput";
+import {
+  buildAgentSelectorSuggestionValues,
+  buildVpsRuleCompletionSuggestions,
+  genericCallerSuggestions,
+  shouldSuppressVpsRuleCompletionError,
+  vpsRulesCategorySuggestion,
+} from "../src/components/SearchExpressionInput";
 import {
   buildParseableSearchValueSuggestions,
   isParseableSearchSuggestion,
   searchFieldsForSearchValues,
 } from "../src/components/searchSuggestions";
 import {
+  agentsMatchingExpression,
   evaluateSearchExpression,
+  expressionReferencesVpsRules,
   filterBySearchExpression,
   parseSearchExpression,
   termMatchTitle,
   tokenizeSearchExpression,
   type SearchFields,
 } from "../src/searchExpression";
-import type { AgentView } from "../src/types";
+import type { AgentView, VpsRuleValueRecord } from "../src/types";
+import {
+  normalizeVpsRuleValue,
+  tryNormalizeVpsRuleValue,
+  VPS_RULE_KEYS,
+} from "../src/vpsRules";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../src/webhookExpressionSuggestions";
 
 type FixtureCase = {
@@ -49,7 +62,44 @@ const fixturePath = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../crates/common/tests/fixtures/expression-cases.json",
 );
-const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as ExpressionFixture;
+const fixture = JSON.parse(
+  readFileSync(fixturePath, "utf8"),
+) as ExpressionFixture;
+
+type VpsRuleFixture = {
+  contexts: Record<
+    string,
+    {
+      rules: Array<{
+        json: VpsRuleValueRecord["value_json"];
+        key: string;
+        raw: string;
+      }>;
+    }
+  >;
+  expression_cases: FixtureCase[];
+  invalid_expressions: Array<{ error_contains: string; expression: string }>;
+  invalid_normalization_cases: Array<{
+    error_contains: string;
+    input: string;
+    key: string;
+    name: string;
+  }>;
+  normalization_cases: Array<{
+    canonical: string;
+    input: string;
+    key: string;
+    name: string;
+  }>;
+};
+
+const vpsRuleFixturePath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../crates/common/tests/fixtures/vps-rule-cases.json",
+);
+const vpsRuleFixture = JSON.parse(
+  readFileSync(vpsRuleFixturePath, "utf8"),
+) as VpsRuleFixture;
 
 test("shared expression fixture cases match frontend evaluator", () => {
   const contexts = fixture.contexts;
@@ -57,35 +107,231 @@ test("shared expression fixture cases match frontend evaluator", () => {
     const parsed = parseSearchExpression(testCase.expression);
     expect(parsed.error, testCase.name).toBeNull();
     const actual = Object.entries(contexts)
-      .filter(([, context]) => evaluateSearchExpression(parsed.expression, fieldsForContext(context)))
+      .filter(([, context]) =>
+        evaluateSearchExpression(parsed.expression, fieldsForContext(context)),
+      )
       .map(([name]) => name)
       .sort();
     expect(actual, testCase.name).toEqual([...testCase.matches].sort());
   }
 });
 
+test("shared VPS rule normalization fixture matches the frontend editor normalizer", () => {
+  for (const testCase of vpsRuleFixture.normalization_cases) {
+    expect(
+      normalizeVpsRuleValue(testCase.key, testCase.input),
+      testCase.name,
+    ).toBe(testCase.canonical);
+  }
+  for (const testCase of vpsRuleFixture.invalid_normalization_cases) {
+    expect(
+      tryNormalizeVpsRuleValue(testCase.key, testCase.input),
+      testCase.name,
+    ).toBeNull();
+  }
+});
+
+test("shared VPS rule expressions match the frontend evaluator", () => {
+  for (const testCase of vpsRuleFixture.expression_cases) {
+    const parsed = parseSearchExpression(testCase.expression);
+    expect(parsed.error, testCase.name).toBeNull();
+    const actual = Object.entries(vpsRuleFixture.contexts)
+      .filter(([, context]) =>
+        evaluateSearchExpression(parsed.expression, {
+          all: [],
+          vpsRules: context.rules.map(vpsRuleRecord),
+        }),
+      )
+      .map(([name]) => name)
+      .sort();
+    expect(actual, testCase.name).toEqual([...testCase.matches].sort());
+  }
+});
+
+test("shared invalid VPS rule expressions return matching guidance", () => {
+  for (const testCase of vpsRuleFixture.invalid_expressions) {
+    expect(
+      parseSearchExpression(testCase.expression).error,
+      testCase.expression,
+    ).toContain(testCase.error_contains);
+  }
+});
+
+test("missing VPS-rule evidence cannot silently evaluate as all or zero", () => {
+  const agent = agentFromContext({
+    vps: {
+      display_name: "edge-one",
+      id: "edge-one",
+      status: "online",
+      tags: [],
+    },
+  });
+  expect(() => agentsMatchingExpression([agent], "vps.rules:*")).toThrow(
+    "VPS rule data unavailable",
+  );
+});
+
+test("VPS rule autocomplete progressively reveals scoped details only", () => {
+  const category = vpsRulesCategorySuggestion();
+  expect(category).toMatchObject({ label: "VPS rules…", value: "vps.rules:" });
+  expect(
+    buildAgentSelectorSuggestionValues([]).some((value) =>
+      value.startsWith("vps.rules"),
+    ),
+  ).toBe(false);
+  const genericAgentSuggestions = buildAgentSelectorSuggestionValues([
+    agentFromContext({
+      vps: {
+        display_name: "edge-one",
+        id: "edge-one",
+        status: "online",
+        tags: ["role:edge", "vps.rules:traffic.reset_day"],
+      },
+    }),
+  ]);
+  expect(genericAgentSuggestions).toContain("role:edge");
+  expect(
+    genericAgentSuggestions.some((value) =>
+      value.toLocaleLowerCase().includes("vps.rules"),
+    ),
+  ).toBe(false);
+  expect(buildVpsRuleCompletionSuggestions("vps", 3, [])).toEqual([]);
+
+  const scoped = buildVpsRuleCompletionSuggestions("vps.rules:", 10, []);
+  for (const key of VPS_RULE_KEYS) {
+    expect(scoped.map((option) => option.value)).toContain(`vps.rules:${key}`);
+  }
+  expect(scoped.map((option) => option.label)).toContain("Any configured rule");
+  expect(
+    buildVpsRuleCompletionSuggestions(
+      "status:online vps.rules:",
+      "status:online vps.rules:".length,
+      [],
+    ).map((option) => option.value),
+  ).toContain("vps.rules:traffic.reset_day");
+
+  expect(
+    genericCallerSuggestions([
+      "status:online",
+      "vps.rules",
+      "vps.rules:traffic.quota.total >= 1TB",
+      "tag:edge && vps.rules:billing.price = *USD*",
+      "tag:vps.rules:traffic.reset_day",
+      "vps.tag:vps.rules:network.port_speed",
+    ]),
+  ).toEqual(["status:online"]);
+
+  expect(expressionReferencesVpsRules("vps.ruleship:edge")).toBe(false);
+  expect(expressionReferencesVpsRules("tag:vps.ruleship:edge")).toBe(false);
+});
+
+test("an incomplete VPS-rule prefix suppresses errors only during active completion", () => {
+  const value = "vps.rules:";
+  expect(
+    shouldSuppressVpsRuleCompletionError(value, value.length, true, true),
+  ).toBe(true);
+  expect(
+    shouldSuppressVpsRuleCompletionError(value, value.length, true, false),
+  ).toBe(false);
+  expect(
+    shouldSuppressVpsRuleCompletionError(value, value.length, false, false),
+  ).toBe(false);
+});
+
+test("VPS rule autocomplete ranks canonical observed values and withholds them when unavailable", () => {
+  const rows = [
+    vpsRuleRecord({
+      key: "traffic.quota.total",
+      raw: "4TB",
+      json: { bytes: 4_000_000_000_000 },
+    }),
+    vpsRuleRecord(
+      {
+        key: "traffic.quota.total",
+        raw: "4TB",
+        json: { bytes: 4_000_000_000_000 },
+      },
+      "two",
+    ),
+    vpsRuleRecord(
+      {
+        key: "traffic.quota.total",
+        raw: "750GB",
+        json: { bytes: 750_000_000_000 },
+      },
+      "three",
+    ),
+  ];
+  const scoped = buildVpsRuleCompletionSuggestions(
+    "vps.rules:traffic.quota.total",
+    "vps.rules:traffic.quota.total".length,
+    rows,
+  );
+  const equalityValues = scoped.filter((option) =>
+    option.value.includes(" = "),
+  );
+  expect(equalityValues[0]?.value).toBe("vps.rules:traffic.quota.total = 4TB");
+  expect(equalityValues[0]?.detail).toContain("2 VPSs");
+  expect(scoped.map((option) => option.value)).toContain(
+    "vps.rules:traffic.quota.total >= 1TB",
+  );
+
+  const billingCycle = vpsRuleRecord({
+    key: "billing.cycle",
+    raw: "06-15",
+    json: { day: 15, month: 6, display: "06-15" },
+  });
+  expect(
+    buildVpsRuleCompletionSuggestions(
+      "vps.rules:billing.cycle",
+      "vps.rules:billing.cycle".length,
+      [billingCycle],
+    ).map((option) => option.value),
+  ).toContain("vps.rules:billing.cycle = 06-15");
+
+  const unavailable = buildVpsRuleCompletionSuggestions(
+    "vps.rules:",
+    10,
+    rows,
+    false,
+  );
+  expect(unavailable).toEqual([
+    expect.objectContaining({
+      disabled: true,
+      label: "VPS rule data unavailable",
+    }),
+  ]);
+  expect(unavailable[0]?.value).not.toContain("traffic.quota.total");
+});
+
 test("quoted name selector matches display names with spaces", () => {
   const parsed = parseSearchExpression('name:"edge alpha 01"');
   expect(parsed.error).toBeNull();
   expect(
-    evaluateSearchExpression(parsed.expression, fieldsForContext({
-      vps: {
-        display_name: "edge alpha 01",
-        id: "agent-8f3c",
-        status: "online",
-        tags: ["provider:alpha", "country:us"],
-      },
-    })),
+    evaluateSearchExpression(
+      parsed.expression,
+      fieldsForContext({
+        vps: {
+          display_name: "edge alpha 01",
+          id: "agent-8f3c",
+          status: "online",
+          tags: ["provider:alpha", "country:us"],
+        },
+      }),
+    ),
   ).toBe(true);
   expect(
-    evaluateSearchExpression(parsed.expression, fieldsForContext({
-      vps: {
-        display_name: "edge beta 01",
-        id: "agent-7e2a",
-        status: "online",
-        tags: ["provider:beta", "country:us"],
-      },
-    })),
+    evaluateSearchExpression(
+      parsed.expression,
+      fieldsForContext({
+        vps: {
+          display_name: "edge beta 01",
+          id: "agent-7e2a",
+          status: "online",
+          tags: ["provider:beta", "country:us"],
+        },
+      }),
+    ),
   ).toBe(false);
 });
 
@@ -102,7 +348,9 @@ test("agent selector autocomplete values parse and matching values rank before u
     const parsed = parseSearchExpression(suggestion);
     expect(parsed.error, suggestion).toBeNull();
   }
-  expect(suggestions.indexOf("status:online")).toBeLessThan(suggestions.indexOf("status:never"));
+  expect(suggestions.indexOf("status:online")).toBeLessThan(
+    suggestions.indexOf("status:never"),
+  );
 });
 
 test("selector chip help describes that predicate rather than the full expression", () => {
@@ -206,7 +454,11 @@ test("generic table autocomplete values keep parseable unmatched expressions bel
 
 test("generic table autocomplete computes each row's search fields once", () => {
   const rows = Array.from({ length: 20 }, (_, index) => ({
-    values: [`event-${index}`, `target:${index}`, `status:${index % 2 ? "online" : "offline"}`],
+    values: [
+      `event-${index}`,
+      `target:${index}`,
+      `status:${index % 2 ? "online" : "offline"}`,
+    ],
   }));
   let fieldBuilds = 0;
 
@@ -225,19 +477,29 @@ test("generic table autocomplete computes each row's search fields once", () => 
 
 function fieldsForContext(context: FixtureContext): SearchFields {
   const agent = agentFromContext(context);
-  const providerTags = agent.tags.filter((tag) => tag.toLocaleLowerCase().startsWith("provider:"));
-  const countryTags = agent.tags.filter((tag) => tag.toLocaleLowerCase().startsWith("country:"));
-  const providerValues = providerTags.map((tag) => tag.slice("provider:".length));
+  const providerTags = agent.tags.filter((tag) =>
+    tag.toLocaleLowerCase().startsWith("provider:"),
+  );
+  const countryTags = agent.tags.filter((tag) =>
+    tag.toLocaleLowerCase().startsWith("country:"),
+  );
+  const providerValues = providerTags.map((tag) =>
+    tag.slice("provider:".length),
+  );
   const countryValues = countryTags.map((tag) => tag.slice("country:".length));
   return {
     all: [agent.id, agent.display_name],
-    events: (context.event_predicates ?? []).map((event) => event.toLocaleLowerCase()),
+    events: (context.event_predicates ?? []).map((event) =>
+      event.toLocaleLowerCase(),
+    ),
     fields: {
       "alert.category": stringValues(context.alert?.category),
       "alert.severity": stringValues(context.alert?.severity),
       "alert.state": stringValues(context.alert?.state),
       "job.status": stringValues(context.job?.status),
-      "job.target.status": stringValues((context.job?.target as Record<string, unknown> | undefined)?.status),
+      "job.target.status": stringValues(
+        (context.job?.target as Record<string, unknown> | undefined)?.status,
+      ),
       "job.type": stringValues(context.job?.type),
       "vps.country": countryValues,
       "vps.display_name": [agent.display_name],
@@ -287,4 +549,23 @@ function agentFromContext(context: FixtureContext): AgentView {
 
 function stringValues(value: unknown): string[] {
   return typeof value === "string" ? [value] : [];
+}
+
+function vpsRuleRecord(
+  rule: { json: VpsRuleValueRecord["value_json"]; key: string; raw: string },
+  clientId = "one",
+): VpsRuleValueRecord {
+  return {
+    client_id: clientId,
+    key: rule.key,
+    parsed_display: rule.raw,
+    source_id: null,
+    source_kind: "operator",
+    state: "valid",
+    updated_at: "2026-01-01T00:00:00Z",
+    updated_by: null,
+    validation_errors: [],
+    value_json: rule.json,
+    value_raw: rule.raw,
+  };
 }

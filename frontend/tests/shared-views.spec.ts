@@ -169,6 +169,14 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
       .getByLabel("Active shared views data grid")
       .getByText("Regional customer view", { exact: true }),
   ).toBeVisible();
+  const createdRow = page
+    .getByLabel("Active shared views data grid")
+    .locator(".gridBody [role=row], .gridMobileCard")
+    .filter({ hasText: "Regional customer view" })
+    .first();
+  await expect(createdRow).toContainText(
+    "Frozen targets match the latest server check",
+  );
 
   await openConsoleSubpage(page, "Fleet", "Monitor");
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -242,6 +250,77 @@ test("shared views preserve frozen scope, recoverable URL, and bulk lifecycle", 
   await expect(
     revokedGrid.getByText("Regional customer view", { exact: true }),
   ).toBeVisible();
+});
+
+test("shared views expose unavailable target-refresh evidence without making frozen targets actionable", async ({
+  page,
+}) => {
+  const unavailableShareId = "66666666-6666-4666-8666-666666666666";
+  const unavailableShare: MonitoringShareView = {
+    ...shareFixture({
+      createdAt: new Date(Date.now() - 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000).toISOString(),
+      id: unavailableShareId,
+      name: "Rule-scoped customer status",
+      status: "active",
+      targetClientIds: ["agent-sfo-01"],
+      targetUpdateAvailable: false,
+      targetUpdateEvidenceAvailable: false,
+    }),
+    selector_expression: "vps.rules:traffic.quota.total",
+  };
+  await page.route(
+    /\/api\/v1\/monitoring-shares(?:\/[^?]*)?(?:\?.*)?$/,
+    async (route) => {
+      const request = route.request();
+      if (
+        request.method() === "GET" &&
+        new URL(request.url()).pathname === "/api/v1/monitoring-shares"
+      ) {
+        await json(route, [unavailableShare]);
+        return;
+      }
+      await route.fallback();
+    },
+  );
+
+  await page.goto("/");
+  await waitForConsoleShell(page);
+  await openConsoleSubpage(page, "Observability", "Shared views");
+
+  const grid = page.getByLabel("Active shared views data grid");
+  const unavailableRow = grid
+    .locator(".gridBody [role=row], .gridMobileCard")
+    .filter({ hasText: "Rule-scoped customer status" })
+    .first();
+  await expect(unavailableRow).toContainText("Target refresh unavailable");
+  await grid
+    .getByLabel(`Select Active shared views row ${unavailableShareId}`)
+    .check();
+  await grid.getByRole("button", { name: "Actions", exact: true }).click();
+  const updateTargets = page.getByRole("menuitem", {
+    name: "Update targets",
+    exact: true,
+  });
+  await expect(updateTargets).toHaveAttribute("aria-disabled", "true");
+  await expect(updateTargets).toHaveAttribute(
+    "title",
+    /Target refresh evidence is unavailable.*frozen targets remain unchanged/i,
+  );
+  await page.keyboard.press("Escape");
+
+  await unavailableRow.click();
+  await expect(unavailableRow).toHaveAttribute("aria-expanded", "true");
+  const targetRefreshEvidence = grid
+    .locator(".gridExpandedRow .consoleInlineDetailGrid > span")
+    .filter({ hasText: "Target refresh" });
+  await expect(targetRefreshEvidence).toContainText(
+    "Target refresh unavailable",
+  );
+  await expect(targetRefreshEvidence.locator(":scope > span")).toHaveAttribute(
+    "title",
+    /Target refresh evidence is unavailable.*frozen targets remain unchanged.*required access/i,
+  );
 });
 
 test("grid share scope is limited to the shortcut visit", async ({ page }) => {
@@ -1209,7 +1288,7 @@ test("public monitoring presents no-reset accumulation without a synthetic cycle
   await expect(cycle).not.toContainText("Current accounting cycle");
 });
 
-test("public monitoring formats a yearly renewal anchor as month-day", async ({
+test("public monitoring shows a yearly renewal anchor as canonical MM-DD", async ({
   page,
 }) => {
   await installPublicMonitoringApiMock(page, {
@@ -1484,6 +1563,7 @@ async function installSharedViewApiMock(page: Page) {
           id: createdShareId,
           name: body.name,
           status: "active",
+          targetUpdateEvidenceAvailable: false,
         });
         created.selector_expression = body.selector_expression ?? "*";
         created.target_client_ids = body.target_client_ids ?? [];
@@ -1559,6 +1639,7 @@ async function installSharedViewApiMock(page: Page) {
                 target_client_ids: ["agent-sfo-01", "agent-fra-02"],
                 target_count: 2,
                 target_update_available: false,
+                target_update_evidence_available: true,
                 updated_at: new Date().toISOString(),
               }
             : share,
@@ -1859,7 +1940,7 @@ async function installPublicMonitoringApiMock(
   if (annualBilling) {
     share.visibility.billing = true;
     card.billing = {
-      cycle: "15-06",
+      cycle: "06-15",
       disabled: false,
       display: "120.00 USD/y",
       period_code: "y",
@@ -2216,6 +2297,7 @@ function shareFixture({
   status,
   targetClientIds = ["v-1"],
   targetUpdateAvailable = false,
+  targetUpdateEvidenceAvailable = true,
   visitorCount = 0,
 }: {
   createdAt: string;
@@ -2226,6 +2308,7 @@ function shareFixture({
   status: MonitoringShareView["status"];
   targetClientIds?: string[];
   targetUpdateAvailable?: boolean;
+  targetUpdateEvidenceAvailable?: boolean;
   visitorCount?: number;
 }): MonitoringShareView {
   return {
@@ -2242,6 +2325,7 @@ function shareFixture({
     target_client_ids: targetClientIds,
     target_count: targetClientIds.length,
     target_update_available: targetUpdateAvailable,
+    target_update_evidence_available: targetUpdateEvidenceAvailable,
     updated_at: createdAt,
     visibility: {
       billing: false,

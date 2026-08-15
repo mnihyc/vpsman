@@ -345,7 +345,7 @@ verify_stack() {
       .display_name == "Traffic quota exceeded"
       and .traffic.cycle_percent == 120
       and .traffic.total_bytes == 12000000000)
-    and any(.cards[]; .billing.period_code? == "y" and .billing.cycle? == "15-06")
+    and any(.cards[]; .billing.period_code? == "y" and .billing.cycle? == "06-15")
     and any(.cards[]; .traffic.reset_day? == -1)
     and any(.cards[]; .traffic.configured == false)
     and any(.cards[]; .network.rate_expected == false)

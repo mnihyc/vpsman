@@ -38,7 +38,10 @@ import { usePanelDisplaySettings } from "../../panelDisplay";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../../searchExpression";
+import { useVpsRuleSearchContext } from "../../vpsRuleSearchContext";
 import type {
   AgentView,
   BulkPingTargetLifecycleRequest,
@@ -78,6 +81,7 @@ type SaveReview = {
   kind: "create" | "update";
   probeChanged: boolean;
   request: PingTargetMutationRequest;
+  selectorChanged: boolean;
   targetId: string | null;
   targetName: string;
 };
@@ -115,6 +119,7 @@ export function PingTargetsPanel({
   ) => Promise<BulkResolveResponse>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [targets, setTargets] = useState<PingTargetView[]>([]);
   const [details, setDetails] = useState<Record<string, PingTargetDetailView>>(
     {},
@@ -218,20 +223,33 @@ export function PingTargetsPanel({
   const selectorChanged =
     editor?.mode === "edit" &&
     selectorExpression.trim() !== editor.original.selector_expression.trim();
+  const selectorNeedsResolution =
+    editor?.mode === "create" || (editor?.mode === "edit" && selectorChanged);
+  const selectorEvidenceUnavailable = Boolean(
+    selectorNeedsResolution &&
+    vpsRuleSearchUnavailable(selectorExpression, vpsRuleSearch),
+  );
   const localTargets = useMemo(() => {
-    if (!editor || parsedSelector.error || !selectorExpression.trim()) {
+    if (
+      !editor ||
+      parsedSelector.error ||
+      !selectorExpression.trim() ||
+      selectorEvidenceUnavailable
+    ) {
       return [];
     }
     if (editor.mode === "edit" && !selectorChanged) {
       return editor.assignments.map((assignment) => assignment.client);
     }
-    return agentsMatchingExpression(agents, selectorExpression);
+    return agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch);
   }, [
     agents,
     editor,
     parsedSelector.error,
     selectorChanged,
+    selectorEvidenceUnavailable,
     selectorExpression,
+    vpsRuleSearch,
   ]);
   const editorReady = Boolean(
     editor &&
@@ -239,6 +257,7 @@ export function PingTargetsPanel({
     host.trim() &&
     selectorExpression.trim() &&
     !parsedSelector.error &&
+    !selectorEvidenceUnavailable &&
     (probeKind === "icmp" || validPort(port)),
   );
 
@@ -386,6 +405,7 @@ export function PingTargetsPanel({
             original.enabled !== request.enabled),
         ),
         request,
+        selectorChanged: frozenSelectorChanged,
         targetId: original?.id ?? null,
         targetName: request.name,
       });
@@ -414,9 +434,29 @@ export function PingTargetsPanel({
             apiToken,
             saveReview.request,
           );
-      const saved = response.target.target;
+      const returnedTarget = response.target.target;
+      const priorTarget =
+        saveReview.kind === "update" && editor?.mode === "edit"
+          ? editor.original
+          : null;
+      const saved =
+        saveReview.kind === "create" || saveReview.selectorChanged
+          ? {
+              ...returnedTarget,
+              target_update_available: false,
+              target_update_evidence_available: true,
+            }
+          : priorTarget
+            ? {
+                ...returnedTarget,
+                target_update_available: priorTarget.target_update_available,
+                target_update_evidence_available:
+                  priorTarget.target_update_evidence_available,
+              }
+            : returnedTarget;
+      const savedDetail = { ...response.target, target: saved };
       setTargets((current) => replaceTarget(current, saved));
-      setDetails((current) => ({ ...current, [saved.id]: response.target }));
+      setDetails((current) => ({ ...current, [saved.id]: savedDetail }));
       setRuntimeEvidence((current) => ({
         ...current,
         [saved.id]: runtimeEvidenceFor(response.runtime_sync),
@@ -436,6 +476,14 @@ export function PingTargetsPanel({
 
   async function reviewTargetUpdates(rows: PingTargetView[]) {
     if (rows.length === 0) return;
+    if (rows.some((row) => !row.target_update_evidence_available)) {
+      setFeedback({
+        message:
+          "Target refresh evidence is unavailable. Frozen assignments remain unchanged; repair or retry, then use Update targets with the required access.",
+        tone: "warning",
+      });
+      return;
+    }
     enterReviewWorkflow("targets");
     await runPanelAction(setPending, setError, async () => {
       const targetIds = uniqueSorted(rows.map((row) => row.id));
@@ -550,8 +598,16 @@ export function PingTargetsPanel({
         apiToken,
         request,
       );
-      setTargets((current) => replaceTarget(current, response.target.target));
-      setDetails({ [target.id]: response.target });
+      const preservedTarget = {
+        ...response.target.target,
+        target_update_available: target.target_update_available,
+        target_update_evidence_available:
+          target.target_update_evidence_available,
+      };
+      setTargets((current) => replaceTarget(current, preservedTarget));
+      setDetails({
+        [target.id]: { ...response.target, target: preservedTarget },
+      });
       let refreshFailure: string | null = null;
       try {
         const records = await apiGet<PingTargetView[]>(
@@ -613,8 +669,16 @@ export function PingTargetsPanel({
       {
         id: "selector",
         header: "Saved selector",
-        cell: (target) => <code>{target.selector_expression}</code>,
-        searchValue: (target) => target.selector_expression,
+        cell: (target) => (
+          <span className="historyPrimary">
+            <code>{target.selector_expression}</code>
+            <small title={pingTargetRefreshTitle(target)}>
+              {pingTargetRefreshLabel(target)}
+            </small>
+          </span>
+        ),
+        searchValue: (target) =>
+          `${target.selector_expression} ${pingTargetRefreshLabel(target)}`,
         sortValue: (target) => target.selector_expression,
         minSize: 180,
         size: 240,
@@ -722,12 +786,17 @@ export function PingTargetsPanel({
     },
     {
       description: (rows) =>
-        rows.length
-          ? `Re-resolve the saved selector for ${rows.length} Ping target${rows.length === 1 ? "" : "s"}, then preview exact additions and removals before one transactional apply.`
-          : "Select one or more Ping targets to check their frozen assignments.",
+        rows.length === 0
+          ? "Select one or more Ping targets to check their frozen assignments."
+          : rows.some((row) => !row.target_update_evidence_available)
+            ? "Target refresh evidence is unavailable. Frozen assignments remain unchanged; repair or retry, then use Update targets with the required access."
+            : rows.some((row) => row.target_update_available)
+              ? `Re-resolve the saved selector for ${rows.length} Ping target${rows.length === 1 ? "" : "s"}, then preview exact additions and removals before one transactional apply.`
+              : "The selected frozen assignments match the latest server check.",
       disabled: (rows) =>
         pending ||
         rows.length === 0 ||
+        rows.some((row) => !row.target_update_evidence_available) ||
         rows.every((row) => !row.target_update_available),
       icon: <Target size={14} />,
       label: "Update targets",
@@ -997,7 +1066,9 @@ export function PingTargetsPanel({
               <span>
                 {editor?.mode === "edit" && !selectorChanged
                   ? `${localTargets.length} frozen assignment${localTargets.length === 1 ? "" : "s"}; editing other fields does not re-resolve it`
-                  : `${localTargets.length} local match${localTargets.length === 1 ? "" : "es"}; server resolution is reviewed before save`}
+                  : selectorEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : `${localTargets.length} local match${localTargets.length === 1 ? "" : "es"}; server resolution is reviewed before save`}
               </span>
             </div>
             <SearchExpressionInput
@@ -1012,7 +1083,7 @@ export function PingTargetsPanel({
               showMatchCount
               value={selectorExpression}
               verification={
-                parsedSelector.error
+                parsedSelector.error || selectorEvidenceUnavailable
                   ? "invalid"
                   : selectorExpression.trim()
                     ? "valid"
@@ -1020,25 +1091,31 @@ export function PingTargetsPanel({
               }
               verificationMessage={
                 parsedSelector.error ??
-                (editor?.mode === "edit" && !selectorChanged
-                  ? `${localTargets.length} frozen`
-                  : `${localTargets.length}/${agents.length} local`)
+                (selectorEvidenceUnavailable
+                  ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                  : editor?.mode === "edit" && !selectorChanged
+                    ? `${localTargets.length} frozen`
+                    : `${localTargets.length}/${agents.length} local`)
               }
             />
-            <LocalTargetPreview
-              agents={localTargets}
-              ariaLabel={
-                editor?.mode === "edit" && !selectorChanged
-                  ? "Frozen Ping target VPS assignments"
-                  : "Ping target local VPS preview"
-              }
-            />
-            {localTargets.length === 0 && !parsedSelector.error && (
-              <span className="formHint">
-                This selector currently resolves no VPSs. The target can still
-                be saved and assigned later with Update targets.
-              </span>
+            {!selectorEvidenceUnavailable && (
+              <LocalTargetPreview
+                agents={localTargets}
+                ariaLabel={
+                  editor?.mode === "edit" && !selectorChanged
+                    ? "Frozen Ping target VPS assignments"
+                    : "Ping target local VPS preview"
+                }
+              />
             )}
+            {localTargets.length === 0 &&
+              !parsedSelector.error &&
+              !selectorEvidenceUnavailable && (
+                <span className="formHint">
+                  This selector currently resolves no VPSs. The target can still
+                  be saved and assigned later with Update targets.
+                </span>
+              )}
           </div>
           <button
             className="primaryAction"
@@ -1060,11 +1137,13 @@ export function PingTargetsPanel({
                           ? "Enter a valid TCP port from 1 to 65535"
                           : parsedSelector.error
                             ? `Fix the VPS selector: ${parsedSelector.error}`
-                            : !selectorExpression.trim()
-                              ? "Enter a VPS selector expression"
-                              : editor?.mode === "edit"
-                                ? "Resolve the selector if changed and review the Ping target update"
-                                : "Resolve the selector and review the new Ping target"
+                            : selectorEvidenceUnavailable
+                              ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                              : !selectorExpression.trim()
+                                ? "Enter a VPS selector expression"
+                                : editor?.mode === "edit"
+                                  ? "Resolve the selector if changed and review the Ping target update"
+                                  : "Resolve the selector and review the new Ping target"
             }
             type="submit"
           >
@@ -1269,7 +1348,10 @@ function renderTargetAssignments({
           title={`${detail.assignments.length} assigned · ${detail.target.primary_count} primary · selector ${detail.target.selector_expression}`}
         >
           {detail.assignments.length} assigned · {detail.target.primary_count}{" "}
-          primary · selector <code>{detail.target.selector_expression}</code>
+          primary · selector <code>{detail.target.selector_expression}</code> ·{" "}
+          <span title={pingTargetRefreshTitle(detail.target)}>
+            {pingTargetRefreshLabel(detail.target)}
+          </span>
         </span>
       </div>
       <ConsoleDataGrid
@@ -1531,6 +1613,24 @@ function runtimeEvidenceForTarget(target: PingTargetView): RuntimeEvidence {
           ? "warning"
           : "neutral",
   };
+}
+
+function pingTargetRefreshLabel(target: PingTargetView): string {
+  if (!target.target_update_evidence_available) {
+    return "Target refresh unavailable";
+  }
+  return target.target_update_available
+    ? "Target update available"
+    : "Frozen targets current";
+}
+
+function pingTargetRefreshTitle(target: PingTargetView): string {
+  if (!target.target_update_evidence_available) {
+    return "Target refresh evidence is unavailable. Frozen assignments remain unchanged; repair or retry, then use Update targets with the required access.";
+  }
+  return target.target_update_available
+    ? "The saved selector now resolves to a different VPS list."
+    : "Frozen assignments match the latest server check.";
 }
 
 function humanizeRuntimeState(value: string): string {

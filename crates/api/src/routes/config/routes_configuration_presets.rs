@@ -29,7 +29,7 @@ use crate::{
         clear_runtime_tunnel_credentials, compose_runtime_config_for_agent_with_read_model,
         dispatch_runtime_config_for_clients,
     },
-    security::{SCOPE_CONFIG_READ, SCOPE_NETWORK_READ},
+    security::{require_vps_rule_selector_scope, SCOPE_CONFIG_READ, SCOPE_NETWORK_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
     ApiError,
@@ -263,6 +263,11 @@ pub(crate) async fn apply_configuration_source_override(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
+    if let Some(expression) = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+    {
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+    }
     let resolved_targets = resolve_override_targets(
         &state,
         &request.target_client_ids,

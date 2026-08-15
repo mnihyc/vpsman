@@ -6,6 +6,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{postgres::PgRow, types::Json as SqlJson, Row};
 use uuid::Uuid;
+use vpsman_common::{
+    expression_references_vps_rules,
+    parse_persisted_vps_rule_value as parse_common_persisted_vps_rule_value,
+    parse_vps_rule_value as parse_common_vps_rule_value, ParsedVpsRuleValue, VpsRuleContext,
+};
 
 use crate::{
     model::{
@@ -20,10 +25,10 @@ use crate::{
         TrafficCounterRollupRecord, TrafficCounterSampleRecord, VpsRuleChangePreview, VpsRuleQuery,
         VpsRuleValueRecord, VpsRulesBulkUnsetRequest, VpsRulesBulkUpsertRequest,
         VpsRulesDryRunRequest, VpsRulesDryRunResponse, VPS_RULE_KEY_BILLING_CYCLE,
-        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
-        VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
-        VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_RX, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TX, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_TRAFFIC_SELECTORS,
     },
     model_monitoring::TrafficHistoryPointView,
     model_webhook_rules::WebhookEventCandidate,
@@ -36,7 +41,10 @@ use crate::{
         is_intentional_vnstat_import_boundary, is_vnstat_import_source,
     },
     repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
-    selector_expression::{agent_matches_selector_expression, parse_selector_expression},
+    selector_expression::{
+        agent_matches_selector_expression_with_rules, parse_selector_expression,
+        vps_rule_contexts_by_client,
+    },
     unix_now,
     util::{compare_timestamps_desc, parse_timestamp_unix, timestamp_in_optional_bounds},
 };
@@ -46,11 +54,6 @@ const MAX_POLICY_NOTES_BYTES: usize = 1024;
 const MAX_RULE_NAME_BYTES: usize = 128;
 const MAX_SELECTOR_EXPRESSION_BYTES: usize = 4096;
 const MAX_CONDITION_EXPRESSION_BYTES: usize = 4096;
-const MAX_VPS_RULE_VALUE_BYTES: usize = 4096;
-const MAX_TRAFFIC_SELECTOR_ITEMS: usize = 16;
-const MAX_TRAFFIC_INTERFACE_BYTES: usize = 128;
-const MAX_BILLING_PRICE_WHOLE_DIGITS: usize = 9;
-const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX: &str = "[traffic.selectors]";
 const TRAFFIC_SAMPLE_STALE_SECS: i64 = 900;
 const POLICY_WEBHOOK_REPAIR_WINDOW_SECS: i64 = 3600;
 static POLICY_EVALUATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -304,12 +307,7 @@ fn traffic_counter_stream_usage_from_row(row: PgRow) -> Result<TrafficCounterStr
     })
 }
 
-#[derive(Clone, Debug)]
-struct ParsedRuleValue {
-    raw: String,
-    json: Value,
-    display: String,
-}
+type ParsedRuleValue = ParsedVpsRuleValue;
 
 #[derive(Clone, Debug)]
 struct PolicyEvaluation {
@@ -332,6 +330,23 @@ impl Repository {
             .await
     }
 
+    /// Returns the complete directly configured rule set for visible clients.
+    /// Used by the fleet snapshot so local selector evaluation never interprets
+    /// a truncated rule set as an absent rule.
+    pub(crate) async fn list_all_vps_rules(&self) -> Result<Vec<VpsRuleValueRecord>> {
+        self.list_vps_rules_matching(
+            &VpsRuleQuery {
+                limit: None,
+                client_id: None,
+                selector_expression: None,
+                key: None,
+                state: None,
+            },
+            None,
+        )
+        .await
+    }
+
     async fn list_vps_rules_matching(
         &self,
         query: &VpsRuleQuery,
@@ -339,7 +354,8 @@ impl Repository {
     ) -> Result<Vec<VpsRuleValueRecord>> {
         let agents = self.list_agents().await?;
         let allowed_clients = if let Some(selector) = query.selector_expression.as_deref() {
-            resolve_agents(&agents, selector)?
+            self.resolve_agents_for_selector(&agents, selector)
+                .await?
                 .into_iter()
                 .map(|agent| agent.id)
                 .collect::<HashSet<_>>()
@@ -360,7 +376,22 @@ impl Repository {
             .flatten()
             .map(|limit| limit as i64);
         let mut rows = match self {
-            Self::Memory(memory) => memory.vps_rule_values.read().await.clone(),
+            Self::Memory(memory) => memory
+                .vps_rule_values
+                .read()
+                .await
+                .iter()
+                .filter(|row| {
+                    allowed_clients.contains(&row.client_id)
+                        && query
+                            .client_id
+                            .as_deref()
+                            .is_none_or(|client_id| row.client_id == client_id)
+                        && query.key.as_deref().is_none_or(|key| row.key == key)
+                })
+                .cloned()
+                .map(canonicalize_vps_rule_record)
+                .collect::<Result<Vec<_>>>()?,
             Self::Postgres(pool) => sqlx::query(
                 r#"
                 SELECT
@@ -464,7 +495,8 @@ impl Repository {
                         allowed.contains(row.client_id.as_str()) && keys.contains(&row.key)
                     })
                     .cloned()
-                    .collect::<Vec<_>>();
+                    .map(canonicalize_vps_rule_record)
+                    .collect::<Result<Vec<_>>>()?;
                 rows.sort_by(|left, right| left.client_id.cmp(&right.client_id));
                 Ok(rows)
             }
@@ -487,6 +519,65 @@ impl Repository {
                 )
                 .bind(client_ids)
                 .bind(&keys)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter().map(vps_rule_from_row).collect()
+            }
+        }
+    }
+
+    /// Loads every directly configured VPS rule for the supplied clients.
+    ///
+    /// Selector evaluation deliberately uses this unbounded-by-row-count path:
+    /// the schema permits at most one row for each of the nine supported keys,
+    /// so the caller-controlled client set is the natural and complete bound.
+    pub(crate) async fn list_all_vps_rules_for_clients(
+        &self,
+        client_ids: &[String],
+    ) -> Result<Vec<VpsRuleValueRecord>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let allowed = client_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let mut rows = memory
+                    .vps_rule_values
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|row| allowed.contains(row.client_id.as_str()))
+                    .cloned()
+                    .map(canonicalize_vps_rule_record)
+                    .collect::<Result<Vec<_>>>()?;
+                rows.sort_by(|left, right| {
+                    left.client_id
+                        .cmp(&right.client_id)
+                        .then_with(|| left.key.cmp(&right.key))
+                });
+                Ok(rows)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        client_id,
+                        key,
+                        value_raw,
+                        value_json,
+                        source_kind,
+                        source_id,
+                        updated_by,
+                        updated_at::text AS updated_at
+                    FROM vps_rule_values
+                    WHERE client_id = ANY($1::TEXT[])
+                    ORDER BY client_id ASC, key ASC
+                    "#,
+                )
+                .bind(client_ids)
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter().map(vps_rule_from_row).collect()
@@ -519,18 +610,13 @@ impl Repository {
             operation == "upsert" || operation == "unset",
             "vps_rules_operation_invalid"
         );
-        if operation == "upsert" {
-            anyhow::ensure!(!request.values.is_empty(), "vps_rules_values_required");
+        let (values, keys) = if operation == "upsert" {
+            (normalize_vps_rule_values(&request.values)?, Vec::new())
         } else {
-            validate_vps_rule_keys(&request.keys)?;
-        }
-        self.vps_rule_preview(
-            &operation,
-            &request.selector_expression,
-            &request.values,
-            &request.keys,
-        )
-        .await
+            (BTreeMap::new(), normalize_vps_rule_keys(&request.keys)?)
+        };
+        self.vps_rule_preview(&operation, &request.selector_expression, &values, &keys)
+            .await
     }
 
     pub(crate) async fn bulk_upsert_vps_rules(
@@ -539,17 +625,22 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<VpsRulesDryRunResponse> {
         anyhow::ensure!(request.confirmed, "vps_rules_confirmation_required");
-        validate_vps_rule_values(&request.values)?;
+        let values = normalize_vps_rule_values(&request.values)?;
+        validate_vps_rule_values(&values)?;
         let preview = self
-            .vps_rule_preview("upsert", &request.selector_expression, &request.values, &[])
+            .commit_confirmed_vps_rule_changes(
+                "upsert",
+                &request.selector_expression,
+                &values,
+                &[],
+                &request.preview_hash,
+                operator,
+            )
             .await?;
-        anyhow::ensure!(
-            preview.preview_hash == request.preview_hash,
-            "vps_rules_preview_hash_mismatch"
-        );
-        self.apply_vps_rule_changes(&preview, operator).await?;
-        if let Err(error) = self.evaluate_policy_rules().await {
-            tracing::warn!(%error, "deferred policy evaluation after VPS rule update");
+        if preview.changed_row_count > 0 {
+            if let Err(error) = self.evaluate_policy_rules().await {
+                tracing::warn!(%error, "deferred policy evaluation after VPS rule update");
+            }
         }
         Ok(preview)
     }
@@ -560,24 +651,73 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<VpsRulesDryRunResponse> {
         anyhow::ensure!(request.confirmed, "vps_rules_confirmation_required");
-        validate_vps_rule_keys(&request.keys)?;
+        let keys = normalize_vps_rule_keys(&request.keys)?;
         let preview = self
-            .vps_rule_preview(
+            .commit_confirmed_vps_rule_changes(
                 "unset",
                 &request.selector_expression,
                 &BTreeMap::new(),
-                &request.keys,
+                &keys,
+                &request.preview_hash,
+                operator,
             )
             .await?;
-        anyhow::ensure!(
-            preview.preview_hash == request.preview_hash,
-            "vps_rules_preview_hash_mismatch"
-        );
-        self.apply_vps_rule_changes(&preview, operator).await?;
-        if let Err(error) = self.evaluate_policy_rules().await {
-            tracing::warn!(%error, "deferred policy evaluation after VPS rule removal");
+        if preview.changed_row_count > 0 {
+            if let Err(error) = self.evaluate_policy_rules().await {
+                tracing::warn!(%error, "deferred policy evaluation after VPS rule removal");
+            }
         }
         Ok(preview)
+    }
+
+    async fn commit_confirmed_vps_rule_changes(
+        &self,
+        operation: &str,
+        selector_expression: &str,
+        values: &BTreeMap<String, String>,
+        keys: &[String],
+        expected_preview_hash: &str,
+        operator: &AuthContext,
+    ) -> Result<VpsRulesDryRunResponse> {
+        match self {
+            Self::Memory(memory) => {
+                // Keep rule mutations before the shared agent lifecycle lock. Agent/tag
+                // writers only take the latter, so there is no reverse lock order.
+                let _rule_mutation_guard = memory.vps_rule_mutation.lock().await;
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let preview = self
+                    .vps_rule_preview(operation, selector_expression, values, keys)
+                    .await?;
+                validate_confirmed_vps_rule_preview(&preview, expected_preview_hash)?;
+                if preview.changed_row_count > 0 {
+                    apply_vps_rule_changes_memory(memory, &preview, operator).await?;
+                }
+                Ok(preview)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                lock_postgres_vps_rule_mutations(&mut tx).await?;
+                // Lock target visibility/tags in the same order used by Memory. Keeping
+                // both locks in this transaction makes max_connections=1 safe and lets
+                // cancellation release them automatically by rolling the transaction back.
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                let (agents, stored) = postgres_vps_rule_snapshot_in_tx(&mut tx).await?;
+                let preview = build_vps_rule_preview(
+                    operation,
+                    selector_expression,
+                    values,
+                    keys,
+                    &agents,
+                    &stored,
+                )?;
+                validate_confirmed_vps_rule_preview(&preview, expected_preview_hash)?;
+                if preview.changed_row_count > 0 {
+                    apply_vps_rule_changes_postgres_in_tx(&mut tx, &preview, operator).await?;
+                }
+                tx.commit().await?;
+                Ok(preview)
+            }
+        }
     }
 
     pub(crate) async fn list_traffic_accounting(
@@ -593,8 +733,17 @@ impl Repository {
         now: DateTime<Utc>,
     ) -> Result<Vec<TrafficAccountingRecord>> {
         let agents = self.list_agents().await?;
+        let rules = self
+            .list_all_vps_rules_for_clients(
+                &agents
+                    .iter()
+                    .map(|agent| agent.id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+        let rule_contexts = vps_rule_contexts_by_client(&rules);
         let mut selected_agents = if let Some(selector) = query.selector_expression.as_deref() {
-            resolve_agents(&agents, selector)?
+            resolve_agents_with_rule_contexts(&agents, selector, &rule_contexts)?
         } else {
             agents
         };
@@ -602,7 +751,7 @@ impl Repository {
             selected_agents.retain(|agent| agent.id == client_id);
         }
         let mut records = self
-            .traffic_accounting_for_selected_agents(&selected_agents, now)
+            .traffic_accounting_for_selected_agents_with_rules(&selected_agents, &rules, now)
             .await?;
         records.retain(|record| {
             query
@@ -644,12 +793,22 @@ impl Repository {
                 None,
             )
             .await?;
+        self.traffic_accounting_for_selected_agents_with_rules(selected_agents, &rules, now)
+            .await
+    }
+
+    async fn traffic_accounting_for_selected_agents_with_rules(
+        &self,
+        selected_agents: &[AgentView],
+        rules: &[VpsRuleValueRecord],
+        now: DateTime<Utc>,
+    ) -> Result<Vec<TrafficAccountingRecord>> {
         let cycle_starts = traffic_cycle_starts_for_clients(
             selected_agents.iter().map(|agent| agent.id.as_str()),
-            &rules,
+            rules,
             now,
         );
-        let stream_requests = traffic_stream_requests_from_rules(&cycle_starts, &rules)
+        let stream_requests = traffic_stream_requests_from_rules(&cycle_starts, rules)
             .into_iter()
             .collect::<Vec<_>>();
         let traffic_usage = self
@@ -657,7 +816,7 @@ impl Repository {
             .await?;
         Ok(traffic_accounting_for_agents(
             selected_agents,
-            &rules,
+            rules,
             &traffic_usage,
             now,
         ))
@@ -1377,7 +1536,7 @@ impl Repository {
         let Some(rule) = rules.into_iter().next() else {
             return Ok(Vec::new());
         };
-        let Ok(selectors) = parse_persisted_traffic_selector_list(&rule.value_raw) else {
+        let Ok(selectors) = traffic_selectors_from_rule(&rule) else {
             return Ok(Vec::new());
         };
         let mut streams = BTreeSet::<(String, String)>::new();
@@ -1415,7 +1574,6 @@ impl Repository {
             false,
         )?;
         let agents = self.list_agents().await?;
-        let matched = resolve_agents(&agents, &request.selector_expression)?;
         let now = Utc::now();
         let mut validation_errors = Vec::new();
         let rules = self
@@ -1430,6 +1588,12 @@ impl Repository {
                 None,
             )
             .await?;
+        let rule_contexts = vps_rule_contexts_by_client(&rules);
+        let matched = resolve_agents_with_rule_contexts(
+            &agents,
+            &request.selector_expression,
+            &rule_contexts,
+        )?;
         let cycle_starts = traffic_cycle_starts_for_clients(
             matched.iter().map(|agent| agent.id.as_str()),
             &rules,
@@ -1530,6 +1694,7 @@ impl Repository {
         enabled: Option<bool>,
         selector_expression: Option<&str>,
         client_id: Option<&str>,
+        allow_vps_rule_selectors: bool,
     ) -> Result<Vec<PolicyGroupRecord>> {
         let definition_limit = if selector_expression.is_none() && client_id.is_none() {
             Some(limit.clamp(1, 1000) as usize)
@@ -1542,31 +1707,80 @@ impl Repository {
         if let Some(enabled) = enabled {
             groups.retain(|group| group.enabled == enabled);
         }
-        if let Some(selector) = selector_expression {
+        let query_expression = selector_expression
+            .map(|selector| {
+                parse_selector_expression(selector)
+                    .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
+                    .context("selector expression is empty")
+            })
+            .transpose()?;
+        let group_expressions = groups
+            .iter()
+            .map(|group| {
+                parse_selector_expression(&group.selector_expression)
+                    .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
+                    .context("selector expression is empty")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            allow_vps_rule_selectors
+                || !query_expression
+                    .iter()
+                    .chain(group_expressions.iter())
+                    .any(expression_references_vps_rules),
+            "vps_rule_selector_scope_required"
+        );
+        let mut enrichment_context = None;
+        if selector_expression.is_some() || client_id.is_some() {
             let agents = self.list_agents().await?;
-            let selected = resolve_agents(&agents, selector)?
+            let rule_contexts = if query_expression
+                .iter()
+                .chain(group_expressions.iter())
+                .any(expression_references_vps_rules)
+            {
+                self.vps_rule_contexts_for_agents(&agents).await?
+            } else {
+                HashMap::new()
+            };
+            let selected = query_expression.as_ref().map(|expression| {
+                Repository::resolve_agents_for_expression_with_rule_contexts(
+                    &agents,
+                    expression,
+                    &rule_contexts,
+                )
                 .into_iter()
                 .map(|agent| agent.id)
-                .collect::<HashSet<_>>();
-            groups.retain(|group| {
-                resolve_agents(&agents, &group.selector_expression)
-                    .map(|matched| {
-                        matched
-                            .into_iter()
-                            .any(|agent| selected.contains(&agent.id))
-                    })
-                    .unwrap_or(false)
+                .collect::<HashSet<_>>()
             });
+            let mut retained = Vec::with_capacity(groups.len());
+            for (group, expression) in groups.into_iter().zip(group_expressions) {
+                let matched = Repository::resolve_agents_for_expression_with_rule_contexts(
+                    &agents,
+                    &expression,
+                    &rule_contexts,
+                );
+                let intersects_selected = selected.as_ref().is_none_or(|selected| {
+                    matched.iter().any(|agent| selected.contains(&agent.id))
+                });
+                let contains_client = client_id
+                    .is_none_or(|client_id| matched.iter().any(|agent| agent.id == client_id));
+                if intersects_selected && contains_client {
+                    retained.push(group);
+                }
+            }
+            groups = retained;
+            enrichment_context = Some((agents, rule_contexts));
         }
-        if let Some(client_id) = client_id {
-            let agents = self.list_agents().await?;
-            groups.retain(|group| {
-                resolve_agents(&agents, &group.selector_expression)
-                    .map(|matched| matched.into_iter().any(|agent| agent.id == client_id))
-                    .unwrap_or(false)
-            });
+        if let Some((agents, rule_contexts)) = enrichment_context {
+            self.enrich_policy_group_summaries_with_rule_contexts(
+                &mut groups,
+                &agents,
+                &rule_contexts,
+            )
+            .await?;
+        } else {
+            self.enrich_policy_group_summaries(&mut groups).await?;
         }
-        self.enrich_policy_group_summaries(&mut groups).await?;
         groups.sort_by(|left, right| {
             right
                 .enabled
@@ -1729,8 +1943,20 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn get_fleet_alert_policy(&self, id: Uuid) -> Result<PolicyGroupRecord> {
-        let mut groups = vec![self.get_fleet_alert_policy_definition(id).await?];
+    pub(crate) async fn get_fleet_alert_policy(
+        &self,
+        id: Uuid,
+        allow_vps_rule_selectors: bool,
+    ) -> Result<PolicyGroupRecord> {
+        let group = self.get_fleet_alert_policy_definition(id).await?;
+        let expression = parse_selector_expression(&group.selector_expression)
+            .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
+            .context("selector expression is empty")?;
+        anyhow::ensure!(
+            allow_vps_rule_selectors || !expression_references_vps_rules(&expression),
+            "vps_rule_selector_scope_required"
+        );
+        let mut groups = vec![group];
         self.enrich_policy_group_summaries(&mut groups).await?;
         groups.pop().context("fleet_alert_policy_not_found")
     }
@@ -1932,7 +2158,7 @@ impl Repository {
         if let Err(error) = self.evaluate_policy_rules().await {
             tracing::warn!(%error, "deferred policy evaluation after policy update");
         }
-        self.get_fleet_alert_policy(group.id).await
+        self.get_fleet_alert_policy(group.id, true).await
     }
 
     pub(crate) async fn delete_fleet_alert_policy(
@@ -2262,10 +2488,15 @@ impl Repository {
             &rules,
             now,
         );
+        let rule_contexts = vps_rule_contexts_by_client(&rules);
         let mut matched_groups = Vec::with_capacity(groups.len());
         let mut selector_failures = Vec::new();
         for group in groups {
-            match resolve_agents(&agents, &group.selector_expression) {
+            match resolve_agents_with_rule_contexts(
+                &agents,
+                &group.selector_expression,
+                &rule_contexts,
+            ) {
                 Ok(matched) => matched_groups.push((group, matched)),
                 Err(error) => selector_failures.push((group.id, group.name, error.to_string())),
             }
@@ -2348,7 +2579,6 @@ impl Repository {
         keys: &[String],
     ) -> Result<VpsRulesDryRunResponse> {
         let agents = self.list_agents().await?;
-        let matched = resolve_agents(&agents, selector_expression)?;
         let stored = self
             .list_vps_rules_matching(
                 &VpsRuleQuery {
@@ -2361,269 +2591,14 @@ impl Repository {
                 None,
             )
             .await?;
-        let stored_map = stored
-            .iter()
-            .map(|row| {
-                (
-                    (row.client_id.clone(), row.key.clone()),
-                    row.value_raw.clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let mut changes = Vec::new();
-        for agent in &matched {
-            let billing_touched = if operation == "upsert" {
-                values.keys().any(|key| is_billing_rule_key(key))
-            } else {
-                keys.iter().any(|key| is_billing_rule_key(key))
-            };
-            if operation == "upsert" {
-                for (key, value) in values {
-                    let parsed = parse_vps_rule_value(key, value);
-                    let before = stored_map.get(&(agent.id.clone(), key.clone())).cloned();
-                    let validation_errors = parsed
-                        .as_ref()
-                        .err()
-                        .map(|error| vec![error.to_string()])
-                        .unwrap_or_default();
-                    let canonical_after = parsed
-                        .as_ref()
-                        .map(|parsed| parsed.raw.clone())
-                        .unwrap_or_else(|_| value.trim().to_string());
-                    let action = if !validation_errors.is_empty() {
-                        "invalid"
-                    } else if before.as_deref() == Some(canonical_after.as_str()) {
-                        "unchanged"
-                    } else {
-                        "set"
-                    };
-                    changes.push(VpsRuleChangePreview {
-                        client_id: agent.id.clone(),
-                        display_name: agent.display_name.clone(),
-                        key: key.clone(),
-                        before,
-                        after: Some(canonical_after),
-                        action: action.to_string(),
-                        validation: if validation_errors.is_empty() {
-                            "ok".to_string()
-                        } else {
-                            "invalid".to_string()
-                        },
-                        validation_errors,
-                    });
-                }
-            } else {
-                for key in keys {
-                    let before = stored_map.get(&(agent.id.clone(), key.clone())).cloned();
-                    changes.push(VpsRuleChangePreview {
-                        client_id: agent.id.clone(),
-                        display_name: agent.display_name.clone(),
-                        key: key.clone(),
-                        before: before.clone(),
-                        after: None,
-                        action: if before.is_some() {
-                            "unset"
-                        } else {
-                            "unchanged"
-                        }
-                        .to_string(),
-                        validation: "ok".to_string(),
-                        validation_errors: Vec::new(),
-                    });
-                }
-            }
-            if billing_touched {
-                let mut price = stored_map
-                    .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_PRICE.to_string()))
-                    .cloned();
-                let mut cycle = stored_map
-                    .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_CYCLE.to_string()))
-                    .cloned();
-                if operation == "upsert" {
-                    if let Some(value) = values.get(VPS_RULE_KEY_BILLING_PRICE) {
-                        price = parse_billing_price(value).ok().map(|parsed| parsed.raw);
-                    }
-                    if let Some(value) = values.get(VPS_RULE_KEY_BILLING_CYCLE) {
-                        cycle = parse_billing_cycle(value).ok().map(|parsed| parsed.raw);
-                    }
-                } else {
-                    if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_PRICE) {
-                        price = None;
-                    }
-                    if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_CYCLE) {
-                        cycle = None;
-                    }
-                }
-                if let Err(error) = validate_billing_rule_group(price.as_deref(), cycle.as_deref())
-                {
-                    for change in changes.iter_mut().filter(|change| {
-                        change.client_id == agent.id && is_billing_rule_key(&change.key)
-                    }) {
-                        change.action = "invalid".to_string();
-                        change.validation = "invalid".to_string();
-                        change.validation_errors.push(error.to_string());
-                    }
-                }
-            }
-        }
-        let changed_row_count = changes
-            .iter()
-            .filter(|change| matches!(change.action.as_str(), "set" | "unset"))
-            .count();
-        let invalid_row_count = changes
-            .iter()
-            .filter(|change| change.action == "invalid")
-            .count();
-        let hash_payload = json!({
-            "operation": operation,
-            "selector_expression": selector_expression.trim(),
-            "changes": changes,
-        });
-        Ok(VpsRulesDryRunResponse {
-            matched_vps_count: matched.len(),
-            changed_row_count,
-            invalid_row_count,
-            preview_hash: preview_hash(&hash_payload),
-            changes,
-        })
-    }
-
-    async fn apply_vps_rule_changes(
-        &self,
-        preview: &VpsRulesDryRunResponse,
-        operator: &AuthContext,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            preview.invalid_row_count == 0,
-            "vps_rules_preview_contains_invalid_rows"
-        );
-        let now = unix_now().to_string();
-        let target_client_ids = preview
-            .changes
-            .iter()
-            .map(|change| change.client_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                require_visible_memory_clients(
-                    memory,
-                    &target_client_ids,
-                    "vps_rules_target_no_longer_available",
-                )
-                .await?;
-                let mut rows = memory.vps_rule_values.write().await;
-                for change in &preview.changes {
-                    if change.action == "unchanged" {
-                        continue;
-                    }
-                    rows.retain(|row| {
-                        !(row.client_id == change.client_id && row.key == change.key)
-                    });
-                    if change.action == "set" {
-                        let raw = change.after.clone().context("vps rule set missing value")?;
-                        let parsed = parse_vps_rule_value(&change.key, &raw)?;
-                        rows.push(VpsRuleValueRecord {
-                            client_id: change.client_id.clone(),
-                            key: change.key.clone(),
-                            value_raw: parsed.raw,
-                            value_json: parsed.json,
-                            parsed_display: parsed.display,
-                            state: "ok".to_string(),
-                            validation_errors: Vec::new(),
-                            source_kind: "operator".to_string(),
-                            source_id: None,
-                            updated_by: Some(operator.operator.id),
-                            updated_at: now.clone(),
-                        });
-                    }
-                }
-                drop(rows);
-                memory.audits.write().await.push(vps_rules_audit(
-                    "fleet.vps_rules_updated",
-                    preview,
-                    operator,
-                    now,
-                ));
-            }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                require_visible_postgres_clients_in_tx(
-                    &mut tx,
-                    &target_client_ids,
-                    "vps_rules_target_no_longer_available",
-                )
-                .await?;
-                for change in &preview.changes {
-                    if change.action == "unchanged" {
-                        continue;
-                    }
-                    if change.action == "unset" {
-                        sqlx::query(
-                            "DELETE FROM vps_rule_values WHERE client_id = $1 AND key = $2",
-                        )
-                        .bind(&change.client_id)
-                        .bind(&change.key)
-                        .execute(&mut *tx)
-                        .await?;
-                    } else if change.action == "set" {
-                        let raw = change.after.clone().context("vps rule set missing value")?;
-                        let parsed = parse_vps_rule_value(&change.key, &raw)?;
-                        sqlx::query(
-                            r#"
-                            INSERT INTO vps_rule_values (
-                                client_id, key, value_raw, value_json, source_kind, source_id, updated_by
-                            )
-                            VALUES ($1, $2, $3, $4, 'operator', NULL, $5)
-                            ON CONFLICT (client_id, key) DO UPDATE SET
-                                value_raw = EXCLUDED.value_raw,
-                                value_json = EXCLUDED.value_json,
-                                source_kind = EXCLUDED.source_kind,
-                                source_id = EXCLUDED.source_id,
-                                updated_by = EXCLUDED.updated_by,
-                                updated_at = now()
-                            "#,
-                        )
-                        .bind(&change.client_id)
-                        .bind(&change.key)
-                        .bind(&parsed.raw)
-                        .bind(SqlJson(parsed.json))
-                        .bind(operator.operator.id)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                }
-                sqlx::query(
-                    r#"
-                    INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    "#,
-                )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind("fleet.vps_rules_updated")
-                .bind("vps_rules")
-                .bind(&preview.preview_hash)
-                .bind(json!({
-                    "preview_hash": &preview.preview_hash,
-                    "matched_vps_count": preview.matched_vps_count,
-                    "changed_row_count": preview.changed_row_count,
-                    "result": "succeeded",
-                    "operator_id": operator.operator.id,
-                    "operator_username": &operator.operator.username,
-                    "operator_role": &operator.operator.role,
-                    "operator_session_id": operator.audit_session_id(),
-                    "origin_kind": "operator_request",
-                    "component": "vps-rules-controller",
-                }))
-                .execute(&mut *tx)
-                .await?;
-                tx.commit().await?;
-            }
-        }
-        Ok(())
+        build_vps_rule_preview(
+            operation,
+            selector_expression,
+            values,
+            keys,
+            &agents,
+            &stored,
+        )
     }
 
     async fn list_traffic_counter_usage_for_streams(
@@ -2888,13 +2863,41 @@ impl Repository {
             return Ok(());
         }
         let agents = self.list_agents().await?;
+        let expressions = groups
+            .iter()
+            .map(|group| {
+                parse_selector_expression(&group.selector_expression)
+                    .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
+                    .context("selector expression is empty")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let rule_contexts = if expressions.iter().any(expression_references_vps_rules) {
+            self.vps_rule_contexts_for_agents(&agents).await?
+        } else {
+            HashMap::new()
+        };
+        self.enrich_policy_group_summaries_with_rule_contexts(groups, &agents, &rule_contexts)
+            .await
+    }
+
+    async fn enrich_policy_group_summaries_with_rule_contexts(
+        &self,
+        groups: &mut [PolicyGroupRecord],
+        agents: &[AgentView],
+        rule_contexts: &HashMap<String, VpsRuleContext>,
+    ) -> Result<()> {
         let rule_ids = groups
             .iter()
             .flat_map(|group| group.rules.iter().map(|rule| rule.id))
             .collect::<Vec<_>>();
         let states = self.policy_rule_states_for_rules(&rule_ids).await?;
-        for group in groups {
-            let matched = resolve_agents(&agents, &group.selector_expression)?;
+        let matched_groups = groups
+            .iter()
+            .map(|group| {
+                resolve_agents_with_rule_contexts(agents, &group.selector_expression, rule_contexts)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for (group, matched) in groups.iter_mut().zip(matched_groups) {
             let matched_ids = matched
                 .iter()
                 .map(|agent| agent.id.as_str())
@@ -3342,6 +3345,417 @@ impl Repository {
     }
 }
 
+fn validate_confirmed_vps_rule_preview(
+    preview: &VpsRulesDryRunResponse,
+    expected_preview_hash: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        preview.preview_hash == expected_preview_hash,
+        "vps_rules_preview_hash_mismatch"
+    );
+    anyhow::ensure!(
+        preview.invalid_row_count == 0,
+        "vps_rules_preview_contains_invalid_rows"
+    );
+    Ok(())
+}
+
+async fn lock_postgres_vps_rule_mutations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.vps_rule_mutation'))")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn postgres_vps_rule_snapshot_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(Vec<AgentView>, Vec<VpsRuleValueRecord>)> {
+    let agent_rows = sqlx::query(
+        r#"
+        SELECT
+            c.id,
+            c.display_name,
+            c.status,
+            host(c.registration_ip) AS registration_ip,
+            host(c.last_ip) AS last_ip,
+            c.last_seen_at::text AS last_seen_at,
+            c.arch,
+            c.internal_build_number,
+            c.process_incarnation_id,
+            c.stale_since::text AS stale_since,
+            c.stale_reason,
+            c.capabilities,
+            COALESCE(
+                array_remove(
+                    array_agg(t.name ORDER BY t.display_order, t.created_at, t.name),
+                    NULL
+                ),
+                ARRAY[]::TEXT[]
+            ) AS tags
+        FROM visible_clients c
+        LEFT JOIN client_tags ct ON ct.client_id = c.id
+        LEFT JOIN tags t ON t.id = ct.tag_id
+        GROUP BY
+            c.id,
+            c.display_name,
+            c.status,
+            c.registration_ip,
+            c.last_ip,
+            c.last_seen_at,
+            c.arch,
+            c.internal_build_number,
+            c.process_incarnation_id,
+            c.stale_since,
+            c.stale_reason,
+            c.capabilities
+        ORDER BY c.display_name, c.id
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let agents = agent_rows
+        .into_iter()
+        .map(|row| {
+            Ok(AgentView {
+                id: row.try_get("id")?,
+                display_name: row.try_get("display_name")?,
+                status: row.try_get("status")?,
+                tags: row.try_get("tags")?,
+                registration_ip: row.try_get("registration_ip")?,
+                last_ip: row.try_get("last_ip")?,
+                last_seen_at: row.try_get("last_seen_at")?,
+                arch: row.try_get("arch")?,
+                internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1)
+                    as u64,
+                process_incarnation_id: row.try_get("process_incarnation_id")?,
+                stale_since: row.try_get("stale_since")?,
+                stale_reason: row.try_get("stale_reason")?,
+                capabilities: row
+                    .try_get::<SqlJson<vpsman_common::AgentCapabilitySnapshot>, _>("capabilities")?
+                    .0,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rule_rows = sqlx::query(
+        r#"
+        SELECT
+            rule.client_id,
+            rule.key,
+            rule.value_raw,
+            rule.value_json,
+            rule.source_kind,
+            rule.source_id,
+            rule.updated_by,
+            rule.updated_at::text AS updated_at
+        FROM vps_rule_values rule
+        JOIN visible_clients client ON client.id = rule.client_id
+        ORDER BY rule.client_id, rule.key
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    let rules = rule_rows
+        .into_iter()
+        .map(vps_rule_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((agents, rules))
+}
+
+fn build_vps_rule_preview(
+    operation: &str,
+    selector_expression: &str,
+    values: &BTreeMap<String, String>,
+    keys: &[String],
+    agents: &[AgentView],
+    stored: &[VpsRuleValueRecord],
+) -> Result<VpsRulesDryRunResponse> {
+    let rule_contexts = vps_rule_contexts_by_client(stored);
+    let matched = resolve_agents_with_rule_contexts(agents, selector_expression, &rule_contexts)?;
+    let stored_map = stored
+        .iter()
+        .map(|row| {
+            (
+                (row.client_id.clone(), row.key.clone()),
+                (
+                    row.value_raw.clone(),
+                    row.stored_value_raw
+                        .clone()
+                        .unwrap_or_else(|| row.value_raw.clone()),
+                ),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut changes = Vec::new();
+    for agent in &matched {
+        let billing_touched = if operation == "upsert" {
+            values.keys().any(|key| is_billing_rule_key(key))
+        } else {
+            keys.iter().any(|key| is_billing_rule_key(key))
+        };
+        if operation == "upsert" {
+            for (key, value) in values {
+                let parsed = parse_vps_rule_value(key, value);
+                let stored_before = stored_map.get(&(agent.id.clone(), key.clone()));
+                let before = stored_before.map(|(_, physical)| physical.clone());
+                let validation_errors = parsed
+                    .as_ref()
+                    .err()
+                    .map(|error| vec![error.to_string()])
+                    .unwrap_or_default();
+                let canonical_after = parsed
+                    .as_ref()
+                    .map(|parsed| parsed.raw.clone())
+                    .unwrap_or_else(|_| value.trim().to_string());
+                let action = if !validation_errors.is_empty() {
+                    "invalid"
+                } else if stored_before.is_some_and(|(_, physical)| physical == &canonical_after) {
+                    "unchanged"
+                } else {
+                    "set"
+                };
+                changes.push(VpsRuleChangePreview {
+                    client_id: agent.id.clone(),
+                    display_name: agent.display_name.clone(),
+                    key: key.clone(),
+                    before,
+                    after: Some(canonical_after),
+                    action: action.to_string(),
+                    validation: if validation_errors.is_empty() {
+                        "ok".to_string()
+                    } else {
+                        "invalid".to_string()
+                    },
+                    validation_errors,
+                });
+            }
+        } else {
+            for key in keys {
+                let before = stored_map
+                    .get(&(agent.id.clone(), key.clone()))
+                    .map(|(_, physical)| physical.clone());
+                changes.push(VpsRuleChangePreview {
+                    client_id: agent.id.clone(),
+                    display_name: agent.display_name.clone(),
+                    key: key.clone(),
+                    before: before.clone(),
+                    after: None,
+                    action: if before.is_some() {
+                        "unset"
+                    } else {
+                        "unchanged"
+                    }
+                    .to_string(),
+                    validation: "ok".to_string(),
+                    validation_errors: Vec::new(),
+                });
+            }
+        }
+        if billing_touched {
+            let mut price = stored_map
+                .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_PRICE.to_string()))
+                .map(|(canonical, _)| canonical.clone());
+            let mut cycle = stored_map
+                .get(&(agent.id.clone(), VPS_RULE_KEY_BILLING_CYCLE.to_string()))
+                .map(|(canonical, _)| canonical.clone());
+            if operation == "upsert" {
+                if let Some(value) = values.get(VPS_RULE_KEY_BILLING_PRICE) {
+                    price = parse_vps_rule_value(VPS_RULE_KEY_BILLING_PRICE, value)
+                        .ok()
+                        .map(|parsed| parsed.raw);
+                }
+                if let Some(value) = values.get(VPS_RULE_KEY_BILLING_CYCLE) {
+                    cycle = parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, value)
+                        .ok()
+                        .map(|parsed| parsed.raw);
+                }
+            } else {
+                if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_PRICE) {
+                    price = None;
+                }
+                if keys.iter().any(|key| key == VPS_RULE_KEY_BILLING_CYCLE) {
+                    cycle = None;
+                }
+            }
+            if let Err(error) = validate_billing_rule_group(price.as_deref(), cycle.as_deref()) {
+                for change in changes.iter_mut().filter(|change| {
+                    change.client_id == agent.id && is_billing_rule_key(&change.key)
+                }) {
+                    change.action = "invalid".to_string();
+                    change.validation = "invalid".to_string();
+                    change.validation_errors.push(error.to_string());
+                }
+            }
+        }
+    }
+    let changed_row_count = changes
+        .iter()
+        .filter(|change| matches!(change.action.as_str(), "set" | "unset"))
+        .count();
+    let invalid_row_count = changes
+        .iter()
+        .filter(|change| change.action == "invalid")
+        .count();
+    let hash_payload = json!({
+        "operation": operation,
+        "selector_expression": selector_expression.trim(),
+        "changes": changes,
+    });
+    Ok(VpsRulesDryRunResponse {
+        matched_vps_count: matched.len(),
+        changed_row_count,
+        invalid_row_count,
+        preview_hash: preview_hash(&hash_payload),
+        changes,
+    })
+}
+
+async fn apply_vps_rule_changes_memory(
+    memory: &crate::repository::MemoryState,
+    preview: &VpsRulesDryRunResponse,
+    operator: &AuthContext,
+) -> Result<()> {
+    anyhow::ensure!(
+        preview.invalid_row_count == 0,
+        "vps_rules_preview_contains_invalid_rows"
+    );
+    let target_client_ids = preview
+        .changes
+        .iter()
+        .map(|change| change.client_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    require_visible_memory_clients(
+        memory,
+        &target_client_ids,
+        "vps_rules_target_no_longer_available",
+    )
+    .await?;
+    let now = unix_now().to_string();
+    let mut rows = memory.vps_rule_values.write().await;
+    for change in &preview.changes {
+        if change.action == "unchanged" {
+            continue;
+        }
+        rows.retain(|row| !(row.client_id == change.client_id && row.key == change.key));
+        if change.action == "set" {
+            let raw = change.after.clone().context("vps rule set missing value")?;
+            let parsed = parse_vps_rule_value(&change.key, &raw)?;
+            rows.push(VpsRuleValueRecord {
+                client_id: change.client_id.clone(),
+                key: change.key.clone(),
+                value_raw: parsed.raw,
+                stored_value_raw: None,
+                value_json: parsed.json,
+                parsed_display: parsed.display,
+                state: "ok".to_string(),
+                validation_errors: Vec::new(),
+                source_kind: "operator".to_string(),
+                source_id: None,
+                updated_by: Some(operator.operator.id),
+                updated_at: now.clone(),
+            });
+        }
+    }
+    drop(rows);
+    memory.audits.write().await.push(vps_rules_audit(
+        "fleet.vps_rules_updated",
+        preview,
+        operator,
+        now,
+    ));
+    Ok(())
+}
+
+async fn apply_vps_rule_changes_postgres_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    preview: &VpsRulesDryRunResponse,
+    operator: &AuthContext,
+) -> Result<()> {
+    anyhow::ensure!(
+        preview.invalid_row_count == 0,
+        "vps_rules_preview_contains_invalid_rows"
+    );
+    let target_client_ids = preview
+        .changes
+        .iter()
+        .map(|change| change.client_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    require_visible_postgres_clients_in_tx(
+        tx,
+        &target_client_ids,
+        "vps_rules_target_no_longer_available",
+    )
+    .await?;
+    for change in &preview.changes {
+        if change.action == "unchanged" {
+            continue;
+        }
+        if change.action == "unset" {
+            sqlx::query("DELETE FROM vps_rule_values WHERE client_id = $1 AND key = $2")
+                .bind(&change.client_id)
+                .bind(&change.key)
+                .execute(&mut **tx)
+                .await?;
+        } else if change.action == "set" {
+            let raw = change.after.clone().context("vps rule set missing value")?;
+            let parsed = parse_vps_rule_value(&change.key, &raw)?;
+            sqlx::query(
+                r#"
+                INSERT INTO vps_rule_values (
+                    client_id, key, value_raw, value_json, source_kind, source_id, updated_by
+                )
+                VALUES ($1, $2, $3, $4, 'operator', NULL, $5)
+                ON CONFLICT (client_id, key) DO UPDATE SET
+                    value_raw = EXCLUDED.value_raw,
+                    value_json = EXCLUDED.value_json,
+                    source_kind = EXCLUDED.source_kind,
+                    source_id = EXCLUDED.source_id,
+                    updated_by = EXCLUDED.updated_by,
+                    updated_at = now()
+                "#,
+            )
+            .bind(&change.client_id)
+            .bind(&change.key)
+            .bind(&parsed.raw)
+            .bind(SqlJson(parsed.json))
+            .bind(operator.operator.id)
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(operator.operator.id)
+    .bind("fleet.vps_rules_updated")
+    .bind("vps_rules")
+    .bind(&preview.preview_hash)
+    .bind(json!({
+        "preview_hash": &preview.preview_hash,
+        "matched_vps_count": preview.matched_vps_count,
+        "changed_row_count": preview.changed_row_count,
+        "result": "succeeded",
+        "operator_id": operator.operator.id,
+        "operator_username": &operator.operator.username,
+        "operator_role": &operator.operator.role,
+        "operator_session_id": operator.audit_session_id(),
+        "origin_kind": "operator_request",
+        "component": "vps-rules-controller",
+    }))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 fn is_billing_rule_key(key: &str) -> bool {
     matches!(key, VPS_RULE_KEY_BILLING_PRICE | VPS_RULE_KEY_BILLING_CYCLE)
 }
@@ -3351,23 +3765,28 @@ fn validate_billing_rule_group(price: Option<&str>, cycle: Option<&str>) -> Resu
         anyhow::ensure!(cycle.is_none(), "billing_cycle_requires_price");
         return Ok(());
     };
-    let price = parse_billing_price_parts(price)?;
-    if price.disabled {
+    let price = parse_vps_rule_value(VPS_RULE_KEY_BILLING_PRICE, price)?;
+    if price
+        .json
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         anyhow::ensure!(cycle.is_none(), "billing_cycle_disabled_price_invalid");
         return Ok(());
     }
     let Some(cycle) = cycle else {
         return Ok(());
     };
-    let cycle = parse_billing_cycle(cycle)?;
+    let cycle = parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, cycle)?;
     let has_month = cycle
         .json
         .get("month")
         .is_some_and(|month| !month.is_null());
-    match price.period_code.as_deref() {
+    match price.json.get("period_code").and_then(Value::as_str) {
         Some("m") => anyhow::ensure!(!has_month, "billing_month_cycle_requires_day"),
         Some("q" | "hy" | "y") => {
-            anyhow::ensure!(has_month, "billing_long_cycle_requires_day_month")
+            anyhow::ensure!(has_month, "billing_long_cycle_requires_month_day")
         }
         _ => anyhow::bail!("billing_plan_period_invalid"),
     }
@@ -3653,7 +4072,9 @@ fn traffic_cycle_starts_for_clients<'a>(
         .iter()
         .filter(|rule| rule.key == VPS_RULE_KEY_TRAFFIC_RESET_DAY)
         .filter_map(|rule| {
-            rule.value_json
+            parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)
+                .ok()?
+                .json
                 .get("day")
                 .and_then(Value::as_i64)
                 .map(|day| (rule.client_id.as_str(), day as i32))
@@ -3693,7 +4114,7 @@ fn traffic_stream_requests_from_rules(
         let Some(cycle_start_unix) = cycle_starts.get(rule.client_id.as_str()).copied() else {
             continue;
         };
-        let Ok(selectors) = parse_persisted_traffic_selector_list(&rule.value_raw) else {
+        let Ok(selectors) = traffic_selectors_from_rule(rule) else {
             continue;
         };
         for selector in selectors {
@@ -4303,197 +4724,98 @@ fn aggregate_memory_traffic_history(
 }
 
 fn validate_vps_rule_values(values: &BTreeMap<String, String>) -> Result<()> {
-    anyhow::ensure!(!values.is_empty(), "vps_rules_values_required");
     for (key, value) in values {
         parse_vps_rule_value(key, value)?;
     }
     Ok(())
 }
 
-fn validate_vps_rule_keys(keys: &[String]) -> Result<()> {
+fn normalize_vps_rule_values(
+    values: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
+    anyhow::ensure!(!values.is_empty(), "vps_rules_values_required");
+    let mut normalized = BTreeMap::new();
+    for (key, value) in values {
+        let key = key.trim().to_string();
+        anyhow::ensure!(
+            normalized.insert(key, value.clone()).is_none(),
+            "vps_rules_duplicate_key"
+        );
+    }
+    Ok(normalized)
+}
+
+fn normalize_vps_rule_keys(keys: &[String]) -> Result<Vec<String>> {
     anyhow::ensure!(!keys.is_empty(), "vps_rules_keys_required");
     let mut seen = HashSet::new();
+    let mut normalized_keys = Vec::with_capacity(keys.len());
     for key in keys {
         let normalized = normalize_vps_rule_key(key)?;
-        anyhow::ensure!(seen.insert(normalized), "vps_rules_duplicate_key");
+        anyhow::ensure!(seen.insert(normalized.clone()), "vps_rules_duplicate_key");
+        normalized_keys.push(normalized);
     }
-    Ok(())
+    Ok(normalized_keys)
 }
 
 fn normalize_vps_rule_key(key: &str) -> Result<String> {
     let key = key.trim();
     anyhow::ensure!(
-        matches!(
-            key,
-            VPS_RULE_KEY_TRAFFIC_RESET_DAY
-                | VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL
-                | VPS_RULE_KEY_TRAFFIC_QUOTA_RX
-                | VPS_RULE_KEY_TRAFFIC_QUOTA_TX
-                | VPS_RULE_KEY_TRAFFIC_SELECTORS
-                | VPS_RULE_KEY_BILLING_PRICE
-                | VPS_RULE_KEY_BILLING_CYCLE
-                | VPS_RULE_KEY_NETWORK_PORT_SPEED
-                | VPS_RULE_KEY_NETWORK_RATE_INTERFACES
-        ),
+        vpsman_common::SUPPORTED_VPS_RULE_KEYS.contains(&key),
         "vps_rules_key_unsupported"
     );
     Ok(key.to_string())
 }
 
 fn parse_vps_rule_value(key: &str, value: &str) -> Result<ParsedRuleValue> {
-    parse_vps_rule_value_with_legacy_selector_support(key, value, false)
+    parse_common_vps_rule_value(key, value).map_err(anyhow::Error::msg)
 }
 
 fn parse_persisted_vps_rule_value(key: &str, value: &str) -> Result<ParsedRuleValue> {
-    parse_vps_rule_value_with_legacy_selector_support(key, value, true)
+    parse_common_persisted_vps_rule_value(key, value).map_err(anyhow::Error::msg)
 }
 
-fn parse_vps_rule_value_with_legacy_selector_support(
-    key: &str,
-    value: &str,
-    allow_direction_overlap: bool,
-) -> Result<ParsedRuleValue> {
-    let key = normalize_vps_rule_key(key)?;
-    let raw = value.trim();
+#[cfg(test)]
+fn parse_network_rate_interfaces(value: &str) -> Result<ParsedRuleValue> {
+    parse_vps_rule_value(VPS_RULE_KEY_NETWORK_RATE_INTERFACES, value)
+}
+
+#[cfg(test)]
+fn parse_port_speed(value: &str) -> Result<ParsedRuleValue> {
+    parse_vps_rule_value(vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED, value)
+}
+
+#[cfg(test)]
+fn parse_billing_price(value: &str) -> Result<ParsedRuleValue> {
+    parse_vps_rule_value(VPS_RULE_KEY_BILLING_PRICE, value)
+}
+
+#[cfg(test)]
+fn parse_billing_cycle(value: &str) -> Result<ParsedRuleValue> {
+    parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, value)
+}
+
+fn network_rate_selector_spec_from_rule(
+    rule: &VpsRuleValueRecord,
+) -> Result<NetworkRateSelectorSpec> {
     anyhow::ensure!(
-        !raw.is_empty() || key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-        "vps_rules_empty_value_invalid"
+        rule.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        "network_rate_selector_storage_invalid"
     );
-    anyhow::ensure!(
-        raw.len() <= MAX_VPS_RULE_VALUE_BYTES,
-        "vps_rules_value_too_long"
-    );
-    match key.as_str() {
-        VPS_RULE_KEY_TRAFFIC_RESET_DAY => {
-            let day = raw
-                .parse::<i32>()
-                .context("traffic.reset_day must be an integer")?;
-            anyhow::ensure!(
-                day == -1 || (1..=31).contains(&day),
-                "traffic_reset_day_invalid"
-            );
-            Ok(ParsedRuleValue {
-                raw: raw.to_string(),
-                json: json!({"day": day}),
-                display: if day == -1 {
-                    "-".to_string()
-                } else {
-                    format!("{day} UTC")
-                },
-            })
-        }
-        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL
-        | VPS_RULE_KEY_TRAFFIC_QUOTA_RX
-        | VPS_RULE_KEY_TRAFFIC_QUOTA_TX => {
-            if raw == "-1" {
-                return Ok(ParsedRuleValue {
-                    raw: "-1".to_string(),
-                    json: json!({"bytes": -1, "unlimited": true, "display": "Unlimited"}),
-                    display: "Unlimited".to_string(),
-                });
-            }
-            let bytes = parse_byte_size(raw)?;
-            Ok(ParsedRuleValue {
-                raw: raw.to_string(),
-                json: json!({"bytes": bytes, "display": display_bytes(bytes)}),
-                display: format!("{} bytes", bytes),
-            })
-        }
-        VPS_RULE_KEY_TRAFFIC_SELECTORS => {
-            let selectors = parse_traffic_selector_list_with_options(raw, allow_direction_overlap)?;
-            Ok(ParsedRuleValue {
-                raw: selectors
-                    .iter()
-                    .map(|selector| selector.canonical.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                json: json!({
-                    "selectors": selectors.iter().map(traffic_selector_json).collect::<Vec<_>>()
-                }),
-                display: format!("{} selectors", selectors.len()),
-            })
-        }
-        VPS_RULE_KEY_NETWORK_RATE_INTERFACES => parse_network_rate_interfaces(raw),
-        VPS_RULE_KEY_BILLING_PRICE => parse_billing_price(raw),
-        VPS_RULE_KEY_BILLING_CYCLE => parse_billing_cycle(raw),
-        VPS_RULE_KEY_NETWORK_PORT_SPEED => parse_port_speed(raw),
-        _ => unreachable!("normalize_vps_rule_key rejects unsupported keys"),
-    }
-}
-
-fn parse_network_rate_interfaces(raw: &str) -> Result<ParsedRuleValue> {
-    let spec = parse_network_rate_selector_input(raw)?;
-    Ok(network_rate_selector_rule_value(spec))
-}
-
-fn network_rate_selector_rule_value(spec: NetworkRateSelectorSpec) -> ParsedRuleValue {
-    match spec {
-        NetworkRateSelectorSpec::All => ParsedRuleValue {
-            raw: "[]".to_string(),
-            json: json!({"mode": "all"}),
-            display: "All reported interfaces".to_string(),
-        },
-        NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors) => {
-            ParsedRuleValue {
-                raw: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX.to_string(),
-                json: json!({
-                    "mode": "reference",
-                    "reference": {"rule": VPS_RULE_KEY_TRAFFIC_SELECTORS},
-                }),
-                display: "Traffic selectors (referenced)".to_string(),
-            }
-        }
-        NetworkRateSelectorSpec::Exact(selectors) => ParsedRuleValue {
-            raw: selectors
-                .iter()
-                .map(|selector| selector.canonical.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-            json: json!({
-                "mode": "exact",
-                "selectors": selectors.iter().map(traffic_selector_json).collect::<Vec<_>>()
-            }),
-            display: format!("{} live-rate selectors", selectors.len()),
-        },
-    }
-}
-
-fn parse_network_rate_selector_input(raw: &str) -> Result<NetworkRateSelectorSpec> {
-    if raw == NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX {
-        return Ok(NetworkRateSelectorSpec::Reference(
-            NetworkRateSelectorReference::TrafficSelectors,
-        ));
-    }
-    if raw.is_empty() || raw == "[]" {
-        return Ok(NetworkRateSelectorSpec::All);
-    }
-
-    let selectors = parse_traffic_selector_list(raw)?;
-    anyhow::ensure!(
-        selectors.iter().all(|selector| selector.source == "host"),
-        "network_rate_selector_source_invalid"
-    );
-    Ok(NetworkRateSelectorSpec::Exact(selectors))
-}
-
-fn parse_stored_network_rate_selector_spec(value: &Value) -> Result<NetworkRateSelectorSpec> {
-    let mode = value
+    let parsed = parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)?;
+    let mode = parsed
+        .json
         .get("mode")
         .and_then(Value::as_str)
         .context("network_rate_selector_storage_invalid")?;
     match mode {
         "all" => Ok(NetworkRateSelectorSpec::All),
-        "exact" => {
-            let selectors = parse_stored_traffic_selector_list(value, false)?;
-            anyhow::ensure!(
-                selectors.iter().all(|selector| selector.source == "host"),
-                "network_rate_selector_storage_invalid"
-            );
-            Ok(NetworkRateSelectorSpec::Exact(selectors))
-        }
+        "exact" => Ok(NetworkRateSelectorSpec::Exact(
+            traffic_selectors_from_parsed_rule(&parsed)?,
+        )),
         "reference" => {
             anyhow::ensure!(
-                value
+                parsed
+                    .json
                     .get("reference")
                     .and_then(|reference| reference.get("rule"))
                     .and_then(Value::as_str)
@@ -4508,31 +4830,47 @@ fn parse_stored_network_rate_selector_spec(value: &Value) -> Result<NetworkRateS
     }
 }
 
-fn parse_stored_traffic_selector_list(
-    value: &Value,
-    allow_direction_overlap: bool,
-) -> Result<Vec<TrafficSelector>> {
-    let stored = value
+fn traffic_selectors_from_parsed_rule(parsed: &ParsedRuleValue) -> Result<Vec<TrafficSelector>> {
+    parsed
+        .json
         .get("selectors")
         .and_then(Value::as_array)
-        .context("traffic_selector_storage_invalid")?;
-    let mut canonical = Vec::with_capacity(stored.len());
-    for item in stored {
-        let stored_source = item.get("source").and_then(Value::as_str);
-        let stored_interface = item.get("interface").and_then(Value::as_str);
-        let stored_direction = item.get("direction").and_then(Value::as_str);
-        let stored_canonical = item.get("canonical").and_then(Value::as_str);
-        let parsed =
-            parse_traffic_selector(stored_canonical.context("traffic_selector_storage_invalid")?)?;
-        anyhow::ensure!(
-            stored_source == Some(parsed.source.as_str())
-                && stored_interface == Some(parsed.interface.as_str())
-                && stored_direction == Some(parsed.direction.as_str()),
-            "traffic_selector_storage_invalid"
-        );
-        canonical.push(parsed.canonical);
-    }
-    parse_traffic_selector_list_with_options(&canonical.join(","), allow_direction_overlap)
+        .context("traffic_selector_storage_invalid")?
+        .iter()
+        .map(|item| {
+            Ok(TrafficSelector {
+                source: item
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .context("traffic_selector_storage_invalid")?
+                    .to_string(),
+                interface: item
+                    .get("interface")
+                    .and_then(Value::as_str)
+                    .context("traffic_selector_storage_invalid")?
+                    .to_string(),
+                direction: item
+                    .get("direction")
+                    .and_then(Value::as_str)
+                    .context("traffic_selector_storage_invalid")?
+                    .to_string(),
+                canonical: item
+                    .get("canonical")
+                    .and_then(Value::as_str)
+                    .context("traffic_selector_storage_invalid")?
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn traffic_selectors_from_rule(rule: &VpsRuleValueRecord) -> Result<Vec<TrafficSelector>> {
+    anyhow::ensure!(
+        rule.key == VPS_RULE_KEY_TRAFFIC_SELECTORS,
+        "traffic_selector_storage_invalid"
+    );
+    let parsed = parse_persisted_vps_rule_value(&rule.key, &rule.value_raw)?;
+    traffic_selectors_from_parsed_rule(&parsed)
 }
 
 fn resolve_network_rate_interface_selection(
@@ -4559,7 +4897,7 @@ fn resolve_network_rate_interface_selection(
             Ok(NetworkRateSelectorSpec::Reference(
                 NetworkRateSelectorReference::TrafficSelectors,
             )),
-            |rule| parse_stored_network_rate_selector_spec(&rule.value_json),
+            network_rate_selector_spec_from_rule,
         )?;
         match spec {
             NetworkRateSelectorSpec::All => selection.select_all(client_id.clone()),
@@ -4570,10 +4908,7 @@ fn resolve_network_rate_interface_selection(
                 let inherited = match client_rules
                     .and_then(|rules| rules.get(VPS_RULE_KEY_TRAFFIC_SELECTORS))
                 {
-                    Some(rule) => host_rate_interfaces(&parse_stored_traffic_selector_list(
-                        &rule.value_json,
-                        true,
-                    )?),
+                    Some(rule) => host_rate_interfaces(&traffic_selectors_from_rule(rule)?),
                     None => BTreeSet::new(),
                 };
                 selection.select_exact(client_id.clone(), inherited);
@@ -4581,15 +4916,6 @@ fn resolve_network_rate_interface_selection(
         }
     }
     Ok(selection)
-}
-
-fn traffic_selector_json(selector: &TrafficSelector) -> Value {
-    json!({
-        "source": selector.source,
-        "interface": selector.interface,
-        "direction": selector.direction,
-        "canonical": selector.canonical,
-    })
 }
 
 fn host_rate_interfaces(selectors: &[TrafficSelector]) -> BTreeSet<String> {
@@ -4603,276 +4929,21 @@ fn host_rate_interfaces(selectors: &[TrafficSelector]) -> BTreeSet<String> {
     selected
 }
 
-#[derive(Clone, Debug)]
-struct ParsedBillingPrice {
-    currency: Option<String>,
-    currency_display: Option<String>,
-    disabled: bool,
-    period: Option<String>,
-    period_code: Option<String>,
-    price: Option<String>,
-}
-
-fn parse_billing_price(input: &str) -> Result<ParsedRuleValue> {
-    let price = parse_billing_price_parts(input)?;
-    if price.disabled {
-        return Ok(ParsedRuleValue {
-            raw: "-1".to_string(),
-            json: json!({"disabled": true, "display": "-"}),
-            display: "-".to_string(),
-        });
-    }
-    let amount = price.price.context("billing_plan_price_required")?;
-    let currency = price.currency.context("billing_plan_currency_required")?;
-    let currency_display = price
-        .currency_display
-        .context("billing_plan_currency_required")?;
-    let period = price.period.context("billing_plan_period_required")?;
-    let period_code = price.period_code.context("billing_plan_period_required")?;
-    let display = format!("{amount} {currency_display}/{period_code}");
-    Ok(ParsedRuleValue {
-        raw: display.clone(),
-        json: json!({
-            "disabled": false,
-            "price": amount,
-            "currency": currency,
-            "currency_display": currency_display,
-            "period": period,
-            "period_code": period_code,
-            "display": display,
-        }),
-        display,
-    })
-}
-
-fn parse_billing_price_parts(input: &str) -> Result<ParsedBillingPrice> {
-    let compact = input
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    if compact == "-1" {
-        return Ok(ParsedBillingPrice {
-            currency: None,
-            currency_display: None,
-            disabled: true,
-            period: None,
-            period_code: None,
-            price: None,
-        });
-    }
-    let (amount_and_currency, period_code) = compact
-        .split_once('/')
-        .context("billing_plan_period_required")?;
-    let currency_start = amount_and_currency
-        .char_indices()
-        .find(|(_, character)| !character.is_ascii_digit() && *character != '.')
-        .map(|(index, _)| index)
-        .context("billing_plan_currency_required")?;
-    let price = normalize_billing_price(&amount_and_currency[..currency_start])?;
-    let currency_input = &amount_and_currency[currency_start..];
-    let (currency, currency_display) = normalize_billing_currency(currency_input)?;
-    let period_input = period_code.to_ascii_lowercase();
-    let (period_code, period) = match period_input.as_str() {
-        "m" => ("m", "month"),
-        "q" => ("q", "quarter"),
-        "h" | "hy" => ("hy", "half_year"),
-        "y" => ("y", "year"),
-        _ => anyhow::bail!("billing_plan_period_invalid"),
-    };
-    Ok(ParsedBillingPrice {
-        currency: Some(currency),
-        currency_display: Some(currency_display),
-        disabled: false,
-        period: Some(period.to_string()),
-        period_code: Some(period_code.to_string()),
-        price: Some(price),
-    })
-}
-
-fn normalize_billing_currency(input: &str) -> Result<(String, String)> {
-    let upper = input.to_ascii_uppercase();
-    let normalized = match input {
-        "$" => ("USD".to_string(), "$".to_string()),
-        "¥" | "￥" => ("CNY".to_string(), "¥".to_string()),
-        "€" => ("EUR".to_string(), "€".to_string()),
-        "£" => ("GBP".to_string(), "£".to_string()),
-        _ if upper.len() == 3
-            && upper
-                .chars()
-                .all(|character| character.is_ascii_alphabetic()) =>
-        {
-            (upper.clone(), upper)
-        }
-        _ => anyhow::bail!("billing_plan_currency_invalid"),
-    };
-    Ok(normalized)
-}
-
-fn parse_billing_cycle(input: &str) -> Result<ParsedRuleValue> {
-    let raw = input.trim();
-    let (day, month) = match raw.split_once('-') {
-        Some((day, month)) => (parse_billing_day(day)?, Some(parse_billing_month(month)?)),
-        None => (parse_billing_day(raw)?, None),
-    };
-    let display = month.map_or_else(|| day.to_string(), |month| format!("{day:02}-{month:02}"));
-    Ok(ParsedRuleValue {
-        raw: display.clone(),
-        json: json!({"day": day, "month": month, "display": display}),
-        display,
-    })
-}
-
-fn parse_billing_day(input: &str) -> Result<u8> {
-    let day = input
-        .trim()
-        .parse::<u8>()
-        .context("billing_cycle_day_invalid")?;
-    anyhow::ensure!((1..=31).contains(&day), "billing_cycle_day_invalid");
-    Ok(day)
-}
-
-fn parse_billing_month(input: &str) -> Result<u8> {
-    let month = input
-        .trim()
-        .parse::<u8>()
-        .context("billing_cycle_month_invalid")?;
-    anyhow::ensure!((1..=12).contains(&month), "billing_cycle_month_invalid");
-    Ok(month)
-}
-
-fn parse_port_speed(input: &str) -> Result<ParsedRuleValue> {
-    let compact = input
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>();
-    let unit_start = compact
-        .find(|character: char| character.is_ascii_alphabetic())
-        .context("port_speed_unit_required")?;
-    let amount = &compact[..unit_start];
-    let unit_input = compact[unit_start..].to_ascii_lowercase();
-    let (unit, multiplier) = match unit_input.as_str() {
-        "bps" => ("bps", 1_u128),
-        "kbps" => ("Kbps", 1_000_u128),
-        "mbps" => ("Mbps", 1_000_000_u128),
-        "gbps" => ("Gbps", 1_000_000_000_u128),
-        "tbps" => ("Tbps", 1_000_000_000_000_u128),
-        _ => anyhow::bail!("port_speed_unit_invalid"),
-    };
-    let (whole, fraction) = amount.split_once('.').unwrap_or((amount, ""));
-    anyhow::ensure!(
-        !whole.is_empty()
-            && whole.chars().all(|character| character.is_ascii_digit())
-            && fraction.len() <= 3
-            && fraction.chars().all(|character| character.is_ascii_digit()),
-        "port_speed_value_invalid"
-    );
-    let scale = 10_u128.pow(fraction.len() as u32);
-    let whole_value = whole.parse::<u128>().context("port_speed_value_invalid")?;
-    let fraction_value = if fraction.is_empty() {
-        0
-    } else {
-        fraction
-            .parse::<u128>()
-            .context("port_speed_value_invalid")?
-    };
-    let scaled = whole_value
-        .checked_mul(scale)
-        .and_then(|value| value.checked_add(fraction_value))
-        .context("port_speed_value_too_large")?;
-    let bps = scaled
-        .checked_mul(multiplier)
-        .context("port_speed_value_too_large")?
-        / scale;
-    anyhow::ensure!(
-        bps > 0 && bps <= i64::MAX as u128,
-        "port_speed_value_invalid"
-    );
-    let normalized_whole = whole.trim_start_matches('0');
-    let normalized_whole = if normalized_whole.is_empty() {
-        "0"
-    } else {
-        normalized_whole
-    };
-    let normalized_fraction = fraction.trim_end_matches('0');
-    let normalized_amount = if normalized_fraction.is_empty() {
-        normalized_whole.to_string()
-    } else {
-        format!("{normalized_whole}.{normalized_fraction}")
-    };
-    let display = format!("{normalized_amount} {unit}");
-    Ok(ParsedRuleValue {
-        raw: display.clone(),
-        json: json!({"bps": bps as i64, "display": display}),
-        display,
-    })
-}
-
-fn normalize_billing_price(input: &str) -> Result<String> {
-    let (whole, fraction) = input.split_once('.').unwrap_or((input, ""));
-    anyhow::ensure!(
-        !whole.is_empty()
-            && whole.len() <= MAX_BILLING_PRICE_WHOLE_DIGITS
-            && whole.chars().all(|character| character.is_ascii_digit())
-            && fraction.len() <= 2
-            && fraction.chars().all(|character| character.is_ascii_digit()),
-        "billing_plan_price_invalid"
-    );
-    let normalized_whole = whole.trim_start_matches('0');
-    let normalized_whole = if normalized_whole.is_empty() {
-        "0"
-    } else {
-        normalized_whole
-    };
-    let normalized_fraction = match fraction.len() {
-        0 => "00".to_string(),
-        1 => format!("{fraction}0"),
-        2 => fraction.to_string(),
-        _ => unreachable!("billing price fraction length was validated"),
-    };
-    Ok(format!("{normalized_whole}.{normalized_fraction}"))
-}
-
 fn parse_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>> {
-    parse_traffic_selector_list_with_options(input, false)
+    let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input)?;
+    traffic_selectors_from_parsed_rule(&parsed)
+}
+
+#[cfg(test)]
+fn parse_traffic_selector(input: &str) -> Result<TrafficSelector> {
+    let mut selectors = parse_traffic_selector_list(input)?;
+    anyhow::ensure!(selectors.len() == 1, "traffic_selector_single_required");
+    Ok(selectors.remove(0))
 }
 
 fn parse_persisted_traffic_selector_list(input: &str) -> Result<Vec<TrafficSelector>> {
-    parse_traffic_selector_list_with_options(input, true)
-}
-
-fn parse_traffic_selector_list_with_options(
-    input: &str,
-    allow_direction_overlap: bool,
-) -> Result<Vec<TrafficSelector>> {
-    let raw = input.trim();
-    anyhow::ensure!(!raw.is_empty(), "traffic_selector_empty");
-    let mut selectors = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut selected_directions = BTreeMap::<(String, String), u8>::new();
-    for item in raw.split(',') {
-        let selector = parse_traffic_selector(item)?;
-        anyhow::ensure!(
-            seen.insert(selector.canonical.clone()),
-            "traffic_selector_duplicate"
-        );
-        let requested_directions = traffic_selector_direction_mask(&selector);
-        let selected = selected_directions
-            .entry((selector.source.clone(), selector.interface.clone()))
-            .or_default();
-        if !allow_direction_overlap {
-            anyhow::ensure!(
-                *selected & requested_directions == 0,
-                "traffic_selector_direction_overlap"
-            );
-        }
-        *selected |= requested_directions;
-        selectors.push(selector);
-    }
-    anyhow::ensure!(
-        selectors.len() <= MAX_TRAFFIC_SELECTOR_ITEMS,
-        "traffic_selector_too_many_items"
-    );
-    Ok(selectors)
+    let parsed = parse_persisted_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input)?;
+    traffic_selectors_from_parsed_rule(&parsed)
 }
 
 fn traffic_selector_direction_mask(selector: &TrafficSelector) -> u8 {
@@ -4894,54 +4965,6 @@ fn claim_traffic_selector_directions(
     let newly_counted = requested & !*counted;
     *counted |= requested;
     (newly_counted & 0b01 != 0, newly_counted & 0b10 != 0)
-}
-
-fn parse_traffic_selector(item: &str) -> Result<TrafficSelector> {
-    let item = item.trim();
-    anyhow::ensure!(!item.is_empty(), "traffic_selector_empty_item");
-    let (source, rest) = if let Some((source, rest)) = item.split_once(':') {
-        let source = source.trim();
-        anyhow::ensure!(
-            source == "host" || source == "tunnel",
-            "traffic_selector_source_invalid"
-        );
-        (source.to_string(), rest)
-    } else {
-        ("host".to_string(), item)
-    };
-    let (interface, direction) = if let Some((interface, direction)) = rest.split_once('+') {
-        (interface.trim(), direction.trim())
-    } else {
-        (rest.trim(), "total")
-    };
-    anyhow::ensure!(!interface.is_empty(), "traffic_selector_interface_required");
-    anyhow::ensure!(
-        interface.len() <= MAX_TRAFFIC_INTERFACE_BYTES
-            && !interface.chars().any(|ch| {
-                ch == ',' || ch == '+' || ch == ':' || ch.is_whitespace() || ch.is_control()
-            }),
-        "traffic_selector_interface_invalid"
-    );
-    anyhow::ensure!(
-        matches!(direction, "rx" | "tx" | "total"),
-        "traffic_selector_direction_invalid"
-    );
-    Ok(TrafficSelector {
-        canonical: if source == "host" {
-            if direction == "total" {
-                interface.to_string()
-            } else {
-                format!("{interface}+{direction}")
-            }
-        } else if direction == "total" {
-            format!("{source}:{interface}")
-        } else {
-            format!("{source}:{interface}+{direction}")
-        },
-        source,
-        interface: interface.to_string(),
-        direction: direction.to_string(),
-    })
 }
 
 fn parse_byte_size(input: &str) -> Result<i64> {
@@ -4975,36 +4998,23 @@ fn parse_byte_size(input: &str) -> Result<i64> {
     Ok(bytes as i64)
 }
 
-fn display_bytes(bytes: i64) -> String {
-    const UNITS: [(&str, f64); 5] = [
-        ("TB", 1_000_000_000_000.0),
-        ("GB", 1_000_000_000.0),
-        ("MB", 1_000_000.0),
-        ("KB", 1_000.0),
-        ("B", 1.0),
-    ];
-    for (unit, factor) in UNITS {
-        if bytes as f64 >= factor || unit == "B" {
-            let value = bytes as f64 / factor;
-            return if unit == "B" {
-                format!("{bytes} B")
-            } else if value >= 10.0 {
-                format!("{value:.0} {unit}")
-            } else {
-                format!("{value:.1} {unit}")
-            };
-        }
-    }
-    format!("{bytes} B")
-}
-
-fn resolve_agents(agents: &[AgentView], selector: &str) -> Result<Vec<AgentView>> {
+fn resolve_agents_with_rule_contexts(
+    agents: &[AgentView],
+    selector: &str,
+    rules_by_client: &HashMap<String, VpsRuleContext>,
+) -> Result<Vec<AgentView>> {
     let expression = parse_selector_expression(selector)
         .map_err(|error| anyhow::anyhow!("invalid selector expression: {error}"))?
         .context("selector expression is empty")?;
     Ok(agents
         .iter()
-        .filter(|agent| agent_matches_selector_expression(agent, &expression))
+        .filter(|agent| {
+            agent_matches_selector_expression_with_rules(
+                agent,
+                &expression,
+                rules_by_client.get(&agent.id),
+            )
+        })
         .cloned()
         .collect())
 }
@@ -5096,8 +5106,8 @@ fn traffic_accounting_for_client_with_selector_override(
     let mut incomplete_reasons = Vec::new();
     let reset_day = rule_map
         .get(VPS_RULE_KEY_TRAFFIC_RESET_DAY)
-        .and_then(|rule| rule.value_json.get("day"))
-        .and_then(Value::as_i64)
+        .and_then(|rule| parse_persisted_vps_rule_value(&rule.key, &rule.value_raw).ok())
+        .and_then(|parsed| parsed.json.get("day").and_then(Value::as_i64))
         .map(|value| value as i32);
     if reset_day.is_none() {
         incomplete_reasons.push("traffic.reset_day missing".to_string());
@@ -5111,7 +5121,7 @@ fn traffic_accounting_for_client_with_selector_override(
             ),
         },
         None => match rule_map.get(VPS_RULE_KEY_TRAFFIC_SELECTORS) {
-            Some(rule) => match parse_persisted_traffic_selector_list(&rule.value_raw) {
+            Some(rule) => match traffic_selectors_from_rule(rule) {
                 Ok(selectors) => (selectors, None),
                 Err(error) => (
                     Vec::new(),
@@ -5395,8 +5405,8 @@ fn derive_cycle_usage(
 fn quota_value(rule_map: &HashMap<&str, &VpsRuleValueRecord>, key: &str) -> Option<i64> {
     rule_map
         .get(key)
-        .and_then(|rule| rule.value_json.get("bytes"))
-        .and_then(Value::as_i64)
+        .and_then(|rule| parse_persisted_vps_rule_value(&rule.key, &rule.value_raw).ok())
+        .and_then(|parsed| parsed.json.get("bytes").and_then(Value::as_i64))
 }
 
 fn percent(value: i64, quota: i64) -> f64 {
@@ -6545,34 +6555,52 @@ fn selector_hash(selectors: &[String]) -> String {
     hex::encode(&digest[..16])
 }
 
+fn canonicalize_vps_rule_record(mut record: VpsRuleValueRecord) -> Result<VpsRuleValueRecord> {
+    let stored_value_raw = record
+        .stored_value_raw
+        .clone()
+        .unwrap_or_else(|| record.value_raw.clone());
+    let parsed = parse_persisted_vps_rule_value(&record.key, &stored_value_raw)?;
+    if record.key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
+        anyhow::ensure!(
+            parsed.json == record.value_json,
+            "network_rate_selector_storage_invalid"
+        );
+    } else if record.key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
+        anyhow::ensure!(
+            parsed.json == record.value_json,
+            "traffic_selector_storage_invalid"
+        );
+    }
+    record.value_raw = parsed.raw;
+    record.stored_value_raw = Some(stored_value_raw);
+    record.value_json = parsed.json;
+    record.parsed_display = parsed.display;
+    Ok(record)
+}
+
 fn vps_rule_from_row(row: sqlx::postgres::PgRow) -> Result<VpsRuleValueRecord> {
     let key: String = row.try_get("key")?;
     let raw: String = row.try_get("value_raw")?;
     let stored_json = row.try_get::<SqlJson<Value>, _>("value_json")?.0;
-    let parsed = if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
-        let parsed = network_rate_selector_rule_value(parse_stored_network_rate_selector_spec(
-            &stored_json,
-        )?);
+    let parsed = parse_persisted_vps_rule_value(&key, &raw)?;
+    if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
         anyhow::ensure!(
             parsed.json == stored_json,
             "network_rate_selector_storage_invalid"
         );
-        parsed
-    } else {
-        let parsed = parse_persisted_vps_rule_value(&key, &raw)?;
-        if key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
-            anyhow::ensure!(
-                parsed.json == stored_json,
-                "traffic_selector_storage_invalid"
-            );
-        }
-        parsed
-    };
+    } else if key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
+        anyhow::ensure!(
+            parsed.json == stored_json,
+            "traffic_selector_storage_invalid"
+        );
+    }
     Ok(VpsRuleValueRecord {
         client_id: row.try_get("client_id")?,
         key,
         value_raw: parsed.raw,
-        value_json: stored_json,
+        stored_value_raw: Some(raw),
+        value_json: parsed.json,
         parsed_display: parsed.display,
         state: "ok".to_string(),
         validation_errors: Vec::new(),

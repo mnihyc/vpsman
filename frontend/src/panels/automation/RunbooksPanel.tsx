@@ -10,7 +10,12 @@ import {
 import { useMemo, useState } from "react";
 import { formatLowerBoundCount } from "../../constants";
 import type { JobDispatchPresetInput } from "../../jobDispatchPreset";
-import { agentsMatchingExpression } from "../../searchExpression";
+import {
+  agentsMatchingExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
+} from "../../searchExpression";
+import { useVpsRuleSearchContext } from "../../vpsRuleSearchContext";
 import type {
   AgentView,
   CommandTemplateRecord,
@@ -60,15 +65,25 @@ export function RunbooksPanel({
   onOpenSchedules,
   onRefresh,
 }: RunbooksPanelProps) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [filter, setFilter] = useState<RunbookFilter>("all");
   const [query, setQuery] = useState("");
   const runbooks = useMemo(
     () =>
       commandTemplates.map((template) => {
         const selectorExpression = selectorForTemplateScope(template);
-        const matchingTargets = selectorExpression.trim()
-          ? agentsMatchingExpression(agents, selectorExpression).length
-          : agents.length;
+        const matchingTargets = vpsRuleSearchUnavailable(
+          selectorExpression,
+          vpsRuleSearch,
+        )
+          ? null
+          : selectorExpression.trim()
+            ? agentsMatchingExpression(
+                agents,
+                selectorExpression,
+                vpsRuleSearch,
+              ).length
+            : agents.length;
         const lastRun = latestRunForTemplate(template, jobs);
         return {
           capability: capabilityForOperation(template.operation),
@@ -88,7 +103,7 @@ export function RunbooksPanel({
           template,
         };
       }),
-    [agents, commandTemplates, jobs],
+    [agents, commandTemplates, jobs, vpsRuleSearch],
   );
   const visibleRunbooks = runbooks.filter((runbook) => {
     if (filter === "built_in" && !runbook.template.built_in) {
@@ -322,7 +337,11 @@ export function RunbooksPanel({
                   </div>
                   <div>
                     <dt>Targets</dt>
-                    <dd>{runbook.matchingTargets} matched</dd>
+                    <dd>
+                      {runbook.matchingTargets === null
+                        ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                        : `${runbook.matchingTargets} matched`}
+                    </dd>
                   </div>
                   <div>
                     <dt>Operation</dt>

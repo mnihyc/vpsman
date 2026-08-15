@@ -32,7 +32,10 @@ import {
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import type {
   AgentView,
   ApplyConfigurationSourceOverrideRequest,
@@ -161,6 +164,7 @@ export function ConfigurationSourcesPanel({
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
   sources: ConfigurationSourceView[];
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [view, setView] = useState<"effective" | "presets">("effective");
   const [drawer, setDrawer] = useState<DrawerState>(null);
@@ -201,14 +205,28 @@ export function ConfigurationSourcesPanel({
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const selectorTargetIds = useMemo(
     () =>
-      selectorExpression.trim() && !parsedAssignmentSelector.error
-        ? agentsMatchingExpression(agents, selectorExpression).map(
-            (agent) => agent.id,
-          )
+      selectorExpression.trim() &&
+      !parsedAssignmentSelector.error &&
+      !selectorEvidenceUnavailable
+        ? agentsMatchingExpression(
+            agents,
+            selectorExpression,
+            vpsRuleSearch,
+          ).map((agent) => agent.id)
         : [],
-    [agents, parsedAssignmentSelector.error, selectorExpression],
+    [
+      agents,
+      parsedAssignmentSelector.error,
+      selectorEvidenceUnavailable,
+      selectorExpression,
+      vpsRuleSearch,
+    ],
   );
   const assignmentTargetIds = useMemo(() => {
     const direct = [...new Set(directTargetIds)];
@@ -1362,9 +1380,11 @@ export function ConfigurationSourcesPanel({
                 <div className="targetSelectorHeader">
                   <strong>Targets</strong>
                   <span>
-                    {parsedAssignmentSelector.error
-                      ? "Fix the selector before review"
-                      : `${assignmentTargetIds.length} ${assignmentTargetIds.length === 1 ? "VPS" : "VPSs"} selected locally`}
+                    {selectorEvidenceUnavailable
+                      ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                      : parsedAssignmentSelector.error
+                        ? "Fix the selector before review"
+                        : `${assignmentTargetIds.length} ${assignmentTargetIds.length === 1 ? "VPS" : "VPSs"} selected locally`}
                   </span>
                 </div>
                 <VpsCombobox

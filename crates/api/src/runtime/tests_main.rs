@@ -149,6 +149,250 @@ async fn memory_namespaced_tags_participate_in_bulk_resolution() {
 }
 
 #[tokio::test]
+async fn memory_vps_rules_participate_in_bulk_resolution_without_agent_payload_changes() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    for client_id in ["client-a", "client-b"] {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: client_id.to_string(),
+                process_incarnation_id: uuid::Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                cpu_model: None,
+                kernel_release: None,
+                virtualization: None,
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: Default::default(),
+            },
+        )
+        .await;
+    }
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "client-a".to_string(),
+            key: "traffic.reset_day".to_string(),
+            value_raw: "15".to_string(),
+            stored_value_raw: None,
+            value_json: serde_json::json!({"day": 15}),
+            parsed_display: "Day 15".to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "2026-08-16T00:00:00Z".to_string(),
+        });
+
+    let present = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: "vps.rules:traffic.reset_day".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(present.target_count, 1);
+    assert_eq!(present.targets[0].id, "client-a");
+
+    let value = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: "vps.rules:traffic.reset_day >= 15".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(value.target_count, 1);
+    assert_eq!(value.targets[0].id, "client-a");
+    assert_eq!(
+        serde_json::to_value(&value.targets[0])
+            .unwrap()
+            .get("rules"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn memory_rule_context_rejects_malformed_stored_values() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: "client-a".to_string(),
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_model: None,
+            kernel_release: None,
+            virtualization: None,
+            update_heartbeat: None,
+            internal_build_number: 1,
+            capabilities: Default::default(),
+        },
+    )
+    .await;
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "client-a".to_string(),
+            key: vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+            value_raw: "bogus".to_string(),
+            stored_value_raw: None,
+            value_json: serde_json::json!({"bps": 1}),
+            parsed_display: "bogus".to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "2026-08-16T00:00:00Z".to_string(),
+        });
+
+    let error = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: "vps.rules:network.port_speed".to_string(),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("port_speed_unit_invalid"));
+}
+
+#[tokio::test]
+async fn complete_rule_loader_exceeds_legacy_cap_and_excludes_hidden_clients() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut agents = Vec::with_capacity(601);
+    let mut rows = Vec::with_capacity(5_409);
+    for index in 0..600 {
+        let client_id = format!("client-{index:04}");
+        agents.push(AgentView {
+            id: client_id.clone(),
+            display_name: client_id.clone(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: Default::default(),
+        });
+        for key in vpsman_common::SUPPORTED_VPS_RULE_KEYS {
+            let value = match key {
+                "billing.price" => "10.00 USD/m",
+                "billing.cycle" => "1",
+                "network.port_speed" => "1 Gbps",
+                "network.rate.interfaces" => "[]",
+                "traffic.reset_day" if index == 599 => "31",
+                "traffic.reset_day" => "1",
+                "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => "1GB",
+                "traffic.selectors" => "eth0",
+                _ => unreachable!(),
+            };
+            let parsed = vpsman_common::parse_vps_rule_value(key, value).unwrap();
+            rows.push(crate::model_alert_policies::VpsRuleValueRecord {
+                client_id: client_id.clone(),
+                key: key.to_string(),
+                value_raw: parsed.raw,
+                stored_value_raw: None,
+                value_json: parsed.json,
+                parsed_display: parsed.display,
+                state: "ok".to_string(),
+                validation_errors: Vec::new(),
+                source_kind: "operator".to_string(),
+                source_id: None,
+                updated_by: None,
+                updated_at: "2026-08-16T00:00:00Z".to_string(),
+            });
+        }
+    }
+    let hidden_id = "hidden-client".to_string();
+    agents.push(AgentView {
+        id: hidden_id.clone(),
+        display_name: hidden_id.clone(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    });
+    for key in vpsman_common::SUPPORTED_VPS_RULE_KEYS {
+        let value = match key {
+            "billing.price" => "10.00 USD/m",
+            "billing.cycle" => "1",
+            "network.port_speed" => "1 Gbps",
+            "network.rate.interfaces" => "[]",
+            "traffic.reset_day" => "31",
+            "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => "1GB",
+            "traffic.selectors" => "eth0",
+            _ => unreachable!(),
+        };
+        let parsed = vpsman_common::parse_vps_rule_value(key, value).unwrap();
+        rows.push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: hidden_id.clone(),
+            key: key.to_string(),
+            value_raw: parsed.raw,
+            stored_value_raw: None,
+            value_json: parsed.json,
+            parsed_display: parsed.display,
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "2026-08-16T00:00:00Z".to_string(),
+        });
+    }
+    let malformed_hidden = rows
+        .iter_mut()
+        .find(|row| {
+            row.client_id == hidden_id && row.key == vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED
+        })
+        .expect("hidden speed rule");
+    malformed_hidden.value_raw = "bogus".to_string();
+    malformed_hidden.value_json = serde_json::json!({"bps": 1});
+    *memory.agents.write().await = agents;
+    *memory.vps_rule_values.write().await = rows;
+    memory.hidden_clients.write().await.insert(hidden_id);
+
+    let visible_rules = repo.list_all_vps_rules().await.unwrap();
+    assert_eq!(visible_rules.len(), 5_400);
+    assert!(visible_rules
+        .iter()
+        .all(|rule| rule.client_id != "hidden-client"));
+    let late_match = repo
+        .resolve_bulk_targets(&BulkResolveRequest {
+            selector_expression: "vps.rules:traffic.reset_day >= 31".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(late_match.target_count, 1);
+    assert_eq!(late_match.targets[0].id, "client-0599");
+}
+
+#[tokio::test]
 async fn memory_tag_order_controls_registry_and_agent_tag_reads() {
     let repo = Repository::Memory(MemoryState::default());
     if let Repository::Memory(memory) = &repo {

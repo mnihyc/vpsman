@@ -1,0 +1,105 @@
+{
+  "normalization_cases": [
+    { "name": "reset_day_leading_zero", "key": "traffic.reset_day", "input": "014", "canonical": "14" },
+    { "name": "reset_day_explicit_plus", "key": "traffic.reset_day", "input": "+001", "canonical": "1" },
+    { "name": "decimal_quota_spacing_and_case", "key": "traffic.quota.total", "input": " 04.00 tb ", "canonical": "4TB" },
+    { "name": "binary_quota_unit", "key": "traffic.quota.rx", "input": "1.5 gib", "canonical": "1.5GiB" },
+    { "name": "unlimited_quota", "key": "traffic.quota.tx", "input": "-1", "canonical": "-1" },
+    { "name": "selector_spacing", "key": "traffic.selectors", "input": " ens3, eth0+tx ", "canonical": "ens3,eth0+tx" },
+    { "name": "billing_price_spacing", "key": "billing.price", "input": "29.9 cny / M", "canonical": "29.90 CNY/m" },
+    { "name": "billing_fullwidth_yen", "key": "billing.price", "input": "29.9 ￥ / M", "canonical": "29.90 ¥/m" },
+    { "name": "billing_disabled_spacing", "key": "billing.price", "input": " - 1 ", "canonical": "-1" },
+    { "name": "billing_cycle_padding", "key": "billing.cycle", "input": "6-15", "canonical": "06-15" },
+    { "name": "billing_cycle_long_leading_zero", "key": "billing.cycle", "input": "0006-0015", "canonical": "06-15" },
+    { "name": "billing_cycle_explicit_plus", "key": "billing.cycle", "input": "+006-+015", "canonical": "06-15" },
+    { "name": "port_speed_spacing", "key": "network.port_speed", "input": " 1.500 gbps ", "canonical": "1.5 Gbps" },
+    { "name": "rate_interface_host_prefix", "key": "network.rate.interfaces", "input": " host:eth0, eth1+tx ", "canonical": "eth0,eth1+tx" },
+    { "name": "rate_interface_reference", "key": "network.rate.interfaces", "input": "[traffic.selectors]", "canonical": "[traffic.selectors]" },
+    { "name": "quota_above_javascript_safe_integer", "key": "traffic.quota.total", "input": " 9007199254740993 B ", "canonical": "9007199254740993B" },
+    { "name": "quota_i64_maximum", "key": "traffic.quota.rx", "input": "9223372036854775807b", "canonical": "9223372036854775807B" },
+    { "name": "quota_exact_half_up", "key": "traffic.quota.tx", "input": "0.000000000000500000000001 tb", "canonical": "0.000000000000500000000001TB" },
+    { "name": "selector_token_case", "key": "traffic.selectors", "input": " HOST:eth0+TX, TUNNEL:wg0+RX ", "canonical": "eth0+tx,tunnel:wg0+rx" }
+  ],
+  "invalid_normalization_cases": [
+    { "name": "quota_above_i64_maximum", "key": "traffic.quota.total", "input": "9223372036854775808B", "error_contains": "byte_size_too_large" },
+    { "name": "quota_internal_numeric_whitespace", "key": "traffic.quota.total", "input": "1 0GB", "error_contains": "byte_size_unit_invalid" },
+    { "name": "speed_internal_numeric_whitespace", "key": "network.port_speed", "input": "1 0Gbps", "error_contains": "port_speed_value_invalid" },
+    { "name": "billing_internal_numeric_whitespace", "key": "billing.price", "input": "2 9.90 CNY/m", "error_contains": "billing_plan_price_invalid" },
+    { "name": "billing_unicode_casefold", "key": "billing.price", "input": "29.90 ısd/m", "error_contains": "billing_plan_currency_invalid" },
+    { "name": "billing_cycle_month_first_range", "key": "billing.cycle", "input": "13-15", "error_contains": "billing_cycle_month_invalid" },
+    { "name": "billing_cycle_day_second_range", "key": "billing.cycle", "input": "06-32", "error_contains": "billing_cycle_day_invalid" },
+    { "name": "billing_cycle_impossible_date", "key": "billing.cycle", "input": "02-30", "error_contains": "billing_cycle_day_invalid" },
+    { "name": "selector_duplicate", "key": "traffic.selectors", "input": "eth0, eth0", "error_contains": "traffic_selector_duplicate" },
+    { "name": "selector_direction_overlap", "key": "traffic.selectors", "input": "eth0, eth0+rx", "error_contains": "traffic_selector_direction_overlap" },
+    { "name": "selector_interface_utf8_byte_limit", "key": "traffic.selectors", "input": "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé", "error_contains": "traffic_selector_interface_invalid" }
+  ],
+  "contexts": {
+    "configured": {
+      "rules": [
+        { "key": "traffic.reset_day", "raw": "15", "json": { "day": 15 } },
+        { "key": "traffic.quota.total", "raw": "9007199254740993B", "json": { "bytes": "9007199254740993" } },
+        { "key": "network.port_speed", "raw": "1.5 Gbps", "json": { "bps": 1500000000 } },
+        { "key": "billing.price", "raw": "29.90 CNY/m", "json": { "disabled": false, "price": "29.90", "currency": "CNY", "period_code": "m" } },
+        { "key": "billing.cycle", "raw": "06-15", "json": { "day": 15, "month": 6, "display": "06-15" } },
+        { "key": "traffic.selectors", "raw": "ens3,eth0+tx", "json": { "selectors": [] } }
+      ]
+    },
+    "sentinels": {
+      "rules": [
+        { "key": "traffic.reset_day", "raw": "-1", "json": { "day": -1 } },
+        { "key": "traffic.quota.total", "raw": "-1", "json": { "bytes": -1, "unlimited": true } },
+        { "key": "billing.price", "raw": "-1", "json": { "disabled": true } }
+      ]
+    },
+    "fractional_rounding": {
+      "rules": [
+        { "key": "traffic.quota.total", "raw": "0.000000000000500000000001TB", "json": { "bytes": 1 } }
+      ]
+    },
+    "empty": { "rules": [] }
+  },
+  "expression_cases": [
+    { "name": "any_configured_rule", "expression": "vps.rules:*", "matches": ["configured", "sentinels", "fractional_rounding"] },
+    { "name": "exact_key_presence", "expression": "vps.rules:network.port_speed", "matches": ["configured"] },
+    { "name": "uppercase_protocol_identifiers", "expression": "VPS.RULES:TRAFFIC.RESET_DAY = 15", "matches": ["configured"] },
+    { "name": "uppercase_key_presence", "expression": "VPS.RULES:TRAFFIC.RESET_DAY", "matches": ["configured", "sentinels"] },
+    { "name": "uppercase_key_membership", "expression": "VPS.RULES in [TRAFFIC.RESET_DAY]", "matches": ["configured", "sentinels"] },
+    { "name": "key_glob", "expression": "vps.rules:traffic.quota.*", "matches": ["configured", "sentinels", "fractional_rounding"] },
+    { "name": "key_regex", "expression": "vps.rules in [/^billing\\./]", "matches": ["configured", "sentinels"] },
+    { "name": "normalized_speed_equality", "expression": "vps.rules:network.port_speed = 1.500gbps", "matches": ["configured"] },
+    { "name": "normalized_selector_equality", "expression": "vps.rules:traffic.selectors = \"ens3, eth0+tx\"", "matches": ["configured"] },
+    { "name": "normalized_billing_cycle_equality", "expression": "vps.rules:billing.cycle = 6-15", "matches": ["configured"] },
+    { "name": "raw_glob", "expression": "vps.rules:network.port_speed = *Gbps", "matches": ["configured"] },
+    { "name": "raw_regex", "expression": "vps.rules:billing.price in [/CNY\\/m$/]", "matches": ["configured"] },
+    { "name": "normalized_inequality", "expression": "vps.rules:network.port_speed != 2Gbps", "matches": ["configured"] },
+    { "name": "reset_day_order", "expression": "vps.rules:traffic.reset_day >= 15", "matches": ["configured"] },
+    { "name": "quota_order", "expression": "vps.rules:traffic.quota.total >= 3.5TB", "matches": ["configured"] },
+    { "name": "quota_order_above_javascript_safe_integer", "expression": "vps.rules:traffic.quota.total >= 9007199254740993B", "matches": ["configured"] },
+    { "name": "quota_order_exact_strict_boundary", "expression": "vps.rules:traffic.quota.total > 9007199254740992B", "matches": ["configured"] },
+    { "name": "quota_fractional_rounds_half_up", "expression": "vps.rules:traffic.quota.total <= 1B", "matches": ["fractional_rounding"] },
+    { "name": "speed_order", "expression": "vps.rules:network.port_speed > 1000Mbps", "matches": ["configured"] },
+    { "name": "billing_order_same_unit", "expression": "vps.rules:billing.price < \"50 USD/m\"", "matches": [] },
+    { "name": "billing_order_same_currency_period", "expression": "vps.rules:billing.price < \"50 CNY/m\"", "matches": ["configured"] },
+    { "name": "billing_order_period_mismatch", "expression": "vps.rules:billing.price < \"50 CNY/y\"", "matches": [] },
+    { "name": "sentinel_raw_equality", "expression": "vps.rules:traffic.quota.total = -1", "matches": ["sentinels"] },
+    { "name": "sentinels_excluded_from_order", "expression": "vps.rules:traffic.quota.total < 1TB", "matches": ["fractional_rounding"] },
+    { "name": "missing_not_equal_is_false", "expression": "vps.rules:network.port_speed != 1Gbps", "matches": ["configured"] },
+    { "name": "missing_not_in_is_false", "expression": "vps.rules:network.port_speed not in [1Gbps]", "matches": ["configured"] },
+    { "name": "regex_is_case_sensitive", "expression": "vps.rules:billing.price in [/cny\\/m$/]", "matches": [] },
+    { "name": "explicit_absence", "expression": "!(vps.rules:network.port_speed)", "matches": ["sentinels", "fractional_rounding", "empty"] }
+  ],
+  "invalid_expressions": [
+    { "expression": "vps.rules:billing.cycle > 7", "error_contains": "does not support ordered comparisons" },
+    { "expression": "vps.rules:traffic.reset_day > -1", "error_contains": "day from 1 to 31" },
+    { "expression": "vps.rules:traffic.quota.total > plenty", "error_contains": "positive byte size" },
+    { "expression": "vps.rules:network.port_speed > 100", "error_contains": "positive speed" },
+    { "expression": "vps.rules:billing.price > 50", "error_contains": "currency and period" },
+    { "expression": "vps.rules:billing.price > \"1000000000 USD/m\"", "error_contains": "positive amount" },
+    { "expression": "vps.rules:billing.price > \"50 USD/month\"", "error_contains": "currency and period" },
+    { "expression": "vps.rules:traffic.quota.total > 9223372036854775808B", "error_contains": "positive byte size" },
+    { "expression": "vps.rules:unknown.rule = value", "error_contains": "unsupported VPS rule key" },
+    { "expression": "vps.rules.billing.price = \"29.90 CNY/m\"", "error_contains": "use vps.rules:<key>" },
+    { "expression": "vps.rules", "error_contains": "use vps.rules:<key>" },
+    { "expression": "vps.rules.billing.price", "error_contains": "use vps.rules:<key>" }
+  ]
+}

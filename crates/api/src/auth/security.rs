@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::http::HeaderMap;
 use rand::RngCore;
-use vpsman_common::payload_hash;
+use vpsman_common::{expression_references_vps_rules, payload_hash, Expression};
 pub(crate) use vpsman_server_core::{
     default_operator_scopes, operator_has_scope, operator_role_rank, role_allows,
 };
@@ -31,6 +31,17 @@ pub(crate) const SCOPE_SHARING_WRITE: &str = "sharing:write";
 const ARGON2_MEMORY_KIB: u32 = 19_456;
 const ARGON2_TIME_COST: u32 = 2;
 const ARGON2_PARALLELISM: u32 = 1;
+
+pub(crate) fn require_vps_rule_selector_scope(
+    scopes: &[String],
+    expression: &Expression,
+) -> Result<(), ApiError> {
+    if expression_references_vps_rules(expression) && !operator_has_scope(scopes, SCOPE_CONFIG_READ)
+    {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    Ok(())
+}
 
 pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let value = headers
@@ -154,4 +165,27 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0_u8, |acc, (left, right)| acc | (left ^ right))
         == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vps_rule_selector_scope_is_conditional() {
+        let ordinary = vpsman_common::parse_expression("status:online")
+            .unwrap()
+            .unwrap();
+        assert!(require_vps_rule_selector_scope(&["fleet:read".to_string()], &ordinary).is_ok());
+
+        let rule = vpsman_common::parse_expression("vps.rules:traffic.reset_day")
+            .unwrap()
+            .unwrap();
+        let denied =
+            require_vps_rule_selector_scope(&["fleet:read".to_string()], &rule).unwrap_err();
+        assert_eq!(denied.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(denied.code, "operator_scope_insufficient");
+        assert!(require_vps_rule_selector_scope(&[SCOPE_CONFIG_READ.to_string()], &rule).is_ok());
+        assert!(require_vps_rule_selector_scope(&["*".to_string()], &rule).is_ok());
+    }
 }

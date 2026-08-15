@@ -4,15 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub(crate) const VPS_RULE_KEY_TRAFFIC_RESET_DAY: &str = "traffic.reset_day";
-pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL: &str = "traffic.quota.total";
-pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_RX: &str = "traffic.quota.rx";
-pub(crate) const VPS_RULE_KEY_TRAFFIC_QUOTA_TX: &str = "traffic.quota.tx";
-pub(crate) const VPS_RULE_KEY_TRAFFIC_SELECTORS: &str = "traffic.selectors";
-pub(crate) const VPS_RULE_KEY_BILLING_PRICE: &str = "billing.price";
-pub(crate) const VPS_RULE_KEY_BILLING_CYCLE: &str = "billing.cycle";
-pub(crate) const VPS_RULE_KEY_NETWORK_PORT_SPEED: &str = "network.port_speed";
-pub(crate) const VPS_RULE_KEY_NETWORK_RATE_INTERFACES: &str = "network.rate.interfaces";
+pub(crate) use vpsman_common::{
+    VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
+    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
+    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
+};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NetworkRateInterfaceSelection {
@@ -90,6 +87,8 @@ pub(crate) struct VpsRuleValueRecord {
     pub(crate) client_id: String,
     pub(crate) key: String,
     pub(crate) value_raw: String,
+    #[serde(skip)]
+    pub(crate) stored_value_raw: Option<String>,
     pub(crate) value_json: Value,
     pub(crate) parsed_display: String,
     pub(crate) state: String,

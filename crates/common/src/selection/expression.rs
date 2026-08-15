@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::Value;
 
+use crate::{parse_persisted_vps_rule_value, parse_vps_rule_value, SUPPORTED_VPS_RULE_KEYS};
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expression {
     Predicate(Predicate),
@@ -53,6 +55,7 @@ pub enum ListValue {
 #[derive(Clone, Debug, Default)]
 pub struct ExpressionContext {
     pub vps: Option<VpsMetadata>,
+    pub vps_rules: Option<VpsRuleContext>,
     pub rule: Option<Value>,
     pub event: Option<Value>,
     pub query: Option<Value>,
@@ -78,6 +81,19 @@ pub struct VpsMetadata {
     pub stale_since: Option<String>,
     pub stale_reason: Option<String>,
     pub extra: Option<Value>,
+}
+
+pub const VPS_RULE_FIELD: &str = "vps.rules";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct VpsRuleValue {
+    pub value_raw: String,
+    pub value_json: Value,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VpsRuleContext {
+    pub values: BTreeMap<String, VpsRuleValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +139,7 @@ pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
     if parser.peek().is_some() {
         return Err("unexpected token after expression".to_string());
     }
+    validate_expression(&expression)?;
     Ok(Some(expression))
 }
 
@@ -164,6 +181,19 @@ pub fn expression_referenced_events(expression: &Expression) -> BTreeSet<String>
     events
 }
 
+pub fn expression_references_vps_rules(expression: &Expression) -> bool {
+    match expression {
+        Expression::Predicate(Predicate::Comparison { field, .. })
+        | Expression::Predicate(Predicate::Membership { field, .. }) => is_vps_rule_field(field),
+        Expression::Predicate(Predicate::Bare(raw)) => is_vps_rule_field(raw),
+        Expression::Predicate(_) => false,
+        Expression::Not(inner) => expression_references_vps_rules(inner),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            expression_references_vps_rules(left) || expression_references_vps_rules(right)
+        }
+    }
+}
+
 impl ExpressionContext {
     pub fn for_vps(vps: VpsMetadata) -> Self {
         Self {
@@ -175,6 +205,11 @@ impl ExpressionContext {
     pub fn with_event_predicate(mut self, predicate: impl Into<String>) -> Self {
         self.event_predicates
             .insert(predicate.into().to_ascii_lowercase());
+        self
+    }
+
+    pub fn with_vps_rules(mut self, vps_rules: VpsRuleContext) -> Self {
+        self.vps_rules = Some(vps_rules);
         self
     }
 
@@ -194,6 +229,39 @@ impl ExpressionContext {
             }
         }
         self
+    }
+}
+
+impl VpsRuleValue {
+    pub fn new(value_raw: impl Into<String>, value_json: Value) -> Self {
+        Self {
+            value_raw: value_raw.into(),
+            value_json,
+        }
+    }
+}
+
+impl VpsRuleContext {
+    pub fn from_values(values: impl IntoIterator<Item = (String, VpsRuleValue)>) -> Self {
+        let mut context = Self::default();
+        for (key, value) in values {
+            context
+                .values
+                .insert(key.trim().to_ascii_lowercase(), value);
+        }
+        context
+    }
+
+    pub fn insert(
+        &mut self,
+        key: impl Into<String>,
+        value_raw: impl Into<String>,
+        value_json: Value,
+    ) -> Option<VpsRuleValue> {
+        self.values.insert(
+            key.into().trim().to_ascii_lowercase(),
+            VpsRuleValue::new(value_raw, value_json),
+        )
     }
 }
 
@@ -787,6 +855,193 @@ fn canonical_field(field: &str) -> String {
     }
 }
 
+pub fn validate_expression(expression: &Expression) -> Result<(), String> {
+    match expression {
+        Expression::Predicate(predicate) => validate_predicate(predicate),
+        Expression::Not(inner) => validate_expression(inner),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            validate_expression(left)?;
+            validate_expression(right)
+        }
+    }
+}
+
+fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
+    match predicate {
+        Predicate::Comparison {
+            field,
+            operator,
+            value: ScalarValue::Literal(expected),
+        } => validate_vps_rule_comparison(field, *operator, expected),
+        Predicate::Membership {
+            field,
+            negated,
+            values,
+        } => validate_vps_rule_membership(field, *negated, values),
+        Predicate::Bare(raw) => validate_vps_rule_bare(raw),
+        Predicate::Event(_) | Predicate::Untagged => Ok(()),
+    }
+}
+
+fn validate_vps_rule_bare(raw: &str) -> Result<(), String> {
+    let raw = raw.to_ascii_lowercase();
+    if raw == VPS_RULE_FIELD || raw.starts_with("vps.rules.") {
+        return Err(
+            "choose a VPS rule; use vps.rules:<key>, for example vps.rules:traffic.reset_day"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_vps_rule_comparison(
+    field: &str,
+    operator: ComparisonOperator,
+    expected: &str,
+) -> Result<(), String> {
+    let field = field.to_ascii_lowercase();
+    if field == VPS_RULE_FIELD {
+        return match operator {
+            ComparisonOperator::Eq => validate_vps_rule_key_pattern(expected),
+            ComparisonOperator::NotEq => {
+                Err("vps.rules key absence uses !(vps.rules:<key>), not !=".to_string())
+            }
+            ComparisonOperator::Lt
+            | ComparisonOperator::Lte
+            | ComparisonOperator::Gt
+            | ComparisonOperator::Gte => {
+                Err("vps.rules key presence does not support ordered comparisons".to_string())
+            }
+        };
+    }
+    let Some(key) = field.strip_prefix("vps.rules:") else {
+        if field.starts_with("vps.rules.") {
+            return Err(
+                "VPS rule values use vps.rules:<key>, for example vps.rules:traffic.reset_day"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    };
+    validate_vps_rule_key(key)?;
+    if matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq)
+        && !expected.contains('*')
+        && !expected.contains('?')
+    {
+        parse_vps_rule_value(key, expected)
+            .map_err(|error| format!("invalid value for VPS rule `{key}`: {error}"))?;
+    }
+    if !is_order_operator(operator) {
+        return Ok(());
+    }
+    validate_vps_rule_order_rhs(key, expected)
+}
+
+fn validate_vps_rule_membership(
+    field: &str,
+    negated: bool,
+    values: &[ListValue],
+) -> Result<(), String> {
+    let field = field.to_ascii_lowercase();
+    if field == VPS_RULE_FIELD {
+        if negated {
+            return Err(
+                "vps.rules key absence uses unary ! around a presence expression, not `not in`"
+                    .to_string(),
+            );
+        }
+        for value in values {
+            if let ListValue::Literal(value) = value {
+                validate_vps_rule_key_pattern(value)?;
+            }
+        }
+        return Ok(());
+    }
+    if let Some(key) = field.strip_prefix("vps.rules:") {
+        validate_vps_rule_key(key)?;
+        for value in values {
+            if let ListValue::Literal(value) = value {
+                if !value.contains('*') && !value.contains('?') {
+                    parse_vps_rule_value(key, value)
+                        .map_err(|error| format!("invalid value for VPS rule `{key}`: {error}"))?;
+                }
+            }
+        }
+        return Ok(());
+    }
+    if field.starts_with("vps.rules.") {
+        return Err(
+            "VPS rule values use vps.rules:<key>, for example vps.rules:traffic.reset_day"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_vps_rule_key_pattern(pattern: &str) -> Result<(), String> {
+    if pattern.contains('*') || pattern.contains('?') {
+        return Ok(());
+    }
+    validate_vps_rule_key(&pattern.to_ascii_lowercase())
+}
+
+fn validate_vps_rule_key(key: &str) -> Result<(), String> {
+    if SUPPORTED_VPS_RULE_KEYS.contains(&key) {
+        Ok(())
+    } else {
+        Err(format!("unsupported VPS rule key `{key}`"))
+    }
+}
+
+fn validate_vps_rule_order_rhs(key: &str, expected: &str) -> Result<(), String> {
+    let valid = match key {
+        "traffic.reset_day" => expected_vps_rule_json_integer(key, expected, "day")
+            .is_some_and(|value| (1..=31).contains(&value)),
+        "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => {
+            expected_vps_rule_json_integer(key, expected, "bytes").is_some_and(|value| value >= 0)
+        }
+        "network.port_speed" => {
+            expected_vps_rule_json_integer(key, expected, "bps").is_some_and(|value| value > 0)
+        }
+        "billing.price" => parse_billing_price_order_value(expected).is_some(),
+        _ => {
+            return Err(format!(
+                "VPS rule `{key}` does not support ordered comparisons"
+            ));
+        }
+    };
+    if valid {
+        return Ok(());
+    }
+    let requirement = match key {
+        "traffic.reset_day" => "a day from 1 to 31",
+        "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => {
+            "a positive byte size using B, KB, MB, GB, TB, KiB, MiB, GiB, or TiB"
+        }
+        "network.port_speed" => "a positive speed using bps, Kbps, Mbps, Gbps, or Tbps",
+        "billing.price" => "a positive amount with currency and period, such as 50 USD/m",
+        _ => unreachable!("unsupported ordered keys return above"),
+    };
+    Err(format!(
+        "VPS rule `{key}` ordered comparison requires {requirement}"
+    ))
+}
+
+fn is_order_operator(operator: ComparisonOperator) -> bool {
+    matches!(
+        operator,
+        ComparisonOperator::Lt
+            | ComparisonOperator::Lte
+            | ComparisonOperator::Gt
+            | ComparisonOperator::Gte
+    )
+}
+
+fn is_vps_rule_field(field: &str) -> bool {
+    let field = field.to_ascii_lowercase();
+    field == VPS_RULE_FIELD || field.starts_with("vps.rules:") || field.starts_with("vps.rules.")
+}
+
 fn predicate_matches(context: &ExpressionContext, predicate: &Predicate) -> bool {
     match predicate {
         Predicate::Bare(raw) => bare_matches(context, raw),
@@ -819,6 +1074,21 @@ fn comparison_matches(
     value: &ScalarValue,
 ) -> bool {
     let ScalarValue::Literal(expected) = value;
+    if matches!(operator, ComparisonOperator::Eq | ComparisonOperator::NotEq)
+        && !expected.contains('*')
+        && !expected.contains('?')
+        && field.to_ascii_lowercase().starts_with("vps.rules:")
+    {
+        return vps_rule_exact_comparison_matches(
+            context.vps_rules.as_ref(),
+            field,
+            operator,
+            expected,
+        );
+    }
+    if is_order_operator(operator) && field.to_ascii_lowercase().starts_with("vps.rules:") {
+        return vps_rule_order_matches(context.vps_rules.as_ref(), field, operator, expected);
+    }
     let Some(values) = field_values(context, field) else {
         return false;
     };
@@ -833,6 +1103,9 @@ fn membership_matches(
     negated: bool,
     values: &[ListValue],
 ) -> bool {
+    if field.to_ascii_lowercase().starts_with("vps.rules:") {
+        return vps_rule_membership_matches(context.vps_rules.as_ref(), field, negated, values);
+    }
     let Some(actual_values) = field_values(context, field) else {
         return false;
     };
@@ -916,6 +1189,189 @@ fn order_field_value(actual: &FieldValue, operator: ComparisonOperator, expected
         }
     }
     false
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BillingPriceOrderValue {
+    amount_minor: i128,
+    currency: String,
+    period: String,
+}
+
+fn vps_rule_exact_comparison_matches(
+    rules: Option<&VpsRuleContext>,
+    field: &str,
+    operator: ComparisonOperator,
+    expected: &str,
+) -> bool {
+    let field = field.to_ascii_lowercase();
+    let Some(key) = field.strip_prefix("vps.rules:") else {
+        return false;
+    };
+    let Some(rule) = rules.and_then(|rules| rules.values.get(key)) else {
+        return false;
+    };
+    let Some((actual, expected)) = normalized_rule_values(key, rule, expected) else {
+        return false;
+    };
+    let matched = actual.eq_ignore_ascii_case(&expected);
+    match operator {
+        ComparisonOperator::Eq => matched,
+        ComparisonOperator::NotEq => !matched,
+        _ => false,
+    }
+}
+
+fn vps_rule_membership_matches(
+    rules: Option<&VpsRuleContext>,
+    field: &str,
+    negated: bool,
+    values: &[ListValue],
+) -> bool {
+    let field = field.to_ascii_lowercase();
+    let Some(key) = field.strip_prefix("vps.rules:") else {
+        return false;
+    };
+    let Some(rule) = rules.and_then(|rules| rules.values.get(key)) else {
+        return false;
+    };
+    let matched = values.iter().any(|expected| match expected {
+        ListValue::Regex(pattern) => {
+            Regex::new(pattern).is_ok_and(|regex| regex.is_match(&rule.value_raw))
+        }
+        ListValue::Literal(pattern) if pattern.contains('*') || pattern.contains('?') => {
+            literal_matches(&rule.value_raw, pattern, false)
+        }
+        ListValue::Literal(expected) => normalized_rule_values(key, rule, expected)
+            .is_some_and(|(actual, expected)| actual.eq_ignore_ascii_case(&expected)),
+    });
+    if negated {
+        !matched
+    } else {
+        matched
+    }
+}
+
+fn normalized_rule_values(
+    key: &str,
+    actual: &VpsRuleValue,
+    expected: &str,
+) -> Option<(String, String)> {
+    let actual = parse_persisted_vps_rule_value(key, &actual.value_raw)
+        .ok()?
+        .raw;
+    let expected = parse_vps_rule_value(key, expected).ok()?.raw;
+    Some((actual, expected))
+}
+
+fn vps_rule_order_matches(
+    rules: Option<&VpsRuleContext>,
+    field: &str,
+    operator: ComparisonOperator,
+    expected: &str,
+) -> bool {
+    let field = field.to_ascii_lowercase();
+    let Some(key) = field.strip_prefix("vps.rules:") else {
+        return false;
+    };
+    let Some(rule) = rules.and_then(|rules| rules.values.get(key)) else {
+        return false;
+    };
+    match key {
+        "traffic.reset_day" => parsed_vps_rule_json_integer(rule, key, "day")
+            .filter(|value| (1..=31).contains(value))
+            .zip(
+                expected_vps_rule_json_integer(key, expected, "day")
+                    .filter(|value| (1..=31).contains(value)),
+            )
+            .is_some_and(|(actual, expected)| compare_order(actual, expected, operator)),
+        "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => {
+            parsed_vps_rule_json_integer(rule, key, "bytes")
+                .filter(|value| *value >= 0)
+                .zip(
+                    expected_vps_rule_json_integer(key, expected, "bytes")
+                        .filter(|value| *value >= 0),
+                )
+                .is_some_and(|(actual, expected)| compare_order(actual, expected, operator))
+        }
+        "network.port_speed" => parsed_vps_rule_json_integer(rule, key, "bps")
+            .filter(|value| *value > 0)
+            .zip(expected_vps_rule_json_integer(key, expected, "bps").filter(|value| *value > 0))
+            .is_some_and(|(actual, expected)| compare_order(actual, expected, operator)),
+        "billing.price" => billing_price_from_rule(rule)
+            .zip(parse_billing_price_order_value(expected))
+            .filter(|(actual, expected)| {
+                actual.currency == expected.currency && actual.period == expected.period
+            })
+            .is_some_and(|(actual, expected)| {
+                compare_order(actual.amount_minor, expected.amount_minor, operator)
+            }),
+        _ => false,
+    }
+}
+
+fn vps_rule_json_integer(value: &Value, field: &str) -> Option<i128> {
+    let value = value.get(field)?;
+    value
+        .as_i64()
+        .map(i128::from)
+        .or_else(|| value.as_u64().map(i128::from))
+        .or_else(|| value.as_str()?.parse::<i128>().ok())
+}
+
+fn parsed_vps_rule_json_integer(rule: &VpsRuleValue, key: &str, field: &str) -> Option<i128> {
+    let parsed = parse_persisted_vps_rule_value(key, &rule.value_raw).ok()?;
+    vps_rule_json_integer(&parsed.json, field)
+}
+
+fn expected_vps_rule_json_integer(key: &str, value: &str, field: &str) -> Option<i128> {
+    let parsed = parse_vps_rule_value(key, value).ok()?;
+    vps_rule_json_integer(&parsed.json, field)
+}
+
+fn parse_billing_price_order_value(value: &str) -> Option<BillingPriceOrderValue> {
+    let parsed = parse_vps_rule_value("billing.price", value).ok()?;
+    billing_price_from_json(&parsed.json, false)
+}
+
+fn billing_price_from_rule(rule: &VpsRuleValue) -> Option<BillingPriceOrderValue> {
+    let parsed = parse_persisted_vps_rule_value("billing.price", &rule.value_raw).ok()?;
+    billing_price_from_json(&parsed.json, true)
+}
+
+fn billing_price_from_json(value: &Value, allow_zero: bool) -> Option<BillingPriceOrderValue> {
+    if value
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let amount_minor = parse_billing_amount_minor(value.get("price")?.as_str()?)?;
+    if !allow_zero && amount_minor == 0 {
+        return None;
+    }
+    Some(BillingPriceOrderValue {
+        amount_minor,
+        currency: value.get("currency")?.as_str()?.to_ascii_uppercase(),
+        period: value.get("period_code")?.as_str()?.to_ascii_lowercase(),
+    })
+}
+
+fn parse_billing_amount_minor(value: &str) -> Option<i128> {
+    let (whole, fraction) = value.split_once('.')?;
+    if whole.is_empty()
+        || !whole.bytes().all(|digit| digit.is_ascii_digit())
+        || fraction.len() != 2
+        || !fraction.bytes().all(|digit| digit.is_ascii_digit())
+    {
+        return None;
+    }
+    whole
+        .parse::<i128>()
+        .ok()?
+        .checked_mul(100)?
+        .checked_add(fraction.parse::<i128>().ok()?)
 }
 
 fn compare_order<T: Ord>(actual: T, expected: T, operator: ComparisonOperator) -> bool {
@@ -1007,6 +1463,9 @@ fn glob_matches(value: &str, pattern: &str) -> bool {
 
 fn field_values(context: &ExpressionContext, field: &str) -> Option<Vec<FieldValue>> {
     let field = canonical_field(field);
+    if let Some(values) = vps_rule_field_values(context.vps_rules.as_ref(), &field) {
+        return Some(values);
+    }
     if let Some(values) = vps_field_values(context.vps.as_ref(), &field) {
         return Some(values);
     }
@@ -1023,6 +1482,23 @@ fn field_values(context: &ExpressionContext, field: &str) -> Option<Vec<FieldVal
         other => context.objects.get(other),
     }?;
     json_path_values(value, path)
+}
+
+fn vps_rule_field_values(rules: Option<&VpsRuleContext>, field: &str) -> Option<Vec<FieldValue>> {
+    if field == VPS_RULE_FIELD {
+        let rules = rules?;
+        return Some(
+            rules
+                .values
+                .keys()
+                .cloned()
+                .map(FieldValue::String)
+                .collect(),
+        );
+    }
+    let key = field.strip_prefix("vps.rules:")?;
+    let rule = rules?.values.get(key)?;
+    Some(vec![FieldValue::String(rule.value_raw.clone())])
 }
 
 fn collect_expression_roots(expression: &Expression, roots: &mut BTreeSet<String>) {

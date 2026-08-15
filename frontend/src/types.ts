@@ -1294,6 +1294,7 @@ export type PingTargetView = {
     reason: string;
   };
   target_update_available: boolean;
+  target_update_evidence_available: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -1427,6 +1428,7 @@ export type MonitoringShareView = {
   target_count: number;
   target_client_ids: string[];
   target_update_available: boolean;
+  target_update_evidence_available: boolean;
   visibility: MonitoringShareVisibilityView;
   status: string;
   expires_at: string;

@@ -1251,6 +1251,7 @@ fn dashboard_test_rate_rule(
         client_id: client_id.to_string(),
         key: crate::model_alert_policies::VPS_RULE_KEY_NETWORK_RATE_INTERFACES.to_string(),
         value_raw: interface.to_string(),
+        stored_value_raw: None,
         value_json: json!({
             "mode": "exact",
             "selectors": [{

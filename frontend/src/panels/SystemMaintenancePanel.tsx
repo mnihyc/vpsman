@@ -15,8 +15,12 @@ import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { scrollIntoViewWithMotion } from "../motion";
 import {
   agentsMatchingExpression,
+  type AgentSearchContext,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMaintenance";
 import type {
   AgentView,
@@ -208,6 +212,7 @@ function StaleSelectorMaintenancePanel({
   ) => Promise<BulkResolveResponse>;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [schedules, setSchedules] = useState<ScheduleRecord[]>([]);
   const [pingTargets, setPingTargets] = useState<PingTargetView[]>([]);
   const [shares, setShares] = useState<MonitoringShareView[]>([]);
@@ -266,8 +271,9 @@ function StaleSelectorMaintenancePanel({
   }, [error, privilegeMaterial]);
 
   const rows = useMemo(
-    () => staleSelectorRows(schedules, pingTargets, shares, agents),
-    [agents, pingTargets, schedules, shares],
+    () =>
+      staleSelectorRows(schedules, pingTargets, shares, agents, vpsRuleSearch),
+    [agents, pingTargets, schedules, shares, vpsRuleSearch],
   );
   const updateableRows = rows.filter((row) => row.canUpdate);
   const blockedRows = rows.length - updateableRows.length;
@@ -776,16 +782,21 @@ function staleSelectorRows(
   pingTargets: PingTargetView[],
   shares: MonitoringShareView[],
   agents: AgentView[],
+  context: AgentSearchContext,
 ): StaleSelectorRow[] {
   const rows: StaleSelectorRow[] = [];
   for (const schedule of schedules) {
     const selectorExpression = schedule.selector_expression.trim();
     const parsed = parseSearchExpression(selectorExpression);
+    const ruleEvidenceUnavailable = vpsRuleSearchUnavailable(
+      selectorExpression,
+      context,
+    );
     const frozenTargetIds = uniqueSorted(schedule.target_client_ids ?? []);
     const resolvedTargetIds =
-      selectorExpression && !parsed.error
+      selectorExpression && !parsed.error && !ruleEvidenceUnavailable
         ? uniqueSorted(
-            agentsMatchingExpression(agents, selectorExpression).map(
+            agentsMatchingExpression(agents, selectorExpression, context).map(
               (agent) => agent.id,
             ),
           )
@@ -800,14 +811,19 @@ function staleSelectorRows(
       !schedule.operation || Boolean(schedule.operation_error);
     const reason = parsed.error
       ? `Invalid saved selector: ${parsed.error}`
-      : operationInvalid
-        ? "Saved operation is invalid; repair the schedule before updating targets"
-        : resolvedTargetIds?.length === 0
-          ? "Saved selector currently matches no visible VPS; update will freeze that exact empty result"
-          : "Current selector resolution differs from the frozen target IDs";
+      : ruleEvidenceUnavailable
+        ? "Selector resolution evidence is unavailable; frozen targets remain unchanged. Refresh rule evidence or retry with the required access."
+        : operationInvalid
+          ? "Saved operation is invalid; repair the schedule before updating targets"
+          : resolvedTargetIds?.length === 0
+            ? "Saved selector currently matches no visible VPS; update will freeze that exact empty result"
+            : "Current selector resolution differs from the frozen target IDs";
     rows.push({
       canUpdate:
-        !parsed.error && !operationInvalid && resolvedTargetIds !== null,
+        !parsed.error &&
+        !ruleEvidenceUnavailable &&
+        !operationInvalid &&
+        resolvedTargetIds !== null,
       frozenTargetIds,
       id: `schedule:${schedule.id}`,
       kind: "Schedule",
@@ -823,16 +839,20 @@ function staleSelectorRows(
   for (const target of pingTargets) {
     const selectorExpression = target.selector_expression.trim();
     const parsed = parseSearchExpression(selectorExpression);
+    const ruleEvidenceUnavailable =
+      !target.target_update_evidence_available ||
+      vpsRuleSearchUnavailable(selectorExpression, context);
     const frozenTargetIds = uniqueSorted(target.target_client_ids ?? []);
     const resolvedTargetIds =
-      selectorExpression && !parsed.error
+      selectorExpression && !parsed.error && !ruleEvidenceUnavailable
         ? uniqueSorted(
-            agentsMatchingExpression(agents, selectorExpression).map(
+            agentsMatchingExpression(agents, selectorExpression, context).map(
               (agent) => agent.id,
             ),
           )
         : null;
     if (
+      !ruleEvidenceUnavailable &&
       !target.target_update_available &&
       (resolvedTargetIds === null ||
         sameStringSet(frozenTargetIds, resolvedTargetIds))
@@ -840,14 +860,16 @@ function staleSelectorRows(
       continue;
     }
     rows.push({
-      canUpdate: !parsed.error,
+      canUpdate: !parsed.error && !ruleEvidenceUnavailable,
       frozenTargetIds,
       id: `ping:${target.id}`,
       kind: "Ping target",
       name: target.name,
       reason: parsed.error
         ? `Invalid saved selector: ${parsed.error}`
-        : "Current selector resolution differs from the frozen assignments",
+        : ruleEvidenceUnavailable
+          ? "Target refresh evidence is unavailable; frozen assignments remain unchanged. Repair or retry with the required access."
+          : "Current selector resolution differs from the frozen assignments",
       resolvedTargetIds,
       resourceId: target.id,
       selectorExpression,
@@ -856,29 +878,37 @@ function staleSelectorRows(
     });
   }
   for (const share of shares) {
-    if (!share.target_update_available || share.status !== "active") {
+    if (share.status !== "active") {
       continue;
     }
     const selectorExpression = share.selector_expression.trim();
     const parsed = parseSearchExpression(selectorExpression);
+    const ruleEvidenceUnavailable =
+      !share.target_update_evidence_available ||
+      vpsRuleSearchUnavailable(selectorExpression, context);
+    if (!ruleEvidenceUnavailable && !share.target_update_available) {
+      continue;
+    }
     const frozenTargetIds = uniqueSorted(share.target_client_ids);
     const resolvedTargetIds =
-      selectorExpression && !parsed.error
+      selectorExpression && !parsed.error && !ruleEvidenceUnavailable
         ? uniqueSorted(
-            agentsMatchingExpression(agents, selectorExpression).map(
+            agentsMatchingExpression(agents, selectorExpression, context).map(
               (agent) => agent.id,
             ),
           )
         : null;
     rows.push({
-      canUpdate: !parsed.error,
+      canUpdate: !parsed.error && !ruleEvidenceUnavailable,
       frozenTargetIds,
       id: `share:${share.id}`,
       kind: "Shared view",
       name: share.name,
       reason: parsed.error
         ? `Invalid saved selector: ${parsed.error}`
-        : "Current selector resolution differs from the frozen shared-view targets",
+        : ruleEvidenceUnavailable
+          ? "Target refresh evidence is unavailable; frozen targets remain unchanged. Repair or retry with the required access."
+          : "Current selector resolution differs from the frozen shared-view targets",
       resolvedTargetIds,
       resourceId: share.id,
       selectorExpression,

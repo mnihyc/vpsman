@@ -13,7 +13,9 @@ use crate::{
         WebhookRuleProcessRequest, WebhookRuleQuery, WebhookRuleView,
     },
     repository_webhook_rules::validate_webhook_rule_target,
-    security::{SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE},
+    security::{
+        require_vps_rule_selector_scope, SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
+    },
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -53,6 +55,10 @@ pub(crate) async fn upsert_webhook_rule(
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
     validate_webhook_rule_request(&request)?;
+    let expression = parse_selector_expression(&request.expression)
+        .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?
+        .ok_or_else(|| ApiError::bad_request("webhook_rule_expression_invalid"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -124,6 +130,10 @@ pub(crate) async fn dry_run_webhook_rule(
         .require_operator_scope(&headers, SCOPE_INTEGRATIONS_READ)
         .await?;
     validate_webhook_rule_dry_run_request(&request)?;
+    let expression = parse_selector_expression(&request.expression)
+        .map_err(|_| ApiError::bad_request("webhook_rule_expression_invalid"))?
+        .ok_or_else(|| ApiError::bad_request("webhook_rule_expression_invalid"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .dry_run_webhook_rule(&request, &operator)
@@ -220,6 +230,9 @@ fn webhook_delivery_error(error: anyhow::Error) -> ApiError {
     }
     if message.contains("preview_hash_mismatch") {
         return ApiError::conflict("webhook_rule_delivery_preview_hash_mismatch");
+    }
+    if message.contains("vps_rule_selector_scope_required") {
+        return ApiError::forbidden("operator_scope_insufficient");
     }
     if message.contains("webhook_delivery_rotation_changed_during_confirmation") {
         return ApiError::conflict("webhook_delivery_rotation_confirmation_stale");

@@ -159,6 +159,59 @@ Canonical VPS fields use `vps.<path>`.
 `client:<id>` is not an operator selector. Internal audit and command
 records may still render concrete resolved targets as `client:<id>`.
 
+## VPS Rules
+
+Operators with `config:read` can select VPSs by their directly configured VPS
+rules through the single `vps.rules` field. Defaults and referenced effective
+behavior are not synthesized: a presence expression means that the operator
+actually stored that rule on the VPS.
+
+Autocomplete keeps this scope compact: the ordinary selector menu shows one
+**VPS rules…** entry, and reveals rule names, examples, and observed canonical
+values only after `vps.rules:` is entered or selected.
+
+```text
+vps.rules:*                                      # any configured rule
+vps.rules:traffic.reset_day                      # this rule is configured
+!vps.rules:traffic.reset_day                     # this rule is absent
+vps.rules:traffic.*                              # configured traffic rule
+vps.rules in [/^traffic\.quota\./]               # key regex
+
+vps.rules:traffic.reset_day >= 15
+vps.rules:traffic.quota.total >= 1TB
+vps.rules:network.port_speed >= 1Gbps
+vps.rules:billing.price < "50 USD/m"
+vps.rules:billing.price = "29.90 CNY/m"
+vps.rules:network.port_speed = "*Gbps"
+```
+
+Exact equality normalizes its input with the same rule parser used by the VPS
+Rules editor, so cosmetic whitespace does not change a match. Globs and
+regexes intentionally match the canonical stored text. Ordered comparisons
+interpret reset days as days, quotas as bytes, and port speeds as
+bits per second, accepting the same units as the VPS Rules editor. Billing
+prices are ordered only against a value with the same currency and billing
+period; different units do not match. Billing cycles and interface-selector
+rules do not have a meaningful order and reject `<`, `<=`, `>`, and `>=`.
+The `-1` continuous, unlimited, or disabled sentinels can be matched exactly
+but are not ordered.
+
+New and edited rules are canonicalized before preview and persistence. A
+spacing-only edit therefore produces the same `value_raw`, parsed value, and
+dropdown entry instead of creating a distinct configuration value.
+Two-component billing renewal anchors use `MM-DD` everywhere, for example
+`billing.cycle=06-15`; monthly billing keeps a day-only recurring anchor such
+as `billing.cycle=15`.
+
+A missing rule makes every direct value predicate false, including `!=`; use
+`!vps.rules:<key>` to select absence. Rule-aware live resolution requires
+`config:read` and fails explicitly if complete rule evidence is unavailable.
+Reviewed jobs, schedules, Ping assignments, configuration assignments, and
+monitoring shares still freeze exact VPS IDs. Changing a rule does not silently
+retarget them; an explicit **Update targets** action re-evaluates the saved
+expression. Dynamic alert and webhook expressions evaluate the current
+committed rule values.
+
 ## Event Contexts
 
 Webhook rules evaluate expressions against an event context. A context may

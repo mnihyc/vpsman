@@ -63,6 +63,7 @@ pub(crate) struct MemoryState {
     pub(crate) client_status_history: Arc<RwLock<Vec<ClientStatusHistoryView>>>,
     pub(crate) tags: Arc<RwLock<Vec<String>>>,
     pub(crate) vps_rule_values: Arc<RwLock<Vec<crate::model_alert_policies::VpsRuleValueRecord>>>,
+    pub(crate) vps_rule_mutation: Arc<Mutex<()>>,
     pub(crate) traffic_counter_samples:
         Arc<RwLock<Vec<crate::model_alert_policies::TrafficCounterSampleRecord>>>,
     pub(crate) traffic_counter_rollups:

@@ -186,9 +186,7 @@ export function sanitizeOperatorPreferences(
     bulk_output_compare_mode:
       source.bulk_output_compare_mode ??
       DEFAULT_OPERATOR_PREFERENCES.bulk_output_compare_mode,
-    dashboard_curve_exclusions: Array.isArray(
-      source.dashboard_curve_exclusions,
-    )
+    dashboard_curve_exclusions: Array.isArray(source.dashboard_curve_exclusions)
       ? source.dashboard_curve_exclusions
       : DEFAULT_OPERATOR_PREFERENCES.dashboard_curve_exclusions,
     dashboard_network_top_limit:
@@ -240,7 +238,7 @@ export function displayNameOrUnnamed(
 
 export function formatBillingRenewal(
   value: string | null | undefined,
-  periodCode?: string | null,
+  _periodCode?: string | null,
 ): string | null {
   const cycle = value?.trim();
   if (!cycle) return null;
@@ -248,24 +246,7 @@ export function formatBillingRenewal(
   if (day) return `Renews day ${Number(day[1])}`;
   const anchored = /^(\d{1,2})-(\d{1,2})$/.exec(cycle);
   if (anchored) {
-    if (periodCode === "y" || periodCode === "year") {
-      return `Renews ${anchored[2].padStart(2, "0")}-${anchored[1].padStart(2, "0")}`;
-    }
-    const month = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ][Number(anchored[2]) - 1];
-    if (month) return `Renews ${Number(anchored[1])} ${month}`;
+    return `Renews ${anchored[1].padStart(2, "0")}-${anchored[2].padStart(2, "0")}`;
   }
   return `Renewal anchor ${cycle}`;
 }
@@ -534,9 +515,7 @@ export function timestampMillis(value: string): number {
   if (/^-?\d+(?:\.\d+)?$/.test(trimmed)) {
     const numeric = Number(trimmed);
     if (Number.isFinite(numeric)) {
-      return Math.abs(numeric) < 100_000_000_000
-        ? numeric * 1000
-        : numeric;
+      return Math.abs(numeric) < 100_000_000_000 ? numeric * 1000 : numeric;
     }
   }
   return new Date(value).getTime();
@@ -557,9 +536,9 @@ function formatRelativeTime(date: Date, now: Date): string | null {
     ["hour", 60 * 60],
     ["minute", 60],
   ];
-  const [unit, secondsPerUnit] =
-    units.find(([, secondsPerUnit]) => absSeconds >= secondsPerUnit) ??
-    ["minute", 60];
+  const [unit, secondsPerUnit] = units.find(
+    ([, secondsPerUnit]) => absSeconds >= secondsPerUnit,
+  ) ?? ["minute", 60];
   const count = Math.max(1, Math.round(absSeconds / secondsPerUnit));
   const signedCount = deltaMs < 0 ? -count : count;
   try {

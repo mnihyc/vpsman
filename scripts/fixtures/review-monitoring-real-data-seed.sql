@@ -218,7 +218,7 @@ VALUES
         'review-total-monthly',
         'billing.cycle',
         '14',
-        '{"display":"14"}'::jsonb,
+        '{"day":14,"month":null,"display":"14"}'::jsonb,
         'review_fixture',
         now()
     ),
@@ -281,8 +281,8 @@ VALUES
     (
         'review-rx-yearly',
         'billing.cycle',
-        '15-06',
-        '{"display":"15-06"}'::jsonb,
+        '06-15',
+        '{"day":15,"month":6,"display":"06-15"}'::jsonb,
         'review_fixture',
         now()
     ),

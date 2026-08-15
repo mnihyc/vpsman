@@ -36,6 +36,8 @@ pub mod tlv;
 pub mod transport;
 #[path = "release/update_manifest.rs"]
 pub mod update_manifest;
+#[path = "config/vps_rules.rs"]
+pub mod vps_rules;
 
 pub use port_forwarding::*;
 
@@ -57,3 +59,4 @@ pub use template::*;
 pub use tlv::*;
 pub use transport::*;
 pub use update_manifest::*;
+pub use vps_rules::*;

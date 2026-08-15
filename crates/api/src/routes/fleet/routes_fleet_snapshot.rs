@@ -9,7 +9,7 @@ use axum::{
 use crate::{
     error::ApiError,
     model::FleetAlertQuery,
-    model_alert_policies::{PolicyAlertQuery, TrafficAccountingQuery, VpsRuleQuery},
+    model_alert_policies::{PolicyAlertQuery, TrafficAccountingQuery},
     model_fleet_snapshot::{FleetSnapshotQuery, FleetSnapshotResponse, FleetSnapshotSource},
     security::{
         operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
@@ -22,7 +22,6 @@ use crate::{
 const FLEET_DETAIL_LIMIT: i64 = 200;
 const FLEET_LATEST_TELEMETRY_LIMIT: i64 = 1_000;
 const FLEET_NETWORK_RATE_SNAPSHOT_LIMIT: i64 = 5_000;
-const FLEET_VPS_RULE_SNAPSHOT_LIMIT: i64 = 5_000;
 
 pub(crate) async fn fleet_snapshot(
     State(state): State<AppState>,
@@ -208,18 +207,12 @@ async fn load_full_sources(
             fleet_read,
             state
                 .repo
-                .list_fleet_alert_policies(FLEET_DETAIL_LIMIT, None, None, None,),
+                .list_fleet_alert_policies(FLEET_DETAIL_LIMIT, None, None, None, config_read,),
         ),
         load_source(
             "vps_rule_values",
             config_read,
-            state.repo.list_vps_rules(&VpsRuleQuery {
-                limit: Some(FLEET_VPS_RULE_SNAPSHOT_LIMIT),
-                client_id: None,
-                selector_expression: None,
-                key: None,
-                state: None,
-            }),
+            state.repo.list_all_vps_rules(),
         ),
         load_source(
             "traffic_accounting",
@@ -303,6 +296,13 @@ where
     }
     match future.await {
         Ok(data) => FleetSnapshotSource::available(data),
+        Err(error)
+            if error
+                .to_string()
+                .contains("vps_rule_selector_scope_required") =>
+        {
+            FleetSnapshotSource::unavailable("operator_scope_insufficient")
+        }
         Err(error) => {
             tracing::warn!(source, %error, "fleet snapshot source failed");
             FleetSnapshotSource::unavailable(format!("fleet_snapshot_{source}_unavailable"))

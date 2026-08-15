@@ -104,11 +104,9 @@ export function useDashboardData(activeView: ActiveView) {
     }
     const authGeneration = authGenerationRef.current;
     setAuthRefreshError(null);
-    const request = apiPost<AuthResponse>(
-      "/api/v1/auth/refresh",
-      "",
-      { refresh_token: refreshToken },
-    )
+    const request = apiPost<AuthResponse>("/api/v1/auth/refresh", "", {
+      refresh_token: refreshToken,
+    })
       .then((auth) => {
         if (authGeneration !== authGenerationRef.current) {
           return;
@@ -565,8 +563,7 @@ export function useDashboardData(activeView: ActiveView) {
         }
         if (
           (currentView === "Home" || currentView === "Observability") &&
-          (event.type === "agent_updated" ||
-            event.type === "job_rejected")
+          (event.type === "agent_updated" || event.type === "job_rejected")
         ) {
           scheduleDashboardOverviewReload();
         }
@@ -665,20 +662,15 @@ export function useDashboardData(activeView: ActiveView) {
     setApiToken("");
     setAuthRequired(true);
     if (logoutToken) {
-      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(
-        () => {
-          if (authGenerationRef.current === logoutGeneration) {
-            setLogoutWarning(
-              "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Audit > Sessions when the API is available.",
-            );
-          }
-        },
-      );
+      void apiPost<void>("/api/v1/auth/logout", logoutToken, {}).catch(() => {
+        if (authGenerationRef.current === logoutGeneration) {
+          setLogoutWarning(
+            "Signed out locally, but the server could not revoke this session. It may remain active until it expires; sign in again to review Audit > Sessions when the API is available.",
+          );
+        }
+      });
     }
-  }, [
-    apiToken,
-    clearDashboardData,
-  ]);
+  }, [apiToken, clearDashboardData]);
 
   return {
     accessError: access.accessError,
@@ -758,16 +750,14 @@ export function useDashboardData(activeView: ActiveView) {
     updateTagOrder: inventory.updateTagOrder,
     allocateTunnelEndpoints: topology.allocateTunnelEndpoints,
     createTunnelPlan: topology.createTunnelPlan,
-    createNetworkAdapterDefinition:
-      topology.createNetworkAdapterDefinition,
+    createNetworkAdapterDefinition: topology.createNetworkAdapterDefinition,
     createPortForwardRule: portForwarding.createPortForwardRule,
     updatePortForwardRule: portForwarding.updatePortForwardRule,
     mutatePortForwardRule: portForwarding.mutatePortForwardRule,
     bulkMutatePortForwardRules: portForwarding.bulkMutatePortForwardRules,
     resolvePortForwardHostname: portForwarding.resolvePortForwardHostname,
     deleteTunnelPlan: topology.deleteTunnelPlan,
-    deleteNetworkAdapterDefinition:
-      topology.deleteNetworkAdapterDefinition,
+    deleteNetworkAdapterDefinition: topology.deleteNetworkAdapterDefinition,
     exportTunnelPlan: topology.exportTunnelPlan,
     refreshTunnelPlanOspfStatus: topology.refreshTunnelPlanOspfStatus,
     rotateTunnelPlanCredentials: topology.rotateTunnelPlanCredentials,
@@ -786,7 +776,8 @@ export function useDashboardData(activeView: ActiveView) {
     jobsLoading: jobs.jobsLoading,
     keyLifecycleReport: access.keyLifecycleReport,
     processSupervisorInventory: jobs.processSupervisorInventory,
-    processSupervisorInventoryTruncated: jobs.processSupervisorInventoryTruncated,
+    processSupervisorInventoryTruncated:
+      jobs.processSupervisorInventoryTruncated,
     serverJobs: jobs.serverJobs,
     serverJobsError: jobs.serverJobsError,
     fileTransfers: jobs.fileTransfers,
@@ -803,6 +794,7 @@ export function useDashboardData(activeView: ActiveView) {
     fleetAlertStates: fleet.fleetAlertStates,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
     configPolicyEvidenceAvailable: fleet.configPolicyEvidenceAvailable,
+    vpsRuleEvidenceAvailable: fleet.vpsRuleEvidenceAvailable,
     fleetCoreEvidenceAvailable: fleet.fleetCoreEvidenceAvailable,
     vpsRuleValues: fleet.vpsRuleValues,
     trafficAccounting: fleet.trafficAccounting,
@@ -871,8 +863,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadSchedules: schedules.loadSchedules,
     loadNetworkObservations: topology.loadNetworkObservations,
     queryNetworkObservations: topology.queryNetworkObservations,
-    loadNetworkAdapterDefinitions:
-      topology.loadNetworkAdapterDefinitions,
+    loadNetworkAdapterDefinitions: topology.loadNetworkAdapterDefinitions,
     loadNetworkTrends: topology.loadNetworkTrends,
     loadOspfRecommendations: topology.loadOspfRecommendations,
     loadOspfUpdatePlans: topology.loadOspfUpdatePlans,
@@ -881,8 +872,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadPortForwardRules: portForwarding.loadPortForwardRules,
     setTunnelPlanEnabled: topology.setTunnelPlanEnabled,
     updateTunnelConnectionAssessment: topology.updateTunnelConnectionAssessment,
-    updateNetworkAdapterDefinition:
-      topology.updateNetworkAdapterDefinition,
+    updateNetworkAdapterDefinition: topology.updateNetworkAdapterDefinition,
     updateTunnelPlanOspfCost: topology.updateTunnelPlanOspfCost,
     updateTunnelPlan: topology.updateTunnelPlan,
     networkObservations: topology.networkObservations,
@@ -898,7 +888,8 @@ export function useDashboardData(activeView: ActiveView) {
     operatorSessionsTruncated: access.operatorSessionsTruncated,
     preferencesError: access.preferencesError,
     preferencesSaving: access.preferencesSaving,
-    deleteRuntimeConfigPatchGenerator: inventory.deleteRuntimeConfigPatchGenerator,
+    deleteRuntimeConfigPatchGenerator:
+      inventory.deleteRuntimeConfigPatchGenerator,
     deleteTag: inventory.deleteTag,
     dashboardOverview: dashboardOverview.dashboardOverview,
     dashboardOverviewError: dashboardOverview.dashboardOverviewError,
@@ -913,7 +904,8 @@ export function useDashboardData(activeView: ActiveView) {
     previewConfigurationPreset: inventory.previewConfigurationPreset,
     previewConfigurationSourceOverride:
       inventory.previewConfigurationSourceOverride,
-    renderRuntimeConfigPatchGenerator: inventory.renderRuntimeConfigPatchGenerator,
+    renderRuntimeConfigPatchGenerator:
+      inventory.renderRuntimeConfigPatchGenerator,
     resolveBulkPreview: inventory.resolveBulkPreview,
     resolveJobTargets: inventory.resolveJobTargets,
     revokeClientKey: access.revokeClientKey,
@@ -949,8 +941,7 @@ export function useDashboardData(activeView: ActiveView) {
     tags: inventory.tags,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
-    tagInventoryEvidenceAvailable:
-      inventory.tagInventoryEvidenceAvailable,
+    tagInventoryEvidenceAvailable: inventory.tagInventoryEvidenceAvailable,
     runtimeConfigApplyEvidenceAvailable:
       inventory.runtimeConfigApplyEvidenceAvailable,
     runtimeConfigApplyError: inventory.runtimeConfigApplyError,
@@ -968,7 +959,8 @@ export function useDashboardData(activeView: ActiveView) {
     portForwardLoading: portForwarding.portForwardLoading,
     updateConfigurationPreset: inventory.updateConfigurationPreset,
     updateOperator: access.updateOperator,
-    upsertRuntimeConfigPatchGenerator: inventory.upsertRuntimeConfigPatchGenerator,
+    upsertRuntimeConfigPatchGenerator:
+      inventory.upsertRuntimeConfigPatchGenerator,
     upsertCommandTemplate: jobs.upsertCommandTemplate,
     upsertHistoryRetentionPolicy: audit.upsertHistoryRetentionPolicy,
     upsertFleetAlertPolicy: fleet.upsertFleetAlertPolicy,

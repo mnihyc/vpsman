@@ -2538,6 +2538,56 @@ test(
   },
 );
 
+test("canonicalizes VPS rule values before review and save", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "rule-value save normalization is viewport-independent",
+  );
+
+  await page.goto("/#/config/rules/agent-sfo-01");
+  await waitForConsoleShell(page);
+  const editor = page.locator(".consoleDetailPanel", {
+    hasText: "Bulk rule editor",
+  });
+  await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("3TB");
+  await editor.getByText("Advanced raw key/value", { exact: true }).click();
+  const rawValues = editor.getByLabel("VPS rule set values");
+
+  await rawValues.fill("traffic.quota.total=1 0GB");
+  await editor
+    .getByRole("button", { name: "Preview changes", exact: true })
+    .click();
+  await expect(
+    page.locator(".vpsRulesActionFeedback.actionFeedbackDanger"),
+  ).toContainText("VPS rule traffic.quota.total has an invalid value: 1 0GB");
+  await expect(page.locator(".vpsRulesPreviewBlock")).toHaveCount(0);
+
+  await rawValues.fill(
+    "traffic.quota.total= 04.00 tb\nnetwork.port_speed=1.500 gbps",
+  );
+  await editor
+    .getByRole("button", { name: "Preview changes", exact: true })
+    .click();
+  const previewGrid = page.getByLabel("Preview changes data grid");
+  await expect(previewGrid).toContainText("4TB");
+  await expect(previewGrid).toContainText("1.5 Gbps");
+
+  const finalAction = page.getByLabel("VPS rules preview final action");
+  await finalAction.getByRole("button", { name: "Apply 2 changes" }).click();
+  const prompt = page.locator(".confirmationPrompt", {
+    hasText: "Confirm VPS rule write",
+  });
+  await prompt.getByRole("button", { name: "Apply 2 changes" }).click();
+  await expect(
+    page.locator(".vpsRulesActionFeedback.actionFeedbackSuccess"),
+  ).toContainText("applied 2 VPS rule changes");
+  await expect(rawValues).toHaveValue(
+    "network.port_speed=1.5 Gbps\ntraffic.quota.total=4TB",
+  );
+});
+
 test("clears stale alert-policy detail when a routed policy does not exist", async ({
   page,
 }) => {
@@ -2628,13 +2678,10 @@ test(
     await editor
       .getByRole("button", { name: "Preview changes", exact: true })
       .click();
-    const invalidPreview = page.locator(".vpsRulesPreviewBlock");
-    await expect(invalidPreview).toContainText(
-      "Billing period must be m, q, hy, h, or y.",
-    );
     await expect(
-      page.getByLabel("VPS rules preview final action"),
-    ).toContainText("Correct invalid values");
+      page.locator(".vpsRulesActionFeedback.actionFeedbackDanger"),
+    ).toContainText("VPS rule billing.price has an invalid value: 29 USD/w");
+    await expect(page.locator(".vpsRulesPreviewBlock")).toHaveCount(0);
     await expect(
       page
         .getByLabel("VPS rules preview final action")

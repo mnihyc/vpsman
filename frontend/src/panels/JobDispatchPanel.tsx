@@ -105,7 +105,10 @@ import {
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import {
   TargetImpactPreview,
   targetImpactModeForDispatch,
@@ -373,6 +376,7 @@ export function JobDispatchPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const appliedDispatchPresetRequestId = useRef<string | null>(null);
   // Only the main composer restores operator-safe drafts/results. File
   // objects, resume tokens, terminal input, privilege material, reviews, and
@@ -1128,10 +1132,19 @@ export function JobDispatchPanel({
                               : true;
   const expressionTargets = useMemo(
     () =>
-      selectorParse.error
+      selectorParse.error ||
+      vpsRuleSearchUnavailable(normalizedSelectorExpression, vpsRuleSearch)
         ? []
-        : agentsMatchingExpression(agents, normalizedSelectorExpression),
-    [agents, normalizedSelectorExpression, selectorParse.error],
+        : agentsMatchingExpression(
+            agents,
+            normalizedSelectorExpression,
+            vpsRuleSearch,
+          ),
+    [agents, normalizedSelectorExpression, selectorParse.error, vpsRuleSearch],
+  );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    normalizedSelectorExpression,
+    vpsRuleSearch,
   );
   const impactMode = targetImpactModeForDispatch(mode);
   const supportsForceUnprivileged = impactMode !== "generic";
@@ -2313,6 +2326,11 @@ export function JobDispatchPanel({
           verificationMessage={selectorVerificationMessage}
         />
         <TargetImpactPreview
+          emptyText={
+            selectorEvidenceUnavailable
+              ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+              : undefined
+          }
           forceUnprivileged={
             supportsForceUnprivileged ? forceUnprivileged : false
           }

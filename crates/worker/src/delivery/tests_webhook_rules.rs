@@ -255,6 +255,7 @@ fn candidate_uses_interval_predicate_and_aggregates_matches() {
             stale_since: None,
             stale_reason: None,
             capabilities: json!({}),
+            vps_rules: VpsRuleContext::default(),
         },
         VpsRow {
             id: "core-a".to_string(),
@@ -268,6 +269,7 @@ fn candidate_uses_interval_predicate_and_aggregates_matches() {
             stale_since: None,
             stale_reason: None,
             capabilities: json!({}),
+            vps_rules: VpsRuleContext::default(),
         },
     ];
     let candidate =
@@ -276,6 +278,55 @@ fn candidate_uses_interval_predicate_and_aggregates_matches() {
             .unwrap();
     assert_eq!(candidate.matched_vps.len(), 1);
     assert_eq!(candidate.message, "interval.30sec edge-a");
+}
+
+#[test]
+fn candidate_can_match_vps_rules_without_exposing_them_in_payload() {
+    let rule = RuleRow {
+        id: Uuid::nil(),
+        actor_id: None,
+        name: "rule scoped interval".to_string(),
+        expression: "interval.30sec && vps.rules:traffic.reset_day >= 15".to_string(),
+        target: "https://hooks.acme.com/vpsman".to_string(),
+        body_template: "{event.kind} {vps.id}".to_string(),
+        cooldown_secs: 30,
+    };
+    let mut vps_rules = VpsRuleContext::default();
+    insert_persisted_vps_rule(
+        &mut vps_rules,
+        "traffic.reset_day".to_string(),
+        "015".to_string(),
+        json!({"day": 15}),
+    )
+    .unwrap();
+    let vps_rows = vec![VpsRow {
+        id: "edge-a".to_string(),
+        display_name: "edge-a".to_string(),
+        status: "online".to_string(),
+        tags: vec!["edge".to_string()],
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        internal_build_number: 1,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: json!({}),
+        vps_rules,
+    }];
+
+    let candidate =
+        delivery_candidate_for_rule(&rule, "interval.30sec", "interval.30sec:1", &vps_rows, 1)
+            .unwrap()
+            .unwrap();
+    assert_eq!(candidate.matched_vps.len(), 1);
+    assert_eq!(candidate.payload["matched_vps"][0].get("vps_rules"), None);
+    assert!(insert_persisted_vps_rule(
+        &mut VpsRuleContext::default(),
+        "network.port_speed".to_string(),
+        "not-a-speed".to_string(),
+        json!({}),
+    )
+    .is_err());
 }
 
 #[test]
@@ -321,6 +372,7 @@ fn policy_alert_event_uses_event_roots_without_webhook_rule_collision() {
         stale_since: None,
         stale_reason: None,
         capabilities: json!({}),
+        vps_rules: VpsRuleContext::default(),
     }];
 
     let candidate = event_candidate_for_rule(&rule, &event, &vps_rows)

@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
-use vpsman_common::payload_hash;
+use vpsman_common::{expression_references_vps_rules, payload_hash, Expression, VpsRuleContext};
 
 use crate::model::*;
 use crate::repository::Repository;
@@ -19,7 +19,10 @@ use crate::repository_port_forwarding::{
     archive_postgres_port_forwarding_for_agent_delete, lock_postgres_port_forward_client,
     postgres_port_forwarding_blocks_agent_delete,
 };
-use crate::selector_expression::{agent_matches_selector_expression, parse_selector_expression};
+use crate::selector_expression::{
+    agent_matches_selector_expression, agent_matches_selector_expression_with_rules,
+    parse_selector_expression, vps_rule_contexts_by_client,
+};
 use crate::unix_now;
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
@@ -490,6 +493,7 @@ impl Repository {
             Self::Postgres(pool) => {
                 let tag_id = Uuid::new_v4();
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 require_visible_postgres_clients_in_tx(
                     &mut tx,
                     &[client_id.to_string()],
@@ -537,6 +541,7 @@ impl Repository {
     pub(crate) async fn bulk_mutate_tags(
         &self,
         request: &BulkTagMutationRequest,
+        allow_vps_rule_selectors: bool,
     ) -> Result<TagMutationResponse> {
         let before_agents = self.list_agents().await?;
         let targets = self.fixed_target_agents(&request.target_client_ids).await?;
@@ -547,7 +552,11 @@ impl Repository {
         let (after_agents, preview_changed) =
             simulate_bulk_tag_mutation(&before_agents, &target_ids, &request.tag, &request.action);
         let schedule_impacts = self
-            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .schedule_impacts_for_agent_sets(
+                &before_agents,
+                &after_agents,
+                allow_vps_rule_selectors,
+            )
             .await?;
         if !request.confirmed {
             return Ok(tag_mutation_response(
@@ -625,6 +634,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let target_client_ids = targets
                     .iter()
                     .map(|agent| agent.id.clone())
@@ -711,6 +721,7 @@ impl Repository {
         &self,
         tag: &str,
         confirmed: bool,
+        allow_vps_rule_selectors: bool,
     ) -> Result<TagMutationResponse> {
         let before_agents = self.list_agents().await?;
         let affected = self.clients_for_tag(tag).await?;
@@ -720,7 +731,11 @@ impl Repository {
             .collect::<HashSet<_>>();
         let (after_agents, preview_changed) = simulate_remove_tag(&before_agents, &target_ids, tag);
         let schedule_impacts = self
-            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .schedule_impacts_for_agent_sets(
+                &before_agents,
+                &after_agents,
+                allow_vps_rule_selectors,
+            )
             .await?;
         if !confirmed {
             return Ok(tag_mutation_response(
@@ -735,6 +750,7 @@ impl Repository {
         }
         match self {
             Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 memory.tags.write().await.retain(|existing| existing != tag);
                 let mut changed = 0_usize;
                 let mut agents = memory.agents.write().await;
@@ -760,10 +776,13 @@ impl Repository {
                 ))
             }
             Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 let result = sqlx::query("DELETE FROM tags WHERE name = $1")
                     .bind(tag)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
                 let changed = if result.rows_affected() > 0 {
                     affected.len()
                 } else {
@@ -791,6 +810,7 @@ impl Repository {
         client_id: &str,
         tag: &str,
         confirmed: bool,
+        allow_vps_rule_selectors: bool,
     ) -> Result<TagMutationResponse> {
         let before_agents = self.list_agents().await?;
         let affected = before_agents
@@ -802,7 +822,11 @@ impl Repository {
         let target_ids = HashSet::from([client_id.to_string()]);
         let (after_agents, preview_changed) = simulate_add_tag(&before_agents, &target_ids, tag);
         let schedule_impacts = self
-            .schedule_impacts_for_agent_sets(&before_agents, &after_agents)
+            .schedule_impacts_for_agent_sets(
+                &before_agents,
+                &after_agents,
+                allow_vps_rule_selectors,
+            )
             .await?;
         if !confirmed {
             return Ok(tag_mutation_response(
@@ -835,18 +859,59 @@ impl Repository {
         &self,
         before_agents: &[AgentView],
         after_agents: &[AgentView],
+        allow_vps_rule_selectors: bool,
     ) -> Result<Vec<ScheduleImpactView>> {
-        let mut impacts = Vec::new();
-        for schedule in self
+        let schedules = self
             .list_schedules()
             .await?
             .into_iter()
             .filter(|schedule| schedule.enabled && schedule.deleted_at.is_none())
-        {
-            let before_targets =
-                resolve_agents_from_set(before_agents, &schedule.selector_expression)?;
-            let after_targets =
-                resolve_agents_from_set(after_agents, &schedule.selector_expression)?;
+            .map(|schedule| {
+                let expression = parse_selector_expression(&schedule.selector_expression)
+                    .map_err(|error| anyhow!("invalid schedule selector expression: {error}"))?;
+                Ok((schedule, expression))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            allow_vps_rule_selectors
+                || !schedules.iter().any(|(_, expression)| {
+                    expression
+                        .as_ref()
+                        .is_some_and(expression_references_vps_rules)
+                }),
+            "vps_rule_selector_scope_required"
+        );
+        let rules_by_client = if schedules.iter().any(|(_, expression)| {
+            expression
+                .as_ref()
+                .is_some_and(expression_references_vps_rules)
+        }) {
+            let mut union = before_agents
+                .iter()
+                .chain(after_agents)
+                .cloned()
+                .collect::<Vec<_>>();
+            union.sort_by(|left, right| left.id.cmp(&right.id));
+            union.dedup_by(|left, right| left.id == right.id);
+            self.vps_rule_contexts_for_agents(&union).await?
+        } else {
+            HashMap::new()
+        };
+        let mut impacts = Vec::new();
+        for (schedule, expression) in schedules {
+            let Some(expression) = expression else {
+                continue;
+            };
+            let before_targets = Self::resolve_agents_for_expression_with_rule_contexts(
+                before_agents,
+                &expression,
+                &rules_by_client,
+            );
+            let after_targets = Self::resolve_agents_for_expression_with_rule_contexts(
+                after_agents,
+                &expression,
+                &rules_by_client,
+            );
             let before_ids = before_targets
                 .iter()
                 .map(|agent| agent.id.clone())
@@ -1535,6 +1600,71 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn resolve_agents_for_expression(
+        &self,
+        agents: &[AgentView],
+        expression: &Expression,
+    ) -> Result<Vec<AgentView>> {
+        if !expression_references_vps_rules(expression) {
+            return Ok(agents
+                .iter()
+                .filter(|agent| agent_matches_selector_expression(agent, expression))
+                .cloned()
+                .collect());
+        }
+
+        let rules_by_client = self.vps_rule_contexts_for_agents(agents).await?;
+        Ok(Self::resolve_agents_for_expression_with_rule_contexts(
+            agents,
+            expression,
+            &rules_by_client,
+        ))
+    }
+
+    pub(crate) async fn vps_rule_contexts_for_agents(
+        &self,
+        agents: &[AgentView],
+    ) -> Result<HashMap<String, VpsRuleContext>> {
+        let client_ids = agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let rows = self.list_all_vps_rules_for_clients(&client_ids).await?;
+        Ok(vps_rule_contexts_by_client(&rows))
+    }
+
+    pub(crate) fn resolve_agents_for_expression_with_rule_contexts(
+        agents: &[AgentView],
+        expression: &Expression,
+        rules_by_client: &HashMap<String, VpsRuleContext>,
+    ) -> Vec<AgentView> {
+        agents
+            .iter()
+            .filter(|agent| {
+                agent_matches_selector_expression_with_rules(
+                    agent,
+                    expression,
+                    rules_by_client.get(&agent.id),
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) async fn resolve_agents_for_selector(
+        &self,
+        agents: &[AgentView],
+        selector_expression: &str,
+    ) -> Result<Vec<AgentView>> {
+        let expression = parse_selector_expression(selector_expression)
+            .map_err(|error| anyhow!("invalid selector expression: {error}"))?
+            .context("selector expression is empty")?;
+        self.resolve_agents_for_expression(agents, &expression)
+            .await
+    }
+
     pub(crate) async fn resolve_bulk_targets(
         &self,
         request: &BulkResolveRequest,
@@ -1547,17 +1677,14 @@ impl Repository {
                 targets: Vec::new(),
             });
         };
-        let mut targets = match self {
+        let candidates = match self {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await;
                 let hidden = memory.hidden_clients.read().await;
                 let tag_order = memory_tag_order_map(&memory.tags.read().await);
                 agents
                     .iter()
-                    .filter(|agent| {
-                        !hidden.contains(&agent.id)
-                            && agent_matches_selector_expression(agent, &expression)
-                    })
+                    .filter(|agent| !hidden.contains(&agent.id))
                     .map(|agent| agent_with_ordered_tags(agent, &tag_order))
                     .collect::<Vec<_>>()
             }
@@ -1615,11 +1742,11 @@ impl Repository {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(|agent| agent_matches_selector_expression(agent, &expression))
-                    .collect()
             }
         };
+        let mut targets = self
+            .resolve_agents_for_expression(&candidates, &expression)
+            .await?;
         targets.sort_by(|left, right| left.id.cmp(&right.id));
         targets.dedup_by(|left, right| left.id == right.id);
         Ok(BulkResolveResponse {
@@ -1904,25 +2031,6 @@ fn deleted_endpoint_tunnel_plan_reason(client_id: &str, operator_reason: Option<
         Some(reason) => format!("endpoint_vps_deleted:{client_id}; operator_reason:{reason}"),
         None => format!("endpoint_vps_deleted:{client_id}"),
     }
-}
-
-fn resolve_agents_from_set(
-    agents: &[AgentView],
-    selector_expression: &str,
-) -> Result<Vec<AgentView>> {
-    let Some(expression) = parse_selector_expression(selector_expression)
-        .map_err(|error| anyhow!("invalid schedule selector expression: {error}"))?
-    else {
-        return Ok(Vec::new());
-    };
-    let mut targets = agents
-        .iter()
-        .filter(|agent| agent_matches_selector_expression(agent, &expression))
-        .cloned()
-        .collect::<Vec<_>>();
-    targets.sort_by(|left, right| left.id.cmp(&right.id));
-    targets.dedup_by(|left, right| left.id == right.id);
-    Ok(targets)
 }
 
 fn schedule_impact_summary(added: usize, removed: usize) -> String {

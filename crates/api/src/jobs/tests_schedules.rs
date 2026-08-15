@@ -316,12 +316,45 @@ async fn tag_impact_preview_includes_schedules_beyond_one_thousand() {
     }
 
     let preview = repo
-        .assign_agent_tag_mutation("client-a", "edge", false)
+        .assign_agent_tag_mutation("client-a", "edge", false, false)
         .await
         .unwrap();
 
     assert_eq!(preview.schedule_impacts.len(), 1_001);
     assert!(preview.confirmation_required);
+}
+
+#[tokio::test]
+async fn tag_impact_preview_checks_rule_scope_at_the_schedule_repository_boundary() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = schedule_test_operator();
+    seed_never_connected_agent(&repo, "client-a").await;
+    let schedule = repo
+        .create_schedule(shell_schedule_request("rule-schedule", true), &operator)
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .schedules
+            .write()
+            .await
+            .iter_mut()
+            .find(|stored| stored.id == schedule.id)
+            .unwrap()
+            .selector_expression = "vps.rules:traffic.reset_day".to_string();
+    }
+
+    let denied = repo
+        .assign_agent_tag_mutation("client-a", "edge", false, false)
+        .await
+        .unwrap_err();
+    assert!(denied
+        .to_string()
+        .contains("vps_rule_selector_scope_required"));
+    assert!(repo
+        .assign_agent_tag_mutation("client-a", "edge", false, true)
+        .await
+        .is_ok());
 }
 
 #[tokio::test]

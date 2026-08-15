@@ -60,6 +60,100 @@ async fn ping_target_list_reports_durable_runtime_state_and_frozen_target_drift(
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].runtime_sync.state, "applied");
     assert!(!current[0].target_update_available);
+    assert!(current[0].target_update_evidence_available);
+
+    memory
+        .ping_targets
+        .write()
+        .await
+        .iter_mut()
+        .find(|target| target.id == saved.target.id)
+        .unwrap()
+        .selector_expression = "vps.rules:traffic.reset_day".to_string();
+    memory
+        .operators
+        .write()
+        .await
+        .iter_mut()
+        .find(|stored| stored.id == operator.operator.id)
+        .unwrap()
+        .scopes = vec![crate::security::SCOPE_NETWORK_READ.to_string()];
+    let Json(frozen_only) =
+        crate::routes_monitoring::list_ping_targets(State(state.clone()), headers.clone())
+            .await
+            .unwrap();
+    assert_eq!(frozen_only[0].target_client_ids, ["v-1"]);
+    assert!(!frozen_only[0].target_update_available);
+    assert!(!frozen_only[0].target_update_evidence_available);
+
+    memory
+        .ping_targets
+        .write()
+        .await
+        .iter_mut()
+        .find(|target| target.id == saved.target.id)
+        .unwrap()
+        .selector_expression = "(".to_string();
+    let Json(malformed_selector) =
+        crate::routes_monitoring::list_ping_targets(State(state.clone()), headers.clone())
+            .await
+            .unwrap();
+    assert_eq!(malformed_selector[0].target_client_ids, ["v-1"]);
+    assert!(!malformed_selector[0].target_update_evidence_available);
+
+    memory
+        .ping_targets
+        .write()
+        .await
+        .iter_mut()
+        .find(|target| target.id == saved.target.id)
+        .unwrap()
+        .selector_expression = "vps.rules:traffic.reset_day".to_string();
+    memory
+        .operators
+        .write()
+        .await
+        .iter_mut()
+        .find(|stored| stored.id == operator.operator.id)
+        .unwrap()
+        .scopes = vec![
+        crate::security::SCOPE_NETWORK_READ.to_string(),
+        crate::security::SCOPE_CONFIG_READ.to_string(),
+    ];
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "v-1".to_string(),
+            key: vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+            value_raw: "bogus".to_string(),
+            stored_value_raw: None,
+            value_json: serde_json::json!({"bps": 1}),
+            parsed_display: "bogus".to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "1".to_string(),
+        });
+    let Json(malformed_rule_storage) =
+        crate::routes_monitoring::list_ping_targets(State(state.clone()), headers.clone())
+            .await
+            .unwrap();
+    assert_eq!(malformed_rule_storage[0].target_client_ids, ["v-1"]);
+    assert!(!malformed_rule_storage[0].target_update_evidence_available);
+    memory.vps_rule_values.write().await.clear();
+
+    memory
+        .ping_targets
+        .write()
+        .await
+        .iter_mut()
+        .find(|target| target.id == saved.target.id)
+        .unwrap()
+        .selector_expression = "*".to_string();
 
     seed_monitoring_agent(&repo, "v-2").await;
     let Json(drifted) = crate::routes_monitoring::list_ping_targets(State(state), headers)
@@ -67,6 +161,7 @@ async fn ping_target_list_reports_durable_runtime_state_and_frozen_target_drift(
         .unwrap();
     assert_eq!(drifted[0].runtime_sync.state, "applied");
     assert!(drifted[0].target_update_available);
+    assert!(drifted[0].target_update_evidence_available);
 }
 
 #[tokio::test]
@@ -500,6 +595,7 @@ async fn shared_view_creation_persists_random_public_target_keys() {
         serde_json::json!(["v-1"])
     );
     assert_eq!(first["share"]["target_update_available"], false);
+    assert_eq!(first["share"]["target_update_evidence_available"], true);
     assert!(first.get("secret").is_none());
     let first_record = repo
         .monitoring_share_record(first_share_id)
@@ -884,6 +980,8 @@ async fn probe_changes_advance_generation_and_stale_results_never_cross_it() {
     .await
     .unwrap();
     assert_eq!(metadata_only.target.target.generation, 1);
+    assert!(metadata_only.target.target.target_update_evidence_available);
+    assert!(!metadata_only.target.target.target_update_available);
 
     repo.mutate_ping_targets_bulk(&[saved.target.id], "disable", &operator)
         .await
@@ -926,6 +1024,7 @@ async fn probe_changes_advance_generation_and_stale_results_never_cross_it() {
     .await
     .unwrap();
     assert_eq!(probe_changed.target.target.generation, 4);
+    assert!(probe_changed.target.target.target_update_evidence_available);
 
     record_ping(&repo, saved.target.id, 1, observed + 60, 99.0).await;
     record_ping(&repo, saved.target.id, 4, observed + 60, 12.0).await;
@@ -997,6 +1096,7 @@ async fn authoritative_traffic_history_preserves_counter_reset_gaps() {
             client_id: "v-1".to_string(),
             key: crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_SELECTORS.to_string(),
             value_raw: "eth0+rx".to_string(),
+            stored_value_raw: None,
             value_json: serde_json::json!({
                 "selectors": [{
                     "source": "host",

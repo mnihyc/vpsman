@@ -1,7 +1,8 @@
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use chrono::{Datelike, Utc};
+use serde_json::{json, Value};
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     PgPool, Row,
@@ -28,10 +29,11 @@ use vpsman_server_core::{
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AuthContext, BackupRequestStatus, BootstrapOperatorRequest, ConfigurationOverrideAction,
-        CreateBackupPolicyRequest, CreateBackupRequest, CreateConfigurationPresetRequest,
-        CreateScheduleRequest, FleetAlertQuery, JobOutputView, JobRolloutPolicy, ListQuery,
-        LoginRequest, NewServerArtifact, PingTargetRecord, PreviewConfigurationPresetRequest,
+        AuthContext, BackupRequestStatus, BootstrapOperatorRequest, BulkTagMutationAction,
+        BulkTagMutationRequest, ConfigurationOverrideAction, CreateBackupPolicyRequest,
+        CreateBackupRequest, CreateConfigurationPresetRequest, CreateScheduleRequest,
+        FleetAlertQuery, JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest,
+        NewServerArtifact, PingTargetRecord, PreviewConfigurationPresetRequest,
         PreviewConfigurationSourceOverrideRequest, SchedulePrivilegeMutationRequest,
         UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
@@ -40,7 +42,9 @@ use crate::{
     },
     model_alert_policies::{
         CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
-        PolicyDryRunRequest, PolicyRuleRequest, VpsRuleQuery,
+        PolicyDryRunRequest, PolicyRuleRequest, VpsRuleQuery, VpsRulesBulkUnsetRequest,
+        VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VPS_RULE_KEY_NETWORK_PORT_SPEED,
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
     },
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
@@ -6404,6 +6408,464 @@ async fn postgres_fleet_alert_policy_regression_reads_legacy_overlapping_traffic
 }
 
 #[tokio::test]
+async fn postgres_vps_rule_spacing_edit_is_canonical_and_does_not_update_the_row() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "canonical-rule-client";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let first_values = BTreeMap::from([(
+        format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} "),
+        " 001.000   gbps ".to_string(),
+    )]);
+    let first_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: first_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values: first_values,
+                confirmed: true,
+                preview_hash: first_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let audit_count_after_create = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let changed_values = BTreeMap::from([(
+        VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+        " 001.500   gbps ".to_string(),
+    )]);
+    let changed_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: changed_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(changed_preview.changed_row_count, 1);
+    assert_eq!(changed_preview.changes[0].action, "set");
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values: changed_values,
+                confirmed: true,
+                preview_hash: changed_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT value_raw FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+        )
+        .bind(client_id)
+        .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "1.5 Gbps"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        audit_count_after_create + 1
+    );
+
+    sqlx::query("UPDATE vps_rule_values SET value_raw = $3 WHERE client_id = $1 AND key = $2")
+        .bind(client_id)
+        .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+        .bind(" 001.500   gbps ")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let normalization_audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let normalization_values = BTreeMap::from([(
+        VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+        "1.5Gbps".to_string(),
+    )]);
+    let normalization_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: normalization_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(normalization_preview.changed_row_count, 1);
+    assert_eq!(normalization_preview.changes[0].action, "set");
+    assert_eq!(
+        normalization_preview.changes[0].before.as_deref(),
+        Some(" 001.500   gbps ")
+    );
+    assert_eq!(
+        normalization_preview.changes[0].after.as_deref(),
+        Some("1.5 Gbps")
+    );
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values: normalization_values,
+                confirmed: true,
+                preview_hash: normalization_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT value_raw FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+        )
+        .bind(client_id)
+        .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "1.5 Gbps"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        normalization_audit_count + 1
+    );
+
+    let before_updated_at = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+        "SELECT updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let before_audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let edit_values = BTreeMap::from([(
+        VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+        "1.5Gbps".to_string(),
+    )]);
+    let edit_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: edit_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(edit_preview.changed_row_count, 0);
+    assert_eq!(edit_preview.changes[0].action, "unchanged");
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values: edit_values,
+                confirmed: true,
+                preview_hash: edit_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let row = sqlx::query(
+        "SELECT value_raw, value_json, updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.get::<String, _>("value_raw"), "1.5 Gbps");
+    assert_eq!(
+        row.get::<sqlx::types::Json<Value>, _>("value_json").0,
+        json!({"bps": 1_500_000_000_i64, "display": "1.5 Gbps"})
+    );
+    assert_eq!(
+        row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+        before_updated_at
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        before_audit_count
+    );
+
+    let duplicate_error = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: BTreeMap::from([
+                (
+                    VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+                    "1 Gbps".to_string(),
+                ),
+                (
+                    format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} "),
+                    "2 Gbps".to_string(),
+                ),
+            ]),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(duplicate_error
+        .to_string()
+        .contains("vps_rules_duplicate_key"));
+
+    let unset_keys = vec![format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} ")];
+    let unset_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "unset".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: BTreeMap::new(),
+            keys: unset_keys.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(unset_preview.changed_row_count, 1);
+    db.repo
+        .bulk_unset_vps_rules(
+            &VpsRulesBulkUnsetRequest {
+                selector_expression: format!("id:{client_id}"),
+                keys: unset_keys,
+                confirmed: true,
+                preview_hash: unset_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+        )
+        .bind(client_id)
+        .bind(VPS_RULE_KEY_NETWORK_PORT_SPEED)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_single_connection_serializes_stale_self_referential_rule_confirmations() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "concurrent-rule-client";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES ($1, $2, '1', '{"day":1}'::jsonb)
+        "#,
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_TRAFFIC_RESET_DAY)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let single_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let single_repo = Repository::Postgres(single_pool.clone());
+    let operator = postgres_network_operator(&db.repo).await;
+    let selector_expression = "vps.rules:traffic.reset_day <= 1".to_string();
+    let values = BTreeMap::from([(VPS_RULE_KEY_TRAFFIC_RESET_DAY.to_string(), "2".to_string())]);
+    let preview = single_repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: selector_expression.clone(),
+            values: values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.matched_vps_count, 1);
+    let left_request = VpsRulesBulkUpsertRequest {
+        selector_expression: selector_expression.clone(),
+        values: values.clone(),
+        confirmed: true,
+        preview_hash: preview.preview_hash.clone(),
+    };
+    let right_request = VpsRulesBulkUpsertRequest {
+        selector_expression,
+        values,
+        confirmed: true,
+        preview_hash: preview.preview_hash,
+    };
+    let (left, right) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            single_repo.bulk_upsert_vps_rules(&left_request, &operator),
+            single_repo.bulk_upsert_vps_rules(&right_request, &operator),
+        )
+    })
+    .await
+    .expect("single-connection rule mutations must not deadlock");
+    let results = [left, right];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results
+        .into_iter()
+        .find_map(Result::err)
+        .expect("one stale confirmation");
+    assert!(error
+        .to_string()
+        .contains("vps_rules_preview_hash_mismatch"));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT value_raw FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+        )
+        .bind(client_id)
+        .bind(VPS_RULE_KEY_TRAFFIC_RESET_DAY)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "2"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    drop(single_repo);
+    single_pool.close().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_confirmed_bulk_tag_mutation_waits_for_agent_lifecycle_lock() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "tag-lifecycle-client";
+    insert_client(&db.pool, client_id, None).await;
+
+    let mut lifecycle_blocker = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
+        .execute(&mut *lifecycle_blocker)
+        .await
+        .unwrap();
+
+    let mutation_repo = db.repo.clone();
+    let request = BulkTagMutationRequest {
+        action: BulkTagMutationAction::Add,
+        tag: "serialized-tag".to_string(),
+        selector_expression: format!("id:{client_id}"),
+        target_client_ids: vec![client_id.to_string()],
+        confirmed: true,
+        preview_hash: None,
+        privilege_assertion: None,
+    };
+    let mutation_task =
+        tokio::spawn(async move { mutation_repo.bulk_mutate_tags(&request, false).await });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting_for_lifecycle_lock: bool = sqlx::query_scalar(
+                r#"
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%vpsman.agent_key_lifecycle%'
+                )
+                "#,
+            )
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+            if waiting_for_lifecycle_lock {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("confirmed tag mutation should wait for the agent lifecycle lock");
+
+    lifecycle_blocker.rollback().await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), mutation_task)
+        .await
+        .expect("tag mutation should finish after the lifecycle lock is released")
+        .expect("tag mutation task should not panic")
+        .unwrap();
+    assert_eq!(response.changed_count, 1);
+    assert!(db
+        .repo
+        .list_agents()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|agent| agent.id == client_id)
+        .unwrap()
+        .tags
+        .iter()
+        .any(|tag| tag == "serialized-tag"));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn filter_limit_regression_postgres_rules_and_policies() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -6535,7 +6997,7 @@ async fn filter_limit_regression_postgres_rules_and_policies() {
 
     let client_policies = db
         .repo
-        .list_fleet_alert_policies(1, Some(true), None, Some(target_client_id))
+        .list_fleet_alert_policies(1, Some(true), None, Some(target_client_id), true)
         .await
         .unwrap();
     assert_eq!(client_policies.len(), 1);
@@ -6543,7 +7005,13 @@ async fn filter_limit_regression_postgres_rules_and_policies() {
 
     let selector_policies = db
         .repo
-        .list_fleet_alert_policies(1, Some(true), Some(&format!("id:{target_client_id}")), None)
+        .list_fleet_alert_policies(
+            1,
+            Some(true),
+            Some(&format!("id:{target_client_id}")),
+            None,
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(selector_policies.len(), 1);

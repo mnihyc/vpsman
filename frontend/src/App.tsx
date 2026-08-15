@@ -57,6 +57,10 @@ import type {
 import { pushHistoryEntry, replaceHistoryEntry } from "./historyEntryState";
 import { retryableLazy } from "./lazyImport";
 import { presentAudit, type AuditEvidenceReference } from "./auditPresentation";
+import {
+  createVpsRuleSearchContextValue,
+  VpsRuleSearchProvider,
+} from "./vpsRuleSearchContext";
 
 type ReleaseRouteTarget = AgentView | string;
 
@@ -1109,7 +1113,15 @@ export function App() {
       window.removeEventListener("storage", handlePrivilegeStorage);
     };
   }, []);
-  const fleetViews = useFleetViews(dashboard.agents);
+  const vpsRuleSearchContext = useMemo(
+    () =>
+      createVpsRuleSearchContextValue(
+        dashboard.vpsRuleValues,
+        dashboard.vpsRuleEvidenceAvailable,
+      ),
+    [dashboard.vpsRuleEvidenceAvailable, dashboard.vpsRuleValues],
+  );
+  const fleetViews = useFleetViews(dashboard.agents, vpsRuleSearchContext);
   const operatorPreferences = useMemo(
     () => sanitizeOperatorPreferences(dashboard.operator?.preferences),
     [dashboard.operator?.preferences],
@@ -2527,7 +2539,7 @@ export function App() {
   function renderNetworkPanel(panelSubpage: string) {
     return (
       <div className="workspace singleColumn">
-      <TopologyPanel
+        <TopologyPanel
           activeSubpage={panelSubpage}
           agents={dashboard.agents}
           apiToken={dashboard.apiToken}
@@ -3026,7 +3038,7 @@ export function App() {
         vpsNameDisplayMode: operatorPreferences.vps_name_display_mode,
       }}
     >
-      <>
+      <VpsRuleSearchProvider value={vpsRuleSearchContext}>
         <ConsoleShell
           activeSavedFleetViewId={fleetViews.activeSavedViewId}
           activeSubpage={activeSubpage}
@@ -3082,7 +3094,7 @@ export function App() {
           onPrivilegeMaterialChange={setPrivilegeMaterial}
           open={privilegeUnlockOpen}
         />
-      </>
+      </VpsRuleSearchProvider>
     </PanelDisplayProvider>
   );
 }

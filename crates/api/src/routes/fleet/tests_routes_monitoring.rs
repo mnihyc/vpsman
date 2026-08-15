@@ -91,6 +91,7 @@ async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
         target_count: 1,
         target_client_ids: vec!["v-1".to_string()],
         target_update_available: false,
+        target_update_evidence_available: false,
         visibility: MonitoringShareVisibilityView {
             identity_context: false,
             billing: false,
@@ -112,10 +113,11 @@ async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
         last_visited_at: None,
     }];
 
-    enrich_monitoring_share_target_evidence(&state, &mut shares)
+    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
         .await
         .unwrap();
     assert!(!shares[0].target_update_available);
+    assert!(shares[0].target_update_evidence_available);
     memory.agents.write().await.push(AgentView {
         id: "v-2".to_string(),
         display_name: "v-2".to_string(),
@@ -131,13 +133,60 @@ async fn shared_view_list_exposes_frozen_targets_and_drift_for_operator() {
         stale_reason: None,
         capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
     });
-    enrich_monitoring_share_target_evidence(&state, &mut shares)
+    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
         .await
         .unwrap();
     assert!(shares[0].target_update_available);
     let json = serde_json::to_value(&shares[0]).unwrap();
     assert_eq!(json["target_client_ids"], serde_json::json!(["v-1"]));
     assert_eq!(json["target_update_available"], true);
+
+    shares[0].selector_expression = "vps.rules:traffic.reset_day".to_string();
+    enrich_monitoring_share_target_evidence(&state, &mut shares, false)
+        .await
+        .unwrap();
+    assert_eq!(shares[0].target_client_ids, ["v-1"]);
+    assert!(!shares[0].target_update_available);
+    assert!(!shares[0].target_update_evidence_available);
+
+    shares[0].selector_expression = "(".to_string();
+    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
+        .await
+        .unwrap();
+    assert_eq!(shares[0].target_client_ids, ["v-1"]);
+    assert!(!shares[0].target_update_evidence_available);
+
+    shares[0].selector_expression = "vps.rules:traffic.reset_day".to_string();
+    let mut ordinary_share = shares[0].clone();
+    ordinary_share.id = uuid::Uuid::new_v4();
+    ordinary_share.selector_expression = "*".to_string();
+    shares.push(ordinary_share);
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "v-1".to_string(),
+            key: vpsman_common::VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+            value_raw: "bogus".to_string(),
+            stored_value_raw: None,
+            value_json: serde_json::json!({"bps": 1}),
+            parsed_display: "bogus".to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "1".to_string(),
+        });
+    enrich_monitoring_share_target_evidence(&state, &mut shares, true)
+        .await
+        .unwrap();
+    assert_eq!(shares[0].target_client_ids, ["v-1"]);
+    assert!(!shares[0].target_update_evidence_available);
+    assert_eq!(shares[1].target_client_ids, ["v-1"]);
+    assert!(shares[1].target_update_evidence_available);
+    assert!(shares[1].target_update_available);
 }
 
 #[tokio::test]
@@ -880,10 +929,10 @@ fn public_billing_projection_allowlists_period_code_for_cycle_formatting() {
         currency_display: Some("USD".to_string()),
         period: Some("year".to_string()),
         period_code: Some("y".to_string()),
-        cycle: Some("15-06".to_string()),
+        cycle: Some("06-15".to_string()),
         display: "120.00 USD/y".to_string(),
     });
 
     assert_eq!(projected.period_code.as_deref(), Some("y"));
-    assert_eq!(projected.cycle.as_deref(), Some("15-06"));
+    assert_eq!(projected.cycle.as_deref(), Some("06-15"));
 }

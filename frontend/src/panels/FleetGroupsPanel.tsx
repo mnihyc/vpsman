@@ -69,7 +69,10 @@ import {
   agentsMatchingExpression,
   parseSearchExpression,
   selectorExpressionForClientIds,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import { formatVpsName, runPanelAction } from "../utils";
 import { LocalTargetPreview } from "./TargetImpactPreview";
 
@@ -1668,6 +1671,7 @@ function BulkTagPanel({
   setLastMutation: (response: TagMutationResponse | null) => void;
   tags: TagView[];
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(TAG_BULK_SELECTOR_STORAGE_KEY),
   );
@@ -1695,12 +1699,22 @@ function BulkTagPanel({
   const trimmedTag = tag.trim();
   const bulkGroupNameError = groupNameValidationError(tag);
   const trimmedSelector = selectorExpression.trim();
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    trimmedSelector,
+    vpsRuleSearch,
+  );
   const localTargets = useMemo(
     () =>
-      trimmedSelector && !selectorParse.error
-        ? agentsMatchingExpression(agents, trimmedSelector)
+      trimmedSelector && !selectorParse.error && !selectorEvidenceUnavailable
+        ? agentsMatchingExpression(agents, trimmedSelector, vpsRuleSearch)
         : [],
-    [agents, selectorParse.error, trimmedSelector],
+    [
+      agents,
+      selectorEvidenceUnavailable,
+      selectorParse.error,
+      trimmedSelector,
+      vpsRuleSearch,
+    ],
   );
   const eligibleLocalTargets = useMemo(
     () => tagMutationEligibleTargets(localTargets, includeReviewTargets),
@@ -1726,6 +1740,7 @@ function BulkTagPanel({
     (action === "delete" ||
       (trimmedSelector &&
         !selectorParse.error &&
+        !selectorEvidenceUnavailable &&
         eligibleLocalTargets.length > 0)),
   );
 
@@ -2002,10 +2017,16 @@ function BulkTagPanel({
               }
               verificationMessage={selectorParse.error ?? undefined}
             />
-            <LocalTargetPreview
-              agents={localTargets}
-              ariaLabel="Bulk group local VPS preview"
-            />
+            {selectorEvidenceUnavailable ? (
+              <small className="errorText">
+                {VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE}
+              </small>
+            ) : (
+              <LocalTargetPreview
+                agents={localTargets}
+                ariaLabel="Bulk group local VPS preview"
+              />
+            )}
             <label
               className="inlineCheck tightCheck compactReviewCheck"
               title="Default excludes contact-unknown, stale, and degraded targets from the final mutation. Enable only when you intentionally want those targets included."

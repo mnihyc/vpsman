@@ -46,7 +46,7 @@ fn vps_rule_billing_and_port_speed_errors_are_bad_requests() {
         "billing_cycle_requires_price",
         "billing_cycle_disabled_price_invalid",
         "billing_month_cycle_requires_day",
-        "billing_long_cycle_requires_day_month",
+        "billing_long_cycle_requires_month_day",
         "port_speed_unit_required",
         "port_speed_unit_invalid",
         "port_speed_value_invalid",

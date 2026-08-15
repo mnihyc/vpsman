@@ -39,8 +39,11 @@ role receives the scopes needed for normal daily operation. The default
 - `config:read`: configuration preset definitions, effective per-VPS sources,
   preset and override previews, readiness and runtime-sync state, rendered
   effective runtime config, runtime config patch generators, rendered
-  incremental config patches, per-VPS rule values, Config > Rules dry-runs,
-  and private agent-update release metadata.
+  incremental config patches, per-VPS rule values, rule-aware VPS selector
+  evaluation and suggestions, Config > Rules dry-runs, and private agent-update
+  release metadata. Any live selector using `vps.rules` requires this scope in
+  addition to the operation's normal scope; unavailable rule evidence is an
+  explicit error rather than an empty match.
 - `network:read`: full tunnel plans, exportable runtime `plan.json` details,
   OSPF update plans, port-forward desired/runtime state, general Ping-target
   definitions/assignments/history, hostname-resolution candidates, raw network

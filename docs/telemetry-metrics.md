@@ -276,9 +276,9 @@ The optional display rules next to traffic do not alter accounting:
   **-** on operator monitoring cards. A Shared view shows that placeholder only
   when Billing is included in its visibility.
 - `billing.cycle` is an optional renewal anchor, independent of traffic reset:
-  a day for monthly billing, or day-month for quarterly, half-yearly, and yearly
-  billing. Yearly renewal labels render the stored day-month anchor as
-  month-day (`15-06` becomes `06-15`).
+  a day for monthly billing, or `MM-DD` for quarterly, half-yearly, and yearly
+  billing. Full calendar anchors use the same `MM-DD` syntax in storage,
+  search, API responses, and operator displays.
 - `network.port_speed` accepts an explicit bit-rate unit such as `400 Mbps` or
   `1.5 Gbps`. It is display-only on monitoring cards. A new tunnel-plan draft
   may use one endpoint's value, or the lower of two values, as a convenience;

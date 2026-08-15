@@ -3385,6 +3385,7 @@ fn ping_target_view(
             reason: "No durable runtime evidence is available".to_string(),
         },
         target_update_available: false,
+        target_update_evidence_available: false,
         created_at: record.created_at.clone(),
         updated_at: record.updated_at.clone(),
     }
@@ -4206,6 +4207,7 @@ async fn postgres_monitoring_share_views(
                 target_count,
                 target_client_ids: row.try_get("target_client_ids")?,
                 target_update_available: false,
+                target_update_evidence_available: false,
                 visibility: MonitoringShareVisibilityView {
                     identity_context: row.try_get("show_identity_context")?,
                     billing: row.try_get("show_billing")?,
@@ -4289,6 +4291,7 @@ fn monitoring_share_view(
         target_count: record.targets.len(),
         target_client_ids: record.target_client_ids(),
         target_update_available: false,
+        target_update_evidence_available: false,
         visibility: record.visibility.clone(),
         status: monitoring_share_status(record, crate::unix_now()).to_string(),
         expires_at: record.expires_at.clone(),

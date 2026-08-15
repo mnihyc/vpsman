@@ -1,5 +1,11 @@
 import { useCallback, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPostPreview, isApiUnauthorized } from "../api";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPostPreview,
+  isApiUnauthorized,
+} from "../api";
 import { emptySummary } from "../constants";
 import type {
   AgentView,
@@ -83,9 +89,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     promise: Promise<void>;
   } | null>(null);
   const deletedClientIds = useRef(new Set<string>());
-  const fleetSourceErrors = useRef<
-    Partial<Record<FleetErrorSource, string>>
-  >({});
+  const fleetSourceErrors = useRef<Partial<Record<FleetErrorSource, string>>>(
+    {},
+  );
   apiTokenRef.current = apiToken;
   const [summary, setSummary] = useState<FleetSummary>(emptySummary);
   const [agents, setAgents] = useState<AgentView[]>([]);
@@ -128,6 +134,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [fleetAlertsEvidenceAvailable, setFleetAlertsEvidenceAvailable] =
     useState(false);
   const [configPolicyEvidenceAvailable, setConfigPolicyEvidenceAvailable] =
+    useState(false);
+  const [vpsRuleEvidenceAvailable, setVpsRuleEvidenceAvailable] =
     useState(false);
 
   const publishFleetError = useCallback(
@@ -248,6 +256,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       );
 
       setFleetAlertsEvidenceAvailable(sourceAvailable(fleetAlertsSource));
+      setVpsRuleEvidenceAvailable(sourceAvailable(vpsRuleValuesSource));
       setConfigPolicyEvidenceAvailable(
         [
           fleetAlertPoliciesSource,
@@ -381,6 +390,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setFleetCoreEvidenceAvailable(false);
         setFleetAlertsEvidenceAvailable(false);
         setConfigPolicyEvidenceAvailable(false);
+        setVpsRuleEvidenceAvailable(false);
         fleetSourceErrors.current = { core: "Operator login required" };
         setApiError("Operator login required");
         return;
@@ -395,6 +405,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (fullLoadIsCurrent) {
         setFleetAlertsEvidenceAvailable(false);
         setConfigPolicyEvidenceAvailable(false);
+        setVpsRuleEvidenceAvailable(false);
         publishFleetError("detail", message);
       }
     }
@@ -536,7 +547,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           });
           deletedClientIds.current.add(response.client_id);
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           outcomes.push({
             client_id: target.client_id,
             response: null,
@@ -655,7 +667,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const bulkUpsertVpsRules = useCallback(
     async (request: VpsRulesBulkUpsertRequest) => {
-      const preview = await (request.confirmed ? apiPost : apiPostPreview)<VpsRulesDryRunResponse>(
+      const preview = await (
+        request.confirmed ? apiPost : apiPostPreview
+      )<VpsRulesDryRunResponse>(
         "/api/v1/vps-rules/bulk-upsert",
         apiToken,
         request,
@@ -668,7 +682,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const bulkUnsetVpsRules = useCallback(
     async (request: VpsRulesBulkUnsetRequest) => {
-      const preview = await (request.confirmed ? apiPost : apiPostPreview)<VpsRulesDryRunResponse>(
+      const preview = await (
+        request.confirmed ? apiPost : apiPostPreview
+      )<VpsRulesDryRunResponse>(
         "/api/v1/vps-rules/bulk-unset",
         apiToken,
         request,
@@ -765,11 +781,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dispatchFleetAlertNotifications = useCallback(
     async (request: FleetAlertNotificationDispatchRequest) => {
-      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<FleetAlertNotificationDeliveryRecord[]>(
-        "/api/v1/fleet-alert-notifications/dispatch",
-        apiToken,
-        request,
-      );
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<
+        FleetAlertNotificationDeliveryRecord[]
+      >("/api/v1/fleet-alert-notifications/dispatch", apiToken, request);
       if (apiTokenRef.current !== apiToken) {
         return deliveries;
       }
@@ -792,11 +806,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const processFleetAlertNotifications = useCallback(
     async (request: FleetAlertNotificationProcessRequest) => {
-      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<FleetAlertNotificationDeliveryRecord[]>(
-        "/api/v1/fleet-alert-notifications/process",
-        apiToken,
-        request,
-      );
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<
+        FleetAlertNotificationDeliveryRecord[]
+      >("/api/v1/fleet-alert-notifications/process", apiToken, request);
       if (apiTokenRef.current !== apiToken) {
         return deliveries;
       }
@@ -873,11 +885,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const dispatchWebhookRules = useCallback(
     async (request: WebhookRuleDispatchRequest) => {
-      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<WebhookRuleDeliveryRecord[]>(
-        "/api/v1/webhook-rules/dispatch",
-        apiToken,
-        request,
-      );
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<
+        WebhookRuleDeliveryRecord[]
+      >("/api/v1/webhook-rules/dispatch", apiToken, request);
       if (apiTokenRef.current !== apiToken) {
         return deliveries;
       }
@@ -900,11 +910,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const processWebhookRuleDeliveries = useCallback(
     async (request: WebhookRuleProcessRequest) => {
-      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<WebhookRuleDeliveryRecord[]>(
-        "/api/v1/webhook-deliveries/process",
-        apiToken,
-        request,
-      );
+      const deliveries = await (request.dry_run ? apiPostPreview : apiPost)<
+        WebhookRuleDeliveryRecord[]
+      >("/api/v1/webhook-deliveries/process", apiToken, request);
       if (apiTokenRef.current !== apiToken) {
         return deliveries;
       }
@@ -929,7 +937,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
 
   const rotateWebhookDeliveryHistory = useCallback(
     async (request: WebhookDeliveryRotationRequest) => {
-      const response = await (request.confirmed ? apiPost : apiPostPreview)<WebhookDeliveryRotationResponse>(
+      const response = await (
+        request.confirmed ? apiPost : apiPostPreview
+      )<WebhookDeliveryRotationResponse>(
         "/api/v1/webhook-deliveries/rotate",
         apiToken,
         request,
@@ -968,6 +978,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setFleetCoreEvidenceAvailable(false);
     setFleetAlertsEvidenceAvailable(false);
     setConfigPolicyEvidenceAvailable(false);
+    setVpsRuleEvidenceAvailable(false);
     setApiError(null);
   }, []);
 
@@ -976,6 +987,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     apiError,
     clearFleet,
     configPolicyEvidenceAvailable,
+    vpsRuleEvidenceAvailable,
     fleetAlertsEvidenceAvailable,
     fleetAlerts,
     fleetAlertStates,

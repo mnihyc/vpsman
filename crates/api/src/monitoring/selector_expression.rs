@@ -1,5 +1,7 @@
-use crate::model::AgentView;
-use vpsman_common::{Expression, ExpressionContext, VpsMetadata};
+use std::collections::HashMap;
+
+use crate::{model::AgentView, model_alert_policies::VpsRuleValueRecord};
+use vpsman_common::{Expression, ExpressionContext, VpsMetadata, VpsRuleContext};
 
 pub(crate) fn parse_selector_expression(input: &str) -> Result<Option<Expression>, String> {
     vpsman_common::parse_expression(input)
@@ -10,6 +12,32 @@ pub(crate) fn agent_matches_selector_expression(
     expression: &Expression,
 ) -> bool {
     vpsman_common::expression_matches(&agent_expression_context(agent), expression)
+}
+
+pub(crate) fn agent_matches_selector_expression_with_rules(
+    agent: &AgentView,
+    expression: &Expression,
+    rules: Option<&VpsRuleContext>,
+) -> bool {
+    let mut context = agent_expression_context(agent);
+    if let Some(rules) = rules {
+        context = context.with_vps_rules(rules.clone());
+    }
+    vpsman_common::expression_matches(&context, expression)
+}
+
+pub(crate) fn vps_rule_contexts_by_client(
+    rows: &[VpsRuleValueRecord],
+) -> HashMap<String, VpsRuleContext> {
+    let mut contexts = HashMap::<String, VpsRuleContext>::new();
+    for row in rows {
+        contexts.entry(row.client_id.clone()).or_default().insert(
+            row.key.clone(),
+            row.value_raw.clone(),
+            row.value_json.clone(),
+        );
+    }
+    contexts
 }
 
 pub(crate) fn agent_expression_context(agent: &AgentView) -> ExpressionContext {

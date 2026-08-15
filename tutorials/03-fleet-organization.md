@@ -200,7 +200,7 @@ cargo run -p vpsctl -- vps-rules upsert \
 The same Config > Rules editor also accepts optional card-only facts:
 `billing.price=29.90 CNY/m`, `billing.cycle=15`, and
 `network.port_speed=1.5 Gbps`. Quarterly, half-yearly, and yearly prices use a
-day-month renewal anchor such as `15-06`; the billing anchor is independent of
+month-day renewal anchor such as `06-15`; the billing anchor is independent of
 `traffic.reset_day`. Use `-1` for an explicitly unlimited traffic quota or
 explicit billing **-**. Leaving a field blank means no rule, which is a
 different operator choice. Port speed is display-only, although a new tunnel

@@ -6,19 +6,38 @@ use serde_json::json;
 use super::{
     aggregate_memory_raw_traffic_history, aggregate_memory_traffic_counter_usage,
     aggregate_memory_traffic_history, claim_traffic_selector_directions, derive_cycle_usage,
-    next_policy_rule_state, parse_billing_cycle, parse_billing_price, parse_byte_size,
-    parse_network_rate_interfaces, parse_persisted_traffic_selector_list, parse_port_speed,
-    parse_stored_network_rate_selector_spec, parse_traffic_selector, parse_traffic_selector_list,
-    parse_vps_rule_value, policy_identifier_value, policy_state_is_alert_eligible,
-    policy_webhook_repair_is_recent, resolve_network_rate_interface_selection,
-    traffic_accounting_for_client, traffic_cycle_starts_for_clients, validate_billing_rule_group,
-    NetworkRateSelectorReference, NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord,
-    PolicyRuleStateRecord, TrafficCounterRollupRecord, TrafficCounterSampleRecord,
-    TrafficCounterStreamUsage, TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord,
-    NO_RESET_TRAFFIC_START_UNIX, VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
-    VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
-    VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    network_rate_selector_spec_from_rule, next_policy_rule_state, parse_billing_cycle,
+    parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
+    parse_persisted_traffic_selector_list, parse_port_speed, parse_traffic_selector,
+    parse_traffic_selector_list, parse_vps_rule_value, policy_identifier_value,
+    policy_state_is_alert_eligible, policy_webhook_repair_is_recent,
+    resolve_network_rate_interface_selection, traffic_accounting_for_client,
+    traffic_cycle_starts_for_clients, validate_billing_rule_group, NetworkRateSelectorReference,
+    NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
+    TrafficCounterRollupRecord, TrafficCounterSampleRecord, TrafficCounterStreamUsage,
+    TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
+    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+    VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
+
+#[test]
+fn api_vps_rule_constants_follow_the_common_registry() {
+    let mut api_keys = vec![
+        crate::model_alert_policies::VPS_RULE_KEY_BILLING_CYCLE,
+        crate::model_alert_policies::VPS_RULE_KEY_BILLING_PRICE,
+        crate::model_alert_policies::VPS_RULE_KEY_NETWORK_PORT_SPEED,
+        crate::model_alert_policies::VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
+        crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
+        crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_SELECTORS,
+    ];
+    api_keys.sort_unstable();
+    let mut common_keys = vpsman_common::SUPPORTED_VPS_RULE_KEYS.to_vec();
+    common_keys.sort_unstable();
+    assert_eq!(api_keys, common_keys);
+}
 
 #[test]
 fn billing_price_and_cycle_are_canonical_and_period_aware() {
@@ -41,11 +60,11 @@ fn billing_price_and_cycle_are_canonical_and_period_aware() {
         "10.20 ¥/m"
     );
     assert_eq!(parse_billing_cycle("7").unwrap().raw, "7");
-    assert_eq!(parse_billing_cycle("7-6").unwrap().raw, "07-06");
+    assert_eq!(parse_billing_cycle("6-15").unwrap().raw, "06-15");
     validate_billing_rule_group(Some("29.90 CNY/m"), Some("7")).unwrap();
-    validate_billing_rule_group(Some("60.00 EUR/hy"), Some("07-06")).unwrap();
+    validate_billing_rule_group(Some("60.00 EUR/hy"), Some("06-15")).unwrap();
     assert!(
-        validate_billing_rule_group(Some("29.90 CNY/m"), Some("07-06"))
+        validate_billing_rule_group(Some("29.90 CNY/m"), Some("06-15"))
             .unwrap_err()
             .to_string()
             .contains("billing_month_cycle_requires_day")
@@ -111,8 +130,10 @@ fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
     assert_eq!(referenced.raw, "[traffic.selectors]");
     assert_eq!(referenced.json["mode"], "reference");
     assert_eq!(referenced.json["reference"]["rule"], "traffic.selectors");
+    let referenced_rule =
+        parsed_rule_for("v-1", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, &referenced.raw);
     assert!(matches!(
-        parse_stored_network_rate_selector_spec(&referenced.json).unwrap(),
+        network_rate_selector_spec_from_rule(&referenced_rule).unwrap(),
         NetworkRateSelectorSpec::Reference(NetworkRateSelectorReference::TrafficSelectors)
     ));
     let singular = parse_network_rate_interfaces("[traffic.selector]").unwrap();
@@ -135,9 +156,10 @@ fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
         .to_string()
         .contains("traffic_selector_direction_overlap"));
 
-    let mut inconsistent = exact.json;
-    inconsistent["selectors"][0]["source"] = json!("tunnel");
-    assert!(parse_stored_network_rate_selector_spec(&inconsistent).is_err());
+    let mut invalid_stored =
+        parsed_rule_for("v-1", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, &exact.raw);
+    invalid_stored.value_raw = "tunnel:wg0".to_string();
+    assert!(network_rate_selector_spec_from_rule(&invalid_stored).is_err());
 }
 
 #[test]
@@ -151,12 +173,11 @@ fn live_rate_selector_defaults_to_reference_unless_all_or_exact_is_explicit() {
         "v-7".to_string(),
         "v-8".to_string(),
     ];
-    let mut stored_reference =
-        parsed_rule_for("v-4", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");
-    stored_reference.value_json = json!({
-        "mode": "reference",
-        "reference": {"rule": "traffic.selectors"},
-    });
+    let stored_reference = parsed_rule_for(
+        "v-4",
+        VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        "[traffic.selectors]",
+    );
     let rules = vec![
         parsed_rule_for(
             "v-1",
@@ -215,6 +236,7 @@ fn live_rate_selector_defaults_to_reference_unless_all_or_exact_is_explicit() {
 
     let mut invalid_reference =
         parsed_rule_for("v-5", VPS_RULE_KEY_NETWORK_RATE_INTERFACES, "eth9+tx");
+    invalid_reference.value_raw = "tunnel:wg0".to_string();
     invalid_reference.value_json = json!({
         "mode": "reference",
         "reference": {"rule": "billing.price"},
@@ -847,6 +869,7 @@ fn rule(key: &str, value_raw: &str, value_json: serde_json::Value) -> VpsRuleVal
         client_id: "edge-a".to_string(),
         key: key.to_string(),
         value_raw: value_raw.to_string(),
+        stored_value_raw: None,
         value_json,
         parsed_display: value_raw.to_string(),
         state: "valid".to_string(),

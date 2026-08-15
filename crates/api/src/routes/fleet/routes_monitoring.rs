@@ -8,7 +8,6 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 use uuid::Uuid;
 use vpsman_common::{payload_hash, AgentPingProbeKind, AgentRuntimeConfig};
@@ -42,11 +41,12 @@ use crate::{
     model_alert_policies::{
         VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
     },
+    repository::Repository,
     repository_monitoring::monitoring_share_status,
     runtime_config::dispatch_runtime_config_for_clients,
     security::{
-        generate_token, SCOPE_FLEET_READ, SCOPE_NETWORK_READ, SCOPE_SHARING_READ,
-        SCOPE_SHARING_WRITE,
+        generate_token, operator_has_scope, require_vps_rule_selector_scope, SCOPE_CONFIG_READ,
+        SCOPE_FLEET_READ, SCOPE_NETWORK_READ, SCOPE_SHARING_READ, SCOPE_SHARING_WRITE,
     },
     selector_expression::parse_selector_expression,
     state::AppState,
@@ -94,9 +94,19 @@ pub(crate) async fn list_monitoring_cards(
     headers: HeaderMap,
     Query(query): Query<MonitoringCardsQuery>,
 ) -> Result<Json<MonitoringCardsPageView>, ApiError> {
-    state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    if let Some(selector) = query
+        .selector_expression
+        .as_deref()
+        .filter(|selector| !selector.trim().is_empty())
+    {
+        let expression = parse_selector_expression(selector)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+            .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+    }
     let mut agents = monitoring_agents(&state, query.selector_expression.as_deref()).await?;
     sort_monitoring_agents(&mut agents);
     let total = agents.len();
@@ -136,7 +146,7 @@ pub(crate) async fn list_ping_targets(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<PingTargetView>>, ApiError> {
-    state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
     let mut targets = state
@@ -147,7 +157,12 @@ pub(crate) async fn list_ping_targets(
             "ping_targets_unavailable",
             "Ping targets could not be loaded.",
         ))?;
-    enrich_ping_target_evidence(&state, &mut targets).await?;
+    enrich_ping_target_evidence(
+        &state,
+        &mut targets,
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(targets))
 }
 
@@ -156,7 +171,7 @@ pub(crate) async fn get_ping_target(
     headers: HeaderMap,
     Path(target_id): Path<Uuid>,
 ) -> Result<Json<PingTargetDetailView>, ApiError> {
-    state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_NETWORK_READ)
         .await?;
     let mut detail = state
@@ -168,7 +183,12 @@ pub(crate) async fn get_ping_target(
             "The Ping target could not be loaded.",
         ))?
         .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
-    enrich_ping_target_evidence(&state, std::slice::from_mut(&mut detail.target)).await?;
+    enrich_ping_target_evidence(
+        &state,
+        std::slice::from_mut(&mut detail.target),
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(detail))
 }
 
@@ -180,6 +200,10 @@ pub(crate) async fn create_ping_target(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
+    let expression = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     let normalized = validate_ping_target_mutation(&state, &request, None).await?;
     if !request.confirmed {
         return Err(ApiError::bad_request("ping_target_confirmation_required"));
@@ -198,7 +222,7 @@ pub(crate) async fn create_ping_target(
         created_at: now.clone(),
         updated_at: now,
     };
-    let target = state
+    let mut target = state
         .repo
         .upsert_ping_target(
             record,
@@ -209,6 +233,8 @@ pub(crate) async fn create_ping_target(
         )
         .await
         .map_err(monitoring_repository_error)?;
+    target.target.target_update_evidence_available = true;
+    target.target.target_update_available = false;
     let runtime_sync = dispatch_runtime_config_for_clients(
         &state,
         &operator,
@@ -257,6 +283,12 @@ pub(crate) async fn update_ping_target(
     prior_assignments.sort();
     prior_assignments.dedup();
     let selector_unchanged = request.selector_expression.trim() == existing.selector_expression;
+    if !selector_unchanged {
+        let expression = parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+            .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+    }
     let normalized = validate_ping_target_mutation(
         &state,
         &request,
@@ -293,7 +325,7 @@ pub(crate) async fn update_ping_target(
         created_at: existing.created_at,
         updated_at: crate::unix_now().to_string(),
     };
-    let target = state
+    let mut target = state
         .repo
         .upsert_ping_target(
             record,
@@ -304,6 +336,17 @@ pub(crate) async fn update_ping_target(
         )
         .await
         .map_err(monitoring_repository_error)?;
+    if selector_unchanged {
+        enrich_ping_target_evidence(
+            &state,
+            std::slice::from_mut(&mut target.target),
+            operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+        )
+        .await?;
+    } else {
+        target.target.target_update_evidence_available = true;
+        target.target.target_update_available = false;
+    }
     let affected = prior_assignments
         .into_iter()
         .chain(normalized.target_client_ids)
@@ -354,6 +397,7 @@ pub(crate) async fn bulk_update_ping_targets(
                 "The Ping target could not be loaded.",
             ))?
             .ok_or_else(|| ApiError::not_found("ping_target_not_found"))?;
+        require_monitoring_selector_scope(&operator.operator.scopes, &target.selector_expression)?;
         let resolved = resolve_selector(
             &state,
             &target.selector_expression,
@@ -417,11 +461,17 @@ pub(crate) async fn make_primary_ping_target(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "network:write")
         .await?;
-    let target = state
+    let mut target = state
         .repo
         .make_primary_ping_target(target_id, &request.client_ids, &operator)
         .await
         .map_err(monitoring_repository_error)?;
+    enrich_ping_target_evidence(
+        &state,
+        std::slice::from_mut(&mut target.target),
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(PingTargetMutationResponse {
         target,
         runtime_sync: Vec::new(),
@@ -505,7 +555,7 @@ pub(crate) async fn list_monitoring_shares(
     headers: HeaderMap,
     Query(query): Query<MonitoringShareListQuery>,
 ) -> Result<Json<Vec<MonitoringShareView>>, ApiError> {
-    state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_SHARING_READ)
         .await?;
     if query
@@ -527,7 +577,12 @@ pub(crate) async fn list_monitoring_shares(
             "monitoring_shares_unavailable",
             "Shared monitoring views could not be loaded.",
         ))?;
-    enrich_monitoring_share_target_evidence(&state, &mut shares).await?;
+    enrich_monitoring_share_target_evidence(
+        &state,
+        &mut shares,
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(shares))
 }
 
@@ -555,6 +610,10 @@ pub(crate) async fn create_monitoring_share(
     validate_monitoring_selector(&selector_expression, MAX_SHARE_SELECTOR_BYTES)?;
     parse_selector_expression(&selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+    let expression = parse_selector_expression(&selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     let resolved = resolve_selector(&state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
     if resolved.is_empty() {
         return Err(ApiError::bad_request(
@@ -622,11 +681,13 @@ pub(crate) async fn create_monitoring_share(
         created_at: now.to_string(),
         updated_at: now.to_string(),
     };
-    let share = state
+    let mut share = state
         .repo
         .create_monitoring_share(record, &operator)
         .await
         .map_err(share_repository_error)?;
+    share.target_update_evidence_available = true;
+    share.target_update_available = false;
     let mut response = (
         StatusCode::CREATED,
         Json(CreateMonitoringShareResponse {
@@ -652,11 +713,17 @@ pub(crate) async fn extend_monitoring_shares(
     if !(MIN_SHARE_EXPIRY_SECS..=MAX_SHARE_EXPIRY_SECS).contains(&request.extend_by_secs) {
         return Err(ApiError::bad_request("monitoring_share_extension_invalid"));
     }
-    let shares = state
+    let mut shares = state
         .repo
         .extend_monitoring_shares(&request.share_ids, request.extend_by_secs, &operator)
         .await
         .map_err(share_repository_error)?;
+    enrich_monitoring_share_target_evidence(
+        &state,
+        &mut shares,
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(MonitoringSharesMutationResponse { shares }))
 }
 
@@ -720,6 +787,7 @@ pub(crate) async fn bulk_update_monitoring_share_targets(
         if monitoring_share_status(&share, crate::unix_now()) != "active" {
             return Err(ApiError::conflict("monitoring_share_not_active"));
         }
+        require_monitoring_selector_scope(&operator.operator.scopes, &share.selector_expression)?;
         let resolved =
             resolve_selector(&state, &share.selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
         if resolved.len() > MAX_SHARE_TARGETS {
@@ -776,11 +844,17 @@ pub(crate) async fn revoke_monitoring_shares(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_SHARING_WRITE)
         .await?;
-    let shares = state
+    let mut shares = state
         .repo
         .revoke_monitoring_shares(&request.share_ids, &operator)
         .await
         .map_err(share_repository_error)?;
+    enrich_monitoring_share_target_evidence(
+        &state,
+        &mut shares,
+        operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+    )
+    .await?;
     Ok(Json(MonitoringSharesMutationResponse { shares }))
 }
 
@@ -2044,9 +2118,20 @@ async fn resolve_selector(
     Ok(client_ids)
 }
 
+fn require_monitoring_selector_scope(
+    scopes: &[String],
+    selector_expression: &str,
+) -> Result<(), ApiError> {
+    let expression = parse_selector_expression(selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(scopes, &expression)
+}
+
 async fn enrich_ping_target_evidence(
     state: &AppState,
     targets: &mut [PingTargetView],
+    allow_vps_rule_selectors: bool,
 ) -> Result<(), ApiError> {
     if targets.is_empty() {
         return Ok(());
@@ -2083,34 +2168,32 @@ async fn enrich_ping_target_evidence(
         .into_iter()
         .map(|apply| (apply.client_id.clone(), apply))
         .collect::<HashMap<_, _>>();
-    let target_selectors = targets
+    let selectors = targets
         .iter()
-        .map(|target| (target.id, target.selector_expression.clone()))
-        .collect::<Vec<_>>();
-    let update_checks = stream::iter(target_selectors.into_iter().map(
-        |(target_id, selector_expression)| async move {
-            let resolved =
-                resolve_selector(state, &selector_expression, MAX_MONITORING_SELECTOR_BYTES)
-                    .await?;
-            Ok::<_, ApiError>((target_id, resolved))
-        },
-    ))
-    .buffered(8)
-    .collect::<Vec<_>>()
+        .map(|target| target.selector_expression.clone())
+        .collect::<BTreeSet<_>>();
+    let selector_evidence = resolve_saved_selectors_batch(
+        state,
+        &selectors,
+        MAX_MONITORING_SELECTOR_BYTES,
+        allow_vps_rule_selectors,
+    )
     .await;
-    let mut resolved_by_target = HashMap::new();
-    for result in update_checks {
-        let (target_id, resolved) = result?;
-        resolved_by_target.insert(target_id, resolved);
-    }
     for target in targets {
         let mut client_ids = assignments.remove(&target.id).unwrap_or_default();
         client_ids.sort();
         client_ids.dedup();
         target.target_client_ids = client_ids.clone();
-        target.target_update_available = resolved_by_target
-            .remove(&target.id)
-            .is_some_and(|resolved| resolved != client_ids);
+        target.target_update_evidence_available = selector_evidence
+            .evidence_available
+            .get(&target.selector_expression)
+            .copied()
+            .unwrap_or(false);
+        target.target_update_available = target.target_update_evidence_available
+            && selector_evidence
+                .resolved_client_ids
+                .get(&target.selector_expression)
+                .is_some_and(|resolved| resolved != &client_ids);
         target.runtime_sync = ping_target_runtime_sync(target, &client_ids, &applies);
     }
     Ok(())
@@ -2119,34 +2202,129 @@ async fn enrich_ping_target_evidence(
 async fn enrich_monitoring_share_target_evidence(
     state: &AppState,
     shares: &mut [MonitoringShareView],
+    allow_vps_rule_selectors: bool,
 ) -> Result<(), ApiError> {
     let selectors = shares
         .iter()
         .filter(|share| share.status == "active")
         .map(|share| share.selector_expression.clone())
         .collect::<BTreeSet<_>>();
-    let update_checks = stream::iter(selectors.into_iter().map(|selector_expression| async move {
-        let resolved =
-            resolve_selector(state, &selector_expression, MAX_SHARE_SELECTOR_BYTES).await?;
-        Ok::<_, ApiError>((selector_expression, resolved))
-    }))
-    .buffered(8)
-    .collect::<Vec<_>>()
+    let selector_evidence = resolve_saved_selectors_batch(
+        state,
+        &selectors,
+        MAX_SHARE_SELECTOR_BYTES,
+        allow_vps_rule_selectors,
+    )
     .await;
-    let mut resolved_by_selector = HashMap::new();
-    for result in update_checks {
-        let (selector_expression, resolved) = result?;
-        resolved_by_selector.insert(selector_expression, resolved);
-    }
     for share in shares {
         share.target_client_ids.sort();
         share.target_client_ids.dedup();
+        share.target_update_evidence_available = share.status != "active"
+            || selector_evidence
+                .evidence_available
+                .get(&share.selector_expression)
+                .copied()
+                .unwrap_or(false);
         share.target_update_available = share.status == "active"
-            && resolved_by_selector
+            && share.target_update_evidence_available
+            && selector_evidence
+                .resolved_client_ids
                 .get(&share.selector_expression)
                 .is_some_and(|resolved| resolved != &share.target_client_ids);
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct SavedSelectorEvidenceBatch {
+    evidence_available: HashMap<String, bool>,
+    resolved_client_ids: HashMap<String, Vec<String>>,
+}
+
+/// Resolves all saved selectors from one coherent inventory snapshot. Rule-aware
+/// selectors share one complete rule load; malformed or temporarily
+/// unresolvable selectors remain visible with their live evidence unavailable.
+async fn resolve_saved_selectors_batch(
+    state: &AppState,
+    selectors: &BTreeSet<String>,
+    max_bytes: usize,
+    allow_vps_rule_selectors: bool,
+) -> SavedSelectorEvidenceBatch {
+    let mut batch = SavedSelectorEvidenceBatch::default();
+    let mut parsed = Vec::new();
+    for selector_expression in selectors {
+        batch
+            .evidence_available
+            .insert(selector_expression.clone(), false);
+        if validate_monitoring_selector(selector_expression, max_bytes).is_err() {
+            continue;
+        }
+        let Ok(Some(expression)) = parse_selector_expression(selector_expression) else {
+            continue;
+        };
+        let references_rules = vpsman_common::expression_references_vps_rules(&expression);
+        if references_rules && !allow_vps_rule_selectors {
+            continue;
+        }
+        parsed.push((selector_expression.clone(), expression, references_rules));
+    }
+    if parsed.is_empty() {
+        return batch;
+    }
+
+    let agents = match state.repo.list_agents().await {
+        Ok(agents) => agents,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                selector_count = parsed.len(),
+                "Saved-selector refresh evidence unavailable"
+            );
+            return batch;
+        }
+    };
+    let needs_rules = parsed
+        .iter()
+        .any(|(_, _, references_rules)| *references_rules);
+    let rules_by_client = if needs_rules {
+        match state.repo.vps_rule_contexts_for_agents(&agents).await {
+            Ok(contexts) => Some(contexts),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "VPS-rule selector refresh evidence unavailable"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    for (selector_expression, expression, references_rules) in parsed {
+        if references_rules && rules_by_client.is_none() {
+            continue;
+        }
+        let empty_rules = HashMap::new();
+        let rules = rules_by_client.as_ref().unwrap_or(&empty_rules);
+        let mut client_ids = Repository::resolve_agents_for_expression_with_rule_contexts(
+            &agents,
+            &expression,
+            rules,
+        )
+        .into_iter()
+        .map(|agent| agent.id)
+        .collect::<Vec<_>>();
+        client_ids.sort();
+        client_ids.dedup();
+        batch
+            .evidence_available
+            .insert(selector_expression.clone(), true);
+        batch
+            .resolved_client_ids
+            .insert(selector_expression, client_ids);
+    }
+    batch
 }
 
 fn ping_target_runtime_sync(

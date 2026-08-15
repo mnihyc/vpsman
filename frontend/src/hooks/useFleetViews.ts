@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AgentView } from "../types";
-import { agentSearchFields, filterBySearchExpression } from "../searchExpression";
+import {
+  agentSearchFields,
+  filterBySearchExpression,
+  type AgentSearchContext,
+} from "../searchExpression";
 
 const FLEET_VIEW_STORAGE_KEY = "vpsman.fleetViews";
+const UNAVAILABLE_VPS_RULE_SEARCH_CONTEXT: AgentSearchContext = {
+  available: false,
+  rulesByClient: new Map(),
+};
 
 export type SavedFleetView = {
   id: string;
@@ -18,21 +26,32 @@ type StoredFleetViewState = {
   savedViews?: SavedFleetView[];
 };
 
-export function useFleetViews(agents: AgentView[]) {
+export function useFleetViews(
+  agents: AgentView[],
+  ruleSearchContext: AgentSearchContext = UNAVAILABLE_VPS_RULE_SEARCH_CONTEXT,
+) {
   const [storedState] = useState(readFleetViewState);
   const [fleetQuery, setFleetQueryState] = useState(storedState.query ?? "");
-  const [savedViews, setSavedViews] = useState<SavedFleetView[]>(storedState.savedViews ?? []);
-  const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(storedState.activeSavedViewId ?? null);
+  const [savedViews, setSavedViews] = useState<SavedFleetView[]>(
+    storedState.savedViews ?? [],
+  );
+  const [activeSavedViewId, setActiveSavedViewId] = useState<string | null>(
+    storedState.activeSavedViewId ?? null,
+  );
   const [draftSavedViewName, setDraftSavedViewName] = useState("");
-  const activeSavedView = savedViews.find((view) => view.id === activeSavedViewId) ?? null;
+  const activeSavedView =
+    savedViews.find((view) => view.id === activeSavedViewId) ?? null;
   const draftSavedViewNameKey = normalizedSavedViewName(draftSavedViewName);
   const draftSavedViewMatchesExisting = Boolean(
     draftSavedViewNameKey &&
-      savedViews.some(
-        (view) => normalizedSavedViewName(view.name) === draftSavedViewNameKey,
-      ),
+    savedViews.some(
+      (view) => normalizedSavedViewName(view.name) === draftSavedViewNameKey,
+    ),
   );
-  const filteredAgents = useMemo(() => filterAgents(agents, fleetQuery), [agents, fleetQuery]);
+  const filteredAgents = useMemo(
+    () => filterAgents(agents, fleetQuery, ruleSearchContext),
+    [agents, fleetQuery, ruleSearchContext],
+  );
 
   useEffect(() => {
     writeFleetViewState({ activeSavedViewId, query: fleetQuery, savedViews });
@@ -48,7 +67,9 @@ export function useFleetViews(agents: AgentView[]) {
   function saveFleetView() {
     const now = new Date().toISOString();
     const query = fleetQuery.trim();
-    const name = draftSavedViewName.trim() || defaultFleetViewName(query, savedViews.length);
+    const name =
+      draftSavedViewName.trim() ||
+      defaultFleetViewName(query, savedViews.length);
     const nameKey = normalizedSavedViewName(name);
     const matchingNamedView = savedViews.find(
       (view) => normalizedSavedViewName(view.name) === nameKey,
@@ -75,7 +96,11 @@ export function useFleetViews(agents: AgentView[]) {
       createdAt: now,
       updatedAt: now,
     };
-    setSavedViews((views) => [...views, view].sort((left, right) => left.name.localeCompare(right.name)));
+    setSavedViews((views) =>
+      [...views, view].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      ),
+    );
     setActiveSavedViewId(view.id);
     setDraftSavedViewName(name);
   }
@@ -95,7 +120,9 @@ export function useFleetViews(agents: AgentView[]) {
     if (!activeSavedView) {
       return;
     }
-    setSavedViews((views) => views.filter((view) => view.id !== activeSavedView.id));
+    setSavedViews((views) =>
+      views.filter((view) => view.id !== activeSavedView.id),
+    );
     setActiveSavedViewId(null);
     setDraftSavedViewName("");
   }
@@ -127,8 +154,17 @@ function normalizedSavedViewName(name: string): string {
   return name.trim().toLocaleLowerCase();
 }
 
-function filterAgents(agents: AgentView[], query: string): AgentView[] {
-  return filterBySearchExpression(agents, query, agentSearchFields).items;
+function filterAgents(
+  agents: AgentView[],
+  query: string,
+  context: AgentSearchContext,
+): AgentView[] {
+  if (/\bvps\.rules(?::|\b)/i.test(query) && !context.available) {
+    return agents;
+  }
+  return filterBySearchExpression(agents, query, (agent) =>
+    agentSearchFields(agent, context),
+  ).items;
 }
 
 function defaultFleetViewName(query: string, existingCount: number): string {
@@ -152,10 +188,13 @@ function readFleetViewState(): StoredFleetViewState {
       return {};
     }
     const savedViews = Array.isArray(parsed.savedViews)
-      ? parsed.savedViews.filter(isSavedFleetView).sort((left, right) => left.name.localeCompare(right.name))
+      ? parsed.savedViews
+          .filter(isSavedFleetView)
+          .sort((left, right) => left.name.localeCompare(right.name))
       : [];
     const activeSavedViewId =
-      typeof parsed.activeSavedViewId === "string" && savedViews.some((view) => view.id === parsed.activeSavedViewId)
+      typeof parsed.activeSavedViewId === "string" &&
+      savedViews.some((view) => view.id === parsed.activeSavedViewId)
         ? parsed.activeSavedViewId
         : null;
     return {

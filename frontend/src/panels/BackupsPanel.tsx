@@ -50,9 +50,12 @@ import {
 } from "../privilege";
 import {
   agentsMatchingExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
   parseSearchExpression,
   selectorExpressionForClientIds,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import { DEFAULT_BACKUP_SELECTED_PATHS } from "../presets/backupPathPresets";
 import { ArtifactUploadForm } from "./backups/ArtifactUploadForm";
 import { BackupHistoryTables } from "./backups/BackupHistoryTables";
@@ -407,6 +410,7 @@ export function BackupsPanel({
   setPrivilegeMaterial,
 }: BackupsPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -516,12 +520,24 @@ export function BackupsPanel({
     () => parseSearchExpression(policyTargetsText),
     [policyTargetsText],
   );
+  const policyTargetEvidenceUnavailable = vpsRuleSearchUnavailable(
+    policyTargetsText,
+    vpsRuleSearch,
+  );
   const policyTargetAgents = useMemo(
     () =>
-      !policyTargetsText.trim() || policyTargetParse.error
+      !policyTargetsText.trim() ||
+      policyTargetParse.error ||
+      policyTargetEvidenceUnavailable
         ? []
-        : agentsMatchingExpression(agents, policyTargetsText),
-    [agents, policyTargetParse.error, policyTargetsText],
+        : agentsMatchingExpression(agents, policyTargetsText, vpsRuleSearch),
+    [
+      agents,
+      policyTargetEvidenceUnavailable,
+      policyTargetParse.error,
+      policyTargetsText,
+      vpsRuleSearch,
+    ],
   );
   const policyTargetIds = useMemo(
     () => policyTargetAgents.map((agent) => agent.id),
@@ -1054,7 +1070,8 @@ export function BackupsPanel({
           }),
         };
         const reviewedRequest:
-          CreateBackupPolicyRequest | UpdateBackupPolicyRequest = editingPolicy
+          | CreateBackupPolicyRequest
+          | UpdateBackupPolicyRequest = editingPolicy
           ? {
               ...request,
               retention_days: request.retention_days ?? 30,
@@ -2869,10 +2886,14 @@ export function BackupsPanel({
                 targetCount={policyTargetCount}
                 targetAgents={policyTargetAgents}
                 targetExpressionMessage={
-                  policyTargetParse.error ??
+                  (policyTargetEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : policyTargetParse.error) ??
                   `${policyTargetCount}/${agents.length}`
                 }
-                targetExpressionValid={!policyTargetParse.error}
+                targetExpressionValid={
+                  !policyTargetParse.error && !policyTargetEvidenceUnavailable
+                }
                 targetsText={policyTargetsText}
               />
             ) : (

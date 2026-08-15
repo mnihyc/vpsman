@@ -30,9 +30,10 @@ use crate::{
     },
     repository_webhook_rules::validate_webhook_rule_target,
     security::{
-        operator_has_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
-        SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
+        operator_has_scope, require_vps_rule_selector_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ,
+        SCOPE_FLEET_READ, SCOPE_INTEGRATIONS_READ, SCOPE_INTEGRATIONS_WRITE,
     },
+    selector_expression::parse_selector_expression,
     state::AppState,
     unix_now,
     util::limit_or_default,
@@ -142,22 +143,29 @@ pub(crate) async fn list_fleet_alert_policies(
     headers: HeaderMap,
     Query(query): Query<FleetAlertPolicyQuery>,
 ) -> Result<Json<Vec<PolicyGroupRecord>>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
     validate_alert_policy_query(&query)?;
-    Ok(Json(
-        state
-            .repo
-            .list_fleet_alert_policies(
-                limit_or_default(query.limit),
-                query.enabled,
-                query.selector_expression.as_deref(),
-                query.client_id.as_deref(),
-            )
-            .await
-            .map_err(fleet_alert_policy_error)?,
-    ))
+    if let Some(selector) = query.selector_expression.as_deref() {
+        if let Some(expression) = parse_selector_expression(selector)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        {
+            require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+        }
+    }
+    let groups = state
+        .repo
+        .list_fleet_alert_policies(
+            limit_or_default(query.limit),
+            query.enabled,
+            query.selector_expression.as_deref(),
+            query.client_id.as_deref(),
+            operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+        )
+        .await
+        .map_err(fleet_alert_policy_error)?;
+    Ok(Json(groups))
 }
 
 pub(crate) async fn get_fleet_alert_policy(
@@ -165,16 +173,18 @@ pub(crate) async fn get_fleet_alert_policy(
     headers: HeaderMap,
     Path(policy_id): Path<uuid::Uuid>,
 ) -> Result<Json<PolicyGroupRecord>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    Ok(Json(
-        state
-            .repo
-            .get_fleet_alert_policy(policy_id)
-            .await
-            .map_err(fleet_alert_policy_error)?,
-    ))
+    let group = state
+        .repo
+        .get_fleet_alert_policy(
+            policy_id,
+            operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+        )
+        .await
+        .map_err(fleet_alert_policy_error)?;
+    Ok(Json(group))
 }
 
 pub(crate) async fn dry_run_fleet_alert_policy(
@@ -182,9 +192,13 @@ pub(crate) async fn dry_run_fleet_alert_policy(
     headers: HeaderMap,
     Json(request): Json<PolicyDryRunRequest>,
 ) -> Result<Json<PolicyDryRunResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    let expression = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -202,6 +216,10 @@ pub(crate) async fn upsert_fleet_alert_policy(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    let expression = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -293,6 +311,10 @@ pub(crate) async fn bulk_upsert_vps_rules(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
+    let expression = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -310,6 +332,10 @@ pub(crate) async fn bulk_unset_vps_rules(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "config:write")
         .await?;
+    let expression = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -324,9 +350,16 @@ pub(crate) async fn list_traffic_accounting(
     headers: HeaderMap,
     Query(query): Query<TrafficAccountingQuery>,
 ) -> Result<Json<Vec<TrafficAccountingRecord>>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    if let Some(selector) = query.selector_expression.as_deref() {
+        if let Some(expression) = parse_selector_expression(selector)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        {
+            require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+        }
+    }
     Ok(Json(
         state
             .repo
@@ -864,7 +897,7 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
         "billing_cycle_requires_price",
         "billing_cycle_disabled_price_invalid",
         "billing_month_cycle_requires_day",
-        "billing_long_cycle_requires_day_month",
+        "billing_long_cycle_requires_month_day",
         "port_speed_unit_required",
         "port_speed_unit_invalid",
         "port_speed_value_invalid",
@@ -889,6 +922,9 @@ fn vps_rules_error(error: anyhow::Error) -> ApiError {
 
 fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
     let message = error.to_string();
+    if message.contains("vps_rule_selector_scope_required") {
+        return ApiError::forbidden("operator_scope_insufficient");
+    }
     if message.contains("fleet_alert_policy_not_found") {
         return ApiError::not_found("fleet_alert_policy_not_found");
     }

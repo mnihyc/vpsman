@@ -118,6 +118,7 @@ pub(crate) struct PingTargetView {
     pub(crate) primary_count: usize,
     pub(crate) runtime_sync: PingTargetRuntimeSyncView,
     pub(crate) target_update_available: bool,
+    pub(crate) target_update_evidence_available: bool,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
 }
@@ -626,6 +627,7 @@ pub(crate) struct MonitoringShareView {
     pub(crate) target_count: usize,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) target_update_available: bool,
+    pub(crate) target_update_evidence_available: bool,
     pub(crate) visibility: MonitoringShareVisibilityView,
     pub(crate) status: String,
     pub(crate) expires_at: String,

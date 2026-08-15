@@ -9,8 +9,10 @@ use tokio::time::Duration;
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
-    expression_referenced_roots, parse_expression, payload_hash, render_template_with_limit,
-    validate_template, Expression, ExpressionContext, VpsMetadata,
+    expression_referenced_roots, expression_references_vps_rules, parse_expression,
+    parse_persisted_vps_rule_value, payload_hash, render_template_with_limit, validate_template,
+    Expression, ExpressionContext, VpsMetadata, VpsRuleContext,
+    VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_SELECTORS,
     WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
 };
@@ -131,6 +133,8 @@ struct VpsRow {
     stale_since: Option<String>,
     stale_reason: Option<String>,
     capabilities: Value,
+    #[serde(skip)]
+    vps_rules: VpsRuleContext,
 }
 
 #[derive(Clone, Debug)]
@@ -395,7 +399,10 @@ fn validated_rule_expression(rule: &RuleRow) -> Result<Expression> {
     Ok(expression)
 }
 
-async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsRow>> {
+async fn list_visible_vps(
+    tx: &mut Transaction<'_, Postgres>,
+    include_vps_rules: bool,
+) -> Result<Vec<VpsRow>> {
     let rows = sqlx::query(
         r#"
         SELECT
@@ -419,7 +426,8 @@ async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsR
     )
     .fetch_all(&mut **tx)
     .await?;
-    rows.into_iter()
+    let mut vps_rows = rows
+        .into_iter()
         .map(|row| {
             let capabilities: SqlJson<Value> = row.try_get("capabilities")?;
             Ok(VpsRow {
@@ -435,9 +443,69 @@ async fn list_visible_vps(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<VpsR
                 stale_since: row.try_get("stale_since")?,
                 stale_reason: row.try_get("stale_reason")?,
                 capabilities: capabilities.0,
+                vps_rules: VpsRuleContext::default(),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    if include_vps_rules && !vps_rows.is_empty() {
+        let client_ids = vps_rows
+            .iter()
+            .map(|vps| vps.id.clone())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            r#"
+            SELECT client_id, key, value_raw, value_json
+            FROM vps_rule_values
+            WHERE client_id = ANY($1::TEXT[])
+            ORDER BY client_id ASC, key ASC
+            "#,
+        )
+        .bind(&client_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+        let by_id = vps_rows
+            .iter_mut()
+            .map(|vps| (vps.id.clone(), &mut vps.vps_rules))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut by_id = by_id;
+        for row in rows {
+            let client_id: String = row.try_get("client_id")?;
+            if let Some(context) = by_id.get_mut(&client_id) {
+                let value_json: SqlJson<Value> = row.try_get("value_json")?;
+                insert_persisted_vps_rule(
+                    context,
+                    row.try_get::<String, _>("key")?,
+                    row.try_get::<String, _>("value_raw")?,
+                    value_json.0,
+                )?;
+            }
+        }
+    }
+    Ok(vps_rows)
+}
+
+fn insert_persisted_vps_rule(
+    context: &mut VpsRuleContext,
+    key: String,
+    value_raw: String,
+    stored_json: Value,
+) -> Result<()> {
+    let parsed = parse_persisted_vps_rule_value(&key, &value_raw)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("invalid persisted VPS rule {key}"))?;
+    if key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES {
+        anyhow::ensure!(
+            parsed.json == stored_json,
+            "network_rate_selector_storage_invalid"
+        );
+    } else if key == VPS_RULE_KEY_TRAFFIC_SELECTORS {
+        anyhow::ensure!(
+            parsed.json == stored_json,
+            "traffic_selector_storage_invalid"
+        );
+    }
+    context.insert(key, parsed.raw, parsed.json);
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -582,7 +650,6 @@ pub(crate) async fn process_webhook_events(
         return Ok((0, 0));
     }
     let rules = list_enabled_rules_in_tx(&mut tx, config.materialize_limit).await?;
-    let vps_rows = list_visible_vps(&mut tx).await?;
     let mut inserted = 0_usize;
     let mut validated_rules = Vec::with_capacity(rules.len());
     for rule in &rules {
@@ -596,6 +663,10 @@ pub(crate) async fn process_webhook_events(
             }
         }
     }
+    let include_vps_rules = validated_rules
+        .iter()
+        .any(|(_, expression)| expression_references_vps_rules(expression));
+    let vps_rows = list_visible_vps(&mut tx, include_vps_rules).await?;
     let mut skipped_legacy_manual_events = Vec::new();
     for row in rows {
         let event = event_from_row(row)?;
@@ -809,6 +880,7 @@ fn expression_context_for_event(vps: &VpsRow, event: &EventRow) -> ExpressionCon
             "capabilities": &vps.capabilities,
         })),
     })
+    .with_vps_rules(vps.vps_rules.clone())
     .with_event_predicate(&event.kind);
     for predicate in &event.event_predicates {
         context = context.with_event_predicate(predicate);

@@ -39,8 +39,12 @@ import {
 } from "../privilege";
 import {
   agentsMatchingExpression,
+  type AgentSearchContext,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import {
   ActionFeedback,
   type ActionFeedbackTone,
@@ -158,6 +162,7 @@ export function SchedulesPanel({
   schedules: ScheduleRecord[];
   schedulesTruncated: boolean;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [name, setName] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [commandText, setCommandText] = useState("");
@@ -263,12 +268,24 @@ export function SchedulesPanel({
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const selectedTargets = useMemo(
     () =>
-      selectorParse.error || !selectorExpression.trim()
+      selectorParse.error ||
+      !selectorExpression.trim() ||
+      selectorEvidenceUnavailable
         ? []
-        : agentsMatchingExpression(agents, selectorExpression),
-    [agents, selectorExpression, selectorParse.error],
+        : agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch),
+    [
+      agents,
+      selectorEvidenceUnavailable,
+      selectorExpression,
+      selectorParse.error,
+      vpsRuleSearch,
+    ],
   );
   const selectedTargetIds = useMemo(
     () => selectedTargets.map((agent) => agent.id),
@@ -282,7 +299,8 @@ export function SchedulesPanel({
     scheduleOperation !== null &&
     cronShapeValid &&
     selectorExpression.trim().length > 0 &&
-    !selectorParse.error;
+    !selectorParse.error &&
+    !selectorEvidenceUnavailable;
   const scheduleReviewUnavailableReason = pending
     ? "A schedule change is already in progress"
     : !name.trim()
@@ -293,7 +311,9 @@ export function SchedulesPanel({
           ? "Enter a valid five-field UTC cron expression"
           : !selectorExpression.trim()
             ? "Enter a VPS selector expression"
-            : (selectorParse.error ?? undefined);
+            : selectorEvidenceUnavailable
+              ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+              : (selectorParse.error ?? undefined);
   const status = schedulesTruncated
     ? `${formatLowerBoundCount(schedules.length, true)} loaded schedules`
     : countPhrase(schedules.length, "schedule");
@@ -959,7 +979,7 @@ export function SchedulesPanel({
     const candidates = selected.filter(
       (schedule) =>
         !scheduleOperationInvalid(schedule) &&
-        scheduleTargetsNeedUpdate(schedule, agents),
+        scheduleTargetsNeedUpdate(schedule, agents, vpsRuleSearch),
     );
     if (candidates.length === 0) {
       setScheduleLifecycleFeedback({
@@ -1265,7 +1285,8 @@ export function SchedulesPanel({
       onSelect: (rows) => rows[0] && editSchedule(rows[0]),
     },
     {
-      description: (rows) => describeScheduleTargetUpdate(rows, agents),
+      description: (rows) =>
+        describeScheduleTargetUpdate(rows, agents, vpsRuleSearch),
       label: "Update targets",
       disabled: (rows) =>
         pending ||
@@ -1273,7 +1294,7 @@ export function SchedulesPanel({
         !rows.some(
           (schedule) =>
             !scheduleOperationInvalid(schedule) &&
-            scheduleTargetsNeedUpdate(schedule, agents),
+            scheduleTargetsNeedUpdate(schedule, agents, vpsRuleSearch),
         ),
       icon: <Target size={14} />,
       onSelect: (rows) => void reviewScheduleTargetUpdates(rows),
@@ -1579,7 +1600,9 @@ export function SchedulesPanel({
           summary={
             schedules.length === 0
               ? "Create the first recurring job"
-              : `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save`
+              : selectorEvidenceUnavailable
+                ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                : `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save`
           }
           title={editingScheduleId ? "Modify schedule" : "Create schedule"}
         >
@@ -1756,9 +1779,11 @@ export function SchedulesPanel({
               <div className="targetSelectorHeader">
                 <strong>Target selector (required)</strong>
                 <span>
-                  {selectorExpression.trim()
-                    ? `${vpsCountLabel(selectedTargetCount)} in local preview; server resolves before save`
-                    : "Enter an explicit selector; schedules never imply the entire fleet"}
+                  {selectorEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : selectorExpression.trim()
+                      ? `${vpsCountLabel(selectedTargetCount)} in local preview; server resolves before save`
+                      : "Enter an explicit selector; schedules never imply the entire fleet"}
                 </span>
               </div>
               <SearchExpressionInput
@@ -1777,16 +1802,20 @@ export function SchedulesPanel({
                       : "neutral"
                 }
                 verificationMessage={
-                  selectorParse.error ??
+                  (selectorEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : selectorParse.error) ??
                   (selectorExpression.trim()
                     ? `${selectedTargetCount}/${agents.length}`
                     : "required")
                 }
               />
-              <LocalTargetPreview
-                agents={selectedTargets}
-                ariaLabel="Schedule local VPS preview"
-              />
+              {!selectorEvidenceUnavailable ? (
+                <LocalTargetPreview
+                  agents={selectedTargets}
+                  ariaLabel="Schedule local VPS preview"
+                />
+              ) : null}
             </div>
             <div className="schedulePreview">
               <strong>Next runs</strong>
@@ -1813,9 +1842,11 @@ export function SchedulesPanel({
                   selectedTemplate?.operation ?? scheduleOperation,
                 )}
               >
-                {selectorExpression.trim()
-                  ? `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save; `
-                  : "No target selector; "}
+                {selectorEvidenceUnavailable
+                  ? `${VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE}; `
+                  : selectorExpression.trim()
+                    ? `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save; `
+                    : "No target selector; "}
                 {selectedTemplate
                   ? selectedTemplate.name
                   : operationSummary(scheduleOperation)}
@@ -2014,6 +2045,7 @@ function describeScheduleAction(
 function describeScheduleTargetUpdate(
   rows: ScheduleRecord[],
   agents: AgentView[],
+  context: AgentSearchContext,
 ): string {
   if (rows.length === 0) {
     return "Select schedules to update their saved targets.";
@@ -2021,7 +2053,7 @@ function describeScheduleTargetUpdate(
   const changed = rows.filter(
     (schedule) =>
       !scheduleOperationInvalid(schedule) &&
-      scheduleTargetsNeedUpdate(schedule, agents),
+      scheduleTargetsNeedUpdate(schedule, agents, context),
   );
   if (changed.length > 0) {
     return `Update ${changed.length} of ${rows.length} selected ${
@@ -2034,7 +2066,10 @@ function describeScheduleTargetUpdate(
       ? `Repair the saved operation for ${schedule.name} before updating its targets.`
       : "None of the selected schedules has an eligible changed target snapshot.";
   }
-  const resolution = currentScheduleTargetIds(schedule, agents);
+  if (vpsRuleSearchUnavailable(schedule.selector_expression, context)) {
+    return `${VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE}; refresh rule evidence before updating frozen targets.`;
+  }
+  const resolution = currentScheduleTargetIds(schedule, agents, context);
   if (resolution === null) {
     return rows.length === 1
       ? `Edit ${schedule.name}; its saved audit selector is missing or invalid.`
@@ -2053,19 +2088,27 @@ function describeScheduleTargetUpdate(
 function currentScheduleTargetIds(
   schedule: ScheduleRecord,
   agents: AgentView[],
+  context: AgentSearchContext,
 ): string[] | null {
   const selector = schedule.selector_expression.trim();
-  if (!selector || parseSearchExpression(selector).error) {
+  if (
+    !selector ||
+    parseSearchExpression(selector).error ||
+    vpsRuleSearchUnavailable(selector, context)
+  ) {
     return null;
   }
-  return agentsMatchingExpression(agents, selector).map((agent) => agent.id);
+  return agentsMatchingExpression(agents, selector, context).map(
+    (agent) => agent.id,
+  );
 }
 
 function scheduleTargetsNeedUpdate(
   schedule: ScheduleRecord,
   agents: AgentView[],
+  context: AgentSearchContext,
 ): boolean {
-  const currentTargetIds = currentScheduleTargetIds(schedule, agents);
+  const currentTargetIds = currentScheduleTargetIds(schedule, agents, context);
   return Boolean(
     currentTargetIds &&
     !sameStringSet(fixedTargetIds(schedule), currentTargetIds),

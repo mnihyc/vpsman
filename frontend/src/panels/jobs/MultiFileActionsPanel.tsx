@@ -37,7 +37,12 @@ import {
   buildPrivilegeForJobOperation,
   type PrivilegeMaterial,
 } from "../../privilege";
-import { agentsMatchingExpression } from "../../searchExpression";
+import {
+  agentsMatchingExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
+} from "../../searchExpression";
+import { useVpsRuleSearchContext } from "../../vpsRuleSearchContext";
 import {
   isJobTargetStatus,
   jobTargetStatusBadgeClass,
@@ -139,6 +144,7 @@ export function MultiFileActionsPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -185,9 +191,16 @@ export function MultiFileActionsPanel({
   );
   const [lastRunProgress, setLastRunProgress] =
     useState<BulkJobProgress | null>(null);
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const localMatches = useMemo(
-    () => agentsMatchingExpression(agents, selectorExpression),
-    [agents, selectorExpression],
+    () =>
+      selectorEvidenceUnavailable
+        ? []
+        : agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch),
+    [agents, selectorEvidenceUnavailable, selectorExpression, vpsRuleSearch],
   );
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
@@ -474,17 +487,19 @@ export function MultiFileActionsPanel({
 
   const visibleProgress = bulkProgress ?? lastRunProgress;
   const pathReadiness = bulkPathReadiness(action, path, allowRootPath);
-  const bulkDraftError = bulkDraftValidationMessage({
-    action,
-    localMatchCount: localMatches.length,
-    mode,
-    newPath,
-    pathReadiness,
-    selectorExpression,
-    uploadFile,
-    uploadGroup,
-    uploadOwner,
-  });
+  const bulkDraftError = selectorEvidenceUnavailable
+    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+    : bulkDraftValidationMessage({
+        action,
+        localMatchCount: localMatches.length,
+        mode,
+        newPath,
+        pathReadiness,
+        selectorExpression,
+        uploadFile,
+        uploadGroup,
+        uploadOwner,
+      });
   const preflightItems = buildBulkPreflightItems({
     action,
     agentCount: agents.length,
@@ -506,11 +521,21 @@ export function MultiFileActionsPanel({
     lastRunProgress,
     lastSummary,
   });
-  const liveMatchSummary = buildBulkLiveMatchSummary({
-    agentCount: agents.length,
-    localMatches,
-    preview,
-  });
+  const liveMatchSummary =
+    selectorEvidenceUnavailable && !preview
+      ? {
+          attentionTargets: [],
+          detail:
+            "Complete VPS rule evidence is required before this browser can estimate the target scope.",
+          label: "Live match summary",
+          tone: "attention" as const,
+          value: VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+        }
+      : buildBulkLiveMatchSummary({
+          agentCount: agents.length,
+          localMatches,
+          preview,
+        });
   const reviewButtonTitle = bulkReviewButtonTitle({
     action,
     draftError: bulkDraftError,
@@ -581,10 +606,12 @@ export function MultiFileActionsPanel({
               verification={localMatches.length > 0 ? "valid" : "neutral"}
             />
           </label>
-          <LocalTargetPreview
-            agents={localMatches}
-            ariaLabel="Bulk file local VPS preview"
-          />
+          {!selectorEvidenceUnavailable ? (
+            <LocalTargetPreview
+              agents={localMatches}
+              ariaLabel="Bulk file local VPS preview"
+            />
+          ) : null}
           <div className="multiFilePrimaryActions">
             <button
               aria-pressed={action === "download_files"}

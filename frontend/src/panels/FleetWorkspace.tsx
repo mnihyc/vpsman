@@ -77,7 +77,10 @@ import { VpsCombobox } from "../components/VpsCombobox";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import { scrollIntoViewWithMotion } from "../motion";
 import {
@@ -455,8 +458,9 @@ export function FleetWorkspace({
   const webhookRulesTruncated = webhookRules.length >= FLEET_DETAIL_LIMIT;
   const webhookDeliveriesTruncated =
     webhookRuleDeliveries.length >= FLEET_DETAIL_LIMIT;
-  const vpsRuleValuesTruncated =
-    vpsRuleValues.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
+  // Rule rows are a bounded configuration source (nine keys per VPS) and the
+  // full fleet snapshot now returns them without the telemetry row cap.
+  const vpsRuleValuesTruncated = false;
   const telemetryRollupsTruncated =
     telemetryRollups.length >= FLEET_TELEMETRY_SNAPSHOT_LIMIT;
   const telemetryNetworkRatesTruncated =
@@ -4812,6 +4816,7 @@ export function FleetAlertPolicyManager({
     request: FleetAlertPolicyRequest,
   ) => Promise<FleetAlertPolicyRecord>;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const focusedEditor = editorMode === "focused";
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -4868,12 +4873,24 @@ export function FleetAlertPolicyManager({
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
+  const policySelectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const policyLocalTargets = useMemo(
     () =>
-      selectorExpression.trim() && !policySelectorParse.error
-        ? agentsMatchingExpression(agents, selectorExpression)
+      selectorExpression.trim() &&
+      !policySelectorParse.error &&
+      !policySelectorEvidenceUnavailable
+        ? agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch)
         : [],
-    [agents, policySelectorParse.error, selectorExpression],
+    [
+      agents,
+      policySelectorEvidenceUnavailable,
+      policySelectorParse.error,
+      selectorExpression,
+      vpsRuleSearch,
+    ],
   );
 
   const agentNameById = useMemo(
@@ -5723,16 +5740,20 @@ export function FleetAlertPolicyManager({
                         : "neutral"
                   }
                   verificationMessage={
-                    policySelectorParse.error ??
+                    (policySelectorEvidenceUnavailable
+                      ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                      : policySelectorParse.error) ??
                     (selectorExpression.trim()
                       ? `${policyLocalTargets.length}/${agents.length}`
                       : "required")
                   }
                 />
-                <LocalTargetPreview
-                  agents={policyLocalTargets}
-                  ariaLabel="Alert policy local VPS preview"
-                />
+                {!policySelectorEvidenceUnavailable ? (
+                  <LocalTargetPreview
+                    agents={policyLocalTargets}
+                    ariaLabel="Alert policy local VPS preview"
+                  />
+                ) : null}
               </ConsoleField>
               <ConsoleField label="Notes" className="fieldFull">
                 <textarea

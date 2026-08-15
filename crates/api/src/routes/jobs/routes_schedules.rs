@@ -22,7 +22,7 @@ use crate::{
     repository_schedules::next_cron_runs,
     repository_schedules::ScheduleSnapshotExpectation,
     routes_jobs::create_job_from_saved_schedule,
-    security::{operator_has_scope, SCOPE_SCHEDULES_READ},
+    security::{operator_has_scope, require_vps_rule_selector_scope, SCOPE_SCHEDULES_READ},
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -47,9 +47,15 @@ pub(crate) async fn list_schedules(
         limit: Some(limit_or_default(query.limit)),
         ..query
     };
-    Ok(Json(state.repo.query_schedules(&query).await.map_err(
-        ApiError::internal_mapper("schedules_unavailable", "Schedules could not be loaded."),
-    )?))
+    let schedules = state
+        .repo
+        .query_schedules(&query)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "schedules_unavailable",
+            "Schedules could not be loaded.",
+        ))?;
+    Ok(Json(schedules))
 }
 
 pub(crate) async fn get_schedule(
@@ -77,6 +83,11 @@ pub(crate) async fn create_schedule(
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
     validate_schedule_request(&request)?;
+    if let Some(expression) = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+    {
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+    }
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     require_selector_target_snapshot(
@@ -145,6 +156,11 @@ pub(crate) async fn update_schedule(
         }
         request.target_client_ids = current.target_client_ids.clone();
     } else {
+        if let Some(expression) = parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        {
+            require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+        }
         require_selector_target_snapshot(
             &state,
             &request.selector_expression,
@@ -197,8 +213,10 @@ pub(crate) async fn update_schedule_targets(
     if selector_expression.is_empty() {
         return Err(ApiError::conflict("schedule_selector_missing"));
     }
-    parse_selector_expression(&selector_expression)
-        .map_err(|_| ApiError::conflict("schedule_selector_invalid"))?;
+    let expression = parse_selector_expression(&selector_expression)
+        .map_err(|_| ApiError::conflict("schedule_selector_invalid"))?
+        .ok_or_else(|| ApiError::conflict("schedule_selector_invalid"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     let mut target_client_ids = state
         .repo
         .resolve_bulk_targets(&BulkResolveRequest {

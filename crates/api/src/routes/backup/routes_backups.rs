@@ -47,8 +47,8 @@ use crate::{
         map_schedule_snapshot_error, require_selector_target_snapshot, validate_schedule_request,
         validate_update_schedule_request,
     },
-    security::{operator_has_scope, SCOPE_BACKUPS_READ},
-    selector_expression::id_selector_expression,
+    security::{operator_has_scope, require_vps_rule_selector_scope, SCOPE_BACKUPS_READ},
+    selector_expression::{id_selector_expression, parse_selector_expression},
     state::AppState,
     unix_now,
 };
@@ -118,7 +118,7 @@ pub(crate) async fn list_backup_policies(
     let _operator = state
         .require_operator_scope(&headers, SCOPE_BACKUPS_READ)
         .await?;
-    Ok(Json(
+    let policies =
         state
             .repo
             .list_backup_policies(&query)
@@ -126,8 +126,8 @@ pub(crate) async fn list_backup_policies(
             .map_err(ApiError::internal_mapper(
                 "backup_policies_unavailable",
                 "The backup policies could not be loaded.",
-            ))?,
-    ))
+            ))?;
+    Ok(Json(policies))
 }
 
 pub(crate) async fn create_backup_policy(
@@ -142,6 +142,11 @@ pub(crate) async fn create_backup_policy(
         return Err(ApiError::forbidden("operator_scope_insufficient"));
     }
     validate_create_backup_policy_request(&request)?;
+    if let Some(expression) = parse_selector_expression(&request.selector_expression)
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+    {
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+    }
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     require_selector_target_snapshot(
         &state,
@@ -214,6 +219,11 @@ pub(crate) async fn update_backup_policy(
         }
         request.target_client_ids = current.target_client_ids.clone();
     } else {
+        if let Some(expression) = parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        {
+            require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
+        }
         require_selector_target_snapshot(
             &state,
             &request.selector_expression,

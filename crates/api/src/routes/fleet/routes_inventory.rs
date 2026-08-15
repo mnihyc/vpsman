@@ -24,7 +24,9 @@ use crate::{
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
-    security::{SCOPE_CONFIG_READ, SCOPE_FLEET_READ},
+    security::{
+        operator_has_scope, require_vps_rule_selector_scope, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
+    },
     selector_expression::parse_selector_expression,
     state::AppState,
     util::limit_or_default,
@@ -455,8 +457,10 @@ pub(crate) async fn create_server_runtime_config_patch_request(
         )
         .await?
     } else {
-        parse_selector_expression(&request.selector_expression)
-            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
+        let expression = parse_selector_expression(&request.selector_expression)
+            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+            .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
+        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
         state
             .repo
             .resolve_bulk_targets(&BulkResolveRequest {
@@ -555,7 +559,7 @@ pub(crate) async fn bulk_mutate_tags(
     headers: HeaderMap,
     Json(mut request): Json<BulkTagMutationRequest>,
 ) -> Result<Json<TagMutationResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     match &request.action {
@@ -567,6 +571,7 @@ pub(crate) async fn bulk_mutate_tags(
         }
     }
     validate_bulk_selector_expression(&request.selector_expression)?;
+    let allow_vps_rule_selectors = operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ);
     request.target_client_ids = normalized_target_client_ids(&request.target_client_ids)?;
     let fixed_targets = verified_fixed_target_ids(
         &state,
@@ -581,12 +586,15 @@ pub(crate) async fn bulk_mutate_tags(
         preview_request.privilege_assertion = None;
         let preview = state
             .repo
-            .bulk_mutate_tags(&preview_request)
+            .bulk_mutate_tags(&preview_request, allow_vps_rule_selectors)
             .await
-            .map_err(ApiError::internal_mapper(
-                "tag_mutation_preview_failed",
-                "The tag-mutation preview could not be prepared.",
-            ))?;
+            .map_err(|error| {
+                tag_mutation_error(
+                    error,
+                    "tag_mutation_preview_failed",
+                    "The tag-mutation preview could not be prepared.",
+                )
+            })?;
         require_matching_preview_hash(
             request.preview_hash.as_deref(),
             &preview.preview_hash,
@@ -607,12 +615,19 @@ pub(crate) async fn bulk_mutate_tags(
         );
         verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
     }
-    Ok(Json(state.repo.bulk_mutate_tags(&request).await.map_err(
-        ApiError::internal_mapper(
-            "tag_mutation_failed",
-            "The tag mutation could not be completed.",
-        ),
-    )?))
+    Ok(Json(
+        state
+            .repo
+            .bulk_mutate_tags(&request, allow_vps_rule_selectors)
+            .await
+            .map_err(|error| {
+                tag_mutation_error(
+                    error,
+                    "tag_mutation_failed",
+                    "The tag mutation could not be completed.",
+                )
+            })?,
+    ))
 }
 
 pub(crate) async fn delete_tag(
@@ -621,20 +636,23 @@ pub(crate) async fn delete_tag(
     Path(tag): Path<String>,
     Json(request): Json<DeleteTagRequest>,
 ) -> Result<Json<TagMutationResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_legacy_tag_name_for_cleanup(&tag)?;
+    let allow_vps_rule_selectors = operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ);
     if request.confirmed {
-        let preview =
-            state
-                .repo
-                .delete_tag(&tag, false)
-                .await
-                .map_err(ApiError::internal_mapper(
+        let preview = state
+            .repo
+            .delete_tag(&tag, false, allow_vps_rule_selectors)
+            .await
+            .map_err(|error| {
+                tag_mutation_error(
+                    error,
                     "tag_delete_preview_failed",
                     "The tag-deletion preview could not be prepared.",
-                ))?;
+                )
+            })?;
         require_matching_preview_hash(
             request.preview_hash.as_deref(),
             &preview.preview_hash,
@@ -653,12 +671,11 @@ pub(crate) async fn delete_tag(
     Ok(Json(
         state
             .repo
-            .delete_tag(&tag, request.confirmed)
+            .delete_tag(&tag, request.confirmed, allow_vps_rule_selectors)
             .await
-            .map_err(ApiError::internal_mapper(
-                "tag_delete_failed",
-                "The tag could not be deleted.",
-            ))?,
+            .map_err(|error| {
+                tag_mutation_error(error, "tag_delete_failed", "The tag could not be deleted.")
+            })?,
     ))
 }
 
@@ -834,10 +851,11 @@ pub(crate) async fn assign_agent_tag(
     Path(client_id): Path<String>,
     Json(request): Json<AssignTagRequest>,
 ) -> Result<Json<TagMutationResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
     validate_persisted_tag_name(&request.tag)?;
+    let allow_vps_rule_selectors = operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ);
     if request.confirmed {
         let targets = vec![client_id.clone()];
         let intent = DbPrivilegeIntent::new("tag.assign", &request.tag, None, &targets, true, None);
@@ -846,12 +864,20 @@ pub(crate) async fn assign_agent_tag(
     Ok(Json(
         state
             .repo
-            .assign_agent_tag_mutation(&client_id, &request.tag, request.confirmed)
+            .assign_agent_tag_mutation(
+                &client_id,
+                &request.tag,
+                request.confirmed,
+                allow_vps_rule_selectors,
+            )
             .await
-            .map_err(ApiError::internal_mapper(
-                "tag_assignment_failed",
-                "The VPS tag assignment could not be completed.",
-            ))?,
+            .map_err(|error| {
+                tag_mutation_error(
+                    error,
+                    "tag_assignment_failed",
+                    "The VPS tag assignment could not be completed.",
+                )
+            })?,
     ))
 }
 
@@ -860,10 +886,11 @@ pub(crate) async fn resolve_bulk_targets(
     headers: HeaderMap,
     Json(request): Json<BulkResolveRequest>,
 ) -> Result<Json<BulkResolveResponse>, ApiError> {
-    let _operator = state
+    let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    validate_bulk_selector_expression(&request.selector_expression)?;
+    let expression = validate_bulk_selector_expression(&request.selector_expression)?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     Ok(Json(
         state
             .repo
@@ -876,13 +903,25 @@ pub(crate) async fn resolve_bulk_targets(
     ))
 }
 
-fn validate_bulk_selector_expression(selector_expression: &str) -> Result<(), ApiError> {
+fn validate_bulk_selector_expression(
+    selector_expression: &str,
+) -> Result<vpsman_common::Expression, ApiError> {
     if selector_expression.trim().is_empty() {
         return Err(ApiError::bad_request("selector_expression_required"));
     }
     parse_selector_expression(selector_expression)
-        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
-    Ok(())
+        .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::bad_request("selector_expression_required"))
+}
+
+fn tag_mutation_error(error: anyhow::Error, code: &'static str, message: &'static str) -> ApiError {
+    if error
+        .to_string()
+        .contains("vps_rule_selector_scope_required")
+    {
+        return ApiError::forbidden("operator_scope_insufficient");
+    }
+    ApiError::internal(code, message, error)
 }
 
 fn validate_telemetry_rollup_query(query: &TelemetryRollupQuery) -> Result<(), ApiError> {

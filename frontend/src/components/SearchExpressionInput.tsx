@@ -16,10 +16,11 @@ import {
   type SyntheticEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import type { AgentView } from "../types";
+import type { AgentView, VpsRuleValueRecord } from "../types";
 import { usePanelDisplaySettings } from "../panelDisplay";
 import {
   agentsMatchingExpression,
+  expressionReferencesVpsRules,
   parseSearchExpression,
   quoteSelectorValue,
   removeTokenFromExpression,
@@ -27,6 +28,12 @@ import {
   termMatchTitle,
   tokenizeSearchExpression,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
+import {
+  VPS_RULE_FIELD_DEFINITIONS,
+  isVpsRuleKey,
+  vpsRuleDefinition,
+} from "../vpsRules";
 import {
   clientIdSuffix,
   formatVpsName,
@@ -71,6 +78,7 @@ export function SearchExpressionInput({
   verificationMessage,
 }: SearchExpressionInputProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const editorRef = useRef<HTMLInputElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -86,10 +94,23 @@ export function SearchExpressionInput({
   const autocompleteId = `${editorId}-suggestions`;
   const metaId = `${editorId}-status`;
   const parsed = parseSearchExpression(value);
+  const referencesVpsRules = expressionReferencesVpsRules(value);
+  const ruleEvidenceUnavailable =
+    referencesVpsRules && !vpsRuleSearch.available;
   const displayTokens = useMemo(() => tokenizeForDisplay(value), [value]);
   const hasTokens = displayTokens.some((token) => token.kind === "term");
+  const completingVpsRules = shouldSuppressVpsRuleCompletionError(
+    value,
+    caretIndex,
+    focused,
+    autocompleteOpen,
+  );
+  const visibleParseError =
+    parsed.error && !completingVpsRules ? parsed.error : null;
   const matchedAgents =
-    agents && !parsed.error ? agentsMatchingExpression(agents, value) : [];
+    agents && !visibleParseError && !ruleEvidenceUnavailable
+      ? agentsMatchingExpression(agents, value, vpsRuleSearch)
+      : [];
   const completion = useMemo(
     () =>
       buildCompletion(
@@ -98,20 +119,45 @@ export function SearchExpressionInput({
         agents ?? [],
         suggestions ?? [],
         vpsNameDisplayMode,
-        Boolean(agents?.length),
+        Boolean(agents),
+        vpsRuleSearch.rules,
+        vpsRuleSearch.available,
       ),
-    [agents, caretIndex, suggestions, value, vpsNameDisplayMode],
+    [
+      agents,
+      caretIndex,
+      suggestions,
+      value,
+      vpsNameDisplayMode,
+      vpsRuleSearch.available,
+      vpsRuleSearch.rules,
+    ],
   );
-  const visibleSuggestions = completion.filtered.slice(0, 8);
+  const visibleSuggestions = completion.filtered.slice(
+    0,
+    completion.ruleScoped ? 20 : 8,
+  );
   const matchTitle =
     agents && !parsed.error ? agentListTitle(matchedAgents) : undefined;
-  const matchSummary = parsed.error
-    ? parsed.error
-    : `${matchedAgents.length}/${agents?.length ?? 0}`;
-  const metaText = verificationMessage ?? matchSummary;
-  const metaTitle =
-    metaDescription ?? verificationMessage ?? matchTitle ?? matchSummary;
+  const matchSummary = visibleParseError
+    ? visibleParseError
+    : ruleEvidenceUnavailable
+      ? "VPS rule data unavailable"
+      : completingVpsRules && parsed.error
+        ? "Choose a VPS rule"
+        : `${matchedAgents.length}/${agents?.length ?? 0}`;
+  const metaText =
+    visibleParseError || ruleEvidenceUnavailable
+      ? matchSummary
+      : (verificationMessage ?? matchSummary);
+  const metaTitle = visibleParseError
+    ? visibleParseError
+    : ruleEvidenceUnavailable
+      ? "VPS rule data is unavailable or you do not have config:read access"
+      : (metaDescription ?? verificationMessage ?? matchTitle ?? matchSummary);
   const showVisibleMeta = Boolean(
+    ruleEvidenceUnavailable ||
+    (visibleParseError && referencesVpsRules) ||
     (showMatchCount && agents) ||
     (showVerificationMessage && verificationMessage),
   );
@@ -410,11 +456,14 @@ export function SearchExpressionInput({
   }
 
   function applySuggestion(suggestion: CompletionOption) {
+    if (suggestion.disabled) {
+      return;
+    }
     const nextValue = applyCompletion(value, completion, suggestion);
     const nextCaretIndex = completion.start + suggestion.value.length;
     onChange(nextValue);
     setCaretIndex(nextCaretIndex);
-    setAutocompleteOpen(false);
+    setAutocompleteOpen(Boolean(suggestion.continueCompletion));
     focusInputAt(nextCaretIndex);
   }
 
@@ -471,12 +520,19 @@ export function SearchExpressionInput({
           aria-controls={autocompleteId}
           aria-describedby={showMeta ? metaId : undefined}
           aria-errormessage={
-            showMeta && (parsed.error || verification === "invalid")
+            showMeta &&
+            (visibleParseError ||
+              ruleEvidenceUnavailable ||
+              verification === "invalid")
               ? metaId
               : undefined
           }
           aria-expanded={autocompleteVisible}
-          aria-invalid={Boolean(parsed.error) || verification === "invalid"}
+          aria-invalid={
+            Boolean(visibleParseError) ||
+            ruleEvidenceUnavailable ||
+            verification === "invalid"
+          }
           aria-label={ariaLabel}
           autoCapitalize="none"
           autoComplete="off"
@@ -528,6 +584,7 @@ export function SearchExpressionInput({
               {visibleSuggestions.map((suggestion, index) => (
                 <button
                   aria-selected={activeSuggestionIndex === index}
+                  disabled={suggestion.disabled}
                   id={`${autocompleteId}-option-${index}`}
                   key={`${suggestion.value}:${suggestion.label}`}
                   onClick={() => applySuggestion(suggestion)}
@@ -552,7 +609,7 @@ export function SearchExpressionInput({
       {showVisibleMeta ? (
         <span
           className={
-            parsed.error
+            visibleParseError || ruleEvidenceUnavailable
               ? "searchExpressionMeta errorText"
               : "searchExpressionMeta"
           }
@@ -567,6 +624,11 @@ export function SearchExpressionInput({
           {verificationMessage}
         </span>
       ) : null}
+      <span aria-live="polite" className="srOnly">
+        {autocompleteVisible
+          ? `${visibleSuggestions.length} search suggestion${visibleSuggestions.length === 1 ? "" : "s"}`
+          : ""}
+      </span>
     </div>
   );
 }
@@ -613,13 +675,14 @@ function SearchExpressionTokenView({
   onChange: (value: string) => void;
   token: DisplayToken;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   if (token.kind !== "term") {
     return <span className="searchExpressionOperator">{token.raw}</span>;
   }
   return (
     <span
       className="searchExpressionChip"
-      title={agents ? termMatchTitle(token, agents) : token.raw}
+      title={agents ? termMatchTitle(token, agents, vpsRuleSearch) : token.raw}
     >
       <span>{token.raw}</span>
       <button
@@ -645,10 +708,13 @@ type CompletionState = {
   filtered: CompletionOption[];
   fragment: string;
   start: number;
+  ruleScoped: boolean;
 };
 
 type CompletionOption = {
+  continueCompletion?: boolean;
   detail?: string;
+  disabled?: boolean;
   label: string;
   matchText: string;
   namespace: string | null;
@@ -717,7 +783,11 @@ export function buildAgentSelectorSuggestionValues(
     ...[...COMMON_VPS_SELECTOR_SUGGESTIONS].sort((left, right) =>
       left.localeCompare(right),
     ),
-  ]);
+  ]).filter((value) => !containsReservedVpsRuleNamespace(value));
+}
+
+function containsReservedVpsRuleNamespace(value: string): boolean {
+  return /(?:^|[^a-z0-9_])vps\.rules(?=$|[:.])/i.test(value);
 }
 
 function buildAgentSelectorSuggestions(
@@ -735,17 +805,36 @@ function buildCompletion(
   suggestions: string[],
   mode: VpsNameDisplayMode,
   agentSuggestionsEnabled: boolean,
+  vpsRuleValues: readonly VpsRuleValueRecord[],
+  vpsRuleEvidenceAvailable: boolean,
 ): CompletionState {
   const boundedCaret = Math.max(0, Math.min(caretIndex, value.length));
+  const ruleScope = vpsRuleCompletionScope(value, boundedCaret);
+  if (ruleScope) {
+    return {
+      end: boundedCaret,
+      filtered: buildVpsRuleScopedCompletionOptions(
+        ruleScope,
+        vpsRuleValues,
+        vpsRuleEvidenceAvailable,
+      ),
+      fragment: ruleScope.fragment,
+      ruleScoped: true,
+      start: ruleScope.start,
+    };
+  }
   const { fragment, start } = completionFragment(value, boundedCaret);
   const normalized = fragment.toLocaleLowerCase();
   const namespaceSeparator = normalized.indexOf(":");
   const allSuggestions = uniqueCompletionOptions([
+    ...(agentSuggestionsEnabled ? [vpsRulesCategoryOption()] : []),
     ...(agentSuggestionsEnabled
       ? buildAgentCompletionOptions(agents, fragment, mode)
       : []),
     ...(agentSuggestionsEnabled ? buildAgentSelectorSuggestions(agents) : []),
-    ...suggestions.map((suggestion) => staticCompletionOption(suggestion)),
+    ...genericCallerSuggestions(suggestions).map((suggestion) =>
+      staticCompletionOption(suggestion),
+    ),
   ]);
   return {
     end: boundedCaret,
@@ -755,8 +844,323 @@ function buildCompletion(
         )
       : allSuggestions.slice(0, 8),
     fragment,
+    ruleScoped: false,
     start,
   };
+}
+
+export function genericCallerSuggestions(suggestions: string[]): string[] {
+  return suggestions.filter(
+    (suggestion) => !containsReservedVpsRuleNamespace(suggestion),
+  );
+}
+
+type VpsRuleCompletionScope = {
+  fragment: string;
+  keyFragment: string;
+  negated: boolean;
+  operator: "=" | "!=" | "<" | "<=" | ">" | ">=" | null;
+  rhs: string;
+  start: number;
+};
+
+export type VpsRuleCompletionSuggestion = {
+  detail?: string;
+  disabled?: boolean;
+  label: string;
+  value: string;
+};
+
+export function buildVpsRuleCompletionSuggestions(
+  value: string,
+  caretIndex: number,
+  rows: readonly VpsRuleValueRecord[],
+  available = true,
+): VpsRuleCompletionSuggestion[] {
+  const scope = vpsRuleCompletionScope(value, caretIndex);
+  return scope
+    ? buildVpsRuleScopedCompletionOptions(scope, rows, available).map(
+        ({ detail, disabled, label, value }) => ({
+          detail,
+          disabled,
+          label,
+          value,
+        }),
+      )
+    : [];
+}
+
+function isActiveVpsRuleCompletion(value: string, caretIndex: number): boolean {
+  return Boolean(vpsRuleCompletionScope(value, caretIndex));
+}
+
+export function shouldSuppressVpsRuleCompletionError(
+  value: string,
+  caretIndex: number,
+  focused: boolean,
+  autocompleteOpen: boolean,
+): boolean {
+  return (
+    focused && autocompleteOpen && isActiveVpsRuleCompletion(value, caretIndex)
+  );
+}
+
+function vpsRuleCompletionScope(
+  value: string,
+  caretIndex: number,
+): VpsRuleCompletionScope | null {
+  const beforeCaret = value.slice(
+    0,
+    Math.max(0, Math.min(caretIndex, value.length)),
+  );
+  let start = 0;
+  const delimiter = /&&|\|\||\b(?:and|or)\b|\(/gi;
+  for (const match of beforeCaret.matchAll(delimiter)) {
+    start = (match.index ?? 0) + match[0].length;
+  }
+  const scopedPrefixStart = lastUnquotedVpsRulePrefixStart(beforeCaret);
+  if (scopedPrefixStart !== null) {
+    start = Math.max(start, scopedPrefixStart);
+  }
+  while (/\s/.test(beforeCaret[start] ?? "")) start += 1;
+  const fragment = beforeCaret.slice(start);
+  const match = fragment.match(
+    /^(!\s*)?vps\.rules:([^\s=!<>()[\],&|~]*)(?:\s*(>=|<=|!=|=|>|<)\s*(.*))?$/i,
+  );
+  if (!match) return null;
+  return {
+    fragment,
+    keyFragment: match[2].toLowerCase(),
+    negated: Boolean(match[1]),
+    operator: (match[3] as VpsRuleCompletionScope["operator"]) ?? null,
+    rhs: match[4] ?? "",
+    start,
+  };
+}
+
+function lastUnquotedVpsRulePrefixStart(value: string): number | null {
+  const lower = value.toLowerCase();
+  const prefix = "vps.rules:";
+  let escaped = false;
+  let lastStart: number | null = null;
+  let quote: string | null = null;
+  for (let index = 0; index <= value.length - prefix.length; index += 1) {
+    const char = value[index];
+    if (quote) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (!lower.startsWith(prefix, index)) continue;
+    if (index > 0 && !/[\s(!&|]/.test(value[index - 1])) continue;
+    let candidate = index;
+    let previous = index;
+    while (previous > 0 && /\s/.test(value[previous - 1])) previous -= 1;
+    if (previous > 0 && value[previous - 1] === "!") {
+      candidate = previous - 1;
+    }
+    lastStart = candidate;
+    index += prefix.length - 1;
+  }
+  return lastStart;
+}
+
+function vpsRulesCategoryOption(): CompletionOption {
+  const category = vpsRulesCategorySuggestion();
+  return {
+    ...completionOption(
+      category.value,
+      category.label,
+      category.detail,
+      "vps rules configured configuration",
+    ),
+    continueCompletion: true,
+  };
+}
+
+export function vpsRulesCategorySuggestion(): VpsRuleCompletionSuggestion {
+  return {
+    detail: "Search directly configured VPS rules",
+    label: "VPS rules…",
+    value: "vps.rules:",
+  };
+}
+
+function buildVpsRuleScopedCompletionOptions(
+  scope: VpsRuleCompletionScope,
+  rows: readonly VpsRuleValueRecord[],
+  available: boolean,
+): CompletionOption[] {
+  if (!available) {
+    return [
+      {
+        ...completionOption(
+          scope.fragment,
+          "VPS rule data unavailable",
+          "Requires complete rule evidence and config:read access",
+          "unavailable config read",
+        ),
+        disabled: true,
+      },
+    ];
+  }
+  const key = scope.keyFragment;
+  if (!isVpsRuleKey(key)) {
+    const prefix = scope.negated ? "!vps.rules:" : "vps.rules:";
+    const generic = scope.negated
+      ? []
+      : [
+          ruleCompletionOption(
+            "vps.rules:*",
+            "Any configured rule",
+            "At least one directly configured rule",
+          ),
+          ruleCompletionOption(
+            "vps.rules:traffic.*",
+            "Any traffic rule",
+            "Configured key wildcard",
+          ),
+          ruleCompletionOption(
+            "vps.rules in [/^traffic\\./]",
+            "Traffic rule key regex",
+            "Case-sensitive regular expression",
+          ),
+        ];
+    const keys = VPS_RULE_FIELD_DEFINITIONS.filter(
+      (definition) =>
+        !key ||
+        definition.key.includes(key) ||
+        definition.label.toLowerCase().includes(key),
+    ).map((definition) =>
+      ruleCompletionOption(
+        `${prefix}${definition.key}`,
+        definition.label,
+        `${scope.negated ? "Rule is absent" : "Configured rule"} · ${definition.key}`,
+      ),
+    );
+    const normalizedFragment = key.toLowerCase();
+    return uniqueCompletionOptions([...generic, ...keys]).filter(
+      (option) =>
+        !normalizedFragment || option.matchText.includes(normalizedFragment),
+    );
+  }
+
+  const definition = vpsRuleDefinition(key)!;
+  const base = `${scope.negated ? "!" : ""}vps.rules:${key}`;
+  const presence = ruleCompletionOption(
+    base,
+    scope.negated ? `${definition.label} is absent` : definition.label,
+    `${scope.negated ? "Rule is absent" : "Configured rule"} · ${key}`,
+  );
+  if (scope.negated) return [presence];
+
+  const observed = observedRuleValues(rows, key);
+  const operator = scope.operator;
+  const rhs = unquoteLeadingFragment(scope.rhs.trim().toLowerCase());
+  const valueOptions = observed
+    .filter(({ value }) =>
+      operator && isOrderedRuleOperator(operator) ? value !== "-1" : true,
+    )
+    .filter(({ value }) => !rhs || value.toLocaleLowerCase().includes(rhs))
+    .slice(0, 20)
+    .map(({ count, value }) => {
+      const selectedOperator = operator ?? "=";
+      return ruleCompletionOption(
+        `${base} ${selectedOperator} ${quoteSelectorValue(value)}`,
+        `${selectedOperator} ${value}`,
+        `${count} VPS${count === 1 ? "" : "s"} · canonical configured value`,
+      );
+    });
+  if (operator) {
+    const example = orderedRuleExample(key);
+    return uniqueCompletionOptions([
+      ...valueOptions,
+      ...(example && isOrderedRuleOperator(operator)
+        ? [
+            ruleCompletionOption(
+              `${base} ${operator} ${quoteSelectorValue(example)}`,
+              `${operator} ${example}`,
+              `${definition.label} example`,
+            ),
+          ]
+        : []),
+    ]);
+  }
+
+  const example = orderedRuleExample(key);
+  return uniqueCompletionOptions([
+    presence,
+    ...valueOptions,
+    ...(example && definition.orderedKind
+      ? [
+          ruleCompletionOption(
+            `${base} >= ${quoteSelectorValue(example)}`,
+            `At least ${example}`,
+            `Typed ${definition.label.toLocaleLowerCase()} comparison`,
+          ),
+        ]
+      : []),
+    ruleCompletionOption(
+      `${base} = "*"`,
+      "Value wildcard…",
+      "Match the canonical configured value",
+    ),
+    ruleCompletionOption(
+      `${base} in [/.*/]`,
+      "Value regex…",
+      "Case-sensitive canonical-value regex",
+    ),
+  ]);
+}
+
+function observedRuleValues(
+  rows: readonly VpsRuleValueRecord[],
+  key: string,
+): Array<{ count: number; value: string }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.key === key) {
+      counts.set(row.value_raw, (counts.get(row.value_raw) ?? 0) + 1);
+    }
+  }
+  return Array.from(counts, ([value, count]) => ({ count, value })).sort(
+    (left, right) =>
+      right.count - left.count || left.value.localeCompare(right.value),
+  );
+}
+
+function isOrderedRuleOperator(operator: string): boolean {
+  return (
+    operator === "<" ||
+    operator === "<=" ||
+    operator === ">" ||
+    operator === ">="
+  );
+}
+
+function orderedRuleExample(key: string): string | null {
+  if (key === "billing.price") return "50 USD/m";
+  if (key === "network.port_speed") return "1 Gbps";
+  if (key === "traffic.reset_day") return "15";
+  if (key.startsWith("traffic.quota.")) return "1TB";
+  return null;
+}
+
+function ruleCompletionOption(
+  value: string,
+  label: string,
+  detail: string,
+): CompletionOption {
+  return completionOption(value, label, detail, `${label} ${detail}`);
 }
 
 function applyCompletion(

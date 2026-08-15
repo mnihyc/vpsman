@@ -1,6 +1,7 @@
 use super::*;
 use base64::Engine as _;
 use serde_json::json;
+use std::collections::BTreeMap;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
 #[tokio::test]
@@ -444,7 +445,7 @@ async fn fleet_alert_policy_groups_issue_resource_alerts() {
 
     let policies = state
         .repo
-        .list_fleet_alert_policies(20, Some(true), Some("id:edge-a"), None)
+        .list_fleet_alert_policies(20, Some(true), Some("id:edge-a"), None, true)
         .await
         .unwrap();
     assert_eq!(policies.len(), 1);
@@ -481,7 +482,7 @@ async fn fleet_alert_policy_regression_upsert_by_name_preserves_identity_past_li
         .await
         .unwrap();
     assert_eq!(
-        repo.list_fleet_alert_policies(20, None, None, None)
+        repo.list_fleet_alert_policies(20, None, None, None, true)
             .await
             .unwrap()
             .len(),
@@ -548,6 +549,84 @@ async fn fleet_alert_policy_regression_upsert_by_name_preserves_identity_past_li
 }
 
 #[tokio::test]
+async fn policy_live_enrichment_requires_rule_capability_only_for_rule_selectors() {
+    let ordinary_repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let ordinary = ordinary_repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "ordinary-policy".to_string(),
+                enabled: true,
+                selector_expression: "status:online".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "load".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(ordinary_repo
+        .list_fleet_alert_policies(20, None, None, None, false)
+        .await
+        .is_ok());
+    assert!(ordinary_repo
+        .get_fleet_alert_policy(ordinary.id, false)
+        .await
+        .is_ok());
+
+    let rule_repo = Repository::Memory(MemoryState::default());
+    let rule_policy = rule_repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "rule-policy".to_string(),
+                enabled: true,
+                selector_expression: "vps.rules:traffic.reset_day >= 15".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "load".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let list_error = rule_repo
+        .list_fleet_alert_policies(20, None, None, None, false)
+        .await
+        .unwrap_err();
+    assert!(list_error
+        .to_string()
+        .contains("vps_rule_selector_scope_required"));
+    let get_error = rule_repo
+        .get_fleet_alert_policy(rule_policy.id, false)
+        .await
+        .unwrap_err();
+    assert!(get_error
+        .to_string()
+        .contains("vps_rule_selector_scope_required"));
+}
+
+#[tokio::test]
 async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_lock() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = test_operator();
@@ -587,7 +666,10 @@ async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_l
         .to_string()
         .contains("fleet_alert_policy_delete_review_stale"));
     assert_eq!(
-        repo.get_fleet_alert_policy(renamed.id).await.unwrap().name,
+        repo.get_fleet_alert_policy(renamed.id, true)
+            .await
+            .unwrap()
+            .name,
         "reviewed-after"
     );
     if let Repository::Memory(memory) = &repo {
@@ -603,7 +685,7 @@ async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_l
         .await
         .unwrap();
     assert!(repo
-        .get_fleet_alert_policy(renamed.id)
+        .get_fleet_alert_policy(renamed.id, true)
         .await
         .unwrap_err()
         .to_string()
@@ -766,6 +848,7 @@ async fn filter_limit_regression_internal_traffic_accounting_is_unbounded() {
                 client_id,
                 key: key.to_string(),
                 value_raw: value_raw.to_string(),
+                stored_value_raw: None,
                 value_json,
                 parsed_display: value_raw.to_string(),
                 state: "ok".to_string(),
@@ -920,6 +1003,271 @@ async fn vps_rules_dry_run_returns_invalid_billing_row_without_persisting() {
 }
 
 #[tokio::test]
+async fn vps_rule_spacing_variants_are_canonical_and_confirmed_edit_is_a_row_noop() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: "v-1".to_string(),
+        display_name: "VPS 1".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    let operator = test_operator();
+    let first_values = BTreeMap::from([(
+        format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} "),
+        " 001.500   gbps ".to_string(),
+    )]);
+    let first_preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:v-1".to_string(),
+            values: first_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(first_preview.changed_row_count, 1);
+    assert_eq!(first_preview.changes[0].after.as_deref(), Some("1.5 Gbps"));
+    repo.bulk_upsert_vps_rules(
+        &VpsRulesBulkUpsertRequest {
+            selector_expression: "id:v-1".to_string(),
+            values: first_values,
+            confirmed: true,
+            preview_hash: first_preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    {
+        let mut rows = memory.vps_rule_values.write().await;
+        assert_eq!(rows[0].key, VPS_RULE_KEY_NETWORK_PORT_SPEED);
+        // Simulate a row written before canonical save-time normalization.
+        rows[0].value_raw = " 001.500   gbps ".to_string();
+        rows[0].stored_value_raw = None;
+        rows[0].updated_at = "legacy-timestamp".to_string();
+    }
+
+    let edit_values = BTreeMap::from([(
+        VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+        "1.5Gbps".to_string(),
+    )]);
+    let normalization_preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:v-1".to_string(),
+            values: edit_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(normalization_preview.changed_row_count, 1);
+    assert_eq!(normalization_preview.changes[0].action, "set");
+    assert_eq!(
+        normalization_preview.changes[0].before.as_deref(),
+        Some(" 001.500   gbps ")
+    );
+    assert_eq!(
+        normalization_preview.changes[0].after.as_deref(),
+        Some("1.5 Gbps")
+    );
+    let audit_count_before_normalization = memory.audits.read().await.len();
+    repo.bulk_upsert_vps_rules(
+        &VpsRulesBulkUpsertRequest {
+            selector_expression: "id:v-1".to_string(),
+            values: edit_values.clone(),
+            confirmed: true,
+            preview_hash: normalization_preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let before_noop = memory.vps_rule_values.read().await[0].clone();
+    assert_eq!(before_noop.value_raw, "1.5 Gbps");
+    assert_eq!(before_noop.updated_by, Some(operator.operator.id));
+    assert_eq!(
+        memory.audits.read().await.len(),
+        audit_count_before_normalization + 1
+    );
+    let before_noop_audit_count = memory.audits.read().await.len();
+
+    let edit_preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:v-1".to_string(),
+            values: edit_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(edit_preview.changed_row_count, 0);
+    assert_eq!(edit_preview.changes[0].action, "unchanged");
+    repo.bulk_upsert_vps_rules(
+        &VpsRulesBulkUpsertRequest {
+            selector_expression: "id:v-1".to_string(),
+            values: edit_values,
+            confirmed: true,
+            preview_hash: edit_preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let after = memory.vps_rule_values.read().await[0].clone();
+    assert_eq!(after.value_raw, "1.5 Gbps");
+    assert_eq!(
+        after.value_json,
+        json!({"bps": 1_500_000_000_i64, "display": "1.5 Gbps"})
+    );
+    assert_eq!(after.parsed_display, "1.5 Gbps");
+    assert_eq!(after.updated_at, before_noop.updated_at);
+    assert_eq!(after.updated_by, before_noop.updated_by);
+    assert_eq!(memory.audits.read().await.len(), before_noop_audit_count);
+
+    let duplicate_error = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:v-1".to_string(),
+            values: BTreeMap::from([
+                (
+                    VPS_RULE_KEY_NETWORK_PORT_SPEED.to_string(),
+                    "1 Gbps".to_string(),
+                ),
+                (
+                    format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} "),
+                    "2 Gbps".to_string(),
+                ),
+            ]),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap_err();
+    assert!(duplicate_error
+        .to_string()
+        .contains("vps_rules_duplicate_key"));
+
+    let unset_keys = vec![format!(" {VPS_RULE_KEY_NETWORK_PORT_SPEED} ")];
+    let unset_preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "unset".to_string(),
+            selector_expression: "id:v-1".to_string(),
+            values: BTreeMap::new(),
+            keys: unset_keys.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(unset_preview.changed_row_count, 1);
+    repo.bulk_unset_vps_rules(
+        &VpsRulesBulkUnsetRequest {
+            selector_expression: "id:v-1".to_string(),
+            keys: unset_keys,
+            confirmed: true,
+            preview_hash: unset_preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    assert!(memory.vps_rule_values.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_confirmations_reject_the_stale_self_referential_rule_preview() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: "v-1".to_string(),
+        display_name: "VPS 1".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    let parsed = vpsman_common::parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "1").unwrap();
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: "v-1".to_string(),
+            key: VPS_RULE_KEY_TRAFFIC_RESET_DAY.to_string(),
+            value_raw: parsed.raw,
+            stored_value_raw: None,
+            value_json: parsed.json,
+            parsed_display: parsed.display,
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "1".to_string(),
+        });
+    let selector_expression = "vps.rules:traffic.reset_day <= 1".to_string();
+    let values = BTreeMap::from([(VPS_RULE_KEY_TRAFFIC_RESET_DAY.to_string(), "2".to_string())]);
+    let preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: selector_expression.clone(),
+            values: values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.matched_vps_count, 1);
+    let left_request = VpsRulesBulkUpsertRequest {
+        selector_expression: selector_expression.clone(),
+        values: values.clone(),
+        confirmed: true,
+        preview_hash: preview.preview_hash.clone(),
+    };
+    let right_request = VpsRulesBulkUpsertRequest {
+        selector_expression,
+        values,
+        confirmed: true,
+        preview_hash: preview.preview_hash,
+    };
+    let operator = test_operator();
+    let (left, right) = tokio::join!(
+        repo.bulk_upsert_vps_rules(&left_request, &operator),
+        repo.bulk_upsert_vps_rules(&right_request, &operator),
+    );
+    let results = [left, right];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results
+        .into_iter()
+        .find_map(Result::err)
+        .expect("one stale confirmation");
+    assert!(error
+        .to_string()
+        .contains("vps_rules_preview_hash_mismatch"));
+    let rows = memory.vps_rule_values.read().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].value_raw, "2");
+    assert_eq!(memory.audits.read().await.len(), 1);
+}
+
+#[tokio::test]
 async fn configured_traffic_without_a_quota_remains_healthy() {
     let memory = MemoryState::default();
     let now = chrono::Utc::now().timestamp();
@@ -943,6 +1291,7 @@ async fn configured_traffic_without_a_quota_remains_healthy() {
             client_id: "v-1".to_string(),
             key: key.to_string(),
             value_raw: value_raw.to_string(),
+            stored_value_raw: None,
             value_json,
             parsed_display: value_raw.to_string(),
             state: "ok".to_string(),
@@ -1206,6 +1555,7 @@ async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_f
                 client_id: client_id.to_string(),
                 key: key.to_string(),
                 value_raw: value_raw.to_string(),
+                stored_value_raw: None,
                 value_json,
                 parsed_display: value_raw.to_string(),
                 state: "ok".to_string(),
@@ -1220,7 +1570,14 @@ async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_f
             stored_rule(
                 VPS_RULE_KEY_TRAFFIC_SELECTORS,
                 "eth0",
-                json!({"selectors": []}),
+                json!({
+                    "selectors": [{
+                        "source": "host",
+                        "interface": "eth0",
+                        "direction": "total",
+                        "canonical": "eth0"
+                    }]
+                }),
             ),
             stored_rule(
                 VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,

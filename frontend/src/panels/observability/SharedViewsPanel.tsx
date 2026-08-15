@@ -29,7 +29,10 @@ import { scrollIntoViewWithMotion } from "../../motion";
 import {
   agentsMatchingExpression,
   parseSearchExpression,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../../searchExpression";
+import { useVpsRuleSearchContext } from "../../vpsRuleSearchContext";
 import { LocalTargetPreview } from "../TargetImpactPreview";
 import type {
   AgentView,
@@ -140,6 +143,7 @@ export function SharedViewsPanel({
     selectorExpression: string,
   ) => Promise<BulkResolveResponse>;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [statusFilter, setStatusFilter] = useHistoryEntryState<ShareStatus>(
     "observability.shared-views.status",
     "active",
@@ -309,12 +313,28 @@ export function SharedViewsPanel({
     () => parseSearchExpression(draft.selectorExpression),
     [draft.selectorExpression],
   );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    draft.selectorExpression,
+    vpsRuleSearch,
+  );
   const localTargets = useMemo(
     () =>
-      draft.selectorExpression.trim() && !selectorParse.error
-        ? agentsMatchingExpression(agents, draft.selectorExpression)
+      draft.selectorExpression.trim() &&
+      !selectorParse.error &&
+      !selectorEvidenceUnavailable
+        ? agentsMatchingExpression(
+            agents,
+            draft.selectorExpression,
+            vpsRuleSearch,
+          )
         : [],
-    [agents, draft.selectorExpression, selectorParse.error],
+    [
+      agents,
+      draft.selectorExpression,
+      selectorEvidenceUnavailable,
+      selectorParse.error,
+      vpsRuleSearch,
+    ],
   );
   const draftExpirySecs = durationSeconds(
     draft.durationValue,
@@ -327,6 +347,7 @@ export function SharedViewsPanel({
     draft.name.trim().length <= 128 &&
     draft.selectorExpression.trim().length > 0 &&
     !selectorParse.error &&
+    !selectorEvidenceUnavailable &&
     draftExpirySecs !== null &&
     (!draft.visibility.detail_history || visibleMetricCount > 0);
 
@@ -428,7 +449,12 @@ export function SharedViewsPanel({
         apiToken,
         review.request,
       );
-      setShares((current) => mergeShares(current, [response.share]));
+      const createdShare = {
+        ...response.share,
+        target_update_available: false,
+        target_update_evidence_available: true,
+      };
+      setShares((current) => mergeShares(current, [createdShare]));
       createdUrlFocusShareIdRef.current = response.share.id;
       setSharedViewUrl({
         createdAt: response.share.created_at,
@@ -490,6 +516,9 @@ export function SharedViewsPanel({
                 ...share,
                 target_update_available:
                   existingById.get(share.id)?.target_update_available ?? false,
+                target_update_evidence_available:
+                  existingById.get(share.id)
+                    ?.target_update_evidence_available ?? false,
               }
             : share,
         );
@@ -513,6 +542,16 @@ export function SharedViewsPanel({
   }
 
   async function reviewTargetUpdate(selectedShares: MonitoringShareView[]) {
+    if (
+      selectedShares.some((share) => !share.target_update_evidence_available)
+    ) {
+      setFeedback({
+        message:
+          "Target refresh evidence is unavailable. Frozen targets remain unchanged; repair or retry, then use Update targets with the required access.",
+        tone: "warning",
+      });
+      return;
+    }
     enterReviewWorkflow("targets");
     setPending(true);
     try {
@@ -629,7 +668,9 @@ export function SharedViewsPanel({
         cell: (share) => (
           <span className="historyPrimary">
             <strong title={share.name}>{share.name}</strong>
-            <small title={share.id}>{shortShareId(share.id)}</small>
+            <small title={`${share.id} · ${shareTargetRefreshTitle(share)}`}>
+              {shortShareId(share.id)} · {shareTargetRefreshLabel(share)}
+            </small>
           </span>
         ),
         header: "Name",
@@ -727,13 +768,16 @@ export function SharedViewsPanel({
         description: (rows) =>
           rows.some((share) => effectiveShareStatus(share) !== "active")
             ? "Only active shared views can refresh their frozen targets."
-            : rows.some((share) => share.target_update_available)
-              ? `Re-resolve the saved selector for ${rows.length} shared ${rows.length === 1 ? "view" : "views"}, then review exact additions and removals.`
-              : "The selected frozen targets already match their saved selectors.",
+            : rows.some((share) => !share.target_update_evidence_available)
+              ? "Target refresh evidence is unavailable. Frozen targets remain unchanged; repair or retry, then use Update targets with the required access."
+              : rows.some((share) => share.target_update_available)
+                ? `Re-resolve the saved selector for ${rows.length} shared ${rows.length === 1 ? "view" : "views"}, then review exact additions and removals.`
+                : "The selected frozen targets already match their saved selectors.",
         disabled: (rows) =>
           pending ||
           rows.length === 0 ||
           rows.some((share) => effectiveShareStatus(share) !== "active") ||
+          rows.some((share) => !share.target_update_evidence_available) ||
           !rows.some((share) => share.target_update_available),
         icon: <RefreshCw size={14} />,
         label: "Update targets",
@@ -1040,7 +1084,9 @@ export function SharedViewsPanel({
                 <span>
                   {selectorParse.error
                     ? "Fix the expression before review"
-                    : `${localTargets.length}/${agents.length} VPSs in the local preview; review resolves the authoritative list`}
+                    : selectorEvidenceUnavailable
+                      ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                      : `${localTargets.length}/${agents.length} VPSs in the local preview; review resolves the authoritative list`}
                 </span>
               </div>
               <SearchExpressionInput
@@ -1054,18 +1100,25 @@ export function SharedViewsPanel({
                 showMatchCount
                 value={draft.selectorExpression}
                 verification={
-                  selectorParse.error
+                  selectorParse.error || selectorEvidenceUnavailable
                     ? "invalid"
                     : draft.selectorExpression.trim()
                       ? "valid"
                       : "neutral"
                 }
-                verificationMessage={selectorParse.error ?? undefined}
+                verificationMessage={
+                  selectorParse.error ??
+                  (selectorEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : undefined)
+                }
               />
-              <LocalTargetPreview
-                agents={localTargets}
-                ariaLabel="Shared view local VPS preview"
-              />
+              {!selectorEvidenceUnavailable && (
+                <LocalTargetPreview
+                  agents={localTargets}
+                  ariaLabel="Shared view local VPS preview"
+                />
+              )}
             </div>
             <small>
               Default * means all current VPSs. Future fleet changes do not
@@ -1189,14 +1242,16 @@ export function SharedViewsPanel({
                     ? "Enter a public display name"
                     : selectorParse.error
                       ? `Fix the VPS selector: ${selectorParse.error}`
-                      : !draft.selectorExpression.trim()
-                        ? "Enter a VPS selector expression"
-                        : durationSeconds(
-                              draft.durationValue,
-                              draft.durationUnit,
-                            ) === null
-                          ? "Choose an expiry from one minute through 365 days"
-                          : "Resolve the selector and review the exact public visibility snapshot"
+                      : selectorEvidenceUnavailable
+                        ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                        : !draft.selectorExpression.trim()
+                          ? "Enter a VPS selector expression"
+                          : durationSeconds(
+                                draft.durationValue,
+                                draft.durationUnit,
+                              ) === null
+                            ? "Choose an expiry from one minute through 365 days"
+                            : "Resolve the selector and review the exact public visibility snapshot"
               }
               type="submit"
             >
@@ -1382,10 +1437,8 @@ function ShareEvidence({ share }: { share: MonitoringShareView }) {
         </span>
         <span>
           <strong>Target refresh</strong>
-          <span>
-            {share.target_update_available
-              ? "Saved selector now resolves differently"
-              : "Frozen targets match the latest server check"}
+          <span title={shareTargetRefreshTitle(share)}>
+            {shareTargetRefreshLabel(share)}
           </span>
         </span>
         <span>
@@ -1695,8 +1748,33 @@ function applyTargetChanges(
       target_client_ids: targetClientIds,
       target_count: targetClientIds.length,
       target_update_available: false,
+      target_update_evidence_available: true,
     };
   });
+}
+
+function shareTargetRefreshLabel(share: MonitoringShareView): string {
+  if (effectiveShareStatus(share) !== "active") {
+    return "Not applicable while inactive";
+  }
+  if (!share.target_update_evidence_available) {
+    return "Target refresh unavailable";
+  }
+  return share.target_update_available
+    ? "Saved selector now resolves differently"
+    : "Frozen targets match the latest server check";
+}
+
+function shareTargetRefreshTitle(share: MonitoringShareView): string {
+  if (effectiveShareStatus(share) !== "active") {
+    return "Expired or revoked shared views keep their frozen targets as retained evidence.";
+  }
+  if (!share.target_update_evidence_available) {
+    return "Target refresh evidence is unavailable. Frozen targets remain unchanged; repair or retry, then use Update targets with the required access.";
+  }
+  return share.target_update_available
+    ? "The saved selector now resolves to a different VPS list."
+    : "Frozen targets match the latest server check.";
 }
 
 function deduplicateShares(

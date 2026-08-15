@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
     default_webhook_message, expression_matches, expression_referenced_events,
     expression_referenced_roots, is_webhook_rule_delivery_process_status, payload_hash,
-    render_template_with_limit, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
+    render_template_with_limit, VpsRuleContext, WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED,
     WEBHOOK_RULE_DELIVERY_STATUS_FAILED, WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_QUEUED,
 };
@@ -21,6 +21,7 @@ use crate::{
         WebhookRuleView,
     },
     repository_webhook_rules::dry_run_webhook_delivery,
+    security::{operator_has_scope, SCOPE_CONFIG_READ},
     selector_expression::{agent_expression_context, parse_selector_expression},
     state::AppState,
     unix_now,
@@ -85,11 +86,21 @@ impl AppState {
             .event_id
             .clone()
             .unwrap_or_else(|| format!("{}:{}", request.event_kind.trim(), unix_now()));
-        let candidate = webhook_candidate_for_rule(
+        let agents = self.repo.list_agents().await?;
+        let expression = parse_selector_expression(&rule.expression)
+            .map_err(|error| anyhow::anyhow!("invalid webhook rule expression: {error}"))?
+            .context("webhook rule expression is empty")?;
+        let rules_by_client = if vpsman_common::expression_references_vps_rules(&expression) {
+            self.repo.vps_rule_contexts_for_agents(&agents).await?
+        } else {
+            HashMap::new()
+        };
+        let candidate = webhook_candidate_for_rule_with_vps_rules(
             &rule,
             request.event_kind.trim(),
             &event_id,
-            self.repo.list_agents().await?,
+            agents,
+            &rules_by_client,
             Some(operator.operator.id),
         )?;
         let Some(candidate) = candidate else {
@@ -143,13 +154,31 @@ impl AppState {
                 .await?
         };
         let agents = self.repo.list_agents().await?;
+        let uses_vps_rules = rules.iter().any(|rule| {
+            parse_selector_expression(&rule.expression)
+                .ok()
+                .flatten()
+                .is_some_and(|expression| {
+                    vpsman_common::expression_references_vps_rules(&expression)
+                })
+        });
+        anyhow::ensure!(
+            !uses_vps_rules || operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+            "vps_rule_selector_scope_required"
+        );
+        let rules_by_client = if uses_vps_rules {
+            self.repo.vps_rule_contexts_for_agents(&agents).await?
+        } else {
+            HashMap::new()
+        };
         let mut candidates = Vec::new();
         for rule in rules {
-            if let Some(candidate) = webhook_candidate_for_rule(
+            if let Some(candidate) = webhook_candidate_for_rule_with_vps_rules(
                 &rule,
                 event_kind,
                 &event_id,
                 agents.clone(),
+                &rules_by_client,
                 Some(operator.operator.id),
             )? {
                 candidates.push(candidate);
@@ -390,6 +419,7 @@ fn webhook_process_preview_hash(
     Ok(payload_hash(&payload))
 }
 
+#[cfg(test)]
 pub(crate) fn webhook_candidate_for_rule(
     rule: &WebhookRuleView,
     event_kind: &str,
@@ -397,17 +427,37 @@ pub(crate) fn webhook_candidate_for_rule(
     agents: Vec<AgentView>,
     actor_id: Option<Uuid>,
 ) -> Result<Option<WebhookRuleDeliveryCandidate>> {
-    webhook_candidate_for_event(
+    webhook_candidate_for_rule_with_vps_rules(
+        rule,
+        event_kind,
+        event_id,
+        agents,
+        &HashMap::new(),
+        actor_id,
+    )
+}
+
+fn webhook_candidate_for_rule_with_vps_rules(
+    rule: &WebhookRuleView,
+    event_kind: &str,
+    event_id: &str,
+    agents: Vec<AgentView>,
+    rules_by_client: &HashMap<String, VpsRuleContext>,
+    actor_id: Option<Uuid>,
+) -> Result<Option<WebhookRuleDeliveryCandidate>> {
+    webhook_candidate_for_event_with_vps_rules(
         rule,
         event_kind,
         event_id,
         &[event_kind.to_string()],
         &Value::Null,
         agents,
+        rules_by_client,
         actor_id,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn webhook_candidate_for_event(
     rule: &WebhookRuleView,
     event_kind: &str,
@@ -415,6 +465,28 @@ pub(crate) fn webhook_candidate_for_event(
     event_predicates: &[String],
     event_payload: &Value,
     agents: Vec<AgentView>,
+    actor_id: Option<Uuid>,
+) -> Result<Option<WebhookRuleDeliveryCandidate>> {
+    webhook_candidate_for_event_with_vps_rules(
+        rule,
+        event_kind,
+        event_id,
+        event_predicates,
+        event_payload,
+        agents,
+        &HashMap::new(),
+        actor_id,
+    )
+}
+
+fn webhook_candidate_for_event_with_vps_rules(
+    rule: &WebhookRuleView,
+    event_kind: &str,
+    event_id: &str,
+    event_predicates: &[String],
+    event_payload: &Value,
+    agents: Vec<AgentView>,
+    rules_by_client: &HashMap<String, VpsRuleContext>,
     actor_id: Option<Uuid>,
 ) -> Result<Option<WebhookRuleDeliveryCandidate>> {
     let expression = parse_selector_expression(&rule.expression)
@@ -427,7 +499,11 @@ pub(crate) fn webhook_candidate_for_event(
     let matched_vps = agents
         .into_iter()
         .filter(|agent| {
-            let mut context = agent_expression_context(agent).with_event_predicate(event_kind);
+            let mut context = agent_expression_context(agent);
+            if let Some(rules) = rules_by_client.get(&agent.id) {
+                context = context.with_vps_rules(rules.clone());
+            }
+            context = context.with_event_predicate(event_kind);
             for predicate in event_predicates {
                 context = context.with_event_predicate(predicate);
             }

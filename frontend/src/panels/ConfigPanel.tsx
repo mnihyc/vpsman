@@ -53,7 +53,10 @@ import {
   agentsMatchingExpression,
   parseSearchExpression,
   selectorExpressionForClientIds,
+  VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE,
+  vpsRuleSearchUnavailable,
 } from "../searchExpression";
+import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import {
   clampJobMaxTimeoutSecs,
   clampInteger,
@@ -98,6 +101,15 @@ import {
   shortId,
   timestampMillis,
 } from "../utils";
+import {
+  NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
+  NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX,
+  VPS_RULE_FIELD_DEFINITIONS,
+  VPS_RULE_KEYS,
+  normalizeVpsRuleValue,
+  tryNormalizeVpsRuleValue,
+  type VpsRuleFieldDefinition,
+} from "../vpsRules";
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
@@ -136,19 +148,6 @@ const CONFIG_HELP = {
   previewHash:
     "Server-issued hash of the dry-run diff that the apply request must echo to prevent stale writes.",
 } as const;
-const VPS_RULE_KEYS = [
-  "billing.price",
-  "billing.cycle",
-  "network.port_speed",
-  "network.rate.interfaces",
-  "traffic.reset_day",
-  "traffic.quota.total",
-  "traffic.quota.rx",
-  "traffic.quota.tx",
-  "traffic.selectors",
-] as const;
-const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX = "[traffic.selectors]";
-const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER = `Default when unset: ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX}`;
 const RUNTIME_CONFIG_QUEUED_STALE_MS = 60 * 60 * 1000;
 
 type BulkConfigApplySnapshot = {
@@ -1548,6 +1547,7 @@ function BulkConfigApply({
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [selectorExpression, setSelectorExpression] = useState(() =>
     readLocalString(CONFIG_BULK_SELECTOR_STORAGE_KEY),
   );
@@ -1599,12 +1599,24 @@ function BulkConfigApply({
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const localSelectorTargets = useMemo(
     () =>
-      selectorExpression.trim() && !selectorParse.error
-        ? agentsMatchingExpression(agents, selectorExpression)
+      selectorExpression.trim() &&
+      !selectorParse.error &&
+      !selectorEvidenceUnavailable
+        ? agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch)
         : [],
-    [agents, selectorExpression, selectorParse.error],
+    [
+      agents,
+      selectorEvidenceUnavailable,
+      selectorExpression,
+      selectorParse.error,
+      vpsRuleSearch,
+    ],
   );
   const previewToml =
     patchMode === "temporary" ? temporaryToml.trim() : rendered?.toml.trim();
@@ -2230,7 +2242,9 @@ function BulkConfigApply({
                 : "neutral"
           }
           verificationMessage={
-            selectorParse.error ??
+            (selectorEvidenceUnavailable
+              ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+              : selectorParse.error) ??
             (preview
               ? `${preview.target_count}/${agents.length}`
               : selectorExpression.trim()
@@ -2242,9 +2256,11 @@ function BulkConfigApply({
           <strong>
             {preview
               ? `${bulkVpsCountLabel(preview.target_count)} verified`
-              : selectorExpression.trim()
-                ? `${bulkVpsCountLabel(localSelectorTargets.length)} matched locally`
-                : "No target selector"}
+              : selectorEvidenceUnavailable
+                ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                : selectorExpression.trim()
+                  ? `${bulkVpsCountLabel(localSelectorTargets.length)} matched locally`
+                  : "No target selector"}
           </strong>
           <span>
             {preview
@@ -2254,7 +2270,9 @@ function BulkConfigApply({
                 : "Add a selector; an empty selector is never treated as all VPSs."}
           </span>
         </div>
-        <LocalTargetPreview agents={localSelectorTargets} />
+        {!selectorEvidenceUnavailable ? (
+          <LocalTargetPreview agents={localSelectorTargets} />
+        ) : null}
         <button
           className="secondaryAction"
           disabled={pending || !canPreviewChanges}
@@ -3481,80 +3499,6 @@ type VpsRulesOperatorPreview = VpsRulesDryRunResponse & {
 
 type VpsRulesEditMode = "upsert" | "unset";
 
-type VpsRuleFieldDefinition = {
-  help: string;
-  inputMode?: "decimal" | "numeric" | "text";
-  key: (typeof VPS_RULE_KEYS)[number];
-  label: string;
-  placeholder: string;
-};
-
-const VPS_RULE_FIELD_DEFINITIONS: VpsRuleFieldDefinition[] = [
-  {
-    help: "Optional card price, for example 29.90 CNY/m, 48 USD/q, 60 €/hy, or 99 USD/y. Use -1 to explicitly disable billing and show -; blank leaves the rule unset.",
-    inputMode: "text",
-    key: "billing.price",
-    label: "Billing price",
-    placeholder: "29.90 CNY/m",
-  },
-  {
-    help: "Optional renewal anchor, independent of traffic reset day. Use a day for /m (for example 15), or day-month for /q, /hy, and /y (for example 15-06).",
-    inputMode: "text",
-    key: "billing.cycle",
-    label: "Billing cycle",
-    placeholder: "15 or 15-06",
-  },
-  {
-    help: "Optional display-only port speed, for example 400Mbps or 1.5 Gbps. It does not configure shaping, quotas, or the agent network.",
-    inputMode: "text",
-    key: "network.port_speed",
-    label: "Port speed",
-    placeholder: "1.5 Gbps",
-  },
-  {
-    help: `Existing traffic-selector syntax for aggregate live rates and charts. By default, an absent or unset rule follows traffic.selectors. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store that reference explicitly, clear a previously edited value or enter [] to select every reported interface, or override with interface selectors such as eth0,eth1. A +rx or +tx suffix is accepted but ignored here: live speed always keeps separate RX and TX values for every selected interface. Direction suffixes remain meaningful to traffic accounting only.`,
-    inputMode: "text",
-    key: "network.rate.interfaces",
-    label: "Live rate interfaces",
-    placeholder: NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER,
-  },
-  {
-    help: "Day of month in UTC when traffic accounting resets. Use -1 to accumulate totals continuously from the earliest retained counter evidence.",
-    inputMode: "numeric",
-    key: "traffic.reset_day",
-    label: "Reset day",
-    placeholder: "-1 or 14",
-  },
-  {
-    help: "Total traffic quota for the current reset cycle or continuously accumulated total. Type 4TB, 750GB, raw bytes, or -1 for explicitly unlimited. Blank leaves the rule unset.",
-    inputMode: "text",
-    key: "traffic.quota.total",
-    label: "Total quota",
-    placeholder: "4TB",
-  },
-  {
-    help: "Optional receive-side traffic quota. Use -1 for explicitly unlimited; blank leaves the rule unset.",
-    inputMode: "text",
-    key: "traffic.quota.rx",
-    label: "RX quota",
-    placeholder: "Optional",
-  },
-  {
-    help: "Optional transmit-side traffic quota. Use -1 for explicitly unlimited; blank leaves the rule unset.",
-    inputMode: "text",
-    key: "traffic.quota.tx",
-    label: "TX quota",
-    placeholder: "Optional",
-  },
-  {
-    help: "Traffic selectors as comma-separated interface+direction tokens, for example ens3, eth0+tx, or tun0+rx.",
-    inputMode: "text",
-    key: "traffic.selectors",
-    label: "Interfaces / selectors",
-    placeholder: "ens3, eth0+tx",
-  },
-];
-
 type VpsRuleAlertPolicyImpact = {
   conditionExpression: string;
   enabled: boolean;
@@ -3596,7 +3540,7 @@ function parseVpsRuleTextValues(text: string): Record<string, string> {
     if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
       continue;
     }
-    const value = line.slice(equals + 1).trim();
+    const value = normalizeVpsRuleValue(key, line.slice(equals + 1));
     if (value || key === "network.rate.interfaces") {
       values[key] = value || "[]";
     }
@@ -3710,8 +3654,8 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
     "Remove the renewal cycle while billing is disabled with -1.",
   billing_month_cycle_requires_day:
     "Monthly billing uses a day only, such as 15.",
-  billing_long_cycle_requires_day_month:
-    "Quarterly, half-year, and yearly billing use day-month, such as 15-06.",
+  billing_long_cycle_requires_month_day:
+    "Quarterly, half-year, and yearly billing use MM-DD, such as 06-15.",
   port_speed_unit_required: "Add bps, Kbps, Mbps, Gbps, or Tbps.",
   port_speed_unit_invalid:
     "Port-speed unit must be bps, Kbps, Mbps, Gbps, or Tbps.",
@@ -3757,174 +3701,6 @@ function vpsRuleValidationMessages(change: VpsRuleChangePreview): string[] {
   );
 }
 
-function normalizeVpsRuleValue(key: string, value: string | null): string {
-  if (value == null) {
-    return "unset";
-  }
-  const text = value.trim();
-  if (!text) {
-    return "empty";
-  }
-  if (key.startsWith("traffic.quota.")) {
-    const bytes = parseByteQuantity(text);
-    if (bytes != null) {
-      return `bytes:${bytes}`;
-    }
-  }
-  if (key === "traffic.reset_day") {
-    const numeric = parsePlainNumber(text);
-    if (numeric != null) {
-      return `number:${numeric}`;
-    }
-  }
-  if (key === "traffic.selectors") {
-    return normalizeSelectorRuleValue(text);
-  }
-  if (key === "network.rate.interfaces") {
-    if (text === "[]") return "network-rate:all";
-    if (text === NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX) {
-      return "network-rate:reference:traffic.selectors";
-    }
-    return `network-rate:${normalizeSelectorRuleValue(text)}`;
-  }
-  return normalizeGenericRuleValue(text);
-}
-
-function normalizeSelectorRuleValue(text: string): string {
-  const jsonValue = parseJsonValue(text);
-  const rawItems = Array.isArray(jsonValue)
-    ? jsonValue.map((item) => String(item))
-    : text.split(",");
-  const items = rawItems
-    .map((item) => normalizeSelectorRuleToken(item))
-    .filter(Boolean)
-    .sort((left, right) => left.localeCompare(right));
-  return `selectors:${items.join(",")}`;
-}
-
-function normalizeSelectorRuleToken(token: string): string {
-  const normalized = token.trim().replace(/^host:/, "");
-  if (!normalized) {
-    return "";
-  }
-  return normalized.includes("+") ? normalized : `${normalized}+total`;
-}
-
-function normalizeGenericRuleValue(text: string): string {
-  const jsonValue = parseJsonValue(text);
-  if (jsonValue !== undefined) {
-    return `json:${stableJsonStringify(normalizeJsonValue(jsonValue))}`;
-  }
-  const bytes = parseByteQuantity(text);
-  if (bytes != null) {
-    return `bytes:${bytes}`;
-  }
-  const numeric = parsePlainNumber(text);
-  if (numeric != null) {
-    return `number:${numeric}`;
-  }
-  const normalizedText = text.replace(/\s+/g, " ");
-  if (normalizedText.includes(",")) {
-    return `list:${normalizedText
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .sort((left, right) => left.localeCompare(right))
-      .join(",")}`;
-  }
-  const lower = normalizedText.toLowerCase();
-  if (["false", "no", "off"].includes(lower)) {
-    return "boolean:false";
-  }
-  if (["true", "yes", "on"].includes(lower)) {
-    return "boolean:true";
-  }
-  return `text:${normalizedText}`;
-}
-
-function parseJsonValue(text: string): unknown | undefined {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
-
-function normalizeJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    const values = value.map((item) => normalizeJsonValue(item));
-    if (
-      values.every(
-        (item) =>
-          item === null ||
-          ["boolean", "number", "string"].includes(typeof item),
-      )
-    ) {
-      return values.sort((left, right) =>
-        stableJsonStringify(left).localeCompare(stableJsonStringify(right)),
-      );
-    }
-    return values;
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([objectKey, objectValue]) => [
-          objectKey,
-          normalizeJsonValue(objectValue),
-        ]),
-    );
-  }
-  return typeof value === "string" ? value.trim().replace(/\s+/g, " ") : value;
-}
-
-function stableJsonStringify(value: unknown): string {
-  return JSON.stringify(value);
-}
-
-function parseByteQuantity(text: string): number | null {
-  const match = text
-    .trim()
-    .replace(/_/g, "")
-    .match(
-      /^([0-9]+(?:\.[0-9]+)?)\s*(bytes?|b|kb|mb|gb|tb|pb|kib|mib|gib|tib|pib)?$/i,
-    );
-  if (!match) {
-    return null;
-  }
-  const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) {
-    return null;
-  }
-  const unit = (match[2] ?? "b").toLowerCase();
-  const multipliers: Record<string, number> = {
-    b: 1,
-    byte: 1,
-    bytes: 1,
-    gb: 1_000_000_000,
-    gib: 1_073_741_824,
-    kb: 1_000,
-    kib: 1_024,
-    mb: 1_000_000,
-    mib: 1_048_576,
-    pb: 1_000_000_000_000_000,
-    pib: 1_125_899_906_842_624,
-    tb: 1_000_000_000_000,
-    tib: 1_099_511_627_776,
-  };
-  return Math.round(amount * (multipliers[unit] ?? 1));
-}
-
-function parsePlainNumber(text: string): number | null {
-  const compact = text.trim().replace(/_/g, "");
-  if (!/^[+-]?\d+(?:\.\d+)?$/.test(compact)) {
-    return null;
-  }
-  const numeric = Number(compact);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-
 function VpsRulesPanel({
   agents,
   fleetAlertPolicies,
@@ -3952,6 +3728,7 @@ function VpsRulesPanel({
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
 }) {
+  const vpsRuleSearch = useVpsRuleSearchContext();
   const [selectorExpression, setSelectorExpression] = useState(
     () =>
       initialSelectorExpression ??
@@ -4017,12 +3794,24 @@ function VpsRulesPanel({
     () => parseSearchExpression(selectorExpression),
     [selectorExpression],
   );
+  const selectorEvidenceUnavailable = vpsRuleSearchUnavailable(
+    selectorExpression,
+    vpsRuleSearch,
+  );
   const localSelectorTargets = useMemo(
     () =>
-      selectorExpression.trim() && !parsedSelector.error
-        ? agentsMatchingExpression(agents, selectorExpression)
+      selectorExpression.trim() &&
+      !parsedSelector.error &&
+      !selectorEvidenceUnavailable
+        ? agentsMatchingExpression(agents, selectorExpression, vpsRuleSearch)
         : [],
-    [agents, parsedSelector.error, selectorExpression],
+    [
+      agents,
+      parsedSelector.error,
+      selectorEvidenceUnavailable,
+      selectorExpression,
+      vpsRuleSearch,
+    ],
   );
   const localSelectorTargetIds = useMemo(
     () =>
@@ -4400,7 +4189,13 @@ function VpsRulesPanel({
       if (Object.prototype.hasOwnProperty.call(values, key)) {
         throw new Error(`Duplicate VPS rule key: ${key}`);
       }
-      values[key] = value || "[]";
+      const canonicalValue = tryNormalizeVpsRuleValue(key, value);
+      if (canonicalValue === null) {
+        throw new Error(
+          `VPS rule ${key} has an invalid value: ${value || "(empty)"}`,
+        );
+      }
+      values[key] = canonicalValue;
     }
     if (Object.keys(values).length === 0) {
       throw new Error("Add at least one VPS rule value to set");
@@ -4537,10 +4332,18 @@ function VpsRulesPanel({
           for (const key of snapshot.keys) {
             delete refreshedValues[key];
           }
+        }
+        const nextValuesText = serializeVpsRuleTextValues(refreshedValues);
+        if (
+          nextValuesText !== valuesText ||
+          (snapshot.operation === "unset" && unsetKeys.length > 0)
+        ) {
           preserveStatusOnNextDraftInvalidationRef.current = true;
+        }
+        if (snapshot.operation === "unset") {
           setUnsetKeys([]);
         }
-        setValuesText(serializeVpsRuleTextValues(refreshedValues));
+        setValuesText(nextValuesText);
         const refreshedCount = Object.keys(refreshedValues).length;
         setPrefillFeedback({
           message:
@@ -4853,13 +4656,16 @@ function VpsRulesPanel({
                   }
                 />
               </label>
-              <LocalTargetPreview
-                agents={localSelectorTargets}
-                ariaLabel="Local VPS rule match preview"
-              />
+              {!selectorEvidenceUnavailable ? (
+                <LocalTargetPreview
+                  agents={localSelectorTargets}
+                  ariaLabel="Local VPS rule match preview"
+                />
+              ) : null}
               <small className="vpsRulesTargetHint">
-                Local match only. Preview changes resolves and binds the
-                authoritative VPS list.
+                {selectorEvidenceUnavailable
+                  ? `${VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE}. Preview changes can request an authoritative resolution.`
+                  : "Local match only. Preview changes resolves and binds the authoritative VPS list."}
               </small>
               <ActionFeedback
                 className="localActionFeedback vpsRulesActionFeedback"
