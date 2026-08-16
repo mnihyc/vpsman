@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
 use super::{
-    aligned_timeline_point_count, enrich_monitoring_share_target_evidence, monitoring_range,
-    network_rate_is_current, public_billing_plan, public_network_metric, public_traffic_metric,
+    aligned_timeline_point_count, client_monitoring_view, enrich_monitoring_share_target_evidence,
+    monitoring_cards_for_agents, monitoring_range, network_rate_is_current, public_billing_plan,
+    public_monitoring_card, public_network_metric, public_traffic_metric,
     retained_resolution_for_age, retained_traffic_resolution_for_age, tier_aligned_step_secs,
     traffic_uses_exact_source, ClientMonitoringQuery,
 };
@@ -17,13 +18,14 @@ use tower::ServiceExt;
 use crate::{
     gateway_client::GatewayDispatchClient,
     model::{
-        AgentView, BillingPlanView, MonitoringShareView, MonitoringShareVisibilityRequest,
-        MonitoringShareVisibilityView, PublicBillingPlanView, PublicMonitoringCardView,
-        PublicMonitoringDataView, PublicMonitoringDetailView, PublicMonitoringRangeView,
-        PublicMonitoringShareBootstrapView, PublicMonitoringShareView, PublicNetworkMetricView,
-        PublicNetworkPointView, PublicPingMetricView, PublicPingPointView, PublicPortSpeedView,
-        PublicResourceMetricView, PublicSystemInformationView, PublicTrafficHistoryPointView,
-        PublicTrafficMetricView, TelemetryNetworkRateView,
+        AgentView, BillingPlanView, MonitoringShareRecord, MonitoringShareTargetRecord,
+        MonitoringShareView, MonitoringShareVisibilityRequest, MonitoringShareVisibilityView,
+        PublicBillingPlanView, PublicMonitoringCardView, PublicMonitoringDataView,
+        PublicMonitoringDetailView, PublicMonitoringRangeView, PublicMonitoringShareBootstrapView,
+        PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
+        PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
+        PublicSystemInformationView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
+        TelemetryNetworkRateView,
     },
     model_alert_policies::TrafficAccountingRecord,
     repository::{MemoryState, Repository},
@@ -46,6 +48,108 @@ fn router_test_state() -> AppState {
         suite_config_path: "config/vpsman.toml".into(),
         dispatcher_config: DispatcherRuntimeConfig::default(),
     }
+}
+
+#[tokio::test]
+async fn product_name_is_a_canonical_narrow_private_and_identity_gated_projection() {
+    let state = router_test_state();
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!()
+    };
+    let agent = AgentView {
+        id: "v-1".to_string(),
+        display_name: "VPS 1".to_string(),
+        status: "online".to_string(),
+        tags: vec!["provider:test".to_string()],
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(crate::unix_now().to_string()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    };
+    memory.agents.write().await.push(agent.clone());
+    memory
+        .vps_rule_values
+        .write()
+        .await
+        .push(crate::model_alert_policies::VpsRuleValueRecord {
+            client_id: agent.id.clone(),
+            key: vpsman_common::VPS_RULE_KEY_PRODUCT_NAME.to_string(),
+            value_raw: "  Storage-Box\t 4  ".to_string(),
+            stored_value_raw: None,
+            value_json: serde_json::json!({"stale": true}),
+            parsed_display: "stale".to_string(),
+            state: "ok".to_string(),
+            validation_errors: Vec::new(),
+            source_kind: "operator".to_string(),
+            source_id: None,
+            updated_by: None,
+            updated_at: "1".to_string(),
+        });
+
+    let card = monitoring_cards_for_agents(&state, vec![agent.clone()])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(card.product_name.as_deref(), Some("Storage-Box 4"));
+    let detail = client_monitoring_view(
+        &state,
+        &agent.id,
+        &ClientMonitoringQuery {
+            window: Some("15m".to_string()),
+            start_unix: None,
+            end_unix: None,
+            points: Some(2),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(detail.product_name.as_deref(), Some("Storage-Box 4"));
+
+    let share = |identity_context| MonitoringShareRecord {
+        id: uuid::Uuid::new_v4(),
+        name: "Status".to_string(),
+        token_secret: "secret".to_string(),
+        selector_expression: "*".to_string(),
+        targets: vec![MonitoringShareTargetRecord {
+            client_id: agent.id.clone(),
+            public_client_key: "a".repeat(64),
+        }],
+        visibility: MonitoringShareVisibilityView {
+            identity_context,
+            billing: false,
+            system_information: false,
+            resources: false,
+            network: false,
+            traffic: false,
+            ping: false,
+            detail_history: false,
+        },
+        expires_at: crate::unix_now().saturating_add(3_600).to_string(),
+        revoked_at: None,
+        revoked_by: None,
+        created_by: None,
+        created_at: "1".to_string(),
+        updated_at: "1".to_string(),
+    };
+    let visible = public_monitoring_card(card.clone(), &share(true)).unwrap();
+    assert_eq!(visible.product_name.as_deref(), Some("Storage-Box 4"));
+    assert_eq!(
+        serde_json::to_value(visible).unwrap()["product_name"],
+        "Storage-Box 4"
+    );
+
+    let hidden = public_monitoring_card(card, &share(false)).unwrap();
+    assert!(hidden.product_name.is_none());
+    assert!(serde_json::to_value(hidden)
+        .unwrap()
+        .get("product_name")
+        .is_none());
 }
 
 #[test]
@@ -567,6 +671,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
         display_name: "VPS".to_string(),
         status: "online".to_string(),
         tags: Some(vec!["provider:test".to_string()]),
+        product_name: Some("Storage-Box 4".to_string()),
         billing: Some(billing.clone()),
         system_information: Some(system_information.clone()),
         resources: Some(resource.clone()),
@@ -766,6 +871,7 @@ fn public_monitoring_contract_has_exhaustive_explicit_allowlists() {
             "network_history",
             "primary_ping",
             "primary_ping_history",
+            "product_name",
             "resource_history",
             "resources",
             "status",

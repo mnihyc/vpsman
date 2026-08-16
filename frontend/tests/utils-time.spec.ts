@@ -60,8 +60,8 @@ test("keeps an unlimited directional quota tied to its counted bytes", () => {
   ).toEqual({ direction: "TX", used: 3_000 });
 });
 
-test("formats every full billing anchor as MM-DD", () => {
+test("displays standard or shorthand billing anchors as MM-DD", () => {
   expect(formatBillingRenewal("15", "m")).toBe("Renews day 15");
   expect(formatBillingRenewal("06-15", "q")).toBe("Renews 06-15");
-  expect(formatBillingRenewal("06-15", "y")).toBe("Renews 06-15");
+  expect(formatBillingRenewal("6-5", "y")).toBe("Renews 06-05");
 });

@@ -994,6 +994,7 @@ const operatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  fleet_location_display_mode: "country_only",
   gateway_endpoints: "primary=gw.example.com:9443=10",
   gateway_server_public_key_hex:
     "1111111111111111111111111111111111111111111111111111111111111111",
@@ -1332,6 +1333,19 @@ const fleetAlertPolicies = [
 ];
 
 const vpsRuleValues: VpsRuleValueRecord[] = [
+  {
+    client_id: "agent-sfo-01",
+    key: "product.name",
+    parsed_display: "LN.V2.HKGv3",
+    source_id: null,
+    source_kind: "operator",
+    state: "ok",
+    updated_at: "2026-06-02T10:00:00Z",
+    updated_by: "fixture-admin",
+    validation_errors: [],
+    value_json: { display: "LN.V2.HKGv3", name: "LN.V2.HKGv3" },
+    value_raw: "LN.V2.HKGv3",
+  },
   {
     client_id: "agent-sfo-01",
     key: "traffic.reset_day",
@@ -4959,6 +4973,11 @@ export async function installConsoleApiMock(
         );
         return {
           client,
+          product_name:
+            vpsRuleValuesFixture.find(
+              (rule) =>
+                rule.client_id === client.id && rule.key === "product.name",
+            )?.value_raw ?? null,
           network,
           ping,
           ping_targets: pingTargets,
@@ -5536,6 +5555,9 @@ export async function installConsoleApiMock(
           const params = new URL(url, window.location.href).searchParams;
           const offset = Math.max(0, Number(params.get("offset") ?? "0"));
           const limit = Math.max(1, Number(params.get("limit") ?? "1000"));
+          const fixedClientId = params
+            .get("selector_expression")
+            ?.match(/^id:([^\s]+)$/)?.[1];
           const networkScale =
             telemetryNetworkRateScalesFixture[
               Math.min(
@@ -5544,7 +5566,10 @@ export async function installConsoleApiMock(
               )
             ] ?? 1;
           monitoringCardsRequestCount += 1;
-          const items = visibleAgents().map((client, clientIndex) => ({
+          const cardAgents = fixedClientId
+            ? visibleAgents().filter((client) => client.id === fixedClientId)
+            : visibleAgents();
+          const items = cardAgents.map((client, clientIndex) => ({
             billing:
               client.id === "agent-sfo-01"
                 ? {
@@ -5559,6 +5584,11 @@ export async function installConsoleApiMock(
                   }
                 : null,
             client,
+            product_name:
+              vpsRuleValuesFixture.find(
+                (rule) =>
+                  rule.client_id === client.id && rule.key === "product.name",
+              )?.value_raw ?? null,
             network_rate_expected:
               monitoringNetworkRateExpectedOverrideFixture ?? true,
             network:

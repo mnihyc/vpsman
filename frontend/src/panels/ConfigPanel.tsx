@@ -196,6 +196,7 @@ export function ConfigPanel({
   trafficAccounting,
   vpsRuleValues,
   configurationPresets,
+  configurationPresetsEvidenceState,
   configurationSources,
   configurationSourcesEvidenceState,
   fleetConfigEvidenceAvailable,
@@ -211,7 +212,7 @@ export function ConfigPanel({
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
-  onLoadConfigurationSources,
+  onLoadConfigurationInventory,
   onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
   onOpenJobHistory,
@@ -233,6 +234,7 @@ export function ConfigPanel({
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
   configurationPresets: ConfigurationPresetRecord[];
+  configurationPresetsEvidenceState: EvidenceState;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: EvidenceState;
   fleetConfigEvidenceAvailable: boolean;
@@ -255,7 +257,7 @@ export function ConfigPanel({
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onLoadConfigurationSources: () => Promise<void>;
+  onLoadConfigurationInventory: () => Promise<void>;
   onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: DeleteRuntimeConfigPatchGeneratorRequest,
@@ -264,7 +266,7 @@ export function ConfigPanel({
   onOpenJobHistory: () => void;
   onOpenPrivilegeUnlock: () => void;
   onOpenAlerts: () => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onBulkUnsetVpsRules: (
     request: VpsRulesBulkUnsetRequest,
   ) => Promise<VpsRulesDryRunResponse>;
@@ -330,10 +332,10 @@ export function ConfigPanel({
       void runPanelAction(
         setPending,
         setActionError,
-        onLoadConfigurationSources,
+        onLoadConfigurationInventory,
       );
     }
-  }, [onLoadConfigurationSources, subpage]);
+  }, [onLoadConfigurationInventory, subpage]);
 
   return (
     <section className="workspace singleColumn configWorkspace">
@@ -347,11 +349,13 @@ export function ConfigPanel({
             <button
               className="secondaryAction"
               disabled={loading || pending}
-              onClick={onRefresh}
+              onClick={() =>
+                void runPanelAction(setPending, setActionError, onRefresh)
+              }
               title={
                 loading || pending
                   ? "Wait for the current configuration request to finish"
-                  : "Refresh configuration sources and retained runtime evidence"
+                  : "Refresh configuration inventory and retained runtime evidence"
               }
               type="button"
             >
@@ -374,6 +378,9 @@ export function ConfigPanel({
           <ConfigOverview
             agents={agents}
             configurationPresets={configurationPresets}
+            configurationPresetsEvidenceState={
+              configurationPresetsEvidenceState
+            }
             configurationSources={configurationSources}
             configurationSourcesEvidenceState={
               configurationSourcesEvidenceState
@@ -458,6 +465,7 @@ export function ConfigPanel({
 function ConfigOverview({
   agents,
   configurationPresets,
+  configurationPresetsEvidenceState,
   configurationSources,
   configurationSourcesEvidenceState,
   fleetConfigEvidenceAvailable,
@@ -471,6 +479,7 @@ function ConfigOverview({
 }: {
   agents: AgentView[];
   configurationPresets: ConfigurationPresetRecord[];
+  configurationPresetsEvidenceState: EvidenceState;
   configurationSources: ConfigurationSourceView[];
   configurationSourcesEvidenceState: EvidenceState;
   fleetConfigEvidenceAvailable: boolean;
@@ -509,6 +518,8 @@ function ConfigOverview({
   );
   const runtimeEvidenceAvailable = runtimeConfigEvidenceState === "available";
   const inventoryEvidenceAvailable = inventoryEvidenceState === "available";
+  const configurationPresetsEvidenceAvailable =
+    configurationPresetsEvidenceState === "available";
   const configurationSourcesEvidenceAvailable =
     configurationSourcesEvidenceState === "available";
   const currentStateEvidenceAvailable =
@@ -516,10 +527,12 @@ function ConfigOverview({
   const completeSummaryEvidence =
     currentStateEvidenceAvailable &&
     inventoryEvidenceAvailable &&
+    configurationPresetsEvidenceAvailable &&
     configurationSourcesEvidenceAvailable;
   const evidenceLoading =
     runtimeConfigEvidenceState === "loading" ||
     inventoryEvidenceState === "loading" ||
+    configurationPresetsEvidenceState === "loading" ||
     configurationSourcesEvidenceState === "loading";
   const trustedRuntimeConfigApplyStates = runtimeEvidenceAvailable
     ? runtimeConfigApplyStates
@@ -885,6 +898,7 @@ function ConfigOverview({
             <h3>Configuration sources</h3>
             <ConsoleStatusBadge
               tone={
+                !configurationPresetsEvidenceAvailable ||
                 !configurationSourcesEvidenceAvailable ||
                 !fleetConfigEvidenceAvailable ||
                 missingSourceEvidence
@@ -892,7 +906,8 @@ function ConfigOverview({
                   : "ok"
               }
             >
-              {configurationSourcesEvidenceAvailable &&
+              {configurationPresetsEvidenceAvailable &&
+              configurationSourcesEvidenceAvailable &&
               fleetConfigEvidenceAvailable
                 ? `${sourceClientIds.size}/${agents.length} VPSs`
                 : evidenceLoading
@@ -911,7 +926,7 @@ function ConfigOverview({
             </span>
             <span>
               <strong>
-                {configurationSourcesEvidenceAvailable
+                {configurationPresetsEvidenceAvailable
                   ? customPresetCount
                   : "Unknown"}
               </strong>
@@ -3655,7 +3670,7 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   billing_month_cycle_requires_day:
     "Monthly billing uses a day only, such as 15.",
   billing_long_cycle_requires_month_day:
-    "Quarterly, half-year, and yearly billing use MM-DD, such as 06-15.",
+    "Quarterly, half-year, and yearly billing use MM-DD, such as 06-15. M-D shorthand is also accepted.",
   port_speed_unit_required: "Add bps, Kbps, Mbps, Gbps, or Tbps.",
   port_speed_unit_invalid:
     "Port-speed unit must be bps, Kbps, Mbps, Gbps, or Tbps.",

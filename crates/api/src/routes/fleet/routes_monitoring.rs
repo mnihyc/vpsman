@@ -40,6 +40,7 @@ use crate::{
     model_alert_policies::TrafficAccountingRecord,
     model_alert_policies::{
         VPS_RULE_KEY_BILLING_CYCLE, VPS_RULE_KEY_BILLING_PRICE, VPS_RULE_KEY_NETWORK_PORT_SPEED,
+        VPS_RULE_KEY_PRODUCT_NAME,
     },
     repository::Repository,
     repository_monitoring::monitoring_share_status,
@@ -1152,6 +1153,7 @@ async fn monitoring_cards_for_agents(
         .collect::<HashMap<_, _>>();
     let mut billing_rules = HashMap::<String, HashMap<String, serde_json::Value>>::new();
     let mut port_speeds = HashMap::<String, PortSpeedView>::new();
+    let mut product_names = HashMap::<String, String>::new();
     for row in state
         .repo
         .list_vps_rules_for_clients(
@@ -1160,6 +1162,7 @@ async fn monitoring_cards_for_agents(
                 VPS_RULE_KEY_BILLING_PRICE,
                 VPS_RULE_KEY_BILLING_CYCLE,
                 VPS_RULE_KEY_NETWORK_PORT_SPEED,
+                VPS_RULE_KEY_PRODUCT_NAME,
             ],
         )
         .await
@@ -1168,7 +1171,9 @@ async fn monitoring_cards_for_agents(
             "VPS display rules could not be loaded.",
         ))?
     {
-        if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED {
+        if row.key == VPS_RULE_KEY_PRODUCT_NAME {
+            product_names.insert(row.client_id, row.value_raw);
+        } else if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED {
             port_speeds.insert(
                 row.client_id,
                 monitoring_port_speed(&row.value_json).map_err(|error| {
@@ -1237,6 +1242,7 @@ async fn monitoring_cards_for_agents(
             })?;
             Ok(MonitoringCardView {
                 client,
+                product_name: product_names.remove(&client_id),
                 billing: billing.get(&client_id).cloned(),
                 system_information: system_information.remove(&client_id),
                 port_speed: port_speeds.get(&client_id).cloned(),
@@ -1349,6 +1355,17 @@ async fn client_monitoring_view(
         .into_iter()
         .next()
         .ok_or_else(|| ApiError::not_found("monitoring_client_not_found"))?;
+    let product_name = state
+        .repo
+        .list_vps_rules_for_clients(&client_ids, &[VPS_RULE_KEY_PRODUCT_NAME])
+        .await
+        .map_err(ApiError::internal_mapper(
+            "vps_rules_unavailable",
+            "VPS display rules could not be loaded.",
+        ))?
+        .into_iter()
+        .next()
+        .map(|rule| rule.value_raw);
     let system_information = state
         .repo
         .monitoring_system_information_for_clients(&client_ids)
@@ -1498,6 +1515,7 @@ async fn client_monitoring_view(
         .map(|(_, ping)| ping);
     Ok(ClientMonitoringView {
         client,
+        product_name,
         system_information,
         range,
         resources,
@@ -1754,6 +1772,10 @@ fn public_monitoring_card(
         tags: visibility
             .identity_context
             .then(|| public_identity_tags(card.client.tags)),
+        product_name: visibility
+            .identity_context
+            .then_some(card.product_name)
+            .flatten(),
         billing: visibility
             .billing
             .then(|| card.billing.map(public_billing_plan))

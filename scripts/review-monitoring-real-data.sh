@@ -183,7 +183,7 @@ stop_process_group() {
     || die "refusing to stop PID $pid because it no longer belongs to run $run_id"
   kill -TERM -- "-$pid" >/dev/null 2>&1 || true
   for ((attempt = 0; attempt < 50; attempt += 1)); do
-    kill -0 "$pid" >/dev/null 2>&1 || return
+    kill -0 "$pid" >/dev/null 2>&1 || return 0
     sleep 0.1
   done
   if process_matches_run "$pid"; then
@@ -216,7 +216,13 @@ cleanup_failed_start() {
 
 wait_for_postgres() {
   local deadline=$((SECONDS + 60))
-  until docker exec "$container_name" pg_isready -U vpsman -d vpsman >/dev/null 2>&1; do
+  local ready_checks=0
+  while ((ready_checks < 8)); do
+    if docker exec "$container_name" pg_isready -U vpsman -d vpsman >/dev/null 2>&1; then
+      ready_checks=$((ready_checks + 1))
+    else
+      ready_checks=0
+    fi
     if ((SECONDS >= deadline)); then
       docker logs "$container_name" >&2 || true
       die "PostgreSQL did not become ready"
@@ -479,6 +485,7 @@ write_manifest() {
         "no-reset accumulated traffic with 2020 and 2022 imported samples",
         "monthly billing renewal day",
         "annual billing renewal MM-DD",
+        "optional product names projected beside provider identity",
         "billing absent and visibility-hidden",
         "healthy, degraded, and no-primary Ping",
         "selected and intentionally empty network rates",

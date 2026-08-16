@@ -1,6 +1,7 @@
 import type { VpsRuleValueRecord } from "./types";
 
 export const VPS_RULE_KEYS = [
+  "product.name",
   "billing.price",
   "billing.cycle",
   "network.port_speed",
@@ -30,6 +31,13 @@ export const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_PLACEHOLDER = `Default when
 
 export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
   {
+    help: "Optional product or plan name shown beside the provider, for example LN.V2.HKGv3 or Storage-Box 4. Case and punctuation are preserved; extra whitespace is removed.",
+    inputMode: "text",
+    key: "product.name",
+    label: "Product name",
+    placeholder: "LN.V2.HKGv3",
+  },
+  {
     help: "Optional card price, for example 29.90 CNY/m, 48 USD/q, 60 €/hy, or 99 USD/y. Use -1 to explicitly disable billing and show -; blank leaves the rule unset.",
     inputMode: "text",
     key: "billing.price",
@@ -38,7 +46,7 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "29.90 CNY/m",
   },
   {
-    help: "Optional renewal anchor, independent of traffic reset day. Use a day for /m (for example 15), or MM-DD for /q, /hy, and /y (for example 06-15).",
+    help: "Optional renewal anchor, independent of traffic reset day. Use a day for /m (for example 15), or standard MM-DD for /q, /hy, and /y (for example 06-15). M-D shorthand is accepted.",
     inputMode: "text",
     key: "billing.cycle",
     label: "Billing cycle",
@@ -105,6 +113,7 @@ const RULE_DEFINITION_BY_KEY = new Map(
 );
 const MAX_I64 = 9_223_372_036_854_775_807n;
 const MAX_VPS_RULE_VALUE_BYTES = 4_096;
+const MAX_PRODUCT_NAME_BYTES = 160;
 const MAX_TRAFFIC_INTERFACE_BYTES = 128;
 const MAX_TRAFFIC_SELECTOR_ITEMS = 16;
 
@@ -154,6 +163,28 @@ export function indexVpsRulesByClient(
   return byClient;
 }
 
+export function productNameFromVpsRules(
+  rows: readonly VpsRuleValueRecord[],
+  clientId: string,
+): string | null {
+  return (
+    rows.find((row) => row.client_id === clientId && row.key === "product.name")
+      ?.value_raw ?? null
+  );
+}
+
+export function providerProductLabel(
+  providerInput: string | null | undefined,
+  productInput: string | null | undefined,
+  fallback = "",
+): string {
+  const provider = providerInput?.trim() ?? "";
+  const product = productInput?.trim() ?? "";
+  if (provider) return product ? `${provider} · ${product}` : provider;
+  if (product) return `provider unset · ${product}`;
+  return fallback;
+}
+
 /**
  * Canonicalizes the operator-facing text shape shared by rule editing and
  * selector equality. Validation remains authoritative on the control plane.
@@ -170,9 +201,22 @@ export function tryNormalizeVpsRuleValue(
   key: string,
   input: string | null,
 ): string | null {
-  const trimmed = input?.trim() ?? "";
+  const raw = input ?? "";
+  const trimmed = raw.trim();
   if (!isVpsRuleKey(key)) return null;
-  if (utf8ByteLength(trimmed) > MAX_VPS_RULE_VALUE_BYTES) return null;
+  if (utf8ByteLength(raw) > MAX_VPS_RULE_VALUE_BYTES) {
+    return null;
+  }
+  if (key === "product.name") {
+    const canonical = raw
+      .replace(/\p{White_Space}+/gu, " ")
+      .replace(/^ +| +$/g, "");
+    return canonical &&
+      !/[\p{Cc}\p{Cs}]/u.test(canonical) &&
+      utf8ByteLength(canonical) <= MAX_PRODUCT_NAME_BYTES
+      ? canonical
+      : null;
+  }
   if (!trimmed) return key === "network.rate.interfaces" ? "[]" : null;
   if (trimmed === "-1") {
     return key === "billing.price" ||

@@ -529,7 +529,7 @@ impl Repository {
     /// Loads every directly configured VPS rule for the supplied clients.
     ///
     /// Selector evaluation deliberately uses this unbounded-by-row-count path:
-    /// the schema permits at most one row for each of the nine supported keys,
+    /// the schema permits at most one row for each of the ten supported keys,
     /// so the caller-controlled client set is the natural and complete bound.
     pub(crate) async fn list_all_vps_rules_for_clients(
         &self,

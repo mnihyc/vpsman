@@ -317,6 +317,8 @@ exact targets, then dispatch.
 - Treat tags as operational intent: `edge`, `bgp`, `lab`, `backup-critical`.
 - Treat namespaced tags as infrastructure ownership: `provider:provider-a`,
   `country:US`, `region:sfo`, `pool:legacy`, or reseller/account labels.
+  Country and region are independent tags: country drives compact fleet-card
+  location, while region adds finer placement in Fleet details and tooltips.
 - Do not dispatch destructive work from a fuzzy mental target set. Resolve and
   inspect first.
 - Keep unprivileged targets visible. Degraded operations are useful signals,

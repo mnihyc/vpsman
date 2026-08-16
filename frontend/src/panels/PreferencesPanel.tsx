@@ -12,6 +12,7 @@ import {
   LayoutPanelTop,
   Languages,
   ListChecks,
+  MapPin,
   RotateCcw,
   Route,
   Save,
@@ -305,6 +306,76 @@ export function PreferencesPanel({
               title="Personal display preferences"
             >
               <PreferenceGroup
+                description="Country columns show a compact flag plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
+                icon={<Flag size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    show_country_flags:
+                      DEFAULT_OPERATOR_PREFERENCES.show_country_flags,
+                  })
+                }
+                resetDisabled={
+                  draft.show_country_flags ===
+                  DEFAULT_OPERATOR_PREFERENCES.show_country_flags
+                }
+                scope="Personal"
+                title="Country flags"
+              >
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={draft.show_country_flags}
+                    name="show_country_flags"
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        show_country_flags: event.target.checked,
+                      }))
+                    }
+                    type="checkbox"
+                  />
+                  <span>Show flag next to country code</span>
+                </label>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Fleet / Instances keeps the original single-line country cell by default. Country + region adds the independent region tag on a second line without resizing the column. Full location remains available in tooltips and details."
+                icon={<MapPin size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    fleet_location_display_mode:
+                      DEFAULT_OPERATOR_PREFERENCES.fleet_location_display_mode,
+                  })
+                }
+                resetDisabled={
+                  draft.fleet_location_display_mode ===
+                  DEFAULT_OPERATOR_PREFERENCES.fleet_location_display_mode
+                }
+                scope="Personal"
+                title="Fleet table location"
+              >
+                <label>
+                  <span>Location display</span>
+                  <select
+                    aria-label="Fleet table location"
+                    name="fleet_location_display_mode"
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        fleet_location_display_mode:
+                          event.target.value === "country_region"
+                            ? "country_region"
+                            : "country_only",
+                      }))
+                    }
+                    value={draft.fleet_location_display_mode}
+                  >
+                    <option value="country_only">Country only</option>
+                    <option value="country_region">Country + region</option>
+                  </select>
+                </label>
+              </PreferenceGroup>
+
+              <PreferenceGroup
                 description="Controls how VPS labels are rendered in tables, drawers, and action previews."
                 icon={<ServerCog size={18} />}
                 onReset={() =>
@@ -340,38 +411,6 @@ export function PreferencesPanel({
                     </option>
                     <option value="name">Name only</option>
                   </select>
-                </label>
-              </PreferenceGroup>
-
-              <PreferenceGroup
-                description="Country columns show a compact flag icon plus code when enabled; turn this off for code-only compact rows such as US, DE, or JP."
-                icon={<Flag size={18} />}
-                onReset={() =>
-                  resetDraftPatch({
-                    show_country_flags:
-                      DEFAULT_OPERATOR_PREFERENCES.show_country_flags,
-                  })
-                }
-                resetDisabled={
-                  draft.show_country_flags ===
-                  DEFAULT_OPERATOR_PREFERENCES.show_country_flags
-                }
-                scope="Personal"
-                title="Country flags"
-              >
-                <label className="checkLine inlineCheck">
-                  <input
-                    checked={draft.show_country_flags}
-                    name="show_country_flags"
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        show_country_flags: event.target.checked,
-                      }))
-                    }
-                    type="checkbox"
-                  />
-                  <span>Show flag next to country code</span>
                 </label>
               </PreferenceGroup>
 

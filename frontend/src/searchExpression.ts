@@ -296,10 +296,14 @@ export function agentSearchFields(
   const countryTags = agent.tags.filter((tag) =>
     tag.toLocaleLowerCase().startsWith("country:"),
   );
+  const regionTags = agent.tags.filter((tag) =>
+    tag.toLocaleLowerCase().startsWith("region:"),
+  );
   const providerValues = providerTags.map((tag) =>
     tag.slice("provider:".length),
   );
   const countryValues = countryTags.map((tag) => tag.slice("country:".length));
+  const regionValues = regionTags.map((tag) => tag.slice("region:".length));
   return {
     all: [agent.id, agent.display_name],
     fields: {
@@ -311,7 +315,7 @@ export function agentSearchFields(
       "vps.tags": agent.tags,
       "vps.provider": providerValues,
       "vps.country": countryValues,
-      "vps.region": countryValues,
+      "vps.region": regionValues,
       "vps.last_seen_at": agent.last_seen_at ? [agent.last_seen_at] : [],
       "vps.internal_build_number": [agent.internal_build_number ?? 0],
       last_seen: agent.last_seen_at ? [agent.last_seen_at] : [],
@@ -322,7 +326,7 @@ export function agentSearchFields(
       id: [agent.id],
       name: [agent.display_name],
       provider: providerTags.concat(providerValues),
-      region: countryTags.concat(countryValues),
+      region: regionTags.concat(regionValues),
       status: [agent.status],
       tag: agent.tags,
       tags: agent.tags,
@@ -935,12 +939,20 @@ function shorthandPredicate(raw: string): SearchPredicate {
       values: [{ type: "literal", value: `provider:${value}` }],
     };
   }
-  if (lower === "country" || lower === "region") {
+  if (lower === "country") {
     return {
       type: "membership",
       field: "vps.tag",
       negated: false,
       values: [{ type: "literal", value: `country:${value}` }],
+    };
+  }
+  if (lower === "region") {
+    return {
+      type: "membership",
+      field: "vps.tag",
+      negated: false,
+      values: [{ type: "literal", value: `region:${value}` }],
     };
   }
   if (lower.startsWith("vps.")) {
@@ -990,7 +1002,7 @@ function canonicalField(field: string): string {
     lower === "vps.last_seen_at"
   )
     return "vps.last_seen_at";
-  if (lower === "region" || lower === "vps.region") return "vps.country";
+  if (lower === "region" || lower === "vps.region") return "vps.region";
   return lower;
 }
 

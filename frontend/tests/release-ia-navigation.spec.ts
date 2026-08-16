@@ -4048,7 +4048,7 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await expect(health).toContainText("need attention");
   await expect(health).toContainText("historical records");
   await expect(health).toContainText("verified source checks");
-  await expect(health).toContainText("3/3 rules valid");
+  await expect(health).toContainText("4/4 rules valid");
 
   const currentState = page.getByLabel("Current config state by VPS");
   await expect(currentState).toContainText("Affected VPS current state");
@@ -4072,7 +4072,7 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   );
   await expect(drift).toContainText("Source readiness drift");
   await expect(drift).toContainText("Rule validation");
-  await expect(drift).toContainText("3/3 rules valid");
+  await expect(drift).toContainText("4/4 rules valid");
   await expect(drift).not.toContainText("rows are not ok");
 
   const sourceSummary = page.getByLabel("Configuration source summary");

@@ -176,6 +176,14 @@ INSERT INTO vps_rule_values (
 VALUES
     (
         'review-total-monthly',
+        'product.name',
+        'LN.V2.HKGv3',
+        '{"name":"LN.V2.HKGv3","display":"LN.V2.HKGv3"}'::jsonb,
+        'review_fixture',
+        now()
+    ),
+    (
+        'review-total-monthly',
         'traffic.reset_day',
         '1',
         '{"day":1}'::jsonb,
@@ -243,6 +251,14 @@ VALUES
         'traffic.quota.total',
         '10 GB',
         '{"bytes":10000000000}'::jsonb,
+        'review_fixture',
+        now()
+    ),
+    (
+        'review-rx-yearly',
+        'product.name',
+        'Storage-Box 4',
+        '{"name":"Storage-Box 4","display":"Storage-Box 4"}'::jsonb,
         'review_fixture',
         now()
     ),

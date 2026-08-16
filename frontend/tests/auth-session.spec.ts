@@ -10,6 +10,7 @@ const preferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  fleet_location_display_mode: "country_only",
   language: "en",
   show_country_flags: true,
   sidebar_subpanel_default: "active",
@@ -101,11 +102,15 @@ test("keeps ordinary bearer login authenticated across browser reload", async ({
   await password.fill("session-password-123");
   await expect(password).not.toHaveAttribute("title", /session-password-123/);
   expect(
-    await page.locator("[title]").evaluateAll((elements) =>
-      elements.some((element) =>
-        (element.getAttribute("title") ?? "").includes("session-password-123"),
+    await page
+      .locator("[title]")
+      .evaluateAll((elements) =>
+        elements.some((element) =>
+          (element.getAttribute("title") ?? "").includes(
+            "session-password-123",
+          ),
+        ),
       ),
-    ),
   ).toBe(false);
   await activate(page.getByRole("button", { name: "Sign in" }));
 
@@ -323,7 +328,9 @@ test("sign out clears local authentication when server revocation fails", async 
   });
 });
 
-async function installAuthSessionApiMock(page: import("@playwright/test").Page) {
+async function installAuthSessionApiMock(
+  page: import("@playwright/test").Page,
+) {
   await page.route("**/api/v1/auth/bootstrap-status", async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -409,7 +416,7 @@ async function installAuthSessionApiMock(page: import("@playwright/test").Page) 
       return;
     }
     const mode = new URL(route.request().url()).searchParams.get("mode");
-    const available = <T,>(data: T) => ({ data, error: null });
+    const available = <T>(data: T) => ({ data, error: null });
     const response: Record<string, unknown> = {
       agents: available([
         {

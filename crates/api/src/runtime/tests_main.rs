@@ -275,7 +275,7 @@ async fn complete_rule_loader_exceeds_legacy_cap_and_excludes_hidden_clients() {
         unreachable!();
     };
     let mut agents = Vec::with_capacity(601);
-    let mut rows = Vec::with_capacity(5_409);
+    let mut rows = Vec::with_capacity(6_010);
     for index in 0..600 {
         let client_id = format!("client-{index:04}");
         agents.push(AgentView {
@@ -299,6 +299,7 @@ async fn complete_rule_loader_exceeds_legacy_cap_and_excludes_hidden_clients() {
                 "billing.cycle" => "1",
                 "network.port_speed" => "1 Gbps",
                 "network.rate.interfaces" => "[]",
+                "product.name" => "Storage-Box 4",
                 "traffic.reset_day" if index == 599 => "31",
                 "traffic.reset_day" => "1",
                 "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => "1GB",
@@ -344,6 +345,7 @@ async fn complete_rule_loader_exceeds_legacy_cap_and_excludes_hidden_clients() {
             "billing.cycle" => "1",
             "network.port_speed" => "1 Gbps",
             "network.rate.interfaces" => "[]",
+            "product.name" => "LN.V2.HKGv3",
             "traffic.reset_day" => "31",
             "traffic.quota.total" | "traffic.quota.rx" | "traffic.quota.tx" => "1GB",
             "traffic.selectors" => "eth0",
@@ -378,7 +380,7 @@ async fn complete_rule_loader_exceeds_legacy_cap_and_excludes_hidden_clients() {
     memory.hidden_clients.write().await.insert(hidden_id);
 
     let visible_rules = repo.list_all_vps_rules().await.unwrap();
-    assert_eq!(visible_rules.len(), 5_400);
+    assert_eq!(visible_rules.len(), 6_000);
     assert!(visible_rules
         .iter()
         .all(|rule| rule.client_id != "hidden-client"));

@@ -1020,6 +1020,7 @@ export type CurrentPingView = {
 
 export type MonitoringCardView = {
   client: AgentView;
+  product_name: string | null;
   billing: BillingPlanView | null;
   system_information: SystemInformationView | null;
   port_speed: PortSpeedView | null;
@@ -1088,6 +1089,7 @@ export type MonitoringRangeView = {
 
 export type ClientMonitoringView = {
   client: AgentView;
+  product_name: string | null;
   system_information: SystemInformationView | null;
   range: MonitoringRangeView;
   resources: TelemetryRollupRecord[];
@@ -1224,6 +1226,7 @@ export type PublicMonitoringCardView = {
   display_name: string;
   status: string;
   tags?: string[];
+  product_name?: string;
   billing?: PublicBillingPlanView;
   system_information?: PublicSystemInformationView;
   resources?: PublicResourceMetricView;
@@ -1606,6 +1609,7 @@ export type OperatorView = {
 
 export type OperatorPreferences = {
   vps_name_display_mode: "name" | "name_id_suffix";
+  fleet_location_display_mode: "country_only" | "country_region";
   timezone: string | null;
   language: "en";
   show_country_flags: boolean;

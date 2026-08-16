@@ -1184,6 +1184,91 @@ async fn vps_rule_spacing_variants_are_canonical_and_confirmed_edit_is_a_row_noo
 }
 
 #[tokio::test]
+async fn product_name_save_and_equivalent_whitespace_edit_are_canonical_and_noop() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: "product-vps".to_string(),
+        display_name: "Product VPS".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    });
+    let operator = test_operator();
+    let key = vpsman_common::VPS_RULE_KEY_PRODUCT_NAME;
+    let values = BTreeMap::from([(key.to_string(), "  Storage-Box\t 4  ".to_string())]);
+    let preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:product-vps".to_string(),
+            values: values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.changed_row_count, 1);
+    assert_eq!(preview.changes[0].after.as_deref(), Some("Storage-Box 4"));
+    repo.bulk_upsert_vps_rules(
+        &VpsRulesBulkUpsertRequest {
+            selector_expression: "id:product-vps".to_string(),
+            values,
+            confirmed: true,
+            preview_hash: preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+    let before = memory.vps_rule_values.read().await[0].clone();
+    let audit_count = memory.audits.read().await.len();
+
+    let equivalent_values =
+        BTreeMap::from([(key.to_string(), "\n Storage-Box     4 \t".to_string())]);
+    let equivalent_preview = repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: "id:product-vps".to_string(),
+            values: equivalent_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(equivalent_preview.changed_row_count, 0);
+    assert_eq!(equivalent_preview.changes[0].action, "unchanged");
+    repo.bulk_upsert_vps_rules(
+        &VpsRulesBulkUpsertRequest {
+            selector_expression: "id:product-vps".to_string(),
+            values: equivalent_values,
+            confirmed: true,
+            preview_hash: equivalent_preview.preview_hash,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let after = memory.vps_rule_values.read().await[0].clone();
+    assert_eq!(after.value_raw, "Storage-Box 4");
+    assert_eq!(
+        after.value_json,
+        json!({"name": "Storage-Box 4", "display": "Storage-Box 4"})
+    );
+    assert_eq!(after.updated_at, before.updated_at);
+    assert_eq!(after.updated_by, before.updated_by);
+    assert_eq!(memory.audits.read().await.len(), audit_count);
+}
+
+#[tokio::test]
 async fn concurrent_confirmations_reject_the_stale_self_referential_rule_preview() {
     let repo = Repository::Memory(MemoryState::default());
     let Repository::Memory(memory) = &repo else {

@@ -24,6 +24,7 @@ import {
   type MonitorCardDensity,
 } from "./monitorCardDensity";
 import { countryTagValue } from "./tagDisplay";
+import { providerProductLabel } from "./vpsRules";
 import {
   MiniSparkline,
   MonitorFact,
@@ -485,6 +486,8 @@ export function PublicMonitoringSharePage({
         const matchesSearch =
           !query ||
           card.display_name.toLocaleLowerCase().includes(query) ||
+          (share?.visibility.identity_context === true &&
+            card.product_name?.toLocaleLowerCase().includes(query)) ||
           tags.some((tag) => tag.toLocaleLowerCase().includes(query));
         return (
           matchesSearch &&
@@ -980,7 +983,10 @@ function PublicMonitoringCardView({
     ? countryTagValue(card.tags ?? [])
     : null;
   const identitySummary = visibility?.identity_context
-    ? publicIdentitySummary(card.tags ?? [])
+    ? publicCardIdentitySummary(card.tags ?? [], card.product_name)
+    : "";
+  const identityTooltip = visibility?.identity_context
+    ? publicIdentityTooltip(card.tags ?? [], card.product_name)
     : "";
   const cardTitle = `${card.display_name || "Unnamed VPS"} · ${visibleStatusLabel}`;
   const freshness = publicCardFreshness(card, visibility);
@@ -1005,12 +1011,21 @@ function PublicMonitoringCardView({
       </span>
       <strong
         className="vpsMonitorCardName"
-        title={card.display_name || "Unnamed VPS"}
+        title={[
+          card.display_name || "Unnamed VPS",
+          visibility?.identity_context
+            ? publicDetailIdentitySummary(card.tags ?? [], card.product_name)
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")}
       >
-        {country ? (
+        {density === "compact" && country ? (
           <CountryFlag country={country} decorative fallback="none" />
         ) : null}
-        <span>{card.display_name || "Unnamed VPS"}</span>
+        <span className="vpsMonitorCardNameText">
+          {card.display_name || "Unnamed VPS"}
+        </span>
       </strong>
       <small>{freshnessLabel}</small>
     </>
@@ -1031,7 +1046,7 @@ function PublicMonitoringCardView({
         <div
           className="publicMonitoringIdentityContext"
           aria-label="Shared identity context"
-          title="Provider, region, country, and tags disclosed by this Shared view"
+          title={identityTooltip}
         >
           {identitySummary || "Identity context unavailable"}
         </div>
@@ -1363,7 +1378,7 @@ function PublicTrafficRow({
           aria-valuemin={0}
           aria-valuenow={fill}
           aria-valuetext={formatPercent(quotaPercent)}
-          className="vpsMonitorMetricTrack"
+          className={`vpsMonitorMetricTrack${problem || quotaPercent >= 90 ? " warning" : ""}`}
           role="meter"
         >
           <span style={{ width: `${fill}%` }} />
@@ -1589,7 +1604,7 @@ function PublicMonitoringDetailPanel({
     ? countryTagValue(card.tags ?? [])
     : null;
   const identitySummary = visibility?.identity_context
-    ? publicIdentitySummary(card.tags ?? [])
+    ? publicDetailIdentitySummary(card.tags ?? [], card.product_name)
     : "";
   const resourcesAvailable = Boolean(
     detail &&
@@ -2924,9 +2939,7 @@ function summarizePublicFleet(
   const traffic = visibility?.traffic ? { bytes: 0, count: 0 } : null;
   for (const card of cards) {
     if (locations) {
-      const location =
-        countryTagValue(card.tags ?? []) ??
-        publicTagValue(card.tags ?? [], "region");
+      const location = countryTagValue(card.tags ?? []);
       if (location) locations.values.add(location);
       else locations.unspecified += 1;
     }
@@ -2982,13 +2995,46 @@ function publicTagValues(tags: string[], key: string) {
   );
 }
 
-function publicTagValue(tags: string[], key: string) {
-  return publicTagValues(tags, key)[0] ?? null;
+function publicCardIdentitySummary(tags: string[], productName?: string) {
+  const providers = publicTagValues(tags, "provider");
+  const primaryProviderProduct = providerProductLabel(
+    providers[0],
+    productName,
+  );
+  return [
+    primaryProviderProduct,
+    ...providers.slice(1),
+    ...publicTagValues(tags, "country"),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
-function publicIdentitySummary(tags: string[]) {
-  return ["provider", "region", "country"]
-    .flatMap((key) => publicTagValues(tags, key))
+function publicDetailIdentitySummary(tags: string[], productName?: string) {
+  const providers = publicTagValues(tags, "provider");
+  return [
+    providerProductLabel(providers[0], productName),
+    ...providers.slice(1).map((provider) => `Provider ${provider}`),
+    ...publicTagValues(tags, "country"),
+    ...publicTagValues(tags, "region"),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function publicIdentityTooltip(tags: string[], productName?: string) {
+  const providers = publicTagValues(tags, "provider");
+  return [
+    providers.length
+      ? `Provider ${providers.join(", ")}`
+      : productName
+        ? "Provider unset"
+        : null,
+    productName ? `Product ${productName}` : null,
+    ...publicTagValues(tags, "country"),
+    ...publicTagValues(tags, "region"),
+  ]
+    .filter(Boolean)
     .join(" · ");
 }
 
@@ -3005,9 +3051,7 @@ function comparePublicMonitoringCards(
   const provider = (card: PublicMonitoringCard) =>
     publicTagValues(card.tags ?? [], "provider")[0] ?? "provider unset";
   const region = (card: PublicMonitoringCard) =>
-    countryTagValue(card.tags ?? []) ??
-    publicTagValues(card.tags ?? [], "region")[0] ??
-    "region unset";
+    publicTagValues(card.tags ?? [], "region")[0] ?? "region unset";
   if (mode === "provider") {
     return (
       provider(left).localeCompare(provider(right)) ||

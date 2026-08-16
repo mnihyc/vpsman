@@ -262,6 +262,7 @@ pub(crate) struct CurrentPingView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MonitoringCardView {
     pub(crate) client: AgentView,
+    pub(crate) product_name: Option<String>,
     pub(crate) billing: Option<BillingPlanView>,
     pub(crate) system_information: Option<SystemInformationView>,
     pub(crate) port_speed: Option<PortSpeedView>,
@@ -339,6 +340,7 @@ pub(crate) struct MonitoringRangeView {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ClientMonitoringView {
     pub(crate) client: AgentView,
+    pub(crate) product_name: Option<String>,
     pub(crate) system_information: Option<SystemInformationView>,
     pub(crate) range: MonitoringRangeView,
     pub(crate) resources: Vec<TelemetryRollupView>,
@@ -368,6 +370,8 @@ pub(crate) struct PublicMonitoringCardView {
     pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) product_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) billing: Option<PublicBillingPlanView>,
     #[serde(skip_serializing_if = "Option::is_none")]

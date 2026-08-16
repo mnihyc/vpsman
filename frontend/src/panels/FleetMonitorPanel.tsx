@@ -41,8 +41,9 @@ import {
   usePersistentMonitorCardDensity,
   type MonitorCardDensity,
 } from "../monitorCardDensity";
-import { countryTagValue } from "../tagDisplay";
+import { countryTagValue, regionTagValue } from "../tagDisplay";
 import { selectorExpressionForClientIds } from "../searchExpression";
+import { providerProductLabel } from "../vpsRules";
 import {
   displayNameOrUnnamed,
   formatBillingRenewal,
@@ -424,13 +425,19 @@ export function FleetMonitorPanel({
       )
         return false;
       if (!query) return true;
-      return [agent.id, agent.display_name, ...agent.tags]
+      return [
+        agent.id,
+        agent.display_name,
+        cardsByClient.get(agent.id)?.product_name ?? "",
+        ...agent.tags,
+      ]
         .join(" ")
         .toLowerCase()
         .includes(query);
     });
   }, [
     cardAgents,
+    cardsByClient,
     cardSignals,
     effectiveProviderFilter,
     effectiveTagFilter,
@@ -790,6 +797,7 @@ export function FleetMonitorPanel({
                   rateHistory={rateHistory.get(agent.id) ?? []}
                   rates={rates.get(agent.id) ?? []}
                   portSpeed={portSpeedByClient.get(agent.id) ?? null}
+                  productName={monitoringCard?.product_name ?? null}
                   rollupHistory={rollupHistory.get(agent.id) ?? []}
                   rollup={rollups.get(agent.id) ?? null}
                   signals={
@@ -836,6 +844,7 @@ export type VpsMonitorCardProps = {
   primaryPing: CurrentPingView | null;
   primaryPingHistory: PingRollupView[];
   portSpeed: PortSpeedView | null;
+  productName: string | null;
   rateHistory: TelemetryNetworkRateRecord[];
   rates: TelemetryNetworkRateRecord[];
   rollupHistory: TelemetryRollupRecord[];
@@ -897,6 +906,7 @@ export function VpsMonitorCard({
   primaryPing,
   primaryPingHistory,
   portSpeed,
+  productName,
   rateHistory,
   rates,
   rollupHistory,
@@ -908,9 +918,17 @@ export function VpsMonitorCard({
   traffic,
 }: VpsMonitorCardProps) {
   const displayState = agentDisplayState(agent);
-  const provider = tagValue(agent.tags, "provider") ?? "provider unset";
+  const provider = providerProductLabel(
+    tagValue(agent.tags, "provider"),
+    productName,
+    "provider unset",
+  );
   const country = countryTagValue(agent.tags);
-  const region = country ?? tagValue(agent.tags, "region") ?? "region unset";
+  const region = regionTagValue(agent.tags);
+  const countryLabel = country ?? "country unset";
+  const identityTitle = [provider, countryLabel, region]
+    .filter(Boolean)
+    .join(" · ");
   const currentRates = coherentNetworkRates(rates);
   const rxBps = sumNetworkRate(currentRates, "rx");
   const txBps = sumNetworkRate(currentRates, "tx");
@@ -991,6 +1009,8 @@ export function VpsMonitorCard({
             ? `Primary Ping ${primaryPing.state}`
             : pingTelemetryState.label))
       : null;
+  const displayedPingProblem =
+    pingProblem?.trim() === telemetryState.label.trim() ? null : pingProblem;
   const noteworthyEvidence =
     monitoringState !== "loading" &&
     (telemetryState.kind !== "fresh" ||
@@ -1089,15 +1109,17 @@ export function VpsMonitorCard({
       </span>
       <strong
         className="vpsMonitorCardName"
-        title={displayNameOrUnnamed(agent.display_name)}
+        title={`${displayNameOrUnnamed(agent.display_name)} · ${identityTitle}`}
       >
-        {showCountryFlags && country ? (
+        {density === "compact" && showCountryFlags && country ? (
           <CountryFlag country={country} decorative fallback="none" />
         ) : null}
-        <span>{displayNameOrUnnamed(agent.display_name)}</span>
+        <span className="vpsMonitorCardNameText">
+          {displayNameOrUnnamed(agent.display_name)}
+        </span>
       </strong>
-      <small title={`${provider} / ${region}`}>
-        {provider} / {region}
+      <small title={identityTitle}>
+        {provider} / {countryLabel}
       </small>
     </>
   );
@@ -1308,7 +1330,7 @@ export function VpsMonitorCard({
               ? undefined
               : `${quotaPercent.toFixed(1)} percent`
           }
-          className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}`}
+          className={`vpsMonitorTrafficTrack${quotaState === "unlimited" ? " unlimitedTrafficTrack" : quotaPercent === null ? " missing" : ""}${trafficWarning > 0 || (quotaPercent !== null && quotaPercent >= 90) ? " warning" : ""}`}
           role={quotaPercent === null ? undefined : "meter"}
         >
           <span style={{ width: `${Math.min(100, quotaPercent ?? 0)}%` }} />
@@ -1365,11 +1387,11 @@ export function VpsMonitorCard({
             ))}
           </span>
         )}
-        {density === "comfortable" && pingProblem ? (
+        {density === "comfortable" && displayedPingProblem ? (
           <small
             className={`vpsMonitorPingDetail${pingWarning > 0 ? " exceptionEvidence" : ""}`}
           >
-            {pingProblem}
+            {displayedPingProblem}
           </small>
         ) : null}
       </div>
@@ -1463,9 +1485,10 @@ export function MonitorMetric({
     boundedValue === null || meterMax <= 0
       ? 0
       : (boundedValue / meterMax) * 100;
+  const visualWarning = stale || fillPercent >= 90;
   return (
     <span
-      className={`vpsMonitorMetric${stale ? " stale" : ""}`}
+      className={`vpsMonitorMetric${stale ? " stale" : ""}${visualWarning ? " warning" : ""}`}
       title={metricTitle || undefined}
     >
       <span aria-hidden="true" className="vpsMonitorMetricIcon">
@@ -1489,7 +1512,7 @@ export function MonitorMetric({
         aria-valuetext={
           boundedValue === null ? undefined : `${value}; ${meterCaption}`
         }
-        className={`vpsMonitorMetricTrack${boundedValue === null ? " missing" : ""}`}
+        className={`vpsMonitorMetricTrack${boundedValue === null ? " missing" : ""}${visualWarning ? " warning" : ""}`}
         role={boundedValue === null ? undefined : "meter"}
       >
         <span style={{ width: `${fillPercent}%` }} />
@@ -2150,11 +2173,7 @@ function providerSortValue(agent: AgentView) {
 }
 
 function regionSortValue(agent: AgentView) {
-  return (
-    countryTagValue(agent.tags) ??
-    tagValue(agent.tags, "region") ??
-    "region unset"
-  );
+  return regionTagValue(agent.tags) ?? "region unset";
 }
 
 function monitorWarningRank(
@@ -2302,8 +2321,7 @@ function monitorFleetSnapshot(
   let trafficBytes = 0;
   let trafficCount = 0;
   for (const agent of agents) {
-    const location =
-      countryTagValue(agent.tags) ?? tagValue(agent.tags, "region");
+    const location = countryTagValue(agent.tags);
     if (location) locations.add(location);
     else unspecifiedLocations += 1;
     const currentRates = coherentNetworkRates(rates.get(agent.id) ?? []);

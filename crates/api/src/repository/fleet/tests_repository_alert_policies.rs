@@ -27,6 +27,7 @@ fn api_vps_rule_constants_follow_the_common_registry() {
         crate::model_alert_policies::VPS_RULE_KEY_BILLING_PRICE,
         crate::model_alert_policies::VPS_RULE_KEY_NETWORK_PORT_SPEED,
         crate::model_alert_policies::VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+        crate::model_alert_policies::VPS_RULE_KEY_PRODUCT_NAME,
         crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
         crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
         crate::model_alert_policies::VPS_RULE_KEY_TRAFFIC_QUOTA_TX,
@@ -60,11 +61,15 @@ fn billing_price_and_cycle_are_canonical_and_period_aware() {
         "10.20 ¥/m"
     );
     assert_eq!(parse_billing_cycle("7").unwrap().raw, "7");
-    assert_eq!(parse_billing_cycle("6-15").unwrap().raw, "06-15");
+    let padded_cycle = parse_billing_cycle("06-05").unwrap();
+    assert_eq!(padded_cycle.raw, "06-05");
+    assert_eq!(padded_cycle.display, "06-05");
+    assert_eq!(padded_cycle.json["display"], "06-05");
+    assert_eq!(parse_billing_cycle("6-5").unwrap(), padded_cycle);
     validate_billing_rule_group(Some("29.90 CNY/m"), Some("7")).unwrap();
-    validate_billing_rule_group(Some("60.00 EUR/hy"), Some("06-15")).unwrap();
+    validate_billing_rule_group(Some("60.00 EUR/hy"), Some("06-05")).unwrap();
     assert!(
-        validate_billing_rule_group(Some("29.90 CNY/m"), Some("06-15"))
+        validate_billing_rule_group(Some("29.90 CNY/m"), Some("6-5"))
             .unwrap_err()
             .to_string()
             .contains("billing_month_cycle_requires_day")

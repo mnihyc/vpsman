@@ -271,14 +271,18 @@ minute span in memory.
 
 The optional display rules next to traffic do not alter accounting:
 
+- `product.name` is an optional product or plan label, such as `LN.V2.HKGv3`
+  or `Storage-Box 4`. It is displayed alongside the `provider:` tag in VPS
+  details and monitoring views. Public monitoring shares include it only when
+  identity context is enabled.
 - `billing.price` accepts an amount, currency symbol or three-letter code, and
   `/m`, `/q`, `/h` or `/hy`, or `/y`. `-1` and an unset rule display billing as
   **-** on operator monitoring cards. A Shared view shows that placeholder only
   when Billing is included in its visibility.
 - `billing.cycle` is an optional renewal anchor, independent of traffic reset:
-  a day for monthly billing, or `MM-DD` for quarterly, half-yearly, and yearly
-  billing. Full calendar anchors use the same `MM-DD` syntax in storage,
-  search, API responses, and operator displays.
+  a day for monthly billing, or standard `MM-DD` for quarterly, half-yearly,
+  and yearly billing. `M-D` shorthand is accepted and normalized to `MM-DD` in
+  storage, search, API responses, and presentation labels.
 - `network.port_speed` accepts an explicit bit-rate unit such as `400 Mbps` or
   `1.5 Gbps`. It is display-only on monitoring cards. A new tunnel-plan draft
   may use one endpoint's value, or the lower of two values, as a convenience;

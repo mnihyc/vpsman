@@ -373,6 +373,12 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
         return Err(ApiError::bad_request("unsupported_operator_language"));
     }
     if !matches!(
+        preferences.fleet_location_display_mode.trim(),
+        "country_only" | "country_region"
+    ) {
+        return Err(ApiError::bad_request("invalid_fleet_location_display_mode"));
+    }
+    if !matches!(
         preferences.sidebar_subpanel_default.trim(),
         "active" | "all"
     ) {

@@ -53,7 +53,7 @@ export function fleetTagVisible(
 }
 
 export function defaultFleetTagVisible(tag: string): boolean {
-  return !isCountryTag(tag) && !isProviderTag(tag);
+  return !isCountryTag(tag) && !isProviderTag(tag) && !isRegionTag(tag);
 }
 
 export function isCountryTag(tag: string): boolean {
@@ -66,6 +66,22 @@ export function countryTagValue(tags: string[]): string | null {
   return value ? value.toUpperCase() : null;
 }
 
+export function isRegionTag(tag: string): boolean {
+  return /^region:[a-z0-9_.-]{1,64}$/i.test(tag);
+}
+
+export function regionTagValue(tags: string[]): string | null {
+  const tag = tags.find(isRegionTag);
+  const value = tag?.slice("region:".length).trim();
+  return value || null;
+}
+
 export function isProviderTag(tag: string): boolean {
   return /^provider[:=_-][a-z0-9_.-]{1,64}$/i.test(tag);
+}
+
+export function providerTagValue(tags: string[]): string | null {
+  const tag = tags.find(isProviderTag);
+  const value = tag?.match(/^provider[:=_-]([a-z0-9_.-]{1,64})$/i)?.[1];
+  return value || null;
 }

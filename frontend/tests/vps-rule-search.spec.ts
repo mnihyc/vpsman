@@ -28,6 +28,9 @@ test("VPS-rule search details appear only inside the scoped completion", async (
   await expect(
     suggestions.getByText("Total quota", { exact: true }),
   ).toHaveCount(0);
+  await expect(
+    suggestions.getByText("Product name", { exact: true }),
+  ).toHaveCount(0);
 
   await category.click();
   await expect(input).toHaveValue("vps.rules:");
@@ -36,6 +39,9 @@ test("VPS-rule search details appear only inside the scoped completion", async (
   ).toBeVisible();
   await expect(
     suggestions.getByText("Total quota", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    suggestions.getByText("Product name", { exact: true }),
   ).toBeVisible();
   await expect(input).toHaveAttribute("aria-invalid", "false");
 

@@ -161,6 +161,7 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  fleet_location_display_mode: "country_only",
   fleet_tag_visibility_overrides: {},
   gateway_endpoints: "",
   gateway_server_public_key_hex: null,
@@ -195,6 +196,10 @@ export function sanitizeOperatorPreferences(
     dashboard_resource_top_limit:
       source.dashboard_resource_top_limit ??
       DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
+    fleet_location_display_mode:
+      source.fleet_location_display_mode === "country_region"
+        ? "country_region"
+        : DEFAULT_OPERATOR_PREFERENCES.fleet_location_display_mode,
     fleet_tag_visibility_overrides:
       source.fleet_tag_visibility_overrides &&
       typeof source.fleet_tag_visibility_overrides === "object" &&

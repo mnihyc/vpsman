@@ -21,7 +21,8 @@ role receives the scopes needed for normal daily operation. The default
 - `fleet:read`: fleet metadata, agent inventory, gateway sessions, monitoring
   cards and per-VPS resource/network/Ping history, job status, target status,
   fleet and policy alert state, traffic accounting summaries, topology
-  summaries, and other non-payload operational status.
+  summaries, the narrow canonical product-name display projection, and other
+  non-payload operational status. It does not expose generic VPS rule records.
 - `jobs:read`: durable job output payloads, output archives, file-download
   payloads, output chunks, output comparison previews, process-supervisor
   inventory, file-transfer session records, file-transfer source artifacts, and
@@ -117,9 +118,10 @@ creating another audit event for that visitor.
 
 Public projections always include display name and health. Depending on
 the immutable visibility selection, they may also include allowlisted
-provider/region/country context whose value is not an IP literal, resources,
-network rate, authoritative traffic, billing display, normalized system
-information, general Ping, and detail history. Billing and system information
+provider/region/country tags whose values are not IP literals, the optional
+configured product name, resources, network rate, authoritative traffic,
+billing display, normalized system information, general Ping, and detail history.
+Billing and system information
 are independent opt-in groups and omit missing facts. The projection never
 includes raw `os-release`, hostname, IP addresses, capability payloads, build or
 process identities, or per-interface evidence. They use
@@ -128,9 +130,10 @@ each share. The key is stable for that share's lifetime and is never derived
 from the URL-secret digest or predictable internal VPS ID. Public projections
 never expose real VPS IDs, network-address fields, internal configuration,
 actions, jobs, terminals, files, backups, audit data, or operator identity.
-Operator-controlled display names, share names, and Ping target names are
-included verbatim; operators must keep sensitive addresses out of labels
-intended for public sharing.
+Operator-controlled display names, share names, optional product names (when
+identity context is enabled), and Ping target names are included verbatim;
+operators must keep sensitive addresses out of labels intended for public
+sharing.
 
 ## Practical Defaults
 

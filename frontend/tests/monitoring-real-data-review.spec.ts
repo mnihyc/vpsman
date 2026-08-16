@@ -52,9 +52,36 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   });
   await page.setViewportSize({ width: 1440, height: 1300 });
   await page.emulateMedia({ reducedMotion: "reduce" });
-
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await authenticate(page);
+
+  const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
+  await fleetSearch.fill("v");
+  const fleetSuggestions = page.getByRole("listbox", {
+    name: "Search fleet suggestions",
+  });
+  await fleetSuggestions.getByRole("option", { name: /VPS rules…/ }).click();
+  await expect(
+    fleetSuggestions.getByText("Product name", { exact: true }),
+  ).toBeVisible();
+  await capture(page, "private-vps-rules-dropdown.png");
+  await fleetSearch.fill("");
+  await fleetSearch.press("Escape");
+
+  await openConsoleSubpage(page, "System", "Preferences");
+  await page
+    .getByLabel("Fleet table location", { exact: true })
+    .selectOption("country_region");
+  await capture(page, "fleet-location-personal-preference.png");
+  const savePreferences = page.getByRole("button", {
+    name: "Save preferences",
+    exact: true,
+  });
+  if (await savePreferences.isEnabled()) await savePreferences.click();
+  await expect(
+    page.locator(".preferencesPanel").getByText("Saved", { exact: true }),
+  ).toBeVisible();
+
   await openConsoleSubpage(page, "Fleet", "Monitor");
 
   const privateGrid = page.getByLabel("VPS monitor cards");
@@ -114,7 +141,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await expectPingLayout(
     cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
     "Ping · Review healthy gateway",
-    ["21.5 ms", "0% loss"],
+    ["20.5 ms", "0% loss"],
   );
   await expectPingLayout(
     cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
@@ -177,7 +204,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await expectPingLayout(
     cardNamed(privateGrid, "Total quota · Monthly").locator(".vpsMonitorPing"),
     "Ping · Review healthy gateway",
-    ["21.5 ms", "0% loss"],
+    ["20.5 ms", "0% loss"],
   );
   await expectPingLayout(
     cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
@@ -194,7 +221,104 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     cardNamed(privateGrid, "No primary Ping").locator(".vpsMonitorPing"),
     "Intermittent packet loss",
   );
+  const privateComfortableIdentity = cardNamed(
+    privateGrid,
+    "Total quota · Monthly",
+  ).locator(".vpsMonitorCardMain > small");
+  await expect(privateComfortableIdentity).toHaveText(
+    "reviewcloud · LN.V2.HKGv3 / SG",
+  );
+  await expect(privateComfortableIdentity).not.toContainText("sin");
+  await expect(privateComfortableIdentity).toHaveAttribute(
+    "title",
+    "reviewcloud · LN.V2.HKGv3 · SG · sin",
+  );
+  await expect(
+    cardNamed(privateGrid, "Total quota · Monthly").locator(
+      ".countryFlagGlyph",
+    ),
+  ).toHaveCount(0);
   await capture(page, "private-monitor-comfortable.png");
+
+  await cardNamed(privateGrid, "Total quota · Monthly").click();
+  const canonicalIdentity = page.getByLabel("Selected VPS identity");
+  await expect(canonicalIdentity).toBeVisible({ timeout: 30_000 });
+  await expect(canonicalIdentity.getByLabel("Provider")).toHaveText(
+    "Providerreviewcloud · LN.V2.HKGv3",
+  );
+  const canonicalLocation = canonicalIdentity.getByLabel("VPS location");
+  await expect(canonicalLocation).toContainText("SG");
+  await expect(canonicalLocation).toContainText("sin");
+  await expect(canonicalLocation.locator(".countryFlag")).toBeVisible();
+  await expect(canonicalIdentity.getByLabel("VPS tags")).not.toContainText(
+    "provider:reviewcloud",
+  );
+  await expect(canonicalIdentity.getByLabel("VPS tags")).not.toContainText(
+    /country:|region:/,
+  );
+  await capture(page, "private-vps-detail.png");
+
+  await openConsoleSubpage(page, "Fleet", "Instances");
+  const instanceGrid = page.getByLabel("VPS instance records data grid");
+  const monthlyRow = instanceGrid
+    .locator(".gridBody [role=row]", { hasText: "Total quota · Monthly" })
+    .first();
+  const instanceHeaders = await instanceGrid
+    .locator('[role="columnheader"]')
+    .allTextContents();
+  const locationIndex = instanceHeaders.findIndex((header) =>
+    header.includes("Location"),
+  );
+  expect(locationIndex).toBeGreaterThanOrEqual(0);
+  const locationCell = monthlyRow.getByRole("gridcell").nth(locationIndex);
+  await expect(monthlyRow.locator(".instance strong")).toHaveAttribute(
+    "title",
+    "Total quota · Monthly (thly)",
+  );
+  await expect(locationCell.locator(".countryBadge > span").last()).toHaveText(
+    "SG",
+  );
+  await expect(locationCell.locator(".fleetLocationValue > small")).toHaveText(
+    "sin",
+  );
+  await expect(locationCell.locator(".fleetLocationValue")).toHaveAttribute(
+    "title",
+    "SG · sin",
+  );
+  const locationLines = await locationCell
+    .locator(".countryBadge, .fleetLocationValue > small")
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getBoundingClientRect().top),
+    );
+  expect(locationLines[1]).toBeGreaterThan(locationLines[0]);
+  await monthlyRow.getByLabel("Expand VPS instance records row").click();
+  const inlineDetail = instanceGrid
+    .locator(".gridExpandedRow", { hasText: "review-total-monthly" })
+    .first();
+  const inlineProvider = inlineDetail
+    .locator(".timeline")
+    .filter({ has: page.getByText("Provider", { exact: true }) });
+  await expect(inlineProvider).toContainText("reviewcloud · LN.V2.HKGv3");
+  const inlineLocation = inlineDetail
+    .locator(".timeline")
+    .filter({ has: page.getByText("Location", { exact: true }) });
+  await expect(inlineLocation).toContainText("SG");
+  await expect(inlineLocation).toContainText("sin");
+  await expect(inlineLocation.locator(".countryFlag")).toBeVisible();
+  await expect(inlineDetail).not.toContainText("Contact evidence");
+  const countryTag = inlineDetail.getByText("country:SG", { exact: true });
+  const regionTag = inlineDetail.getByText("region:sin", { exact: true });
+  await expect(countryTag).toBeVisible();
+  await expect(regionTag).toBeVisible();
+  const [countryTagBox, regionTagBox] = await Promise.all([
+    countryTag.boundingBox(),
+    regionTag.boundingBox(),
+  ]);
+  expect(countryTagBox).not.toBeNull();
+  expect(regionTagBox).not.toBeNull();
+  expect(Math.abs(regionTagBox!.y - countryTagBox!.y)).toBeLessThanOrEqual(1);
+  expect(regionTagBox!.x).toBeGreaterThan(countryTagBox!.x);
+  await capture(page, "private-vps-inline-detail.png");
 
   await page.setViewportSize({ width: 1440, height: 1200 });
   await page.goto(`/${visibleShareFragment}`, {
@@ -278,7 +402,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       ".publicMonitoringPing",
     ),
     "Ping · Review healthy gateway",
-    ["21.5 ms", "0.0% loss"],
+    ["20.5 ms", "0.0% loss"],
   );
   await expectPingLayout(
     publicCardNamed(sharedGrid, "No primary Ping").locator(
@@ -307,6 +431,29 @@ test("captures private and shared monitoring from the isolated real stack", asyn
 
   await sharedDensity.getByRole("button", { name: "Comfortable" }).click();
   await expect(sharedGrid).toHaveAttribute("data-density", "comfortable");
+  await expect(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".vpsMonitorCardMain > small",
+    ),
+  ).toHaveText("Updated just now");
+  await expect(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").getByLabel(
+      "Shared identity context",
+    ),
+  ).toHaveText("reviewcloud · LN.V2.HKGv3 · SG");
+  await expect(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").getByLabel(
+      "Shared identity context",
+    ),
+  ).toHaveAttribute(
+    "title",
+    "Provider reviewcloud · Product LN.V2.HKGv3 · SG · sin",
+  );
+  await expect(
+    publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
+      ".countryFlagGlyph",
+    ),
+  ).toHaveCount(0);
   await expect(
     publicCardNamed(sharedGrid, "Rates intentionally empty").locator(
       ".vpsMonitorFlowFacts strong",
@@ -341,7 +488,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
       ".publicMonitoringPing",
     ),
     "Ping · Review healthy gateway",
-    ["21.5 ms", "0.0% loss"],
+    ["20.5 ms", "0.0% loss"],
   );
   await expectPingLayout(
     publicCardNamed(sharedGrid, "No primary Ping").locator(
@@ -391,6 +538,9 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await expect(detail).toBeVisible({ timeout: 30_000 });
   await expect(detail.getByLabel("Current shared VPS evidence")).toContainText(
     "29.90 ¥/m",
+  );
+  await expect(detail.locator(".publicMonitoringDetailHeader p")).toContainText(
+    "reviewcloud · LN.V2.HKGv3 · SG · sin",
   );
   await expect(
     detail.getByRole("region", { name: "Traffic volume chart" }),
@@ -470,6 +620,18 @@ async function assertPrivateFixtureSemantics(
   const unconfigured = cardNamed(grid, "Unconfigured traffic");
   const noPrimary = cardNamed(grid, "No primary Ping");
 
+  await expect(total.locator(".vpsMonitorCompactProductContext")).toHaveCount(
+    0,
+  );
+  await expect(total.locator(".vpsMonitorCardName")).toHaveAttribute(
+    "title",
+    "Total quota · Monthly · reviewcloud · LN.V2.HKGv3 · SG · sin",
+  );
+  await expect(rx.locator(".vpsMonitorCardName")).toHaveAttribute(
+    "title",
+    "RX quota · Annual · reviewcloud · Storage-Box 4 · DE · fra",
+  );
+
   for (const card of [
     total,
     exceeded,
@@ -523,6 +685,18 @@ async function assertSharedFixtureSemantics(grid: ReturnType<Page["locator"]>) {
   const emptyRates = publicCardNamed(grid, "Rates intentionally empty");
   const unconfigured = publicCardNamed(grid, "Unconfigured traffic");
   const noPrimary = publicCardNamed(grid, "No primary Ping");
+
+  await expect(total.locator(".vpsMonitorCompactProductContext")).toHaveCount(
+    0,
+  );
+  await expect(total.locator(".vpsMonitorCardName")).toHaveAttribute(
+    "title",
+    "Total quota · Monthly · reviewcloud · LN.V2.HKGv3 · SG · sin",
+  );
+  await expect(rx.locator(".vpsMonitorCardName")).toHaveAttribute(
+    "title",
+    "RX quota · Annual · reviewcloud · Storage-Box 4 · DE · fra",
+  );
 
   for (const card of [
     total,

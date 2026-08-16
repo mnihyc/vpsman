@@ -149,7 +149,8 @@ Canonical VPS fields use `vps.<path>`.
 - `status:online`, `status = online`, and `vps.status = online` are equivalent.
 - `tag:edge`, `vps.tag in [edge]`, and `vps.tags in [edge]` are equivalent.
 - `provider:alpha` matches the tag `provider:alpha`.
-- `country:US` and `region:US` match the tag `country:US`.
+- `country:US` matches the tag `country:US`; `region:IAD` independently
+  matches `region:IAD`. Country and region never alias one another.
 - Unknown namespaced shorthand like `role:edge` matches the exact tag
   `role:edge`; use `vps.role = edge` for future serialized VPS JSON fields.
 - `untagged` is true only when VPS metadata exists and the tag list is empty.
@@ -158,6 +159,13 @@ Canonical VPS fields use `vps.<path>`.
 
 `client:<id>` is not an operator selector. Internal audit and command
 records may still render concrete resolved targets as `client:<id>`.
+
+`country:` is the fleet-card location signal. `region:` is optional finer
+placement metadata. The personal **Country and Fleet location** preference
+keeps the Fleet table's original single-line country view by default and can
+place region directly below it; full identity tooltips and details retain both.
+Cards reserve region for details and full identity tooltips. Structured country
+and region values are not repeated as ordinary tag pills in those surfaces.
 
 ## VPS Rules
 
@@ -183,6 +191,8 @@ vps.rules:network.port_speed >= 1Gbps
 vps.rules:billing.price < "50 USD/m"
 vps.rules:billing.price = "29.90 CNY/m"
 vps.rules:network.port_speed = "*Gbps"
+vps.rules:product.name = "Storage-Box 4"
+vps.rules:product.name in [/^LN\./]
 ```
 
 Exact equality normalizes its input with the same rule parser used by the VPS
@@ -193,15 +203,22 @@ bits per second, accepting the same units as the VPS Rules editor. Billing
 prices are ordered only against a value with the same currency and billing
 period; different units do not match. Billing cycles and interface-selector
 rules do not have a meaningful order and reject `<`, `<=`, `>`, and `>=`.
+Product names likewise support equality, globs, and regexes but have no ordered
+comparison.
 The `-1` continuous, unlimited, or disabled sentinels can be matched exactly
 but are not ordered.
 
 New and edited rules are canonicalized before preview and persistence. A
 spacing-only edit therefore produces the same `value_raw`, parsed value, and
 dropdown entry instead of creating a distinct configuration value.
-Two-component billing renewal anchors use `MM-DD` everywhere, for example
-`billing.cycle=06-15`; monthly billing keeps a day-only recurring anchor such
-as `billing.cycle=15`.
+Two-component billing renewal anchors use canonical `MM-DD`, for example
+`billing.cycle=06-15`; `M-D` shorthand such as `6-15` is accepted and normalized
+to the standard form before preview and persistence. Storage, search, API, and
+display all use `MM-DD`. Monthly billing keeps a day-only recurring anchor such
+as `billing.cycle=15`. `product.name` is optional free-form display text;
+leading, trailing, and repeated whitespace is canonicalized, while case,
+punctuation, and Unicode text are preserved. Its canonical UTF-8 value is
+limited to 160 bytes.
 
 A missing rule makes every direct value predicate false, including `!=`; use
 `!vps.rules:<key>` to select absence. Rule-aware live resolution requires

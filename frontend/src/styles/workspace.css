@@ -2128,7 +2128,8 @@
   min-width: 0;
 }
 
-.vpsMonitorCardName > span:last-child {
+.vpsMonitorCardNameText {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2370,6 +2371,17 @@
 
 .vpsMonitorMetric.stale .vpsMonitorMetricTrack > span {
   background: var(--warning);
+}
+
+.vpsMonitorMetric.warning .vpsMonitorMetricTrack > span,
+.vpsMonitorTrafficTrack.warning > span,
+.publicMonitoringTraffic .vpsMonitorMetricTrack.warning > span {
+  background: var(--warning);
+}
+
+.vpsMonitorMetric.warning > .vpsMonitorSparkline,
+.vpsMonitorFlowFact.stale > .vpsMonitorSparkline {
+  color: var(--warning);
 }
 
 .vpsMonitorFlowFacts {
@@ -4047,6 +4059,24 @@ span.vpsMonitorSparkline.empty {
 .vpsDetailIdentity > .monoValue {
   color: var(--muted);
   font-size: 12px;
+}
+
+.vpsDetailIdentityFact {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.vpsDetailIdentityFact strong {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.vpsDetailIdentityFact span {
+  overflow-wrap: anywhere;
 }
 
 .vpsDetailTags {
@@ -8581,6 +8611,22 @@ button.vpsDetailRecord:hover {
   gap: 4px;
   min-width: 0;
   overflow-x: auto;
+}
+
+.fleetLocationValue {
+  align-content: center;
+  gap: 3px;
+}
+
+.fleetLocationValue small {
+  padding-left: 8px;
+}
+
+.fleetDetailLocation {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
 }
 
 .fleetConfigTableRow,

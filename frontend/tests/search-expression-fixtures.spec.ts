@@ -26,7 +26,14 @@ import {
 } from "../src/searchExpression";
 import type { AgentView, VpsRuleValueRecord } from "../src/types";
 import {
+  defaultFleetTagVisible,
+  isProviderTag,
+  isRegionTag,
+  regionTagValue,
+} from "../src/tagDisplay";
+import {
   normalizeVpsRuleValue,
+  providerProductLabel,
   tryNormalizeVpsRuleValue,
   VPS_RULE_KEYS,
 } from "../src/vpsRules";
@@ -81,7 +88,13 @@ type VpsRuleFixture = {
   invalid_expressions: Array<{ error_contains: string; expression: string }>;
   invalid_normalization_cases: Array<{
     error_contains: string;
-    input: string;
+    input?: string;
+    input_parts?: {
+      count: number;
+      prefix: string;
+      repeat: string;
+      suffix: string;
+    };
     key: string;
     name: string;
   }>;
@@ -100,6 +113,15 @@ const vpsRuleFixturePath = resolve(
 const vpsRuleFixture = JSON.parse(
   readFileSync(vpsRuleFixturePath, "utf8"),
 ) as VpsRuleFixture;
+
+function normalizationFixtureInput(
+  testCase: VpsRuleFixture["invalid_normalization_cases"][number],
+): string {
+  if (testCase.input !== undefined) return testCase.input;
+  const parts = testCase.input_parts;
+  if (!parts) throw new Error(`${testCase.name}: fixture input is missing`);
+  return `${parts.prefix}${parts.repeat.repeat(parts.count)}${parts.suffix}`;
+}
 
 test("shared expression fixture cases match frontend evaluator", () => {
   const contexts = fixture.contexts;
@@ -125,10 +147,39 @@ test("shared VPS rule normalization fixture matches the frontend editor normaliz
   }
   for (const testCase of vpsRuleFixture.invalid_normalization_cases) {
     expect(
-      tryNormalizeVpsRuleValue(testCase.key, testCase.input),
+      tryNormalizeVpsRuleValue(
+        testCase.key,
+        normalizationFixtureInput(testCase),
+      ),
       testCase.name,
     ).toBeNull();
   }
+});
+
+test("provider and product presentation keeps each optional identity explicit", () => {
+  expect(providerProductLabel("Northwind", "Storage-Box 4")).toBe(
+    "Northwind · Storage-Box 4",
+  );
+  expect(providerProductLabel("Northwind", null)).toBe("Northwind");
+  expect(providerProductLabel(null, "Storage-Box 4")).toBe(
+    "provider unset · Storage-Box 4",
+  );
+  expect(providerProductLabel(null, null)).toBe("");
+  expect(providerProductLabel(null, null, "provider unset")).toBe(
+    "provider unset",
+  );
+  expect(providerProductLabel("Same", "Same")).toBe("Same · Same");
+  expect(tryNormalizeVpsRuleValue("product.name", "A\ud800B")).toBeNull();
+  expect(normalizeVpsRuleValue("product.name", "\ufeffBox\ufeff")).toBe(
+    "\ufeffBox\ufeff",
+  );
+  expect(isProviderTag("provider:Northwind")).toBe(true);
+  expect(defaultFleetTagVisible("provider:Northwind")).toBe(false);
+  expect(isProviderTag("provider=Northwind")).toBe(true);
+  expect(defaultFleetTagVisible("provider=Northwind")).toBe(false);
+  expect(isRegionTag("region:FRA")).toBe(true);
+  expect(regionTagValue(["country:DE", "region:FRA"])).toBe("FRA");
+  expect(defaultFleetTagVisible("region:FRA")).toBe(false);
 });
 
 test("shared VPS rule expressions match the frontend evaluator", () => {
@@ -288,6 +339,24 @@ test("VPS rule autocomplete ranks canonical observed values and withholds them w
       [billingCycle],
     ).map((option) => option.value),
   ).toContain("vps.rules:billing.cycle = 06-15");
+
+  const productName = vpsRuleRecord({
+    key: "product.name",
+    raw: "Storage-Box 4",
+    json: { display: "Storage-Box 4", name: "Storage-Box 4" },
+  });
+  const productSuggestions = buildVpsRuleCompletionSuggestions(
+    "vps.rules:product.name",
+    "vps.rules:product.name".length,
+    [productName],
+  ).map((option) => option.value);
+  expect(productSuggestions).toContain(
+    'vps.rules:product.name = "Storage-Box 4"',
+  );
+  expect(productSuggestions).toContain("vps.rules:product.name = LN.V2.HKGv3");
+  expect(productSuggestions).not.toContain(
+    expect.stringMatching(/vps\.rules:product\.name\s+[<>]=?/),
+  );
 
   const unavailable = buildVpsRuleCompletionSuggestions(
     "vps.rules:",
@@ -483,10 +552,14 @@ function fieldsForContext(context: FixtureContext): SearchFields {
   const countryTags = agent.tags.filter((tag) =>
     tag.toLocaleLowerCase().startsWith("country:"),
   );
+  const regionTags = agent.tags.filter((tag) =>
+    tag.toLocaleLowerCase().startsWith("region:"),
+  );
   const providerValues = providerTags.map((tag) =>
     tag.slice("provider:".length),
   );
   const countryValues = countryTags.map((tag) => tag.slice("country:".length));
+  const regionValues = regionTags.map((tag) => tag.slice("region:".length));
   return {
     all: [agent.id, agent.display_name],
     events: (context.event_predicates ?? []).map((event) =>
@@ -507,6 +580,7 @@ function fieldsForContext(context: FixtureContext): SearchFields {
       "vps.internal_build_number": [agent.internal_build_number ?? 0],
       "vps.last_seen_at": agent.last_seen_at ? [agent.last_seen_at] : [],
       "vps.provider": providerValues,
+      "vps.region": regionValues,
       "vps.status": [agent.status],
       "vps.tag": agent.tags,
       "vps.tags": agent.tags,
@@ -518,7 +592,7 @@ function fieldsForContext(context: FixtureContext): SearchFields {
       id: [agent.id],
       name: [agent.display_name],
       provider: providerTags.concat(providerValues),
-      region: countryTags.concat(countryValues),
+      region: regionTags.concat(regionValues),
       status: [agent.status],
       tag: agent.tags,
       tags: agent.tags,

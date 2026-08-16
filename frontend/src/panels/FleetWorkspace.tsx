@@ -11,7 +11,6 @@ import {
 import { basicSetup, EditorView } from "codemirror";
 import {
   Activity,
-  AlertTriangle,
   ArrowUpCircle,
   Bell,
   Boxes,
@@ -22,6 +21,7 @@ import {
   FolderOpen,
   Gauge,
   LockKeyhole,
+  MapPin,
   Network,
   Pencil,
   Plus,
@@ -65,6 +65,7 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../hooks/useReviewGenerationGuard";
+import { useProjectedProductName } from "../hooks/useProjectedProductName";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
@@ -107,6 +108,7 @@ import {
   countryTagValue,
   displayFleetTags as displayTags,
   isProviderTag,
+  regionTagValue,
   sortTagsByDisplayOrder,
   type TagDisplayOrder,
 } from "../tagDisplay";
@@ -120,6 +122,7 @@ import {
 } from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../webhookExpressionSuggestions";
+import { productNameFromVpsRules, providerProductLabel } from "../vpsRules";
 import {
   decodeOutputPreview,
   dispatchFailureReason,
@@ -293,6 +296,7 @@ const AGENT_LIFECYCLE_MAX_TIMEOUT_SECS = 120;
 export function FleetWorkspace({
   activeSubpage,
   agents,
+  apiToken,
   apiError,
   fleetCoreEvidenceAvailable,
   fleetAlerts,
@@ -349,6 +353,7 @@ export function FleetWorkspace({
 }: {
   activeSubpage: string;
   agents: AgentView[];
+  apiToken: string;
   apiError: string | null;
   fleetCoreEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
@@ -458,7 +463,7 @@ export function FleetWorkspace({
   const webhookRulesTruncated = webhookRules.length >= FLEET_DETAIL_LIMIT;
   const webhookDeliveriesTruncated =
     webhookRuleDeliveries.length >= FLEET_DETAIL_LIMIT;
-  // Rule rows are a bounded configuration source (nine keys per VPS) and the
+  // Rule rows are a bounded configuration source (ten keys per VPS) and the
   // full fleet snapshot now returns them without the telemetry row cap.
   const vpsRuleValuesTruncated = false;
   const telemetryRollupsTruncated =
@@ -680,7 +685,12 @@ export function FleetWorkspace({
           <span className="instance">
             <Server size={17} />
             <span>
-              <strong>{formatVpsName(agent, vpsNameDisplayMode)}</strong>
+              <strong
+                className="truncateValue"
+                title={formatVpsName(agent, vpsNameDisplayMode)}
+              >
+                {formatVpsName(agent, vpsNameDisplayMode)}
+              </strong>
             </span>
           </span>
         ),
@@ -798,15 +808,22 @@ export function FleetWorkspace({
       },
       {
         id: "country",
-        header: "Country",
+        header: "Location",
         size: 110,
         minSize: 90,
-        sortValue: (agent) => countryFromTags(agent.tags) ?? "",
-        searchValue: (agent) => countryFromTags(agent.tags) ?? "",
+        sortValue: (agent) =>
+          fleetLocationSortValue(
+            agent.tags,
+            preferences.fleet_location_display_mode === "country_region",
+          ),
+        searchValue: (agent) => fleetLocationSearchValue(agent.tags),
         cell: (agent) => (
-          <CountryBadge
-            country={countryFromTags(agent.tags)}
+          <FleetLocationValue
+            showRegion={
+              preferences.fleet_location_display_mode === "country_region"
+            }
             showFlag={preferences.show_country_flags}
+            tags={agent.tags}
           />
         ),
       },
@@ -1017,6 +1034,7 @@ export function FleetWorkspace({
     [
       preferences.fleet_tag_visibility_overrides,
       preferences.show_country_flags,
+      preferences.fleet_location_display_mode,
       tagDisplayOrder,
       vpsNameDisplayMode,
     ],
@@ -1575,6 +1593,7 @@ export function FleetWorkspace({
           renderExpandedRow={(agent) => (
             <FleetInstanceDetail
               agent={agent}
+              apiToken={apiToken}
               lastLiveEvent={lastLiveEvent}
               latestNetworkRates={latestNetworkRates.get(agent.id) ?? []}
               latestRollup={latestRollups.get(agent.id) ?? null}
@@ -1597,7 +1616,6 @@ export function FleetWorkspace({
               policyAlertsTruncated={policyAlertsTruncated}
               privilegeMaterial={privilegeMaterial}
               requestedTab={null}
-              showCountryFlags={preferences.show_country_flags}
               configurationSources={configurationSources.filter(
                 (source) => source.client_id === agent.id,
               )}
@@ -2065,6 +2083,7 @@ function FleetInstancesPanel({
 
 function FleetInstanceDetail({
   agent,
+  apiToken,
   configurationSources,
   lastLiveEvent,
   policyAlerts,
@@ -2087,7 +2106,6 @@ function FleetInstanceDetail({
   onLoadConfigurationSources,
   onUpdateAgentAlias,
   privilegeMaterial,
-  showCountryFlags,
   summary,
   tagDisplayOrder,
   tagVisibilityOverrides,
@@ -2103,6 +2121,7 @@ function FleetInstanceDetail({
   wsState,
 }: {
   agent: AgentView;
+  apiToken: string;
   configurationSources: ConfigurationSourceView[];
   lastLiveEvent: string;
   policyAlerts: PolicyAlertRecord[];
@@ -2139,7 +2158,6 @@ function FleetInstanceDetail({
     confirmed: boolean,
   ) => Promise<AgentView>;
   privilegeMaterial: PrivilegeMaterial | null;
-  showCountryFlags: boolean;
   summary: FleetSummary;
   tagDisplayOrder: TagDisplayOrder;
   tagVisibilityOverrides: Record<string, boolean>;
@@ -2183,8 +2201,15 @@ function FleetInstanceDetail({
   const [configError, setConfigError] = useState<string | null>(null);
   const [configPreview, setConfigPreview] =
     useState<EffectiveAgentConfigResponse | null>(null);
-  const country = countryFromTags(agent.tags);
   const provider = providerFromTags(agent.tags);
+  const productName = useProjectedProductName(
+    apiToken,
+    agent.id,
+    productNameFromVpsRules(vpsRuleValues, agent.id),
+  );
+  const country = countryFromTags(agent.tags);
+  const region = regionTagValue(agent.tags);
+  const providerProduct = providerProductLabel(provider, productName, "unset");
   const displayOnlyTags = displayTags(
     agent.tags,
     tagDisplayOrder,
@@ -2195,6 +2220,9 @@ function FleetInstanceDetail({
   );
   const agentLabel = formatVpsName(agent, vpsNameDisplayMode);
   const displayState = agentDisplayState(agent);
+  const statusDetail = displayState.detail.startsWith("Last contact ")
+    ? null
+    : displayState.detail;
   const configPreviewSummary = configPreview
     ? `${configPreview.sources.length} effective configuration sources`
     : "Load redacted runtime config view for this VPS.";
@@ -2568,7 +2596,12 @@ function FleetInstanceDetail({
             <DetailLine
               icon={<Server size={18} />}
               label="Status"
-              value={displayState.label}
+              value={
+                <span className="historyPrimary" title={displayState.detail}>
+                  <span>{displayState.label}</span>
+                  {statusDetail ? <small>{statusDetail}</small> : null}
+                </span>
+              }
             />
             <DetailLine
               icon={<Boxes size={18} />}
@@ -2580,11 +2613,6 @@ function FleetInstanceDetail({
               icon={<Clock3 size={18} />}
               label="Last seen"
               value={formatLastSeenDetail(agent.last_seen_at)}
-            />
-            <DetailLine
-              icon={<AlertTriangle size={18} />}
-              label="Contact evidence"
-              value={displayState.detail}
             />
             <DetailLine
               icon={<Clock3 size={18} />}
@@ -2620,15 +2648,18 @@ function FleetInstanceDetail({
             />
             <DetailLine
               icon={<Boxes size={18} />}
-              label="Country"
-              value={
-                <CountryBadge country={country} showFlag={showCountryFlags} />
-              }
+              label="Provider"
+              value={providerProduct}
             />
             <DetailLine
-              icon={<Boxes size={18} />}
-              label="Provider"
-              value={provider || "unset"}
+              icon={<MapPin size={18} />}
+              label="Location"
+              value={
+                <span className="fleetDetailLocation">
+                  <CountryBadge country={country} showFlag />
+                  {region ? <span>· {region}</span> : null}
+                </span>
+              }
             />
             <DetailLine
               icon={<Gauge size={18} />}
@@ -3966,7 +3997,7 @@ function FleetSelectionStatsTable({
           <div className="fleetSelectionStatsRow heading" role="row">
             <span role="columnheader">VPS</span>
             <span role="columnheader">Status</span>
-            <span role="columnheader">Country</span>
+            <span role="columnheader">Location</span>
             <span role="columnheader">Provider</span>
             <span role="columnheader">Last seen</span>
             <span role="columnheader">Tags</span>
@@ -3982,7 +4013,11 @@ function FleetSelectionStatsTable({
                   {displayState.label}
                 </span>
                 <span role="cell">
-                  {countryFromTags(agent.tags) ?? "unset"}
+                  <FleetLocationValue
+                    showFlag={false}
+                    showRegion
+                    tags={agent.tags}
+                  />
                 </span>
                 <span role="cell">
                   {providerFromTags(agent.tags) ?? "unset"}
@@ -4284,6 +4319,45 @@ function agentNamesById(
 
 function countryFromTags(tags: string[]): string | null {
   return countryTagValue(tags);
+}
+
+function fleetLocationSortValue(
+  tags: string[],
+  includeRegion: boolean,
+): string {
+  return includeRegion
+    ? [countryFromTags(tags) ?? "", regionTagValue(tags) ?? ""].join("\0")
+    : (countryFromTags(tags) ?? "");
+}
+
+function fleetLocationSearchValue(tags: string[]): string {
+  return [countryFromTags(tags), regionTagValue(tags)]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function FleetLocationValue({
+  showFlag,
+  showRegion,
+  tags,
+}: {
+  showFlag: boolean;
+  showRegion: boolean;
+  tags: string[];
+}) {
+  const country = countryFromTags(tags);
+  const region = regionTagValue(tags);
+  const location = [country ?? "unset", region].filter(Boolean).join(" · ");
+  return (
+    <span
+      aria-label={location}
+      className="historyPrimary fleetLocationValue"
+      title={location}
+    >
+      <CountryBadge country={country} showFlag={showFlag} />
+      {showRegion && region ? <small>{region}</small> : null}
+    </span>
+  );
 }
 
 function providerFromTags(tags: string[]): string | null {
@@ -5718,7 +5792,7 @@ export function FleetAlertPolicyManager({
               </ConsoleField>
               <ConsoleField
                 className="fieldFull"
-                hint="Use the same fleet selector expression design as saved fleet views and job targeting, including id:<client_id>, name:<name>, tag:<tag>, provider:<provider>, country:<code>, status:<state>, &&, ||, !, and parentheses."
+                hint="Use the same fleet selector expression design as saved fleet views and job targeting, including id:<client_id>, name:<name>, tag:<tag>, provider:<provider>, country:<code>, region:<region>, status:<state>, &&, ||, !, and parentheses."
                 label="VPS selector expression"
               >
                 <SearchExpressionInput

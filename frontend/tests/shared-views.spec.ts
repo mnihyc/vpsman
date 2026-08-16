@@ -666,10 +666,32 @@ test("public monitoring reuses the Unicode country flag renderer", async ({
     name: /Shared edge · Online shared monitoring card/,
   });
   await expect(card.locator(".countryFlagGlyph")).toHaveText("🇺🇸");
-  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
-  await expect(card.getByLabel("Shared identity context")).toHaveText(
-    "Northwind · Transit · Virginia · US",
+  await expect(card.locator(".vpsMonitorCompactProductContext")).toHaveCount(0);
+  await expect(card.locator(".vpsMonitorCardName")).toHaveAttribute(
+    "title",
+    "Shared edge · Northwind · Storage-Box 4 · Provider Transit · US · Virginia",
   );
+  await page.getByRole("button", { name: "Comfortable", exact: true }).click();
+  await expect(card.locator(".countryFlagGlyph")).toHaveCount(0);
+  await expect(card.locator(".vpsMonitorCardMain > small")).toHaveText(
+    "Updated just now",
+  );
+  await expect(card.getByLabel("Shared identity context")).toHaveText(
+    "Northwind · Storage-Box 4 · Transit · US",
+  );
+  await expect(card.getByLabel("Shared identity context")).toHaveAttribute(
+    "title",
+    "Provider Northwind, Transit · Product Storage-Box 4 · US · Virginia",
+  );
+  await expect(card.getByLabel("Shared identity context")).not.toContainText(
+    "Virginia",
+  );
+  await card.click();
+  await expect(
+    page
+      .getByRole("region", { name: "Read-only history for Shared edge" })
+      .locator(".publicMonitoringDetailHeader p"),
+  ).toContainText("US · Virginia");
 });
 
 test("public monitoring keeps grid and detail history state without exposing hidden resource evidence", async ({
@@ -1234,6 +1256,26 @@ test("public monitoring identifies the most-used finite directional traffic quot
   await expect(cycle).not.toContainText("Unlimited");
 });
 
+test("public monitoring uses warning color above ninety percent without changing status", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, { nearQuota: true });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online shared monitoring card/,
+  });
+  const traffic = card.locator(".publicMonitoringTraffic");
+  const track = traffic.locator(".vpsMonitorMetricTrack");
+  await expect(traffic).toContainText("95.0%");
+  await expect(traffic.locator(".exceptionEvidence")).toHaveCount(0);
+  await expect(track).toHaveClass(/warning/);
+  await expect(track.locator(":scope > span")).toHaveCSS(
+    "background-color",
+    "rgb(249, 171, 0)",
+  );
+});
+
 test("public monitoring uses counted directional traffic for an unlimited summary", async ({
   page,
 }) => {
@@ -1288,7 +1330,7 @@ test("public monitoring presents no-reset accumulation without a synthetic cycle
   await expect(cycle).not.toContainText("Current accounting cycle");
 });
 
-test("public monitoring shows a yearly renewal anchor as canonical MM-DD", async ({
+test("public monitoring shows a canonical MM-DD renewal anchor", async ({
   page,
 }) => {
   await installPublicMonitoringApiMock(page, {
@@ -1359,6 +1401,9 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
   await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
 
   const grid = page.getByLabel("Shared VPS cards");
+  await page.getByLabel("Search shared VPSs").fill("Storage-Box 4");
+  await expect(grid.getByRole("link")).toHaveCount(1);
+  await page.getByLabel("Search shared VPSs").fill("");
   await page
     .getByLabel("Filter shared VPSs by provider")
     .selectOption("Hetzner");
@@ -1727,6 +1772,7 @@ async function installPublicMonitoringApiMock(
     edgeCases = false,
     identityContext = false,
     mixedTrafficQuotas = false,
+    nearQuota = false,
     networkRateExpected = true,
     noResetTraffic = false,
     pingLatencyMs = 18.5,
@@ -1746,6 +1792,7 @@ async function installPublicMonitoringApiMock(
     edgeCases?: boolean;
     identityContext?: boolean;
     mixedTrafficQuotas?: boolean;
+    nearQuota?: boolean;
     networkRateExpected?: boolean;
     noResetTraffic?: boolean;
     pingLatencyMs?: number | null;
@@ -1783,6 +1830,7 @@ async function installPublicMonitoringApiMock(
   const card: PublicMonitoringCardView = {
     client_key: publicClientKey,
     display_name: "Shared edge",
+    product_name: identityContext ? "Storage-Box 4" : undefined,
     network: {
       observed_at: networkRateExpected ? observedAt : null,
       rate_expected: networkRateExpected,
@@ -1928,6 +1976,13 @@ async function installPublicMonitoringApiMock(
     card.traffic.rx_bytes = 0;
     card.traffic.total_bytes = 1_000;
     card.traffic.tx_bytes = 1_000;
+  }
+  if (nearQuota && card.traffic) {
+    card.traffic.cycle_percent = 95;
+    card.traffic.quota_total_bytes = 12_000;
+    card.traffic.rx_bytes = 7_600;
+    card.traffic.total_bytes = 11_400;
+    card.traffic.tx_bytes = 3_800;
   }
   if (directionalUnlimited && card.traffic) {
     delete card.traffic.cycle_percent;
@@ -2226,6 +2281,7 @@ async function installPublicMonitoringApiMock(
       ...card,
       client_key: `${publicClientKey}-${index + 1}`,
       display_name: displayName,
+      product_name: identityContext ? `${provider} plan` : undefined,
       network: card.network
         ? {
             ...card.network,

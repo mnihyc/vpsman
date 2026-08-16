@@ -2475,6 +2475,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         sidebar_subpanel_default: "all".to_string(),
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
+        fleet_location_display_mode: "country_region".to_string(),
         fleet_tag_visibility_overrides: BTreeMap::from([("provider:alpha".to_string(), true)]),
         gateway_server_public_key_hex: Some("11".repeat(32)),
         gateway_endpoints: "primary=gw.example.com:9443=10".to_string(),
@@ -2485,6 +2486,10 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         .await
         .unwrap();
     assert_eq!(updated.preferences.vps_name_display_mode, "name");
+    assert_eq!(
+        updated.preferences.fleet_location_display_mode,
+        "country_region"
+    );
     assert_eq!(updated.preferences.timezone.as_deref(), Some("UTC"));
     assert_eq!(updated.preferences.sidebar_subpanel_default, "all");
     assert_eq!(updated.preferences.review_prompt_mode, "overlay");
@@ -2511,6 +2516,10 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         .unwrap()
         .unwrap();
     assert_eq!(context.operator.preferences.vps_name_display_mode, "name");
+    assert_eq!(
+        context.operator.preferences.fleet_location_display_mode,
+        "country_region"
+    );
     assert_eq!(
         context.operator.preferences.timezone.as_deref(),
         Some("UTC")
@@ -2548,6 +2557,13 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "unsupported_operator_language",
+        ),
+        (
+            OperatorPreferences {
+                fleet_location_display_mode: "region_only".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_fleet_location_display_mode",
         ),
         (
             OperatorPreferences {

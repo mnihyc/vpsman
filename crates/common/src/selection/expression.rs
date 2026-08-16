@@ -771,11 +771,18 @@ fn shorthand_predicate(namespace: &str, value: &str) -> Result<Predicate, String
                 values: vec![ListValue::Literal(format!("provider:{value}"))],
             });
         }
-        "country" | "region" => {
+        "country" => {
             return Ok(Predicate::Membership {
                 field: "vps.tag".to_string(),
                 negated: false,
                 values: vec![ListValue::Literal(format!("country:{value}"))],
+            });
+        }
+        "region" => {
+            return Ok(Predicate::Membership {
+                field: "vps.tag".to_string(),
+                negated: false,
+                values: vec![ListValue::Literal(format!("region:{value}"))],
             });
         }
         _ if namespace_lower.starts_with("vps.") => canonical_field(namespace),
@@ -850,7 +857,7 @@ fn canonical_field(field: &str) -> String {
         "last_seen" | "last_seen_at" | "vps.last_seen" | "vps.last_seen_at" => {
             "vps.last_seen_at".to_string()
         }
-        "region" | "vps.region" => "vps.country".to_string(),
+        "region" | "vps.region" => "vps.region".to_string(),
         other => other.to_string(),
     }
 }
@@ -1551,6 +1558,7 @@ fn vps_field_values(vps: Option<&VpsMetadata>, field: &str) -> Option<Vec<FieldV
         ),
         "vps.provider" => Some(tag_alias_values(&vps.tags, "provider:")),
         "vps.country" => Some(tag_alias_values(&vps.tags, "country:")),
+        "vps.region" => Some(tag_alias_values(&vps.tags, "region:")),
         "vps.registration_ip" => option_string_value(&vps.registration_ip),
         "vps.last_ip" => option_string_value(&vps.last_ip),
         "vps.last_seen_at" => option_string_value(&vps.last_seen_at),

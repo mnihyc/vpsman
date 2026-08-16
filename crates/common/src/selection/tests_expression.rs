@@ -11,6 +11,7 @@ fn vps() -> ExpressionContext {
             "prod".to_string(),
             "provider:alpha".to_string(),
             "country:US".to_string(),
+            "region:IAD".to_string(),
         ],
         last_seen_at: Some("2026-06-08T01:00:00Z".to_string()),
         internal_build_number: Some(42),
@@ -98,9 +99,10 @@ fn equality_inequality_and_aliases_match_inventory_fields() {
     assert!(matches(r#"status = "online""#, &context));
     assert!(matches("vps.status != stale", &context));
     assert!(matches(
-        "provider:alpha && country:US && region:US",
+        "provider:alpha && country:US && region:IAD",
         &context
     ));
+    assert!(!matches("region:US", &context));
     assert!(matches("vps.provider = alpha", &context));
     assert!(matches(
         "role:edge",
@@ -492,12 +494,24 @@ fn vps_rule_reference_detection_walks_boolean_expressions() {
 fn shared_vps_rule_fixture_matches_and_normalizes() {
     let fixture: Value =
         serde_json::from_str(include_str!("../../tests/fixtures/vps-rule-cases.json")).unwrap();
-    for case in fixture["normalization_cases"].as_array().unwrap() {
-        let parsed = parse_vps_rule_value(
-            case["key"].as_str().unwrap(),
-            case["input"].as_str().unwrap(),
+    let fixture_input = |case: &Value| {
+        if let Some(input) = case["input"].as_str() {
+            return input.to_string();
+        }
+        let parts = &case["input_parts"];
+        format!(
+            "{}{}{}",
+            parts["prefix"].as_str().unwrap_or_default(),
+            parts["repeat"]
+                .as_str()
+                .unwrap()
+                .repeat(parts["count"].as_u64().unwrap() as usize),
+            parts["suffix"].as_str().unwrap_or_default()
         )
-        .unwrap();
+    };
+    for case in fixture["normalization_cases"].as_array().unwrap() {
+        let input = fixture_input(case);
+        let parsed = parse_vps_rule_value(case["key"].as_str().unwrap(), &input).unwrap();
         assert_eq!(parsed.raw, case["canonical"].as_str().unwrap());
         assert_eq!(
             parse_vps_rule_value(case["key"].as_str().unwrap(), &parsed.raw)
@@ -509,11 +523,8 @@ fn shared_vps_rule_fixture_matches_and_normalizes() {
         );
     }
     for case in fixture["invalid_normalization_cases"].as_array().unwrap() {
-        let error = parse_vps_rule_value(
-            case["key"].as_str().unwrap(),
-            case["input"].as_str().unwrap(),
-        )
-        .unwrap_err();
+        let input = fixture_input(case);
+        let error = parse_vps_rule_value(case["key"].as_str().unwrap(), &input).unwrap_err();
         assert!(
             error.contains(case["error_contains"].as_str().unwrap()),
             "invalid normalization fixture {}: {error}",

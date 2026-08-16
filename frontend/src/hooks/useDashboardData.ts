@@ -709,6 +709,10 @@ export function useDashboardData(activeView: ActiveView) {
     clearOperatorTotp: access.clearOperatorTotp,
     cloneConfigurationPreset: inventory.cloneConfigurationPreset,
     configurationPresets: inventory.configurationPresets,
+    configurationPresetsEvidenceAvailable:
+      inventory.configurationPresetsEvidenceAvailable,
+    configurationPresetsError: inventory.configurationPresetsError,
+    configurationPresetsLoading: inventory.configurationPresetsLoading,
     configurationSourcesEvidenceAvailable:
       inventory.configurationSourcesEvidenceAvailable,
     configurationSourcesError: inventory.configurationSourcesError,
@@ -858,6 +862,7 @@ export function useDashboardData(activeView: ActiveView) {
     previewArtifactCleanup: jobs.previewArtifactCleanup,
     loadTagInventory: inventory.loadTagInventory,
     deleteConfigurationPreset: inventory.deleteConfigurationPreset,
+    loadConfigurationInventory: inventory.loadConfigurationInventory,
     loadConfigurationSources: inventory.loadConfigurationSources,
     loadRuntimeConfigApplyStates: inventory.loadRuntimeConfigApplyStates,
     loadSchedules: schedules.loadSchedules,

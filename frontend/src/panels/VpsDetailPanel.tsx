@@ -18,7 +18,9 @@ import { agentDisplayState } from "../agentDisplayState";
 import { auditClientIds, presentAudit } from "../auditPresentation";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
+import { CountryBadge } from "../components/CountryFlag";
 import { useHistoryEntryState } from "../historyEntryState";
+import { useProjectedProductName } from "../hooks/useProjectedProductName";
 import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
@@ -60,6 +62,15 @@ import {
   shortId,
   timestampMillis,
 } from "../utils";
+import {
+  countryTagValue,
+  isCountryTag,
+  isProviderTag,
+  isRegionTag,
+  providerTagValue,
+  regionTagValue,
+} from "../tagDisplay";
+import { productNameFromVpsRules, providerProductLabel } from "../vpsRules";
 import { VpsMonitoringDetailPanel } from "./VpsMonitoringDetailPanel";
 
 type VpsDetailTab =
@@ -189,8 +200,9 @@ export function VpsDetailPanel({
     "Summary",
   );
   const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
+  const agentId = agent?.id ?? null;
   useEffect(() => {
-    if (!agent) {
+    if (!agentId) {
       setSourceLoadError(null);
       return;
     }
@@ -208,7 +220,7 @@ export function VpsDetailPanel({
     return () => {
       active = false;
     };
-  }, [agent, onLoadConfigurationSources]);
+  }, [agentId, onLoadConfigurationSources]);
   const related = useMemo(
     () =>
       agent
@@ -258,6 +270,20 @@ export function VpsDetailPanel({
       vpsRuleValues,
     ],
   );
+  const productName = useProjectedProductName(
+    apiToken,
+    agent?.id,
+    agent ? productNameFromVpsRules(vpsRuleValues, agent.id) : null,
+  );
+  const provider = agent ? providerTagValue(agent.tags) : null;
+  const providerIdentity = providerProductLabel(provider, productName);
+  const country = agent ? countryTagValue(agent.tags) : null;
+  const region = agent ? regionTagValue(agent.tags) : null;
+  const identityTags = agent
+    ? agent.tags.filter(
+        (tag) => !isCountryTag(tag) && !isProviderTag(tag) && !isRegionTag(tag),
+      )
+    : [];
 
   if (!agent || !related) {
     return (
@@ -266,7 +292,10 @@ export function VpsDetailPanel({
           <div className="sectionHeader">
             <div>
               <h2>VPS detail</h2>
-              <span>Select one VPS from Home, Fleet, Jobs, Backups, Network, or global search.</span>
+              <span>
+                Select one VPS from Home, Fleet, Jobs, Backups, Network, or
+                global search.
+              </span>
             </div>
             <Server size={20} />
           </div>
@@ -277,14 +306,20 @@ export function VpsDetailPanel({
           />
           <div className="emptyState">
             <Server size={22} />
-            <strong>{agents.length === 0 ? "No VPS inventory" : "No VPS selected"}</strong>
+            <strong>
+              {agents.length === 0 ? "No VPS inventory" : "No VPS selected"}
+            </strong>
             <span>
               {loading
                 ? "Loading fleet inventory before opening the canonical detail page."
                 : "Open a VPS from an inventory row, monitor card, alert, job target, backup record, or network node."}
             </span>
             <div className="emptyStateActions">
-              <button className="secondaryAction compactAction" onClick={onOpenInstances} type="button">
+              <button
+                className="secondaryAction compactAction"
+                onClick={onOpenInstances}
+                type="button"
+              >
                 <Server size={14} />
                 <span>Open Instances</span>
               </button>
@@ -305,41 +340,73 @@ export function VpsDetailPanel({
   ).length;
 
   return (
-    <section className="workspace singleColumn vpsDetailWorkspace" aria-label="Canonical VPS detail">
+    <section
+      className="workspace singleColumn vpsDetailWorkspace"
+      aria-label="Canonical VPS detail"
+    >
       <div className="fleetPanel vpsDetailPanel">
         <div className="sectionHeader vpsDetailHeader">
           <div>
             <h2>VPS detail</h2>
             <span>
-              Canonical VPS page for {displayNameOrUnnamed(agent.display_name)}; workflows open in their owning pages.
+              Canonical VPS page for {displayNameOrUnnamed(agent.display_name)};
+              workflows open in their owning pages.
             </span>
           </div>
           <div className="sectionActions">
-            <button className="secondaryAction compactAction" onClick={onOpenInstances} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={onOpenInstances}
+              type="button"
+            >
               <Server size={14} />
               <span>Instances</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenTerminal(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenTerminal(agent)}
+              type="button"
+            >
               <TerminalSquare size={14} />
               <span>Terminal</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenFiles(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenFiles(agent)}
+              type="button"
+            >
               <FolderOpen size={14} />
               <span>Files</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenProcesses(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenProcesses(agent)}
+              type="button"
+            >
               <Activity size={14} />
               <span>Processes</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenDispatch(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenDispatch(agent)}
+              type="button"
+            >
               <Play size={14} />
               <span>Run command</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenBackup(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenBackup(agent)}
+              type="button"
+            >
               <DatabaseBackup size={14} />
               <span>Back up</span>
             </button>
-            <button className="secondaryAction compactAction" onClick={() => onOpenConfig(agent)} type="button">
+            <button
+              className="secondaryAction compactAction"
+              onClick={() => onOpenConfig(agent)}
+              type="button"
+            >
               <FileCog size={14} />
               <span>Config</span>
             </button>
@@ -363,11 +430,26 @@ export function VpsDetailPanel({
             <h3>{displayNameOrUnnamed(agent.display_name)}</h3>
             <span className="monoValue">{agent.id}</span>
             <small>{displayState.detail}</small>
+            {providerIdentity ? (
+              <div aria-label="Provider" className="vpsDetailIdentityFact">
+                <strong>Provider</strong>
+                <span>{providerIdentity}</span>
+              </div>
+            ) : null}
+            {country || region ? (
+              <div aria-label="VPS location" className="vpsDetailIdentityFact">
+                <strong>Location</strong>
+                <span className="fleetDetailLocation">
+                  <CountryBadge country={country} showFlag />
+                  {region ? <span>· {region}</span> : null}
+                </span>
+              </div>
+            ) : null}
             <div className="vpsDetailTags" aria-label="VPS tags">
-              {agent.tags.length ? (
-                agent.tags.map((tag) => <span key={tag}>{tag}</span>)
+              {identityTags.length ? (
+                identityTags.map((tag) => <span key={tag}>{tag}</span>)
               ) : (
-                <span>Untagged</span>
+                <span>No additional tags</span>
               )}
             </div>
           </div>
@@ -376,7 +458,11 @@ export function VpsDetailPanel({
               icon={<Gauge size={16} />}
               label="State"
               value={displayState.label}
-              detail={agent.status ? readableDetailToken(agent.status) : "Inventory state"}
+              detail={
+                agent.status
+                  ? readableDetailToken(agent.status)
+                  : "Inventory state"
+              }
               tone={displayState.tone === "ok" ? "ready" : "warning"}
             />
             <VpsResourceFact
@@ -389,21 +475,35 @@ export function VpsDetailPanel({
                   "Not reported"
                 )
               }
-              detail={agent.last_seen_at ? "Gateway heartbeat" : "No gateway timestamp"}
+              detail={
+                agent.last_seen_at
+                  ? "Gateway heartbeat"
+                  : "No gateway timestamp"
+              }
               tone={agent.last_seen_at ? "ready" : "warning"}
             />
             <VpsResourceFact
               icon={<Network size={16} />}
               label="Last IP"
               value={agent.last_ip ?? agent.registration_ip ?? "Not reported"}
-              detail={agent.last_ip ? "Latest source IP" : agent.registration_ip ? "Registration IP" : "No IP evidence"}
+              detail={
+                agent.last_ip
+                  ? "Latest source IP"
+                  : agent.registration_ip
+                    ? "Registration IP"
+                    : "No IP evidence"
+              }
               mono
             />
             <VpsResourceFact
               icon={<Server size={16} />}
               label="Agent version"
               value={agentVersionLabel(agent)}
-              detail={agent.arch ? `Architecture ${agent.arch}` : "Architecture unavailable"}
+              detail={
+                agent.arch
+                  ? `Architecture ${agent.arch}`
+                  : "Architecture unavailable"
+              }
             />
             <VpsResourceFact
               icon={<AlertTriangle size={16} />}
@@ -436,9 +536,7 @@ export function VpsDetailPanel({
                 recordBounds.jobs,
               )} related job records${recordBounds.jobs ? " in loaded history; more may exist" : ""}`}
               tone={
-                activeJobCount > 0 || recordBounds.jobs
-                  ? "warning"
-                  : "neutral"
+                activeJobCount > 0 || recordBounds.jobs ? "warning" : "neutral"
               }
             />
           </div>
@@ -448,7 +546,9 @@ export function VpsDetailPanel({
           <span>Detail section</span>
           <select
             aria-label="VPS detail section"
-            onChange={(event) => setActiveTab(event.target.value as VpsDetailTab)}
+            onChange={(event) =>
+              setActiveTab(event.target.value as VpsDetailTab)
+            }
             value={activeTab}
           >
             {detailTabs.map((tab) => (
@@ -513,7 +613,10 @@ export function VpsDetailPanel({
               loading={loading}
               title="Remote access"
               description="Open browser terminal sessions from Remote. Session lifecycle, replay, input, resize, and close controls stay there."
-              primary={{ label: "Open terminal", onClick: () => onOpenTerminal(agent) }}
+              primary={{
+                label: "Open terminal",
+                onClick: () => onOpenTerminal(agent),
+              }}
               rows={[
                 ["Agent status", agent.status],
                 ["Privilege mode", privilegeLabel(agent)],
@@ -528,7 +631,10 @@ export function VpsDetailPanel({
               loading={loading}
               title="Files"
               description="Browse, transfer, edit, and review file operations from Remote / Files."
-              primary={{ label: "Browse files", onClick: () => onOpenFiles(agent) }}
+              primary={{
+                label: "Browse files",
+                onClick: () => onOpenFiles(agent),
+              }}
               rows={[
                 [
                   "Transfer sessions",
@@ -545,7 +651,10 @@ export function VpsDetailPanel({
                       ? "None in loaded history; more may exist"
                       : "No transfer record",
                 ],
-                ["Latest path", related.fileTransfers[0]?.path ?? "No path recorded"],
+                [
+                  "Latest path",
+                  related.fileTransfers[0]?.path ?? "No path recorded",
+                ],
               ]}
             />
           )}
@@ -555,9 +664,17 @@ export function VpsDetailPanel({
               loading={loading}
               title="Processes"
               description="Inspect process inventory, logs, restarts, and reviewed stop/restart work from Remote / Processes."
-              primary={{ label: "Open processes", onClick: () => onOpenProcesses(agent) }}
+              primary={{
+                label: "Open processes",
+                onClick: () => onOpenProcesses(agent),
+              }}
               rows={[
-                ["Process limits", agent.capabilities.can_apply_process_limits ? "Supported" : "Not reported"],
+                [
+                  "Process limits",
+                  agent.capabilities.can_apply_process_limits
+                    ? "Supported"
+                    : "Not reported",
+                ],
                 ["Privilege mode", privilegeLabel(agent)],
                 ["Workflow", "Remote / Processes"],
               ]}
@@ -631,9 +748,30 @@ function SummaryTab({
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Health" icon={<Gauge size={18} />}>
-        <VpsFact label="CPU load" value={related.rollup ? related.rollup.cpu_load_1_avg.toFixed(2) : "No resource rollup"} />
-        <VpsFact label="Memory used" value={related.rollup && related.rollup.memory_total_bytes_max > 0 ? `${Math.round(related.rollup.memory_used_ratio_avg * 100)}% (${formatBytes(related.rollup.memory_total_bytes_max)})` : "No resource rollup"} />
-        <VpsFact label="Disk used" value={related.rollup && related.rollup.disk_total_bytes_max > 0 ? `${Math.round(related.rollup.disk_used_ratio_avg * 100)}% (${formatBytes(related.rollup.disk_total_bytes_max)})` : "No resource rollup"} />
+        <VpsFact
+          label="CPU load"
+          value={
+            related.rollup
+              ? related.rollup.cpu_load_1_avg.toFixed(2)
+              : "No resource rollup"
+          }
+        />
+        <VpsFact
+          label="Memory used"
+          value={
+            related.rollup && related.rollup.memory_total_bytes_max > 0
+              ? `${Math.round(related.rollup.memory_used_ratio_avg * 100)}% (${formatBytes(related.rollup.memory_total_bytes_max)})`
+              : "No resource rollup"
+          }
+        />
+        <VpsFact
+          label="Disk used"
+          value={
+            related.rollup && related.rollup.disk_total_bytes_max > 0
+              ? `${Math.round(related.rollup.disk_used_ratio_avg * 100)}% (${formatBytes(related.rollup.disk_total_bytes_max)})`
+              : "No resource rollup"
+          }
+        />
         <VpsFact
           label="Uptime"
           value={
@@ -670,20 +808,34 @@ function SummaryTab({
             detail="Network, job, backup, and alert evidence may still exist because those workflows retain their own records."
           />
         )}
-        <button className="secondaryAction compactAction" onClick={onOpenFleetMetrics} type="button">
+        <button
+          className="secondaryAction compactAction"
+          onClick={onOpenFleetMetrics}
+          type="button"
+        >
           <Activity size={14} />
           View retained metrics
         </button>
       </DetailBlock>
       <DetailBlock title="Warnings" icon={<AlertTriangle size={18} />}>
         {related.alerts.length === 0 ? (
-          <DetailState loading={loading} title="No alert records" detail="Fleet alerts for this VPS are not present in the current page cache." />
+          <DetailState
+            loading={loading}
+            title="No alert records"
+            detail="Fleet alerts for this VPS are not present in the current page cache."
+          />
         ) : (
           related.alerts.slice(0, 3).map((alert) => (
-            <button className="vpsDetailRecord" key={alert.id} onClick={onOpenFleetAlerts} type="button">
+            <button
+              className="vpsDetailRecord"
+              key={alert.id}
+              onClick={onOpenFleetAlerts}
+              type="button"
+            >
               <strong>{alert.title}</strong>
               <span>
-                {alertSeverityLabel(alert.severity)} · {operatorStateLabel(alert.operator_state)} ·{" "}
+                {alertSeverityLabel(alert.severity)} ·{" "}
+                {operatorStateLabel(alert.operator_state)} ·{" "}
                 <DetailTime value={alert.observed_at} />
               </span>
             </button>
@@ -692,10 +844,15 @@ function SummaryTab({
       </DetailBlock>
       <DetailBlock title="Latest work" icon={<History size={18} />}>
         {latestJob ? (
-          <button className="vpsDetailRecord" onClick={() => onOpenJob(latestJob.id)} type="button">
+          <button
+            className="vpsDetailRecord"
+            onClick={() => onOpenJob(latestJob.id)}
+            type="button"
+          >
             <strong>{displayCommandType(latestJob.command_type)}</strong>
             <span>
-              {jobStatusLabel(latestJob.status)} · {latestJob.target_count} target
+              {jobStatusLabel(latestJob.status)} · {latestJob.target_count}{" "}
+              target
               {latestJob.target_count === 1 ? "" : "s"} ·{" "}
               <DetailTime value={latestJob.created_at} />
             </span>
@@ -756,13 +913,21 @@ function ActionTab({
     <div className="vpsDetailActionTab">
       <DetailBlock title={title} icon={icon}>
         <p>{description}</p>
-        <button className="primaryAction compactAction" onClick={primary.onClick} type="button">
+        <button
+          className="primaryAction compactAction"
+          onClick={primary.onClick}
+          type="button"
+        >
           <span>{primary.label}</span>
         </button>
         {rows.map(([label, value]) => (
           <VpsFact key={label} label={label} value={value} />
         ))}
-        <DetailState loading={loading} title="Inline workflow intentionally absent" detail="This page links to the owning workflow instead of duplicating reviewed operations inline." />
+        <DetailState
+          loading={loading}
+          title="Inline workflow intentionally absent"
+          detail="This page links to the owning workflow instead of duplicating reviewed operations inline."
+        />
       </DetailBlock>
     </div>
   );
@@ -781,16 +946,11 @@ function ConfigTab({
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   onOpenConfig: () => void;
 }) {
-  const configPosture = buildConfigPosture(
-    related,
-    runtimeConfigEvidenceState,
-  );
+  const configPosture = buildConfigPosture(related, runtimeConfigEvidenceState);
   const sourceIssueRows = sourceRowsNeedingAttention(
     related.configurationSources,
   );
-  const sourceReadyRows = related.configurationSources.filter(
-    sourceRowIsReady,
-  );
+  const sourceReadyRows = related.configurationSources.filter(sourceRowIsReady);
   const applyState = related.runtimeApplyState;
   const applyEvidenceTitle = [
     applyState?.applied_content_hash
@@ -826,7 +986,11 @@ function ConfigTab({
         ))}
       </div>
       <div className="vpsConfigActions" aria-label="VPS config actions">
-        <button className="primaryAction compactAction" onClick={onOpenConfig} type="button">
+        <button
+          className="primaryAction compactAction"
+          onClick={onOpenConfig}
+          type="button"
+        >
           <FileCog size={14} />
           <span>Open per-VPS config</span>
         </button>
@@ -852,14 +1016,24 @@ function ConfigTab({
       <div className="vpsDetailGrid">
         <DetailBlock title="Source readiness" icon={<Boxes size={18} />}>
           {related.configurationSources.length === 0 ? (
-            <DetailState loading={loading} title="No configuration source evidence" detail="No effective preset, sync, or readiness records are loaded for this VPS." />
+            <DetailState
+              loading={loading}
+              title="No configuration source evidence"
+              detail="No effective preset, sync, or readiness records are loaded for this VPS."
+            />
           ) : (
             <>
               {sourceIssueRows.length > 0 ? (
                 sourceIssueRows.map((record) => (
-                  <span className="vpsDetailRecord static warning" key={`issue:${record.behavior}:${record.effective_preset_id}`}>
+                  <span
+                    className="vpsDetailRecord static warning"
+                    key={`issue:${record.behavior}:${record.effective_preset_id}`}
+                  >
                     <strong>{readableDetailToken(record.behavior)}</strong>
-                    <span>{sourceReadinessStatusLabel(record.readiness.state)} · {sourceReadinessReasonLabel(record)}</span>
+                    <span>
+                      {sourceReadinessStatusLabel(record.readiness.state)} ·{" "}
+                      {sourceReadinessReasonLabel(record)}
+                    </span>
                   </span>
                 ))
               ) : (
@@ -880,9 +1054,17 @@ function ConfigTab({
                 />
               )}
               {related.configurationSources.map((record) => (
-                <span className="vpsDetailRecord static" key={`status:${record.behavior}:${record.effective_preset_id}`}>
+                <span
+                  className="vpsDetailRecord static"
+                  key={`status:${record.behavior}:${record.effective_preset_id}`}
+                >
                   <strong>{readableDetailToken(record.behavior)}</strong>
-                  <span>{record.effective_preset_name} · {record.selection_origin === "explicit_override" ? "explicit override" : "inherited system default"}</span>
+                  <span>
+                    {record.effective_preset_name} ·{" "}
+                    {record.selection_origin === "explicit_override"
+                      ? "explicit override"
+                      : "inherited system default"}
+                  </span>
                 </span>
               ))}
             </>
@@ -891,10 +1073,24 @@ function ConfigTab({
         <DetailBlock title="Runtime sync" icon={<FileCog size={18} />}>
           <VpsFact
             label="Runtime tunnels"
-            value={agent.capabilities.can_manage_runtime_tunnels ? "Supported" : "Not reported"}
+            value={
+              agent.capabilities.can_manage_runtime_tunnels
+                ? "Supported"
+                : "Not reported"
+            }
           />
-          <VpsFact label="Effective sources" value={String(related.configurationSources.length)} />
-          <VpsFact label="Explicit overrides" value={String(related.configurationSources.filter((source) => source.selection_origin === "explicit_override").length)} />
+          <VpsFact
+            label="Effective sources"
+            value={String(related.configurationSources.length)}
+          />
+          <VpsFact
+            label="Explicit overrides"
+            value={String(
+              related.configurationSources.filter(
+                (source) => source.selection_origin === "explicit_override",
+              ).length,
+            )}
+          />
           <VpsFact label="VPS rules" value={String(related.vpsRules.length)} />
           <VpsFact
             label="Last apply"
@@ -919,13 +1115,23 @@ function ConfigTab({
         </DetailBlock>
         <DetailBlock title="Rules and raw details" icon={<FileCog size={18} />}>
           {related.vpsRules.length === 0 ? (
-            <DetailState loading={loading} title="No VPS-specific rules" detail="No runtime config rules are scoped directly to this VPS." />
+            <DetailState
+              loading={loading}
+              title="No VPS-specific rules"
+              detail="No runtime config rules are scoped directly to this VPS."
+            />
           ) : (
             related.vpsRules.slice(0, 4).map((rule) => (
-              <span className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`} key={rule.key}>
+              <span
+                className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`}
+                key={rule.key}
+              >
                 <strong>{rule.key}</strong>
                 <span>
-                  {rule.parsed_display || rule.value_raw} · {rule.validation_errors.length ? rule.validation_errors.join("; ") : "valid"}
+                  {rule.parsed_display || rule.value_raw} ·{" "}
+                  {rule.validation_errors.length
+                    ? rule.validation_errors.join("; ")
+                    : "valid"}
                 </span>
               </span>
             ))
@@ -937,10 +1143,14 @@ function ConfigTab({
                 <span>No raw configuration source records loaded.</span>
               ) : (
                 related.configurationSources.map((record) => (
-                  <span key={`raw:${record.behavior}:${record.effective_preset_id}`}>
+                  <span
+                    key={`raw:${record.behavior}:${record.effective_preset_id}`}
+                  >
                     <strong>{record.behavior}</strong>
                     <code>{record.runtime_sync.state}</code>
-                    <small>{record.runtime_sync.reason} · {record.readiness.reason}</small>
+                    <small>
+                      {record.runtime_sync.reason} · {record.readiness.reason}
+                    </small>
                   </span>
                 ))
               )}
@@ -968,7 +1178,11 @@ function BackupsTab({
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Backup requests" icon={<DatabaseBackup size={18} />}>
-        <button className="primaryAction compactAction" onClick={onOpenBackup} type="button">
+        <button
+          className="primaryAction compactAction"
+          onClick={onOpenBackup}
+          type="button"
+        >
           <span>Open backup workflow</span>
         </button>
         {related.backups.length === 0 ? (
@@ -996,7 +1210,11 @@ function BackupsTab({
                 <DetailTime value={backup.created_at} />
               </span>
               {backup.source_job_id ? (
-                <button className="secondaryAction compactAction" onClick={() => onOpenJob(backup.source_job_id as string)} type="button">
+                <button
+                  className="secondaryAction compactAction"
+                  onClick={() => onOpenJob(backup.source_job_id as string)}
+                  type="button"
+                >
                   <span>Open source job</span>
                 </button>
               ) : null}
@@ -1084,7 +1302,11 @@ function NetworkTab({
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Network workflow" icon={<Network size={18} />}>
-        <button className="primaryAction compactAction" onClick={onOpenNetwork} type="button">
+        <button
+          className="primaryAction compactAction"
+          onClick={onOpenNetwork}
+          type="button"
+        >
           <span>Open network graph</span>
         </button>
         <button
@@ -1095,17 +1317,33 @@ function NetworkTab({
         >
           <span>Fleet evidence</span>
         </button>
-        <VpsFact label="Observed interfaces" value={String(related.networkRates.length)} />
-        <VpsFact label="Tunnel records" value={String(related.tunnels.length)} />
-        <VpsFact label="Trend records" value={String(related.networkTrends.length)} />
+        <VpsFact
+          label="Observed interfaces"
+          value={String(related.networkRates.length)}
+        />
+        <VpsFact
+          label="Tunnel records"
+          value={String(related.tunnels.length)}
+        />
+        <VpsFact
+          label="Trend records"
+          value={String(related.networkTrends.length)}
+        />
       </DetailBlock>
       <DetailBlock title="Latest observations" icon={<Activity size={18} />}>
         {related.networkObservations.length === 0 ? (
-          <DetailState loading={loading} title="No network observations" detail="No retained network observation is loaded for this VPS." />
+          <DetailState
+            loading={loading}
+            title="No network observations"
+            detail="No retained network observation is loaded for this VPS."
+          />
         ) : (
           related.networkObservations.slice(0, 6).map((observation) => (
             <span className="vpsDetailRecord static" key={observation.id}>
-              <strong>{networkObservationLabel(observation.kind)} · {observation.healthy === false ? "Degraded" : "Observed"}</strong>
+              <strong>
+                {networkObservationLabel(observation.kind)} ·{" "}
+                {observation.healthy === false ? "Degraded" : "Observed"}
+              </strong>
               <span>
                 {observation.interface_name ?? "interface -"} ·{" "}
                 <DetailTime value={observation.observed_at} />
@@ -1115,7 +1353,11 @@ function NetworkTab({
         )}
       </DetailBlock>
       <DetailBlock title="Traffic & Rules" icon={<Gauge size={18} />}>
-        <button className="primaryAction compactAction" onClick={onOpenConfig} type="button">
+        <button
+          className="primaryAction compactAction"
+          onClick={onOpenConfig}
+          type="button"
+        >
           <span>Edit VPS Rules</span>
         </button>
         <button
@@ -1125,10 +1367,17 @@ function NetworkTab({
         >
           <span>Open Alert Policy</span>
         </button>
-        <button className="secondaryAction compactAction" onClick={onOpenFleetAlerts} type="button">
+        <button
+          className="secondaryAction compactAction"
+          onClick={onOpenFleetAlerts}
+          type="button"
+        >
           <span>Open Fleet Alerts</span>
         </button>
-        <VpsFact label="Selected traffic" value={trafficSelectorLabel(trafficRules)} />
+        <VpsFact
+          label="Selected traffic"
+          value={trafficSelectorLabel(trafficRules)}
+        />
         <VpsFact
           label="Live rate interfaces"
           value={networkRateSelectionLabel(related.vpsRules)}
@@ -1152,16 +1401,21 @@ function NetworkTab({
         <VpsFact
           label="Latest interval"
           value={
-            aggregateRates.length
-              ? formatBytes(aggregateDelta)
-              : "No sample"
+            aggregateRates.length ? formatBytes(aggregateDelta) : "No sample"
           }
         />
         {trafficRules.length === 0 ? (
-          <DetailState loading={loading} title="No traffic rules" detail="No traffic-scoped VPS rules are loaded for this VPS." />
+          <DetailState
+            loading={loading}
+            title="No traffic rules"
+            detail="No traffic-scoped VPS rules are loaded for this VPS."
+          />
         ) : (
           trafficRules.slice(0, 6).map((rule) => (
-            <span className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`} key={rule.key}>
+            <span
+              className={`vpsDetailRecord static ${rule.validation_errors.length ? "warning" : ""}`}
+              key={rule.key}
+            >
               <strong>{rule.key}</strong>
               <span>{rule.parsed_display || rule.value_raw || "unset"}</span>
             </span>
@@ -1171,7 +1425,11 @@ function NetworkTab({
       <DetailBlock title="Matched policies" icon={<AlertTriangle size={18} />}>
         <strong>Recent policy alerts</strong>
         {trafficPolicyAlerts.length === 0 ? (
-          <DetailState loading={loading} title="No policy alerts" detail="No traffic policy alert is loaded for this VPS." />
+          <DetailState
+            loading={loading}
+            title="No policy alerts"
+            detail="No traffic policy alert is loaded for this VPS."
+          />
         ) : (
           trafficPolicyAlerts.slice(0, 4).map((alert) => (
             <span className="vpsDetailRecord static warning" key={alert.id}>
@@ -1179,7 +1437,8 @@ function NetworkTab({
                 {trafficPolicyLabel(alert, related.alertPolicies)}
               </strong>
               <span title={alert.policy_rule_id}>
-                {trafficPolicyRuleLabel(alert, related.alertPolicies)} · {alert.detail}
+                {trafficPolicyRuleLabel(alert, related.alertPolicies)} ·{" "}
+                {alert.detail}
               </span>
             </span>
           ))
@@ -1290,8 +1549,15 @@ function ActivityTab({
             recordBounds.fileTransfers,
           )}${recordBounds.fileTransfers ? " loaded" : ""}`}
         />
-        <VpsFact label="Network events" value={String(related.networkObservations.length)} />
-        <DetailState loading={loading} title="Job target loading note" detail="Job history rows expose target records after opening a job, so direct job correlation is shown only when backup, transfer, output, or loaded target evidence carries this VPS ID." />
+        <VpsFact
+          label="Network events"
+          value={String(related.networkObservations.length)}
+        />
+        <DetailState
+          loading={loading}
+          title="Job target loading note"
+          detail="Job history rows expose target records after opening a job, so direct job correlation is shown only when backup, transfer, output, or loaded target evidence carries this VPS ID."
+        />
       </DetailBlock>
     </div>
   );
@@ -1382,7 +1648,11 @@ function DetailState({
   return (
     <span className="vpsDetailState">
       <strong>{loading ? "Loading evidence" : title}</strong>
-      <small>{loading ? "Refresh is still in progress for this detail view." : detail}</small>
+      <small>
+        {loading
+          ? "Refresh is still in progress for this detail view."
+          : detail}
+      </small>
     </span>
   );
 }
@@ -1436,7 +1706,9 @@ function buildVpsDetailContext({
     .filter((transfer) => transfer.client_id === clientId)
     .sort(newestFirst((transfer) => transfer.observed_at));
   const relatedAlerts = fleetAlerts
-    .filter((alert) => alert.client_id === clientId || alert.target_id === clientId)
+    .filter(
+      (alert) => alert.client_id === clientId || alert.target_id === clientId,
+    )
     .sort(newestFirst((alert) => alert.observed_at));
   const relatedPolicyAlerts = policyAlerts
     .filter((alert) => alert.client_id === clientId)
@@ -1446,23 +1718,33 @@ function buildVpsDetailContext({
     .sort(newestFirst((audit) => audit.created_at));
   const relatedAuditJobIds = new Set(
     relatedAudits.flatMap((audit) =>
-      presentAudit(audit).evidenceReferences
-        .filter((reference) => reference.kind === "Job")
+      presentAudit(audit)
+        .evidenceReferences.filter((reference) => reference.kind === "Job")
         .map((reference) => reference.value),
     ),
   );
   const relatedNetworkObservations = networkObservations
-    .filter((observation) => observation.client_id === clientId || observation.peer_client_id === clientId)
+    .filter(
+      (observation) =>
+        observation.client_id === clientId ||
+        observation.peer_client_id === clientId,
+    )
     .sort(newestFirst((observation) => observation.observed_at));
   const relatedNetworkTrends = networkTrends
-    .filter((trend) => trend.client_id === clientId || trend.peer_client_id === clientId)
+    .filter(
+      (trend) =>
+        trend.client_id === clientId || trend.peer_client_id === clientId,
+    )
     .sort(newestFirst((trend) => trend.latest_observed_at));
   const relatedJobs = jobs
-    .filter((job) =>
-      relatedBackups.some((backup) => backup.source_job_id === job.id) ||
-      relatedTransfers.some((transfer) => transfer.last_job_id === job.id) ||
-      relatedNetworkObservations.some((observation) => observation.job_id === job.id) ||
-      relatedAuditJobIds.has(job.id),
+    .filter(
+      (job) =>
+        relatedBackups.some((backup) => backup.source_job_id === job.id) ||
+        relatedTransfers.some((transfer) => transfer.last_job_id === job.id) ||
+        relatedNetworkObservations.some(
+          (observation) => observation.job_id === job.id,
+        ) ||
+        relatedAuditJobIds.has(job.id),
     )
     .sort(newestFirst((job) => job.created_at));
   const rollup =
@@ -1473,7 +1755,10 @@ function buildVpsDetailContext({
     .filter((rate) => rate.client_id === clientId)
     .sort((left, right) => left.interface.localeCompare(right.interface));
   const tunnels = telemetryTunnels
-    .filter((tunnel) => tunnel.client_id === clientId || tunnel.peer_client_id === clientId)
+    .filter(
+      (tunnel) =>
+        tunnel.client_id === clientId || tunnel.peer_client_id === clientId,
+    )
     .sort(newestFirst((tunnel) => tunnel.observed_at));
   const uptime =
     telemetryUptimes.find((record) => record.client_id === clientId) ?? null;
@@ -1524,7 +1809,10 @@ function buildVpsDetailContext({
       id: observation.id,
       jobId: observation.job_id ?? undefined,
       kind: "network" as const,
-      title: observation.healthy === false ? "Network degradation" : "Network observation",
+      title:
+        observation.healthy === false
+          ? "Network degradation"
+          : "Network observation",
       when: observation.observed_at,
     })),
     ...relatedJobs.map((job) => ({
@@ -1573,8 +1861,11 @@ function newestFirst<T>(dateFor: (record: T) => string) {
 
 function privilegeLabel(agent: AgentView) {
   if (agent.capabilities.privilege_mode === "root") return "root capable";
-  if (agent.capabilities.privilege_mode === "unprivileged") return "unprivileged";
-  return agent.capabilities.can_attempt_privileged_ops ? "privilege available" : "unknown";
+  if (agent.capabilities.privilege_mode === "unprivileged")
+    return "unprivileged";
+  return agent.capabilities.can_attempt_privileged_ops
+    ? "privilege available"
+    : "unknown";
 }
 
 type ConfigPostureItem = {
@@ -1588,12 +1879,9 @@ function buildConfigPosture(
   related: VpsDetailContext,
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable",
 ): ConfigPostureItem[] {
-  const sourceIssues = sourceRowsNeedingAttention(
-    related.configurationSources,
-  );
-  const sourceReadyCount = related.configurationSources.filter(
-    sourceRowIsReady,
-  ).length;
+  const sourceIssues = sourceRowsNeedingAttention(related.configurationSources);
+  const sourceReadyCount =
+    related.configurationSources.filter(sourceRowIsReady).length;
   const allSourcesReady =
     related.configurationSources.length > 0 &&
     sourceReadyCount === related.configurationSources.length;
@@ -1613,9 +1901,7 @@ function buildConfigPosture(
         )
       : null) ||
     ruleErrors[0] ||
-    (sourceIssues[0]
-      ? sourceReadinessReasonLabel(sourceIssues[0])
-      : null) ||
+    (sourceIssues[0] ? sourceReadinessReasonLabel(sourceIssues[0]) : null) ||
     null;
   return [
     {
@@ -1626,8 +1912,7 @@ function buildConfigPosture(
             )
           : "No effective source evidence loaded",
       label: "Effective sources",
-      tone:
-        related.configurationSources.length > 0 ? "info" : "neutral",
+      tone: related.configurationSources.length > 0 ? "info" : "neutral",
       value:
         related.configurationSources.length > 0
           ? `${related.configurationSources.length} behaviors`
@@ -1649,38 +1934,27 @@ function buildConfigPosture(
           : allSourcesReady
             ? "ok"
             : "neutral",
-      value: sourceIssues.length > 0
-        ? "Needs attention"
-        : allSourcesReady
-          ? "Ready"
-          : related.configurationSources.length > 0
-            ? "Not verified"
-            : "Unknown",
+      value:
+        sourceIssues.length > 0
+          ? "Needs attention"
+          : allSourcesReady
+            ? "Ready"
+            : related.configurationSources.length > 0
+              ? "Not verified"
+              : "Unknown",
     },
     {
       detail: applyEvidenceKnown
-        ? configDriftDetail(
-            applyState,
-            sourceIssues.length,
-            ruleErrors.length,
-          )
+        ? configDriftDetail(applyState, sourceIssues.length, ruleErrors.length)
         : `${applyEvidenceDetail}; cached state is not used for drift claims.`,
       label: "Drift state",
       tone: applyEvidenceKnown
-        ? configDriftTone(
-            applyState,
-            sourceIssues.length,
-            ruleErrors.length,
-          )
+        ? configDriftTone(applyState, sourceIssues.length, ruleErrors.length)
         : sourceIssues.length > 0 || ruleErrors.length > 0
           ? "warning"
           : "neutral",
       value: applyEvidenceKnown
-        ? configDriftLabel(
-            applyState,
-            sourceIssues.length,
-            ruleErrors.length,
-          )
+        ? configDriftLabel(applyState, sourceIssues.length, ruleErrors.length)
         : runtimeConfigEvidenceState === "loading"
           ? "Checking apply"
           : "Apply unknown",
@@ -1732,8 +2006,7 @@ function sourceRowsNeedingAttention(
 
 function sourceRowIsReady(row: ConfigurationSourceView): boolean {
   return (
-    row.runtime_sync.state === "applied" &&
-    row.readiness.state === "ready"
+    row.runtime_sync.state === "applied" && row.readiness.state === "ready"
   );
 }
 
@@ -1749,13 +2022,10 @@ function sourceReadinessStatusLabel(status: string): string {
   return labels[status] ?? readableDetailToken(status);
 }
 
-function sourceReadinessReasonLabel(
-  record: ConfigurationSourceView,
-): string {
+function sourceReadinessReasonLabel(record: ConfigurationSourceView): string {
   if (["failed", "stale"].includes(record.runtime_sync.state)) {
     return sentenceCase(
-      record.runtime_sync.reason ||
-        `Runtime sync ${record.runtime_sync.state}`,
+      record.runtime_sync.reason || `Runtime sync ${record.runtime_sync.state}`,
     );
   }
   return sentenceCase(
@@ -1769,7 +2039,10 @@ function sourceDomainSummary(domains: string[]): string {
   if (unique.length === 0) {
     return "No source domains loaded";
   }
-  return unique.slice(0, 3).map(readableDetailToken).join(", ") + (unique.length > 3 ? ` +${unique.length - 3}` : "");
+  return (
+    unique.slice(0, 3).map(readableDetailToken).join(", ") +
+    (unique.length > 3 ? ` +${unique.length - 3}` : "")
+  );
 }
 
 function configDriftLabel(
@@ -1778,7 +2051,8 @@ function configDriftLabel(
   ruleErrorCount: number,
 ): string {
   if (state?.pending_status === "failed") return "Apply failed";
-  if (state?.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "Stale apply" : "Pending apply";
+  if (state?.pending_status === "queued")
+    return runtimeApplyQueuedIsStale(state) ? "Stale apply" : "Pending apply";
   if (ruleErrorCount > 0) return "Rule errors";
   if (sourceIssueCount > 0) return "Source attention";
   if (state?.applied_content_hash) return "No pending apply";
@@ -1797,10 +2071,14 @@ function configDriftDetail(
       "Runtime config apply",
     );
   }
-  if (state?.pending_status === "queued") return state.pending_reason ?? "Runtime config apply is queued";
-  if (ruleErrorCount > 0) return `${ruleErrorCount} VPS rule validation issue${ruleErrorCount === 1 ? "" : "s"}`;
-  if (sourceIssueCount > 0) return `${sourceIssueCount} source readiness issue${sourceIssueCount === 1 ? "" : "s"}`;
-  if (state?.applied_content_hash) return `Applied hash ${shortId(state.applied_content_hash)}`;
+  if (state?.pending_status === "queued")
+    return state.pending_reason ?? "Runtime config apply is queued";
+  if (ruleErrorCount > 0)
+    return `${ruleErrorCount} VPS rule validation issue${ruleErrorCount === 1 ? "" : "s"}`;
+  if (sourceIssueCount > 0)
+    return `${sourceIssueCount} source readiness issue${sourceIssueCount === 1 ? "" : "s"}`;
+  if (state?.applied_content_hash)
+    return `Applied hash ${shortId(state.applied_content_hash)}`;
   return "Open Config / Per-VPS to compare current redacted config";
 }
 
@@ -1810,13 +2088,16 @@ function configDriftTone(
   ruleErrorCount: number,
 ): ConfigPostureItem["tone"] {
   if (state?.pending_status === "failed") return "critical";
-  if (state?.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "warning" : "info";
+  if (state?.pending_status === "queued")
+    return runtimeApplyQueuedIsStale(state) ? "warning" : "info";
   if (ruleErrorCount > 0 || sourceIssueCount > 0) return "warning";
   if (state?.applied_content_hash) return "ok";
   return "neutral";
 }
 
-function runtimeApplyTimeLabel(state: RuntimeConfigApplyStateRecord | null): ReactNode {
+function runtimeApplyTimeLabel(
+  state: RuntimeConfigApplyStateRecord | null,
+): ReactNode {
   if (state?.applied_at) {
     return <DetailTime value={state.applied_at} />;
   }
@@ -1826,15 +2107,22 @@ function runtimeApplyTimeLabel(state: RuntimeConfigApplyStateRecord | null): Rea
   return "Not applied";
 }
 
-function runtimeApplyStatusLabel(state: RuntimeConfigApplyStateRecord | null): string {
+function runtimeApplyStatusLabel(
+  state: RuntimeConfigApplyStateRecord | null,
+): string {
   if (!state) return "No apply-state evidence";
   if (state.pending_status === "failed") return "Failed apply";
-  if (state.pending_status === "queued") return runtimeApplyQueuedIsStale(state) ? "Stale queued apply" : "Queued apply";
+  if (state.pending_status === "queued")
+    return runtimeApplyQueuedIsStale(state)
+      ? "Stale queued apply"
+      : "Queued apply";
   if (state.applied_content_hash) return "Current";
   return "Unknown";
 }
 
-function runtimeApplyDetail(state: RuntimeConfigApplyStateRecord | null): string {
+function runtimeApplyDetail(
+  state: RuntimeConfigApplyStateRecord | null,
+): string {
   if (!state) return "No server-applied runtime sync recorded";
   if (state.pending_status === "failed") {
     return dispatchFailureReason(
@@ -1843,9 +2131,12 @@ function runtimeApplyDetail(state: RuntimeConfigApplyStateRecord | null): string
       "Runtime config apply",
     );
   }
-  if (state.pending_status === "queued") return state.pending_reason ?? "Runtime config apply queued";
+  if (state.pending_status === "queued")
+    return state.pending_reason ?? "Runtime config apply queued";
   if (state.applied_content_hash) {
-    const job = state.applied_job_id ? `; job ${shortId(state.applied_job_id)}` : "";
+    const job = state.applied_job_id
+      ? `; job ${shortId(state.applied_job_id)}`
+      : "";
     return `Hash ${shortId(state.applied_content_hash)}${job}`;
   }
   return "No server-applied runtime sync recorded";
@@ -1855,9 +2146,13 @@ function runtimeApplyStateTime(state: RuntimeConfigApplyStateRecord): string {
   return state.pending_updated_at ?? state.applied_at ?? state.updated_at;
 }
 
-function runtimeApplyQueuedIsStale(state: RuntimeConfigApplyStateRecord): boolean {
+function runtimeApplyQueuedIsStale(
+  state: RuntimeConfigApplyStateRecord,
+): boolean {
   const updatedAt = timestampMillis(runtimeApplyStateTime(state));
-  return !Number.isFinite(updatedAt) || Date.now() - updatedAt > 24 * 60 * 60 * 1000;
+  return (
+    !Number.isFinite(updatedAt) || Date.now() - updatedAt > 24 * 60 * 60 * 1000
+  );
 }
 
 function sentenceCase(value: string): string {
@@ -1986,7 +2281,9 @@ function networkObservationLabel(kind: string): string {
 
 function trafficSelectorLabel(rules: VpsRuleValueRecord[]) {
   const selectorRule = rules.find((rule) => rule.key === "traffic.selectors");
-  return selectorRule?.value_raw || selectorRule?.parsed_display || "No selector";
+  return (
+    selectorRule?.value_raw || selectorRule?.parsed_display || "No selector"
+  );
 }
 
 function trafficPolicyLabel(
@@ -2003,8 +2300,12 @@ function trafficPolicyRuleLabel(
   alert: PolicyAlertRecord,
   policies: FleetAlertPolicyRecord[],
 ) {
-  const policy = policies.find((candidate) => candidate.id === alert.policy_group_id);
-  const rule = policy?.rules.find((candidate) => candidate.id === alert.policy_rule_id);
+  const policy = policies.find(
+    (candidate) => candidate.id === alert.policy_group_id,
+  );
+  const rule = policy?.rules.find(
+    (candidate) => candidate.id === alert.policy_rule_id,
+  );
   const payload = recordValue(alert.payload);
   const payloadRule = recordValue(payload?.rule);
   return (

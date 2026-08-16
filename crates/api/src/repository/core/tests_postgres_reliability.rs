@@ -44,7 +44,7 @@ use crate::{
         CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
         PolicyDryRunRequest, PolicyRuleRequest, VpsRuleQuery, VpsRulesBulkUnsetRequest,
         VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VPS_RULE_KEY_NETWORK_PORT_SPEED,
-        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
     },
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
@@ -6403,6 +6403,112 @@ async fn postgres_fleet_alert_policy_regression_reads_legacy_overlapping_traffic
         .await
         .unwrap();
     db.repo.evaluate_policy_rules().await.unwrap();
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_product_name_uses_the_fresh_canonical_rule_schema() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "product-name-client";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let values = BTreeMap::from([(
+        VPS_RULE_KEY_PRODUCT_NAME.to_string(),
+        "  Storage-Box\t 4  ".to_string(),
+    )]);
+    let preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(preview.changed_row_count, 1);
+    assert_eq!(preview.changes[0].after.as_deref(), Some("Storage-Box 4"));
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values,
+                confirmed: true,
+                preview_hash: preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let stored = sqlx::query_as::<_, (String, Value, chrono::DateTime<chrono::Utc>)>(
+        "SELECT value_raw, value_json, updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_PRODUCT_NAME)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "Storage-Box 4");
+    assert_eq!(stored.1["name"], "Storage-Box 4");
+    assert_eq!(stored.1["display"], "Storage-Box 4");
+    let audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    let equivalent_values = BTreeMap::from([(
+        VPS_RULE_KEY_PRODUCT_NAME.to_string(),
+        "\n Storage-Box     4 \t".to_string(),
+    )]);
+    let equivalent_preview = db
+        .repo
+        .dry_run_vps_rules(&VpsRulesDryRunRequest {
+            operation: "upsert".to_string(),
+            selector_expression: format!("id:{client_id}"),
+            values: equivalent_values.clone(),
+            keys: Vec::new(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(equivalent_preview.changed_row_count, 0);
+    assert_eq!(equivalent_preview.changes[0].action, "unchanged");
+    db.repo
+        .bulk_upsert_vps_rules(
+            &VpsRulesBulkUpsertRequest {
+                selector_expression: format!("id:{client_id}"),
+                values: equivalent_values,
+                confirmed: true,
+                preview_hash: equivalent_preview.preview_hash,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let after = sqlx::query_as::<_, (String, Value, chrono::DateTime<chrono::Utc>)>(
+        "SELECT value_raw, value_json, updated_at FROM vps_rule_values WHERE client_id = $1 AND key = $2",
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_PRODUCT_NAME)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(after, stored);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.vps_rules_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        audit_count
+    );
 
     db.cleanup().await;
 }

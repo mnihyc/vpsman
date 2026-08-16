@@ -770,8 +770,11 @@ export function buildAgentSelectorSuggestionValues(
       if (lowerTag.startsWith("country:")) {
         const value = tag.slice("country:".length);
         observedValues.add(`country:${quoteSelectorValue(value)}`);
-        observedValues.add(`region:${quoteSelectorValue(value)}`);
         observedValues.add(`vps.country:${quoteSelectorValue(value)}`);
+      }
+      if (lowerTag.startsWith("region:")) {
+        const value = tag.slice("region:".length);
+        observedValues.add(`region:${quoteSelectorValue(value)}`);
         observedValues.add(`vps.region:${quoteSelectorValue(value)}`);
       }
     }
@@ -1081,10 +1084,12 @@ function buildVpsRuleScopedCompletionOptions(
       );
     });
   if (operator) {
-    const example = orderedRuleExample(key);
+    const example = isOrderedRuleOperator(operator)
+      ? orderedRuleExample(key)
+      : equalityRuleExample(key);
     return uniqueCompletionOptions([
       ...valueOptions,
-      ...(example && isOrderedRuleOperator(operator)
+      ...(example
         ? [
             ruleCompletionOption(
               `${base} ${operator} ${quoteSelectorValue(example)}`,
@@ -1097,9 +1102,19 @@ function buildVpsRuleScopedCompletionOptions(
   }
 
   const example = orderedRuleExample(key);
+  const equalityExample = equalityRuleExample(key);
   return uniqueCompletionOptions([
     presence,
     ...valueOptions,
+    ...(equalityExample
+      ? [
+          ruleCompletionOption(
+            `${base} = ${quoteSelectorValue(equalityExample)}`,
+            `Equals ${equalityExample}`,
+            `${definition.label} example`,
+          ),
+        ]
+      : []),
     ...(example && definition.orderedKind
       ? [
           ruleCompletionOption(
@@ -1153,6 +1168,10 @@ function orderedRuleExample(key: string): string | null {
   if (key === "traffic.reset_day") return "15";
   if (key.startsWith("traffic.quota.")) return "1TB";
   return null;
+}
+
+function equalityRuleExample(key: string): string | null {
+  return key === "product.name" ? "LN.V2.HKGv3" : null;
 }
 
 function ruleCompletionOption(

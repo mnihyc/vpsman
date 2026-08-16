@@ -11,13 +11,15 @@ pub const VPS_RULE_KEY_BILLING_PRICE: &str = "billing.price";
 pub const VPS_RULE_KEY_BILLING_CYCLE: &str = "billing.cycle";
 pub const VPS_RULE_KEY_NETWORK_PORT_SPEED: &str = "network.port_speed";
 pub const VPS_RULE_KEY_NETWORK_RATE_INTERFACES: &str = "network.rate.interfaces";
+pub const VPS_RULE_KEY_PRODUCT_NAME: &str = "product.name";
 pub const NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX: &str = "[traffic.selectors]";
 
-pub const SUPPORTED_VPS_RULE_KEYS: [&str; 9] = [
+pub const SUPPORTED_VPS_RULE_KEYS: [&str; 10] = [
     VPS_RULE_KEY_BILLING_PRICE,
     VPS_RULE_KEY_BILLING_CYCLE,
     VPS_RULE_KEY_NETWORK_PORT_SPEED,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+    VPS_RULE_KEY_PRODUCT_NAME,
     VPS_RULE_KEY_TRAFFIC_RESET_DAY,
     VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
     VPS_RULE_KEY_TRAFFIC_QUOTA_RX,
@@ -26,6 +28,7 @@ pub const SUPPORTED_VPS_RULE_KEYS: [&str; 9] = [
 ];
 
 const MAX_VPS_RULE_VALUE_BYTES: usize = 4096;
+pub const MAX_PRODUCT_NAME_BYTES: usize = 160;
 const MAX_TRAFFIC_SELECTOR_ITEMS: usize = 16;
 const MAX_TRAFFIC_INTERFACE_BYTES: usize = 128;
 const MAX_BILLING_PRICE_WHOLE_DIGITS: usize = 9;
@@ -62,14 +65,14 @@ fn parse_vps_rule_value_with_options(
     allow_direction_overlap: bool,
 ) -> Result<ParsedVpsRuleValue, String> {
     let key = normalize_vps_rule_key(key)?;
+    ensure(
+        value.len() <= MAX_VPS_RULE_VALUE_BYTES,
+        "vps_rules_value_too_long",
+    )?;
     let raw = value.trim();
     ensure(
         !raw.is_empty() || key == VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
         "vps_rules_empty_value_invalid",
-    )?;
-    ensure(
-        raw.len() <= MAX_VPS_RULE_VALUE_BYTES,
-        "vps_rules_value_too_long",
     )?;
     match key {
         VPS_RULE_KEY_TRAFFIC_RESET_DAY => parse_traffic_reset_day(raw),
@@ -81,6 +84,7 @@ fn parse_vps_rule_value_with_options(
         VPS_RULE_KEY_BILLING_PRICE => parse_billing_price(raw),
         VPS_RULE_KEY_BILLING_CYCLE => parse_billing_cycle(raw),
         VPS_RULE_KEY_NETWORK_PORT_SPEED => parse_port_speed(raw),
+        VPS_RULE_KEY_PRODUCT_NAME => parse_product_name(raw),
         _ => unreachable!("normalize_vps_rule_key rejects unsupported keys"),
     }
 }
@@ -111,6 +115,24 @@ fn parse_traffic_reset_day(raw: &str) -> Result<ParsedVpsRuleValue, String> {
         } else {
             format!("{day} UTC")
         },
+    })
+}
+
+fn parse_product_name(raw: &str) -> Result<ParsedVpsRuleValue, String> {
+    let canonical = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    ensure(!canonical.is_empty(), "product_name_empty")?;
+    ensure(
+        canonical.len() <= MAX_PRODUCT_NAME_BYTES,
+        "product_name_too_long",
+    )?;
+    ensure(
+        !canonical.chars().any(char::is_control),
+        "product_name_control_character_invalid",
+    )?;
+    Ok(ParsedVpsRuleValue {
+        raw: canonical.clone(),
+        json: json!({"name": canonical, "display": canonical}),
+        display: canonical,
     })
 }
 
@@ -637,6 +659,11 @@ mod tests {
             (VPS_RULE_KEY_BILLING_PRICE, "29.9 cny / M", "29.90 CNY/m"),
             (VPS_RULE_KEY_BILLING_CYCLE, "6-15", "06-15"),
             (
+                VPS_RULE_KEY_PRODUCT_NAME,
+                "  Storage-Box\t 4  ",
+                "Storage-Box 4",
+            ),
+            (
                 VPS_RULE_KEY_TRAFFIC_SELECTORS,
                 " ens3, eth0+tx ",
                 "ens3,eth0+tx",
@@ -661,6 +688,60 @@ mod tests {
                 "canonical normalization must be idempotent for {key}"
             );
         }
+    }
+
+    #[test]
+    fn billing_cycle_accepts_unpadded_shorthand_but_keeps_the_padded_standard() {
+        let padded = parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, "06-05").unwrap();
+        let unpadded = parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, "6-5").unwrap();
+        assert_eq!(padded, unpadded);
+        assert_eq!(padded.raw, "06-05");
+        assert_eq!(padded.display, "06-05");
+        assert_eq!(
+            padded.json,
+            json!({"day": 5, "month": 6, "display": "06-05"})
+        );
+
+        let day_only = parse_vps_rule_value(VPS_RULE_KEY_BILLING_CYCLE, "07").unwrap();
+        assert_eq!(day_only.raw, "7");
+        assert_eq!(day_only.display, "7");
+        assert_eq!(
+            day_only.json,
+            json!({"day": 7, "month": null, "display": "7"})
+        );
+    }
+
+    #[test]
+    fn product_name_is_bounded_display_text_without_a_semantic_format() {
+        let punctuation = parse_vps_rule_value(VPS_RULE_KEY_PRODUCT_NAME, " LN.V2.HKGv3 ").unwrap();
+        assert_eq!(punctuation.raw, "LN.V2.HKGv3");
+        assert_eq!(punctuation.json["name"], "LN.V2.HKGv3");
+        assert_eq!(punctuation.json["display"], "LN.V2.HKGv3");
+
+        let unicode = format!("{}xxxx", "界".repeat(52));
+        assert_eq!(unicode.len(), MAX_PRODUCT_NAME_BYTES);
+        assert_eq!(
+            parse_vps_rule_value(VPS_RULE_KEY_PRODUCT_NAME, &unicode)
+                .unwrap()
+                .raw,
+            unicode
+        );
+        assert_eq!(
+            parse_vps_rule_value(VPS_RULE_KEY_PRODUCT_NAME, &"界".repeat(54)).unwrap_err(),
+            "product_name_too_long"
+        );
+        assert_eq!(
+            parse_vps_rule_value(
+                VPS_RULE_KEY_PRODUCT_NAME,
+                &"x".repeat(MAX_PRODUCT_NAME_BYTES + 1),
+            )
+            .unwrap_err(),
+            "product_name_too_long"
+        );
+        assert_eq!(
+            parse_vps_rule_value(VPS_RULE_KEY_PRODUCT_NAME, "box\0name").unwrap_err(),
+            "product_name_control_character_invalid"
+        );
     }
 
     #[test]

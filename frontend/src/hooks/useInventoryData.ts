@@ -1,5 +1,12 @@
 import { useCallback, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPostPreview, apiPut, isApiUnauthorized } from "../api";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPostPreview,
+  apiPut,
+  isApiUnauthorized,
+} from "../api";
 import type {
   ApplyConfigurationSourceOverrideRequest,
   ApplyConfigurationSourceOverrideResponse,
@@ -31,7 +38,11 @@ import type {
 } from "../types";
 import { retainMutationSuccessAfterRefresh } from "../utils";
 
-export function useInventoryData(apiToken: string, onUnauthorized: () => void, onFleetChanged: () => Promise<void>) {
+export function useInventoryData(
+  apiToken: string,
+  onUnauthorized: () => void,
+  onFleetChanged: () => Promise<void>,
+) {
   const [tags, setTags] = useState<TagView[]>([]);
   const [configurationPresets, setConfigurationPresets] = useState<
     ConfigurationPresetRecord[]
@@ -39,25 +50,37 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const [configurationSources, setConfigurationSources] = useState<
     ConfigurationSourceView[]
   >([]);
-  const [runtimeConfigApplyStates, setRuntimeConfigApplyStates] = useState<RuntimeConfigApplyStateRecord[]>([]);
-  const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] = useState<RuntimeConfigPatchGeneratorRecord[]>([]);
+  const [runtimeConfigApplyStates, setRuntimeConfigApplyStates] = useState<
+    RuntimeConfigApplyStateRecord[]
+  >([]);
+  const [runtimeConfigPatchGenerators, setRuntimeConfigPatchGenerators] =
+    useState<RuntimeConfigPatchGeneratorRecord[]>([]);
   const [tagsError, setTagsError] = useState<string | null>(null);
-  const [runtimeConfigApplyError, setRuntimeConfigApplyError] =
-    useState<string | null>(null);
-  const [configurationSourcesError, setConfigurationSourcesError] =
-    useState<string | null>(null);
+  const [runtimeConfigApplyError, setRuntimeConfigApplyError] = useState<
+    string | null
+  >(null);
+  const [configurationPresetsError, setConfigurationPresetsError] = useState<
+    string | null
+  >(null);
+  const [configurationSourcesError, setConfigurationSourcesError] = useState<
+    string | null
+  >(null);
   const [tagsLoading, setTagsLoading] = useState(false);
+  const [configurationPresetsLoading, setConfigurationPresetsLoading] =
+    useState(false);
   const [configurationSourcesLoading, setConfigurationSourcesLoading] =
     useState(false);
   const [runtimeConfigApplyLoading, setRuntimeConfigApplyLoading] =
     useState(false);
-  const [
-    tagInventoryEvidenceAvailable,
-    setTagInventoryEvidenceAvailable,
-  ] = useState(false);
+  const [tagInventoryEvidenceAvailable, setTagInventoryEvidenceAvailable] =
+    useState(false);
   const [
     runtimeConfigApplyEvidenceAvailable,
     setRuntimeConfigApplyEvidenceAvailable,
+  ] = useState(false);
+  const [
+    configurationPresetsEvidenceAvailable,
+    setConfigurationPresetsEvidenceAvailable,
   ] = useState(false);
   const [
     configurationSourcesEvidenceAvailable,
@@ -67,7 +90,16 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     request: Promise<void>;
     token: string;
   } | null>(null);
+  const loadConfigurationPresetsInFlight = useRef<{
+    request: Promise<void>;
+    token: string;
+  } | null>(null);
+  const loadConfigurationSourcesInFlight = useRef<{
+    request: Promise<void>;
+    token: string;
+  } | null>(null);
   const tagInventoryLoadGeneration = useRef(0);
+  const configurationPresetsLoadGeneration = useRef(0);
   const configurationSourcesLoadGeneration = useRef(0);
   const runtimeConfigApplyLoadGeneration = useRef(0);
   const tagOrderMutationGeneration = useRef(0);
@@ -75,198 +107,308 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   const currentApiToken = useRef(apiToken);
   currentApiToken.current = apiToken;
 
-  const loadTagInventory = useCallback(async (forceFresh = false) => {
-    if (currentApiToken.current !== apiToken) {
-      return;
-    }
-    if (
-      !forceFresh &&
-      loadTagInventoryInFlight.current?.token === apiToken
-    ) {
-      return loadTagInventoryInFlight.current.request;
-    }
-    const generation = tagInventoryLoadGeneration.current + 1;
-    tagInventoryLoadGeneration.current = generation;
-    const runtimeApplyGeneration =
-      runtimeConfigApplyLoadGeneration.current + 1;
-    runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
-    const request = (async () => {
-      setTagsLoading(true);
-      tagInventoryError.current = null;
-      setTagsError(null);
-      setRuntimeConfigApplyError(null);
-      setRuntimeConfigApplyLoading(true);
-      setTagInventoryEvidenceAvailable(false);
-      try {
-        const [
-          tagsResult,
-          runtimeConfigApplyStatesResult,
-          patchGeneratorsResult,
-        ] = await Promise.allSettled([
-          apiGet<TagView[]>("/api/v1/tags", apiToken),
-          apiGet<RuntimeConfigApplyStateRecord[]>("/api/v1/runtime-config/apply-state", apiToken),
-          apiGet<RuntimeConfigPatchGeneratorRecord[]>("/api/v1/runtime-config/patch-generators", apiToken),
-        ]);
-        if (
-          tagInventoryLoadGeneration.current !== generation ||
-          currentApiToken.current !== apiToken
-        ) {
-          return;
-        }
-        const results = [
-          tagsResult,
-          runtimeConfigApplyStatesResult,
-          patchGeneratorsResult,
-        ];
-        if (
-          results.some(
-            (result) =>
-              result.status === "rejected" &&
-              isApiUnauthorized(result.reason),
-          )
-        ) {
-          onUnauthorized();
-          setTags([]);
-          setRuntimeConfigApplyStates([]);
-          setRuntimeConfigPatchGenerators([]);
-          setTagInventoryEvidenceAvailable(false);
-          setRuntimeConfigApplyEvidenceAvailable(false);
-          tagInventoryError.current = "Operator login required";
-          setTagsError("Operator login required");
-          setRuntimeConfigApplyError("Operator login required");
-          return;
-        }
-        if (tagsResult.status === "fulfilled") {
-          setTags(tagsResult.value);
-        }
-        if (runtimeConfigApplyStatesResult.status === "fulfilled") {
+  const loadTagInventory = useCallback(
+    async (forceFresh = false) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (!forceFresh && loadTagInventoryInFlight.current?.token === apiToken) {
+        return loadTagInventoryInFlight.current.request;
+      }
+      const generation = tagInventoryLoadGeneration.current + 1;
+      tagInventoryLoadGeneration.current = generation;
+      const runtimeApplyGeneration =
+        runtimeConfigApplyLoadGeneration.current + 1;
+      runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
+      const request = (async () => {
+        setTagsLoading(true);
+        tagInventoryError.current = null;
+        setTagsError(null);
+        setRuntimeConfigApplyError(null);
+        setRuntimeConfigApplyLoading(true);
+        setTagInventoryEvidenceAvailable(false);
+        try {
+          const [
+            tagsResult,
+            runtimeConfigApplyStatesResult,
+            patchGeneratorsResult,
+          ] = await Promise.allSettled([
+            apiGet<TagView[]>("/api/v1/tags", apiToken),
+            apiGet<RuntimeConfigApplyStateRecord[]>(
+              "/api/v1/runtime-config/apply-state",
+              apiToken,
+            ),
+            apiGet<RuntimeConfigPatchGeneratorRecord[]>(
+              "/api/v1/runtime-config/patch-generators",
+              apiToken,
+            ),
+          ]);
           if (
-            runtimeConfigApplyLoadGeneration.current ===
-            runtimeApplyGeneration
+            tagInventoryLoadGeneration.current !== generation ||
+            currentApiToken.current !== apiToken
           ) {
-            setRuntimeConfigApplyStates(runtimeConfigApplyStatesResult.value);
-            setRuntimeConfigApplyEvidenceAvailable(true);
+            return;
           }
-        }
-        if (patchGeneratorsResult.status === "fulfilled") {
-          setRuntimeConfigPatchGenerators(patchGeneratorsResult.value);
-        }
-        setTagInventoryEvidenceAvailable(
-          [tagsResult, patchGeneratorsResult].every(
-            (result) => result.status === "fulfilled",
-          ),
-        );
-        tagInventoryError.current = unavailableSourceSummary(
-          "Some inventory sources are unavailable",
-          [tagsResult, patchGeneratorsResult],
-          ["tags", "runtime configuration patch generators"],
-        );
-        setTagsError(tagInventoryError.current);
-        if (
-          runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration
-        ) {
-          if (runtimeConfigApplyStatesResult.status === "rejected") {
+          const results = [
+            tagsResult,
+            runtimeConfigApplyStatesResult,
+            patchGeneratorsResult,
+          ];
+          if (
+            results.some(
+              (result) =>
+                result.status === "rejected" &&
+                isApiUnauthorized(result.reason),
+            )
+          ) {
+            onUnauthorized();
+            setTags([]);
+            setRuntimeConfigApplyStates([]);
+            setRuntimeConfigPatchGenerators([]);
+            setTagInventoryEvidenceAvailable(false);
             setRuntimeConfigApplyEvidenceAvailable(false);
+            tagInventoryError.current = "Operator login required";
+            setTagsError("Operator login required");
+            setRuntimeConfigApplyError("Operator login required");
+            return;
           }
-          setRuntimeConfigApplyError(
-            unavailableSourceSummary(
-              "Runtime configuration source unavailable",
-              [runtimeConfigApplyStatesResult],
-              ["apply state"],
+          if (tagsResult.status === "fulfilled") {
+            setTags(tagsResult.value);
+          }
+          if (runtimeConfigApplyStatesResult.status === "fulfilled") {
+            if (
+              runtimeConfigApplyLoadGeneration.current ===
+              runtimeApplyGeneration
+            ) {
+              setRuntimeConfigApplyStates(runtimeConfigApplyStatesResult.value);
+              setRuntimeConfigApplyEvidenceAvailable(true);
+            }
+          }
+          if (patchGeneratorsResult.status === "fulfilled") {
+            setRuntimeConfigPatchGenerators(patchGeneratorsResult.value);
+          }
+          setTagInventoryEvidenceAvailable(
+            [tagsResult, patchGeneratorsResult].every(
+              (result) => result.status === "fulfilled",
             ),
           );
+          tagInventoryError.current = unavailableSourceSummary(
+            "Some inventory sources are unavailable",
+            [tagsResult, patchGeneratorsResult],
+            ["tags", "runtime configuration patch generators"],
+          );
+          setTagsError(tagInventoryError.current);
+          if (
+            runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration
+          ) {
+            if (runtimeConfigApplyStatesResult.status === "rejected") {
+              setRuntimeConfigApplyEvidenceAvailable(false);
+            }
+            setRuntimeConfigApplyError(
+              unavailableSourceSummary(
+                "Runtime configuration source unavailable",
+                [runtimeConfigApplyStatesResult],
+                ["apply state"],
+              ),
+            );
+          }
+        } finally {
+          if (
+            tagInventoryLoadGeneration.current === generation &&
+            currentApiToken.current === apiToken
+          ) {
+            setTagsLoading(false);
+          }
+          if (
+            runtimeConfigApplyLoadGeneration.current ===
+              runtimeApplyGeneration &&
+            currentApiToken.current === apiToken
+          ) {
+            setRuntimeConfigApplyLoading(false);
+          }
         }
+      })();
+      loadTagInventoryInFlight.current = { request, token: apiToken };
+      try {
+        await request;
       } finally {
-        if (
-          tagInventoryLoadGeneration.current === generation &&
-          currentApiToken.current === apiToken
-        ) {
-          setTagsLoading(false);
-        }
-        if (
-          runtimeConfigApplyLoadGeneration.current === runtimeApplyGeneration &&
-          currentApiToken.current === apiToken
-        ) {
-          setRuntimeConfigApplyLoading(false);
+        if (loadTagInventoryInFlight.current?.request === request) {
+          loadTagInventoryInFlight.current = null;
         }
       }
-    })();
-    loadTagInventoryInFlight.current = { request, token: apiToken };
-    try {
-      await request;
-    } finally {
-      if (loadTagInventoryInFlight.current?.request === request) {
-        loadTagInventoryInFlight.current = null;
-      }
-    }
-  }, [apiToken, onUnauthorized]);
+    },
+    [apiToken, onUnauthorized],
+  );
 
   const refreshTagInventoryAfterMutation = useCallback(
     () => loadTagInventory(true),
     [loadTagInventory],
   );
 
-  const loadConfigurationSources = useCallback(async () => {
-    if (currentApiToken.current !== apiToken) {
-      return;
-    }
-    const generation = configurationSourcesLoadGeneration.current + 1;
-    configurationSourcesLoadGeneration.current = generation;
-    setConfigurationSourcesError(null);
-    setConfigurationSourcesLoading(true);
-    setConfigurationSourcesEvidenceAvailable(false);
-    try {
-      const [presets, sources] = await Promise.all([
-        apiGet<ConfigurationPresetRecord[]>(
-          "/api/v1/configuration-presets",
-          apiToken,
-        ),
-        apiGet<ConfigurationSourceView[]>(
-          "/api/v1/configuration-sources",
-          apiToken,
-        ),
-      ]);
-      if (
-        configurationSourcesLoadGeneration.current !== generation ||
-        currentApiToken.current !== apiToken
-      ) {
+  const loadConfigurationPresets = useCallback(
+    async (forceFresh = false) => {
+      if (currentApiToken.current !== apiToken) {
         return;
       }
-      setConfigurationPresets(presets);
-      setConfigurationSources(sources);
-      setConfigurationSourcesError(null);
-      setConfigurationSourcesEvidenceAvailable(true);
-    } catch (error) {
       if (
-        configurationSourcesLoadGeneration.current !== generation ||
-        currentApiToken.current !== apiToken
+        !forceFresh &&
+        loadConfigurationPresetsInFlight.current?.token === apiToken
       ) {
+        return loadConfigurationPresetsInFlight.current.request;
+      }
+      const generation = configurationPresetsLoadGeneration.current + 1;
+      configurationPresetsLoadGeneration.current = generation;
+      const request = (async () => {
+        setConfigurationPresetsError(null);
+        setConfigurationPresetsLoading(true);
+        setConfigurationPresetsEvidenceAvailable(false);
+        try {
+          const presets = await apiGet<ConfigurationPresetRecord[]>(
+            "/api/v1/configuration-presets",
+            apiToken,
+          );
+          if (
+            configurationPresetsLoadGeneration.current !== generation ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          setConfigurationPresets(presets);
+          setConfigurationPresetsError(null);
+          setConfigurationPresetsEvidenceAvailable(true);
+        } catch (error) {
+          if (
+            configurationPresetsLoadGeneration.current !== generation ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setConfigurationPresets([]);
+            setConfigurationPresetsEvidenceAvailable(false);
+            setConfigurationPresetsError("Operator login required");
+            throw new Error("Operator login required");
+          }
+          setConfigurationPresetsError(
+            error instanceof Error
+              ? `Configuration presets: ${error.message}`
+              : "Configuration presets unavailable",
+          );
+          setConfigurationPresetsEvidenceAvailable(false);
+          throw error;
+        } finally {
+          if (
+            configurationPresetsLoadGeneration.current === generation &&
+            currentApiToken.current === apiToken
+          ) {
+            setConfigurationPresetsLoading(false);
+          }
+        }
+      })();
+      loadConfigurationPresetsInFlight.current = { request, token: apiToken };
+      try {
+        await request;
+      } finally {
+        if (loadConfigurationPresetsInFlight.current?.request === request) {
+          loadConfigurationPresetsInFlight.current = null;
+        }
+      }
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  const loadConfigurationSources = useCallback(
+    async (forceFresh = false) => {
+      if (currentApiToken.current !== apiToken) {
         return;
       }
-      if (isApiUnauthorized(error)) {
-        onUnauthorized();
-        setConfigurationPresets([]);
-        setConfigurationSources([]);
+      if (
+        !forceFresh &&
+        loadConfigurationSourcesInFlight.current?.token === apiToken
+      ) {
+        return loadConfigurationSourcesInFlight.current.request;
+      }
+      const generation = configurationSourcesLoadGeneration.current + 1;
+      configurationSourcesLoadGeneration.current = generation;
+      const request = (async () => {
+        setConfigurationSourcesError(null);
+        setConfigurationSourcesLoading(true);
         setConfigurationSourcesEvidenceAvailable(false);
-        setConfigurationSourcesError("Operator login required");
-        throw new Error("Operator login required");
+        try {
+          const sources = await apiGet<ConfigurationSourceView[]>(
+            "/api/v1/configuration-sources",
+            apiToken,
+          );
+          if (
+            configurationSourcesLoadGeneration.current !== generation ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          setConfigurationSources(sources);
+          setConfigurationSourcesError(null);
+          setConfigurationSourcesEvidenceAvailable(true);
+        } catch (error) {
+          if (
+            configurationSourcesLoadGeneration.current !== generation ||
+            currentApiToken.current !== apiToken
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setConfigurationSources([]);
+            setConfigurationSourcesEvidenceAvailable(false);
+            setConfigurationSourcesError("Operator login required");
+            throw new Error("Operator login required");
+          }
+          setConfigurationSourcesError(
+            error instanceof Error
+              ? `Configuration sources: ${error.message}`
+              : "Configuration sources unavailable",
+          );
+          setConfigurationSourcesEvidenceAvailable(false);
+          throw error;
+        } finally {
+          if (
+            configurationSourcesLoadGeneration.current === generation &&
+            currentApiToken.current === apiToken
+          ) {
+            setConfigurationSourcesLoading(false);
+          }
+        }
+      })();
+      loadConfigurationSourcesInFlight.current = { request, token: apiToken };
+      try {
+        await request;
+      } finally {
+        if (loadConfigurationSourcesInFlight.current?.request === request) {
+          loadConfigurationSourcesInFlight.current = null;
+        }
       }
-      setConfigurationSourcesError(
-        error instanceof Error
-          ? `Configuration sources: ${error.message}`
-          : "Configuration sources unavailable",
+    },
+    [apiToken, onUnauthorized],
+  );
+
+  // Presets are authoring catalog data; sources are effective per-VPS evidence.
+  // Compose them only for workflows that render or mutate both resources.
+  const loadConfigurationInventory = useCallback(
+    async (forceFresh = false) => {
+      const results = await Promise.allSettled([
+        loadConfigurationPresets(forceFresh),
+        loadConfigurationSources(forceFresh),
+      ]);
+      const failure = results.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
       );
-      setConfigurationSourcesEvidenceAvailable(false);
-      throw error;
-    } finally {
-      if (
-        configurationSourcesLoadGeneration.current === generation &&
-        currentApiToken.current === apiToken
-      ) {
-        setConfigurationSourcesLoading(false);
+      if (failure) {
+        throw failure.reason;
       }
-    }
-  }, [apiToken, onUnauthorized]);
+    },
+    [loadConfigurationPresets, loadConfigurationSources],
+  );
 
   const loadRuntimeConfigApplyStates = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
@@ -322,7 +464,11 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const createTag = useCallback(
     async (name: string, privilegeAssertion: PrivilegeAssertion) => {
-      await apiPost("/api/v1/tags", apiToken, { confirmed: true, name, privilege_assertion: privilegeAssertion });
+      await apiPost("/api/v1/tags", apiToken, {
+        confirmed: true,
+        name,
+        privilege_assertion: privilegeAssertion,
+      });
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -352,12 +498,20 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const assignTag = useCallback(
-    async (clientId: string, tag: string, privilegeAssertion: PrivilegeAssertion) => {
-      const response = await apiPost<TagMutationResponse>(`/api/v1/agents/${encodeURIComponent(clientId)}/tags`, apiToken, {
-        confirmed: true,
-        privilege_assertion: privilegeAssertion,
-        tag,
-      });
+    async (
+      clientId: string,
+      tag: string,
+      privilegeAssertion: PrivilegeAssertion,
+    ) => {
+      const response = await apiPost<TagMutationResponse>(
+        `/api/v1/agents/${encodeURIComponent(clientId)}/tags`,
+        apiToken,
+        {
+          confirmed: true,
+          privilege_assertion: privilegeAssertion,
+          tag,
+        },
+      );
       if (currentApiToken.current !== apiToken) {
         return response;
       }
@@ -369,16 +523,17 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const bulkMutateTags = useCallback(
     async (request: BulkTagMutationRequest) => {
-      const response = await (request.confirmed ? apiPost : apiPostPreview)<TagMutationResponse>(
-        "/api/v1/tags/bulk",
-        apiToken,
-        request,
-      );
+      const response = await (
+        request.confirmed ? apiPost : apiPostPreview
+      )<TagMutationResponse>("/api/v1/tags/bulk", apiToken, request);
       if (currentApiToken.current !== apiToken) {
         return response;
       }
       if (!response.confirmation_required) {
-        await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
+        await Promise.all([
+          onFleetChanged(),
+          refreshTagInventoryAfterMutation(),
+        ]);
       }
       return response;
     },
@@ -392,16 +547,23 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       privilegeAssertion?: PrivilegeAssertion | null,
       previewHash?: string | null,
     ) => {
-      const response = await apiDelete<TagMutationResponse>(`/api/v1/tags/${encodeURIComponent(tag)}`, apiToken, {
-        confirmed,
-        preview_hash: previewHash ?? null,
-        privilege_assertion: privilegeAssertion,
-      });
+      const response = await apiDelete<TagMutationResponse>(
+        `/api/v1/tags/${encodeURIComponent(tag)}`,
+        apiToken,
+        {
+          confirmed,
+          preview_hash: previewHash ?? null,
+          privilege_assertion: privilegeAssertion,
+        },
+      );
       if (currentApiToken.current !== apiToken) {
         return response;
       }
       if (!response.confirmation_required) {
-        await Promise.all([onFleetChanged(), refreshTagInventoryAfterMutation()]);
+        await Promise.all([
+          onFleetChanged(),
+          refreshTagInventoryAfterMutation(),
+        ]);
       }
       return response;
     },
@@ -418,10 +580,12 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await retainMutationSuccessAfterRefresh(loadConfigurationSources);
+      await retainMutationSuccessAfterRefresh(() =>
+        loadConfigurationInventory(true),
+      );
       return response;
     },
-    [apiToken, loadConfigurationSources],
+    [apiToken, loadConfigurationInventory],
   );
 
   const cloneConfigurationPreset = useCallback(
@@ -434,10 +598,12 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await retainMutationSuccessAfterRefresh(loadConfigurationSources);
+      await retainMutationSuccessAfterRefresh(() =>
+        loadConfigurationInventory(true),
+      );
       return response;
     },
-    [apiToken, loadConfigurationSources],
+    [apiToken, loadConfigurationInventory],
   );
 
   const previewConfigurationPreset = useCallback(
@@ -460,10 +626,12 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await retainMutationSuccessAfterRefresh(loadConfigurationSources);
+      await retainMutationSuccessAfterRefresh(() =>
+        loadConfigurationInventory(true),
+      );
       return response;
     },
-    [apiToken, loadConfigurationSources],
+    [apiToken, loadConfigurationInventory],
   );
 
   const deleteConfigurationPreset = useCallback(
@@ -475,9 +643,11 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       if (currentApiToken.current !== apiToken) {
         return;
       }
-      await retainMutationSuccessAfterRefresh(loadConfigurationSources);
+      await retainMutationSuccessAfterRefresh(() =>
+        loadConfigurationInventory(true),
+      );
     },
-    [apiToken, loadConfigurationSources],
+    [apiToken, loadConfigurationInventory],
   );
 
   const previewConfigurationSourceOverride = useCallback(
@@ -500,10 +670,12 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
       if (currentApiToken.current !== apiToken) {
         return response;
       }
-      await retainMutationSuccessAfterRefresh(loadConfigurationSources);
+      await retainMutationSuccessAfterRefresh(() =>
+        loadConfigurationInventory(true),
+      );
       return response;
     },
-    [apiToken, loadConfigurationSources],
+    [apiToken, loadConfigurationInventory],
   );
 
   const loadEffectiveAgentConfig = useCallback(
@@ -532,7 +704,10 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const renderRuntimeConfigPatchGenerator = useCallback(
-    async (generatorId: string, request: RuntimeConfigPatchGeneratorRenderRequest) =>
+    async (
+      generatorId: string,
+      request: RuntimeConfigPatchGeneratorRenderRequest,
+    ) =>
       apiPost<RuntimeConfigPatchGeneratorRenderResponse>(
         `/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}/render`,
         apiToken,
@@ -558,8 +733,15 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
   );
 
   const deleteRuntimeConfigPatchGenerator = useCallback(
-    async (generatorId: string, request: DeleteRuntimeConfigPatchGeneratorRequest) => {
-      await apiDelete(`/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}`, apiToken, request);
+    async (
+      generatorId: string,
+      request: DeleteRuntimeConfigPatchGeneratorRequest,
+    ) => {
+      await apiDelete(
+        `/api/v1/runtime-config/patch-generators/${encodeURIComponent(generatorId)}`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -578,16 +760,23 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
 
   const resolveJobTargets = useCallback(
     async (selection: JobTargetSelection) =>
-      apiPostPreview<BulkResolveResponse>("/api/v1/bulk/resolve", apiToken, selection),
+      apiPostPreview<BulkResolveResponse>(
+        "/api/v1/bulk/resolve",
+        apiToken,
+        selection,
+      ),
     [apiToken],
   );
 
   const clearInventory = useCallback(() => {
     tagInventoryLoadGeneration.current += 1;
+    configurationPresetsLoadGeneration.current += 1;
     configurationSourcesLoadGeneration.current += 1;
     runtimeConfigApplyLoadGeneration.current += 1;
     tagOrderMutationGeneration.current += 1;
     loadTagInventoryInFlight.current = null;
+    loadConfigurationPresetsInFlight.current = null;
+    loadConfigurationSourcesInFlight.current = null;
     currentApiToken.current = "";
     tagInventoryError.current = null;
     setTags([]);
@@ -596,12 +785,15 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     setRuntimeConfigApplyStates([]);
     setRuntimeConfigPatchGenerators([]);
     setTagsError(null);
+    setConfigurationPresetsError(null);
+    setConfigurationPresetsEvidenceAvailable(false);
     setConfigurationSourcesError(null);
     setConfigurationSourcesEvidenceAvailable(false);
     setRuntimeConfigApplyError(null);
     setTagInventoryEvidenceAvailable(false);
     setRuntimeConfigApplyEvidenceAvailable(false);
     setRuntimeConfigApplyLoading(false);
+    setConfigurationPresetsLoading(false);
     setConfigurationSourcesLoading(false);
     setTagsLoading(false);
   }, []);
@@ -614,6 +806,9 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     submitRuntimeConfigPatch,
     cloneConfigurationPreset,
     configurationPresets,
+    configurationPresetsEvidenceAvailable,
+    configurationPresetsError,
+    configurationPresetsLoading,
     configurationSourcesEvidenceAvailable,
     configurationSourcesError,
     configurationSourcesLoading,
@@ -625,6 +820,7 @@ export function useInventoryData(apiToken: string, onUnauthorized: () => void, o
     deleteTag,
     loadEffectiveAgentConfig,
     loadTagInventory,
+    loadConfigurationInventory,
     loadConfigurationSources,
     loadRuntimeConfigApplyStates,
     runtimeConfigApplyEvidenceAvailable,

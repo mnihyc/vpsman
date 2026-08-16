@@ -1873,6 +1873,7 @@ export function App() {
       <FleetWorkspace
         activeSubpage={panelSubpage}
         agents={visibleAgents}
+        apiToken={dashboard.apiToken}
         apiError={dashboard.apiError}
         fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
         configurationSources={dashboard.configurationSources}
@@ -2054,6 +2055,13 @@ export function App() {
         trafficAccounting={dashboard.trafficAccounting}
         vpsRuleValues={dashboard.vpsRuleValues}
         configurationPresets={dashboard.configurationPresets}
+        configurationPresetsEvidenceState={
+          dashboard.configurationPresetsLoading
+            ? "loading"
+            : dashboard.configurationPresetsEvidenceAvailable
+              ? "available"
+              : "unavailable"
+        }
         configurationSources={dashboard.configurationSources}
         configurationSourcesEvidenceState={
           dashboard.configurationSourcesLoading
@@ -2070,6 +2078,7 @@ export function App() {
         error={combineErrors(
           dashboard.apiError,
           dashboard.tagsError,
+          dashboard.configurationPresetsError,
           dashboard.configurationSourcesError,
           dashboard.runtimeConfigApplyError,
         )}
@@ -2080,6 +2089,7 @@ export function App() {
         jobs={dashboard.jobs}
         loading={
           dashboard.tagsLoading ||
+          dashboard.configurationPresetsLoading ||
           dashboard.configurationSourcesLoading ||
           dashboard.runtimeConfigApplyLoading
         }
@@ -2087,7 +2097,7 @@ export function App() {
         onCreateJob={dashboard.createJob}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
-        onLoadConfigurationSources={dashboard.loadConfigurationSources}
+        onLoadConfigurationInventory={dashboard.loadConfigurationInventory}
         onDeleteRuntimeConfigPatchGenerator={
           dashboard.deleteRuntimeConfigPatchGenerator
         }
@@ -2095,7 +2105,12 @@ export function App() {
         onOpenJobHistory={openJobHistory}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenAlerts={() => selectView("Observability", "alerts")}
-        onRefresh={dashboard.loadTagInventory}
+        onRefresh={async () => {
+          await Promise.all([
+            dashboard.loadTagInventory(),
+            dashboard.loadConfigurationInventory(),
+          ]);
+        }}
         onBulkUnsetVpsRules={dashboard.bulkUnsetVpsRules}
         onBulkUpsertVpsRules={dashboard.bulkUpsertVpsRules}
         onDryRunVpsRules={dashboard.dryRunVpsRules}
@@ -2195,8 +2210,14 @@ export function App() {
     return (
       <ConfigurationSourcesPanel
         agents={dashboard.agents}
-        error={dashboard.configurationSourcesError}
-        loading={dashboard.configurationSourcesLoading}
+        error={combineErrors(
+          dashboard.configurationPresetsError,
+          dashboard.configurationSourcesError,
+        )}
+        loading={
+          dashboard.configurationPresetsLoading ||
+          dashboard.configurationSourcesLoading
+        }
         onApplyOverride={dashboard.applyConfigurationSourceOverride}
         onClonePreset={dashboard.cloneConfigurationPreset}
         onCreatePreset={dashboard.createConfigurationPreset}
@@ -2205,7 +2226,7 @@ export function App() {
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onPreviewOverride={dashboard.previewConfigurationSourceOverride}
         onPreviewPreset={dashboard.previewConfigurationPreset}
-        onRefresh={dashboard.loadConfigurationSources}
+        onRefresh={dashboard.loadConfigurationInventory}
         onUpdatePreset={dashboard.updateConfigurationPreset}
         presets={dashboard.configurationPresets}
         privilegeMaterial={privilegeMaterial}

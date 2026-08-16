@@ -730,10 +730,10 @@ async function clickVisibleGridRowButton(
 
 async function exerciseColumnControls(page: Page, grid: Locator) {
   const vpsHeader = grid.locator(".gridHeaderCell", { hasText: "VPS" }).first();
-  const countryHeader = grid
-    .locator(".gridHeaderCell", { hasText: "Country" })
+  const locationHeader = grid
+    .locator(".gridHeaderCell", { hasText: "Location" })
     .first();
-  const resizeHandle = countryHeader.locator(".gridResizeHandle");
+  const resizeHandle = locationHeader.locator(".gridResizeHandle");
   await expect(resizeHandle).toBeVisible();
   const box = await resizeHandle.boundingBox();
   expect(box).not.toBeNull();

@@ -568,7 +568,7 @@ const allViews: ScreenshotEntry[] = [
       "Affected VPS current state",
       "Stale apply",
       "Deleted or unavailable VPS",
-      "3/3 rules valid",
+      "4/4 rules valid",
     ],
   },
   {
@@ -1672,7 +1672,7 @@ async function navigateAndScreenshot(
       .getByLabel("VPS rules selector expression")
       .fill("id:agent-sfo-01");
     await expect(
-      page.getByText("Loaded 3 existing rules for agent-sfo-01", {
+      page.getByText("Loaded 4 existing rules for agent-sfo-01", {
         exact: true,
       }),
     ).toBeVisible({ timeout: 5_000 });

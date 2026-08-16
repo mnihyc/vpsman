@@ -1182,8 +1182,9 @@ export function SharedViewsPanel({
               Display name and health are always visible. Internal VPS IDs,
               network-address fields, configuration, actions, jobs, terminals,
               files, backups, audit data, and operator identity are never
-              included. Operator-entered display and Ping target names appear as
-              entered, so keep sensitive addresses out of public labels.
+              included. Operator-entered display, product, and Ping target names
+              appear as entered, so keep sensitive addresses out of public
+              labels.
             </small>
           </div>
           {visibilityOptions(draft.visibility).map((option) => (
@@ -1573,7 +1574,7 @@ function visibilityOptions(
   return [
     {
       checked: visibility.identity_context,
-      detail: "Provider and region context",
+      detail: "May disclose provider, product name, country, region, and tags",
       disabled: false,
       field: "identity_context",
       label: "Identity context",

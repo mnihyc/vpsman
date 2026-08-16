@@ -906,6 +906,10 @@ nav {
   white-space: nowrap;
 }
 
+.errorText {
+  color: var(--danger-strong);
+}
+
 .targetExpressionBar {
   height: 34px;
   min-height: 34px;

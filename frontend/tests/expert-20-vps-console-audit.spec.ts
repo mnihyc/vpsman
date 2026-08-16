@@ -12,7 +12,8 @@ test.beforeEach(async ({ page }) => {
 
 async function selectScheduleRow(page: Page, scheduleName: string) {
   const grid = page.getByLabel("Schedule records data grid");
-  const row = grid.locator(".gridBody [role=row]", { hasText: scheduleName })
+  const row = grid
+    .locator(".gridBody [role=row]", { hasText: scheduleName })
     .first();
   await expect(row).toBeVisible();
   const checkbox = row
@@ -21,9 +22,7 @@ async function selectScheduleRow(page: Page, scheduleName: string) {
   if (!(await checkbox.isChecked())) {
     await checkbox.check();
   }
-  await expect(
-    grid.getByRole("button", { name: /Action/ }),
-  ).toBeEnabled();
+  await expect(grid.getByRole("button", { name: /Action/ })).toBeEnabled();
 }
 
 async function chooseScheduleSelectionAction(page: Page, actionName: string) {
@@ -90,7 +89,9 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     "provider:alpha && country:US",
   );
   await expect(page.getByText("1 VPS in local preview")).toBeVisible();
-  await activate(page.getByRole("button", { name: "Review update", exact: true }));
+  await activate(
+    page.getByRole("button", { name: "Review update", exact: true }),
+  );
   await expect(page.getByText("Confirm schedule update")).toBeVisible();
   await activate(
     page
@@ -111,9 +112,7 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
   );
   await expect(page.getByText("Defer schedule")).toBeVisible();
   await expect(
-    page.getByText(
-      "Customer maintenance freeze for APAC packet-filter update",
-    ),
+    page.getByText("Customer maintenance freeze for APAC packet-filter update"),
   ).toBeVisible();
   await activate(
     page.locator(".confirmationPrompt").getByRole("button", { name: "Defer" }),
@@ -165,7 +164,9 @@ test("schedule registry lifecycle uses UUID actions from the browser", async ({
     page.getByRole("region", { name: "Delete schedule" }),
   ).toBeVisible();
   await activate(
-    page.locator(".confirmationPrompt").getByRole("button", { name: "Delete schedule" }),
+    page
+      .locator(".confirmationPrompt")
+      .getByRole("button", { name: "Delete schedule" }),
   );
   await expect(
     page
@@ -252,7 +253,10 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     canonicalDetail.getByText("Last contact", { exact: true }),
   ).toBeVisible();
   await expect(canonicalDetail).toContainText("acmecloud");
-  await expect(canonicalDetail).toContainText("country:NL");
+  const canonicalLocation = canonicalDetail.getByLabel("VPS location");
+  await expect(canonicalLocation).toContainText(/NL\s*·\s*ams/);
+  await expect(canonicalLocation).not.toContainText("country:");
+  await expect(canonicalLocation).not.toContainText("region:");
   await expect(canonicalDetail).toContainText("Memory used");
   await expect(canonicalDetail).toContainText("75%");
   await expect(canonicalDetail.getByLabel("VPS detail tabs")).toBeVisible();
@@ -301,7 +305,9 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
     .getByLabel("Bulk target selector expression")
     .fill("provider:acmecloud && tag:payments");
   await expect(composer.getByText("24/24").first()).toBeVisible();
-  await expect(composer.getByText("24/24 resolved from selector")).toBeVisible();
+  await expect(
+    composer.getByText("24/24 resolved from selector"),
+  ).toBeVisible();
 
   const impact = composer.locator(".targetImpactPreview");
   await expect(
@@ -321,10 +327,16 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await activate(composer.locator(".dispatchExecutionOptions > summary"));
   await expect(composer.getByLabel("Max timeout seconds")).toBeVisible();
   await composer.getByLabel("Max timeout seconds").fill("120");
-  await activate(composer.getByRole("button", { name: "Dispatch", exact: true }));
+  await activate(
+    composer.getByRole("button", { name: "Dispatch", exact: true }),
+  );
   await expect(composer.getByText("Confirm job dispatch")).toBeVisible();
-  await expect(composer.locator(".confirmationPrompt")).toHaveClass(/\bnormal\b/);
-  await expect(composer.locator(".confirmationPrompt")).not.toHaveClass(/\bdanger\b/);
+  await expect(composer.locator(".confirmationPrompt")).toHaveClass(
+    /\bnormal\b/,
+  );
+  await expect(composer.locator(".confirmationPrompt")).not.toHaveClass(
+    /\bdanger\b/,
+  );
   await expect(composer.locator(".dispatchActions")).toHaveCount(0);
   await expect(
     composer.getByText("24 resolved (20 online, 1 stale, 3 unavailable)"),
@@ -535,8 +547,7 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           memory_available_bytes_min: Math.max(1, memoryAvailableGiB - 1) * gib,
           memory_total_bytes_max: 16 * gib,
           memory_used_ratio_avg: 1 - memoryAvailableGiB / 16,
-          memory_used_ratio_max:
-            1 - Math.max(1, memoryAvailableGiB - 1) / 16,
+          memory_used_ratio_max: 1 - Math.max(1, memoryAvailableGiB - 1) / 16,
           network_rx_bytes_max: (120 + index * 3 + point) * 1024 * 1024,
           network_tx_bytes_max: (70 + index * 2 + point) * 1024 * 1024,
           sample_count: 12 + point,
@@ -766,8 +777,8 @@ async function installTwentyFourVpsExpertMock(page: Page) {
         return jsonResponse({
           target_count: targets.length,
           target_counts: targetCountsFromStatuses(
-            jobTargets[jobId].map((target) =>
-              (target as { status: string }).status,
+            jobTargets[jobId].map(
+              (target) => (target as { status: string }).status,
             ),
           ),
           job_id: jobId,
@@ -865,7 +876,10 @@ async function collectLayoutSignals(page: Page, scopeSelector: string) {
       ) {
         const left = rects[leftIndex];
         const right = rects[rightIndex];
-        if (left.element.contains(right.element) || right.element.contains(left.element)) {
+        if (
+          left.element.contains(right.element) ||
+          right.element.contains(left.element)
+        ) {
           continue;
         }
         const separated =
