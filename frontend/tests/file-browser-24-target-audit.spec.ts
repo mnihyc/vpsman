@@ -89,7 +89,7 @@ test("bulk file operations remain scannable with 24 VPS targets", async ({
   await expect(page.getByLabel("Bulk file attention targets")).toContainText(
     "edge-us-23",
   );
-  await expect(preflight).toContainText("384.0 MiB");
+  await expect(preflight).toContainText("403 MB");
   await expect(preflight).toContainText(
     "Stale agents may still reject with a command-version mismatch",
   );

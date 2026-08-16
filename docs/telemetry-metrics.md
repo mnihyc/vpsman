@@ -124,8 +124,14 @@ rate_bps = (current_counter - previous_counter) * 8
 ```
 
 Storage, API fields, and raw CSV values keep this `bps` bit-rate contract.
-Operator-facing live RX/TX values and chart labels convert it by eight and use
-decimal transfer-rate units (`B/s`, `KB/s`, `MB/s`, `GB/s`). Declared port
+Operator-facing live RX/TX values and chart labels convert it by eight. Personal
+preferences select one byte-unit system across authenticated byte counts and
+byte-per-second rates: decimal is the default (`B`, `KB`, `MB`, `GB`, `TB` and
+their `/s` forms, powers of 1000), while binary is an explicit opt-in (`B`,
+`KiB`, `MiB`, `GiB`, `TiB` and their `/s` forms, powers of 1024). Public shares
+use the decimal default because they have no operator preference context. The
+preference changes presentation only; stored bytes, API values, CSV exports,
+and explicitly unit-bearing configuration inputs are unchanged. Declared port
 speed, tunnel bandwidth, shaping/rate limits, and duration-bounded speed-test
 throughput remain capacity measurements in `bps`, `Kbps`, `Mbps`, or `Gbps`;
 they must not use the live-transfer formatter.

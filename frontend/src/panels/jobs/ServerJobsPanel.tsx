@@ -1,4 +1,5 @@
 import { RefreshCw, ShieldCheck, Trash2, XCircle } from "lucide-react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -76,6 +77,7 @@ export function ServerJobsPanel({
   onRefresh: () => void;
   section?: "all" | "cleanup" | "hidden" | "jobs";
 }) {
+  const formatBytes = useByteCountFormatter();
   const [olderThanDays, setOlderThanDays] = useState("30");
   const [artifactState, setArtifactState] =
     useState<CleanupArtifactState>("active");
@@ -237,7 +239,7 @@ export function ServerJobsPanel({
         sortValue: (job) => job.created_at,
       },
     ],
-    [],
+    [formatBytes],
   );
 
   async function previewCleanup() {
@@ -1008,17 +1010,4 @@ function sameDomains(left: string[], right: string[]): boolean {
   return normalizedLeft.every(
     (value, index) => value === normalizedRight[index],
   );
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }

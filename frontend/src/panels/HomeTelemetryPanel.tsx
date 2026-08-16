@@ -46,10 +46,14 @@ import type {
   DashboardWindow,
 } from "../types";
 import {
-  formatByteRateFromBitsPerSecond,
   INTERFACE_RATE_DEFINITION,
   resourceMetricDefinition,
 } from "../telemetryMetrics";
+import {
+  useByteCountFormatter,
+  useByteRateFormatter,
+  type ByteRateFormatter,
+} from "../panelDisplay";
 import { formatCompactTime } from "../utils";
 import {
   ACCESS_REVOKED_RECOVERY_DETAIL,
@@ -129,6 +133,8 @@ export function HomeTelemetryPanel({
   preferences,
   window,
 }: HomeTelemetryPanelProps) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const summary = overview?.summary;
   const operations = overview?.operations;
@@ -1365,6 +1371,7 @@ function ClusterButton({
   cluster: DashboardLabelClusterRecord;
   onOpen: (drawer: DrawerState) => void;
 }) {
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   return (
     <button
       className={
@@ -1376,7 +1383,10 @@ function ClusterButton({
         onOpen({
           description: cluster.query ?? "All VPS clients in the current fleet.",
           drilldown: cluster.drilldown,
-          metrics: clusterDrawerMetrics(cluster),
+          metrics: clusterDrawerMetrics(
+            cluster,
+            formatByteRateFromBitsPerSecond,
+          ),
           title: cluster.label,
         })
       }
@@ -1397,6 +1407,7 @@ function ClusterButton({
 
 function clusterDrawerMetrics(
   cluster: DashboardLabelClusterRecord,
+  formatByteRateFromBitsPerSecond: ByteRateFormatter,
 ): DrawerMetric[] {
   if (cluster.kind === "date") {
     return [
@@ -1611,22 +1622,6 @@ function trafficSortLabel(sort: DashboardTrafficSort): string {
   return (
     trafficSortOptions.find((option) => option.value === sort)?.label ?? "Total"
   );
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1_000_000_000_000) {
-    return `${(value / 1_000_000_000_000).toFixed(1)} TB`;
-  }
-  if (value >= 1_000_000_000) {
-    return `${(value / 1_000_000_000).toFixed(1)} GB`;
-  }
-  if (value >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(1)} MB`;
-  }
-  if (value >= 1_000) {
-    return `${(value / 1_000).toFixed(1)} KB`;
-  }
-  return `${Math.round(value)} B`;
 }
 
 function groupLabel(value: DashboardPreferences["groupBy"]): string {

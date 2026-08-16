@@ -6,6 +6,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { useByteCountFormatter } from "../panelDisplay";
 import {
   Archive,
   ArrowRight,
@@ -410,6 +411,7 @@ export function BackupsPanel({
   setPrivilegeMaterial,
 }: BackupsPanelProps) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const formatBytes = useByteCountFormatter();
   const vpsRuleSearch = useVpsRuleSearchContext();
   const {
     captureReviewGeneration,
@@ -889,6 +891,7 @@ export function BackupsPanel({
     artifacts,
     backupPolicies,
     backups,
+    formatBytes,
     migrationLinks,
     restorePlans,
   });
@@ -3373,6 +3376,7 @@ function BackupRequestSummary({
   backupPolicies: BackupPolicyRecord[];
   backups: BackupRequestRecord[];
 }) {
+  const formatBytes = useByteCountFormatter();
   const protection = backupProtectionSummary(
     agents,
     backupPolicies,
@@ -3686,6 +3690,7 @@ function BackupOverview({
   onSelectSubpage: (subpage: string) => void;
   restorePlans: RestorePlanRecord[];
 }) {
+  const formatBytes = useByteCountFormatter();
   const protection = backupProtectionSummary(
     agents,
     backupPolicies,
@@ -4174,6 +4179,7 @@ function BackupArtifactOwnershipGuide({
   onOpenJobDetails?: (jobId: string) => void;
   onSelectSubpage: (subpage: string) => void;
 }) {
+  const formatBytes = useByteCountFormatter();
   const activeArtifacts = artifacts.filter(backupArtifactContentAvailable);
   const artifactsTruncated = artifacts.length >= HISTORY_DETAIL_LIMIT;
   const backupsTruncated = backups.length >= HISTORY_DETAIL_LIMIT;
@@ -4350,6 +4356,7 @@ function buildBackupPostureItems({
   artifacts,
   backupPolicies,
   backups,
+  formatBytes,
   migrationLinks,
   restorePlans,
 }: {
@@ -4357,6 +4364,7 @@ function buildBackupPostureItems({
   artifacts: BackupArtifactRecord[];
   backupPolicies: BackupPolicyRecord[];
   backups: BackupRequestRecord[];
+  formatBytes: (value: number | null | undefined) => string;
   migrationLinks: MigrationLinkRecord[];
   restorePlans: RestorePlanRecord[];
 }): BackupPostureItem[] {
@@ -4900,19 +4908,6 @@ function latestByIso<T>(
         ? value
         : selected;
   });
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  if (value < 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }
 
 function backupArtifactForRequest(

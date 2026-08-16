@@ -990,6 +990,7 @@ const suiteConfigValidation = {
 };
 
 const operatorPreferences = {
+  byte_unit_display_mode: "decimal",
   bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,

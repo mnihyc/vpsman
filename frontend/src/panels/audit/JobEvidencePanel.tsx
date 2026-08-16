@@ -1,5 +1,6 @@
 import { ClipboardCheck, ExternalLink, FileText, Link2, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
@@ -373,6 +374,7 @@ function JobEvidenceDetail({
   onOpenJobDetails?: (jobId: string) => void;
   record: EvidenceRecord;
 }) {
+  const formatBytes = useByteCountFormatter();
   const targetSummary = targetScopeLabel(record.job, evidence.targets, agentNameById);
   const outputArtifactCount = evidence.outputs.filter((output) =>
     Boolean(output.artifact_object_key || output.artifact_sha256_hex),
@@ -726,14 +728,4 @@ function metadataText(metadata: JsonValue, keys: string[]): string | null {
 
 function commandLabel(value: string): string {
   return value.replace(/^scheduled_/, "").replace(/_/g, " ");
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

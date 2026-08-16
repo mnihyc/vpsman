@@ -1610,6 +1610,7 @@ export type OperatorView = {
 export type OperatorPreferences = {
   vps_name_display_mode: "name" | "name_id_suffix";
   fleet_location_display_mode: "country_only" | "country_region";
+  byte_unit_display_mode: "decimal" | "binary";
   timezone: string | null;
   language: "en";
   show_country_flags: boolean;

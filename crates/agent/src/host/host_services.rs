@@ -428,7 +428,7 @@ async fn collect_systemd_services(
     .await?;
     ensure_command_success("systemctl list-unit-files", &files)?;
     if units.stdout_truncated || files.stdout_truncated {
-        anyhow::bail!("service_inventory_output_limit_exceeded: systemctl output exceeded 2 MiB");
+        anyhow::bail!("service_inventory_output_limit_exceeded: systemctl output exceeded 2.1 MB");
     }
     Ok(parse_systemd_inventory(&units.stdout, &files.stdout))
 }

@@ -241,10 +241,10 @@ test("opens failed transfer retry metadata in resumable dispatch", async ({ page
   await expect(review).toContainText("edge-sfo-01 (fo01)");
   await expect(review).toContainText("Download from VPS");
   await expect(review).toContainText("/var/log/nginx/error.log");
-  await expect(review).toContainText("320.0 KiB / 1.0 MiB (31%)");
+  await expect(review).toContainText("328 KB / 1.0 MB (31%)");
   await expect(review).toContainText("50 Mbps cap");
   await expect(review).toContainText("Checksum not reported by session");
-  await expect(review).toContainText("chunk 64.0 KiB, last 32.0 KiB");
+  await expect(review).toContainText("chunk 66 KB, last 33 KB");
   await expect(review).toContainText("session aborted");
   await expect(review).toContainText("file_transfer_download_chunk");
   await expect(review).toContainText("57575757");

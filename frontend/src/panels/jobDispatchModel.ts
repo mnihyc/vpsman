@@ -85,7 +85,7 @@ export function buildOperation(
       throw new Error("Shell script is empty");
     }
     if (new TextEncoder().encode(script).length > MAX_SHELL_SCRIPT_BYTES) {
-      throw new Error("Shell script exceeds 16 KiB");
+      throw new Error("Shell script exceeds 16.4 KB");
     }
     if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(script)) {
       throw new Error("Shell script contains unsupported control characters");

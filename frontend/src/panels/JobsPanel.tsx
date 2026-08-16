@@ -26,7 +26,10 @@ import {
 } from "../constants";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { usePanelDisplaySettings } from "../panelDisplay";
+import {
+  useByteCountFormatter,
+  usePanelDisplaySettings,
+} from "../panelDisplay";
 import { type PrivilegeMaterial } from "../privilege";
 import type { JobDispatchPreset } from "../jobDispatchPreset";
 import type {
@@ -351,6 +354,7 @@ export function JobsPanel({
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const formatBytes = useByteCountFormatter();
   const targetDetailRef = useRef<HTMLDivElement | null>(null);
   const targetLoadGenerationRef = useRef(0);
   const comparisonLoadGenerationRef = useRef(0);
@@ -1186,7 +1190,7 @@ export function JobsPanel({
         sortValue: (group) => group.output_digest_hex,
       },
     ],
-    [agentNameById],
+    [agentNameById, formatBytes],
   );
   const comparisonTargetColumns = useMemo<
     ConsoleDataGridColumn<JobOutputComparisonRow>[]
@@ -1249,7 +1253,7 @@ export function JobsPanel({
         sortValue: (row) => row.output_digest_hex,
       },
     ],
-    [agentNameById],
+    [agentNameById, formatBytes],
   );
   const comparisonGroupActions = useMemo<
     ConsoleDataGridAction<JobOutputComparisonGroup>[]
@@ -2658,14 +2662,4 @@ function formatComparisonTime(value: string): string {
     return formatTime(new Date(Number(value) * 1000).toISOString());
   }
   return formatTime(value);
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

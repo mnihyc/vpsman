@@ -5,6 +5,7 @@ import {
   PackageCheck,
   Upload,
 } from "lucide-react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import {
   FILE_TRANSFER_CHUNK_BYTES,
   MAX_CHUNKED_FILE_PUSH_BYTES,
@@ -170,19 +171,6 @@ function operationModeGroups(includeTerminal: boolean): OperationModeGroup[] {
     });
   }
   return groups;
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }
 
 export function JobOperationEditor({
@@ -386,6 +374,7 @@ export function JobOperationEditor({
   updateRollbackSha256Hex: string;
   updateSha256Hex: string;
 }) {
+  const formatBytes = useByteCountFormatter();
   if (mode === "shell") {
     return (
       <div className="compactOperation shellOperation">
@@ -869,8 +858,8 @@ export function JobOperationEditor({
         <span className="operationHint">
           There is no fixed lookback limit. A selected date earlier than an
           interface&apos;s vnStat history is clamped independently to that
-          interface&apos;s latest continuous retained coverage. The operation also
-          requires that coverage to reach an existing live agent sample.
+          interface&apos;s latest continuous retained coverage. The operation
+          also requires that coverage to reach an existing live agent sample.
           Aggregate bytes are preserved; minute-level distribution is
           reconstructed from vnStat&apos;s retained resolutions.
         </span>

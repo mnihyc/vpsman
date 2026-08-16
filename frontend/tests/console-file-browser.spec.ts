@@ -360,7 +360,7 @@ test("runs bulk file download and upload workflows with grouped summaries", asyn
 
   const preflight = page.getByLabel("Bulk file preflight checks");
   await expect(preflight).toContainText("Size estimate");
-  await expect(preflight).toContainText("16.0 MiB cap per target");
+  await expect(preflight).toContainText("17 MB cap per target");
   await expect(preflight).toContainText("Remote matched-file size is only known after agents read the path");
   await expect(preflight).toContainText("Retry and retention");
   await expect(page.getByLabel("Bulk file path")).toHaveValue("");

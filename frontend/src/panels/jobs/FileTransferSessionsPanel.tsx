@@ -9,6 +9,10 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
 import { useEffect, useRef, useState } from "react";
 import type { ArtifactDownloadMode } from "../../artifactDownload";
 import { ActionFeedback } from "../../components/ActionFeedback";
@@ -130,6 +134,7 @@ export function FileTransferSessionsPanel({
     request: UploadFileTransferSourceArtifactRequest,
   ) => Promise<FileTransferSourceArtifactRecord>;
 }) {
+  const formatBytes = useByteCountFormatter();
   const [handoffPendingKey, setHandoffPendingKey] = useState<string | null>(
     null,
   );
@@ -268,7 +273,9 @@ export function FileTransferSessionsPanel({
         label: "Retry",
         onSelect: ([transfer]) => {
           if (transfer) {
-            setRetrySnapshot(retryReviewSnapshot(transfer, clientLabel));
+            setRetrySnapshot(
+              retryReviewSnapshot(transfer, clientLabel, formatBytes),
+            );
           }
         },
       },
@@ -386,18 +393,18 @@ export function FileTransferSessionsPanel({
           <small
             title={
               transfer.last_chunk_size_bytes
-                ? formatChunkInfo(transfer)
+                ? formatChunkInfo(transfer, formatBytes)
                 : `Configured chunk ${transfer.chunk_size_bytes ? formatBytes(transfer.chunk_size_bytes) : "automatic"}; last chunk size was not reported.`
             }
           >
-            {formatChunkInfo(transfer)}
+            {formatChunkInfo(transfer, formatBytes)}
           </small>
         </span>
       ),
       header: "Size",
       id: "size",
       searchValue: (transfer) =>
-        `${transfer.size_bytes ?? ""} ${formatChunkInfo(transfer)}`,
+        `${transfer.size_bytes ?? ""} ${formatChunkInfo(transfer, formatBytes)}`,
       sortValue: (transfer) => transfer.size_bytes ?? 0,
     },
     {
@@ -405,11 +412,11 @@ export function FileTransferSessionsPanel({
         return (
           <span className="transferProgressCell">
             <span
-              title={`${formatTransferProgress(transfer)}; ${formatTransferRateLimit(
+              title={`${formatTransferProgress(transfer, formatBytes)}; ${formatTransferRateLimit(
                 transfer.rate_limit_kbps,
               )}`}
             >
-              {formatTransferProgress(transfer)}
+              {formatTransferProgress(transfer, formatBytes)}
             </span>
             <span className="transferProgressTrack">
               <span
@@ -426,7 +433,7 @@ export function FileTransferSessionsPanel({
       id: "progress_speed",
       resizeMinSize: 96,
       searchValue: (transfer) =>
-        `${formatTransferProgress(transfer)} ${formatTransferRateLimit(transfer.rate_limit_kbps)}`,
+        `${formatTransferProgress(transfer, formatBytes)} ${formatTransferRateLimit(transfer.rate_limit_kbps)}`,
       sortValue: (transfer) => transfer.progress_ratio ?? 0,
     },
     {
@@ -1209,7 +1216,7 @@ export function FileTransferSessionsPanel({
             <span>SHA-256</span>
             <strong>{transfer.sha256_hex ?? "Not reported"}</strong>
             <span>Progress</span>
-            <strong>{formatTransferProgress(transfer)}</strong>
+            <strong>{formatTransferProgress(transfer, formatBytes)}</strong>
             <span>Rate limit</span>
             <strong>{formatTransferRateLimit(transfer.rate_limit_kbps)}</strong>
             <span>Resume state</span>
@@ -1501,13 +1508,14 @@ function transferStateDetail(transfer: FileTransferSessionRecord): string {
 function retryReviewSnapshot(
   transfer: FileTransferSessionRecord,
   clientLabel: (clientId: string) => string,
+  formatBytes: ByteCountFormatter,
 ): TransferRetryReviewSnapshot {
   const mode =
     transfer.direction === "upload"
       ? "file_transfer_upload"
       : "file_transfer_download";
   return {
-    chunkEvidence: formatChunkInfo(transfer),
+    chunkEvidence: formatChunkInfo(transfer, formatBytes),
     chunkSizeBytes: transfer.chunk_size_bytes ?? 65536,
     clientId: transfer.client_id,
     clientLabel: clientLabel(transfer.client_id),
@@ -1519,7 +1527,7 @@ function retryReviewSnapshot(
     lastJobId: transfer.last_job_id,
     mode,
     path: transfer.path,
-    progress: formatTransferProgress(transfer),
+    progress: formatTransferProgress(transfer, formatBytes),
     rateLimit: formatTransferRateLimit(transfer.rate_limit_kbps),
     rateLimitKbps: transfer.rate_limit_kbps ?? 0,
     retryGuidance:
@@ -1729,7 +1737,10 @@ async function base64ForBytes(bytes: Uint8Array): Promise<string> {
   return window.btoa(binary);
 }
 
-function formatTransferProgress(transfer: FileTransferSessionRecord): string {
+function formatTransferProgress(
+  transfer: FileTransferSessionRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const size = transfer.size_bytes;
   if (!size || size <= 0) {
     return `${formatBytes(transfer.progress_bytes)} transferred`;
@@ -1738,7 +1749,10 @@ function formatTransferProgress(transfer: FileTransferSessionRecord): string {
   return `${formatBytes(transfer.progress_bytes)} / ${formatBytes(size)} (${pct}%)`;
 }
 
-function formatChunkInfo(transfer: FileTransferSessionRecord): string {
+function formatChunkInfo(
+  transfer: FileTransferSessionRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const configured = transfer.chunk_size_bytes
     ? formatBytes(transfer.chunk_size_bytes)
     : "auto";
@@ -1833,19 +1847,6 @@ function artifactLifecycleStatusTitle(status: string): string {
     deleted: "Object bytes were deleted.",
   };
   return descriptions[status] ?? status.replace(/_/g, " ");
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }
 
 function downloadFileName(path: string): string {

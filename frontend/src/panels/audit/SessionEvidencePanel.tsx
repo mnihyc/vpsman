@@ -7,6 +7,10 @@ import {
   UserX,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { presentAudit } from "../../auditPresentation";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -111,6 +115,7 @@ export function SessionEvidencePanel({
   terminalSessions: TerminalSessionRecord[];
   terminalSessionsTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const canInspectOperatorAuthority = operator?.role === "admin";
   const authEventsTruncated = operatorAuthEventsTruncated;
   const auditCorrelationTruncated = auditsTruncated || jobsTruncated;
@@ -326,10 +331,10 @@ export function SessionEvidencePanel({
         id: "transcript",
         header: "Transcript",
         minSize: 160,
-        searchValue: (row) => transcriptLabel(row.session),
+        searchValue: (row) => transcriptLabel(row.session, formatBytes),
         size: 180,
         sortValue: (row) => row.session.output_retained_bytes ?? 0,
-        cell: (row) => transcriptLabel(row.session),
+        cell: (row) => transcriptLabel(row.session, formatBytes),
       },
       {
         id: "audit",
@@ -350,6 +355,7 @@ export function SessionEvidencePanel({
       agentNameById,
       authEventBySessionId,
       canInspectOperatorAuthority,
+      formatBytes,
       operatorSessions,
       operatorCorrelationTruncated,
       terminalStateByKey,
@@ -583,6 +589,7 @@ function SelectedSessionEvidence({
   record: TerminalEvidenceRecord;
   state: TerminalEvidenceState;
 }) {
+  const formatBytes = useByteCountFormatter();
   const operatorSessionId = terminalOperatorSessionId(record.audits);
   const authEvent = operatorSessionId
     ? (authEventBySessionId.get(operatorSessionId) ?? null)
@@ -647,7 +654,7 @@ function SelectedSessionEvidence({
         </span>
         <span>
           <strong>Transcript link</strong>
-          <span>{transcriptLabel(record.session)}</span>
+          <span>{transcriptLabel(record.session, formatBytes)}</span>
         </span>
         <span>
           <strong>Authorization job</strong>
@@ -1621,7 +1628,10 @@ function sessionLifecycleLabel(session: TerminalSessionRecord): string {
   return `${session.state}; closed by ${session.close_reason ?? "not reported"}`;
 }
 
-function transcriptLabel(session: TerminalSessionRecord): string {
+function transcriptLabel(
+  session: TerminalSessionRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const transcript = transcriptEvidenceState(session);
   if (!transcript.replayable) {
     return transcript.label;
@@ -1640,14 +1650,4 @@ function formatOutputRange(session: TerminalSessionRecord): string {
 
 function formatArgv(argv: string[]): string {
   return argv.join(" ");
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }

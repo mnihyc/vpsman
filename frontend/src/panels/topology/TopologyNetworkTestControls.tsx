@@ -21,7 +21,11 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../../hooks/useReviewGenerationGuard";
-import { usePanelDisplaySettings } from "../../panelDisplay";
+import {
+  useByteCountFormatter,
+  usePanelDisplaySettings,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
 import { scrollIntoViewWithMotion } from "../../motion";
 import {
   buildPrivilegeForJobOperation,
@@ -91,6 +95,7 @@ export function TopologyNetworkTestControls({
   tunnelPlans: TunnelPlanRecord[];
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
+  const formatBytes = useByteCountFormatter();
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -438,7 +443,7 @@ export function TopologyNetworkTestControls({
               { label: "Direction", value: directionSummary! },
               {
                 label: "Transfer limit",
-                value: `${speedLimits!.durationSecs}s per direction · ${formatDataLimit(speedLimits!.maxBytes)} · ${formatRateLimit(speedLimits!.rateLimitKbps)}`,
+                value: `${speedLimits!.durationSecs}s per direction · ${formatDataLimit(speedLimits!.maxBytes, formatBytes)} · ${formatRateLimit(speedLimits!.rateLimitKbps)}`,
               },
               {
                 label: "Listener",
@@ -1040,8 +1045,13 @@ function NetworkExecutionEvidence({
   loading: boolean;
   outputs: JobOutputRecord[];
 }) {
+  const formatBytes = useByteCountFormatter();
   const rows = networkExecutionRows(outputs, clientLabel);
-  const speedCards = networkSpeedEvidenceCards(outputs, clientLabel);
+  const speedCards = networkSpeedEvidenceCards(
+    outputs,
+    clientLabel,
+    formatBytes,
+  );
   const retainedResultCount = rows.length + speedCards.length;
   return (
     <div
@@ -1293,6 +1303,7 @@ function parsedNetworkStatusOutputs(
 function networkSpeedEvidenceCards(
   outputs: JobOutputRecord[],
   clientLabel: (clientId: string) => string,
+  formatBytes: ByteCountFormatter,
 ): NetworkSpeedEvidence[] {
   const groups = new Map<NetworkSpeedDirection, ParsedNetworkStatusOutput[]>();
   for (const entry of parsedNetworkStatusOutputs(outputs)) {
@@ -1353,7 +1364,7 @@ function networkSpeedEvidenceCards(
     const detailParts = [
       bytes === null
         ? "Transferred bytes unavailable"
-        : `${formatNetworkBytes(bytes)} ${measurementRole === "receiver" ? "received" : "sent"}`,
+        : `${formatBytes(bytes)} ${measurementRole === "receiver" ? "received" : "sent"}`,
       elapsedMs === null
         ? "elapsed time unavailable"
         : `${formatMetric(elapsedMs / 1000)}s measured`,
@@ -1461,12 +1472,6 @@ function readableNetworkToken(value: string): string {
   return value
     .replace(/_/g, " ")
     .replace(/^./, (letter: string) => letter.toUpperCase());
-}
-
-function formatNetworkBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${formatMetric(value / 1024)} KiB`;
-  return `${formatMetric(value / (1024 * 1024))} MiB`;
 }
 
 function NetworkTestTrendCharts({
@@ -1901,10 +1906,11 @@ function throughputBaselineSummary(
   };
 }
 
-function formatDataLimit(maxBytes: number): string {
-  return maxBytes === 0
-    ? "unlimited data"
-    : `${formatMetric(maxBytes / (1024 * 1024))} MiB cap`;
+function formatDataLimit(
+  maxBytes: number,
+  formatBytes: ByteCountFormatter,
+): string {
+  return maxBytes === 0 ? "unlimited data" : `${formatBytes(maxBytes)} cap`;
 }
 
 function formatBandwidthMbps(value: number): string {

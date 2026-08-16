@@ -1706,7 +1706,7 @@ test("file browser reads a selected VPS path from Remote Operations without Jobs
   await activate(page.getByRole("button", { name: "Refresh", exact: true }));
   const routingEntry = page
     .getByRole("tree")
-    .getByRole("button", { name: /routing\.log 1\.0 MiB/ });
+    .getByRole("button", { name: /routing\.log 1\.0 MB/ });
   await routingEntry.scrollIntoViewIfNeeded();
   await routingEntry.click();
   const downloadEvent = page.waitForEvent("download");
@@ -2317,8 +2317,8 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   const resourceMetrics = edgeCard.locator(".vpsMonitorMetric");
   await expect(resourceMetrics.locator(":scope > strong small")).toHaveText([
     "(4-core)",
-    "(7.5 GiB)",
-    "(93 GiB)",
+    "(8.0 GB)",
+    "(100 GB)",
   ]);
   for (const index of [0, 1, 2]) {
     await expect(

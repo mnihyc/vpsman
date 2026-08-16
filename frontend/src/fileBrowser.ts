@@ -169,7 +169,7 @@ export async function buildWriteTextOperation({
 }): Promise<JobOperation> {
   const bytes = new TextEncoder().encode(content);
   if (bytes.byteLength > FILE_BROWSER_TEXT_LIMIT_BYTES) {
-    throw new Error("Editor content exceeds 1 MiB text limit");
+    throw new Error("Editor content exceeds 1.05 MB text limit");
   }
   return {
     type: "file_write_text",

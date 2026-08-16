@@ -78,6 +78,8 @@ pub(crate) struct OperatorPreferences {
     pub(crate) show_country_flags: bool,
     #[serde(default = "default_fleet_location_display_mode")]
     pub(crate) fleet_location_display_mode: String,
+    #[serde(default = "default_byte_unit_display_mode")]
+    pub(crate) byte_unit_display_mode: String,
     #[serde(default)]
     pub(crate) fleet_tag_visibility_overrides: BTreeMap<String, bool>,
     #[serde(default = "default_sidebar_subpanel_default")]
@@ -112,6 +114,7 @@ impl Default for OperatorPreferences {
             language: default_operator_language(),
             show_country_flags: default_show_country_flags(),
             fleet_location_display_mode: default_fleet_location_display_mode(),
+            byte_unit_display_mode: default_byte_unit_display_mode(),
             fleet_tag_visibility_overrides: BTreeMap::new(),
             sidebar_subpanel_default: default_sidebar_subpanel_default(),
             review_prompt_mode: default_review_prompt_mode(),
@@ -143,6 +146,11 @@ impl OperatorPreferences {
                 self.fleet_location_display_mode,
                 "country_only",
                 &["country_only", "country_region"],
+            ),
+            byte_unit_display_mode: normalize_choice(
+                self.byte_unit_display_mode,
+                "decimal",
+                &["decimal", "binary"],
             ),
             fleet_tag_visibility_overrides: normalize_fleet_tag_visibility_overrides(
                 self.fleet_tag_visibility_overrides,
@@ -253,6 +261,10 @@ fn default_show_country_flags() -> bool {
 
 fn default_fleet_location_display_mode() -> String {
     "country_only".to_string()
+}
+
+fn default_byte_unit_display_mode() -> String {
+    "decimal".to_string()
 }
 
 fn default_sidebar_subpanel_default() -> String {

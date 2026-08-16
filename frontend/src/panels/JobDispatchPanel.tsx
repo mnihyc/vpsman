@@ -97,6 +97,10 @@ import type {
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
 import { runPanelAction, shortId } from "../utils";
+import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../panelDisplay";
 import { DispatchOptions, JobTargetSelector } from "./JobDispatchControls";
 import {
   JobOperationEditor,
@@ -376,6 +380,7 @@ export function JobDispatchPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (material: PrivilegeMaterial | null) => Promise<void>;
 }) {
+  const formatBytes = useByteCountFormatter();
   const vpsRuleSearch = useVpsRuleSearchContext();
   const appliedDispatchPresetRequestId = useRef<string | null>(null);
   // Only the main composer restores operator-safe drafts/results. File
@@ -1215,7 +1220,7 @@ export function JobDispatchPanel({
       value: dispatchConfirmationOperationLabel,
     },
     { label: "Submission", value: "Dispatch immediately after confirmation" },
-    ...transferReviewItems(activeDispatchConfirmation),
+    ...transferReviewItems(activeDispatchConfirmation, formatBytes),
     ...operationReviewItems(
       activeDispatchConfirmation?.kind === "job"
         ? activeDispatchConfirmation.operation
@@ -2688,15 +2693,16 @@ function operationReviewItems(
   return items;
 }
 
-function transferReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
+function transferReviewItems(
+  snapshot: DispatchConfirmationSnapshot | null,
+  formatBytes: ByteCountFormatter,
+) {
   if (snapshot?.kind === "transfer_upload") {
     return [
       { label: "Local source", value: snapshot.file?.name ?? "Not selected" },
       {
         label: "Source size",
-        value: snapshot.file
-          ? formatTransferBytes(snapshot.file.size)
-          : "Not reported",
+        value: snapshot.file ? formatBytes(snapshot.file.size) : "Not reported",
       },
       {
         label: "Source SHA-256",
@@ -2721,7 +2727,7 @@ function transferReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
       },
       {
         label: "Transfer limits",
-        value: `${formatTransferBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
+        value: `${formatBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
       },
     ];
   }
@@ -2736,7 +2742,7 @@ function transferReviewItems(snapshot: DispatchConfirmationSnapshot | null) {
       { label: "Save method", value: snapshot.downloadSink },
       {
         label: "Transfer limits",
-        value: `${formatTransferBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
+        value: `${formatBytes(snapshot.chunkSizeBytes)} chunks · ${formatTransferRate(snapshot.rateLimitKbps)}`,
       },
     ];
   }
@@ -2823,16 +2829,6 @@ function RolloutNumberField({
       />
     </label>
   );
-}
-
-function formatTransferBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${Math.round(value / 1024)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function formatTransferRate(value: number): string {

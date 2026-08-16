@@ -24,9 +24,10 @@ import type {
 import { formatTime, timestampMillis, trafficQuotaState } from "../utils";
 import { useHistoryEntryState } from "../historyEntryState";
 import {
-  formatByteCount as formatBytes,
-  formatByteRateFromBitsPerSecond,
-} from "../telemetryMetrics";
+  useByteCountFormatter,
+  useByteRateFormatter,
+  type ByteCountFormatter,
+} from "../panelDisplay";
 
 type MonitoringSection = "resources" | "ping";
 type PingMetric = "latency" | "loss";
@@ -378,6 +379,10 @@ export function VpsMonitoringDetailPanel({
 }
 
 function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
+  const formatBytesNullable = (value: number | null) =>
+    value === null ? "-" : formatBytes(value);
   const timeline = useMemo(() => buildTimeline(data.range), [data.range]);
   const resources = useMemo(
     () => resourceCharts(data.resources, timeline, data.range.step_secs),
@@ -662,6 +667,7 @@ function TrafficCycle({
   clientId: string;
   traffic: TrafficAccountingRecord;
 }) {
+  const formatBytes = useByteCountFormatter();
   const configured = trafficConfigured(traffic);
   const percent = finiteNumber(traffic.cycle_percent);
   const width = percent === null ? 0 : Math.min(100, Math.max(0, percent));
@@ -700,6 +706,7 @@ function TrafficCycle({
                   traffic.diagnostic_rx_bytes,
                   traffic.rx_bytes,
                   traffic.quota_rx_bytes,
+                  formatBytes,
                 )}
               </em>
             </span>
@@ -711,6 +718,7 @@ function TrafficCycle({
                   traffic.diagnostic_tx_bytes,
                   traffic.tx_bytes,
                   traffic.quota_tx_bytes,
+                  formatBytes,
                 )}
               </em>
             </span>
@@ -722,6 +730,7 @@ function TrafficCycle({
                   traffic.diagnostic_total_bytes,
                   traffic.total_bytes,
                   traffic.quota_total_bytes,
+                  formatBytes,
                 )}
               </em>
             </span>
@@ -1297,11 +1306,11 @@ function formatLoss(value: number | null): string {
   return value === null ? "loss unavailable" : `${formatPercent(value)} loss`;
 }
 
-function formatBytesNullable(value: number | null): string {
-  return value === null ? "-" : formatBytes(value);
-}
-
-function quotaDetail(used: number, quota: number | null): string {
+function quotaDetail(
+  used: number,
+  quota: number | null,
+  formatBytes: ByteCountFormatter,
+): string {
   if (quota === -1) return "Unlimited";
   return quota && quota > 0
     ? `${formatPercent((used / quota) * 100)} of ${formatBytes(quota)}`
@@ -1312,8 +1321,9 @@ function accountedQuotaDetail(
   observed: number,
   counted: number,
   quota: number | null,
+  formatBytes: ByteCountFormatter,
 ): string {
-  const quotaEvidence = quotaDetail(counted, quota);
+  const quotaEvidence = quotaDetail(counted, quota, formatBytes);
   return observed === counted
     ? quotaEvidence
     : `${formatBytes(counted)} counted · ${quotaEvidence}`;

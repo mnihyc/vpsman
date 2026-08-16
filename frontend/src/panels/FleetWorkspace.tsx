@@ -82,12 +82,15 @@ import {
   vpsRuleSearchUnavailable,
 } from "../searchExpression";
 import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
-import { usePanelDisplaySettings } from "../panelDisplay";
-import { scrollIntoViewWithMotion } from "../motion";
 import {
-  formatByteRateFromBitsPerSecond,
-  formatUptime,
-} from "../telemetryMetrics";
+  useByteCountFormatter,
+  useByteRateFormatter,
+  usePanelDisplaySettings,
+  type ByteCountFormatter,
+  type ByteRateFormatter,
+} from "../panelDisplay";
+import { scrollIntoViewWithMotion } from "../motion";
+import { formatUptime } from "../telemetryMetrics";
 import {
   resolveNetworkRateInterfaces,
   selectedNetworkRates,
@@ -451,6 +454,7 @@ export function FleetWorkspace({
   wsState: string;
 }) {
   const { preferences, vpsNameDisplayMode } = usePanelDisplaySettings();
+  const formatBytes = useByteCountFormatter();
   const fleetAlertPoliciesTruncated =
     fleetAlertPolicies.length >= FLEET_DETAIL_LIMIT;
   const policyAlertsTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
@@ -848,9 +852,15 @@ export function FleetWorkspace({
         sortValue: (agent) =>
           trafficByClientRef.current.get(agent.id)?.latest_total_bytes ?? -1,
         searchValue: (agent) =>
-          trafficNowSummary(trafficByClientRef.current.get(agent.id)),
+          trafficNowSummary(
+            trafficByClientRef.current.get(agent.id),
+            formatBytes,
+          ),
         cell: (agent) =>
-          trafficNowSummary(trafficByClientRef.current.get(agent.id)),
+          trafficNowSummary(
+            trafficByClientRef.current.get(agent.id),
+            formatBytes,
+          ),
       },
       {
         id: "cycle_usage",
@@ -860,9 +870,15 @@ export function FleetWorkspace({
         sortValue: (agent) =>
           trafficByClientRef.current.get(agent.id)?.cycle_percent ?? -1,
         searchValue: (agent) =>
-          cycleUsageSummary(trafficByClientRef.current.get(agent.id)),
+          cycleUsageSummary(
+            trafficByClientRef.current.get(agent.id),
+            formatBytes,
+          ),
         cell: (agent) =>
-          cycleUsageSummary(trafficByClientRef.current.get(agent.id)),
+          cycleUsageSummary(
+            trafficByClientRef.current.get(agent.id),
+            formatBytes,
+          ),
       },
       {
         id: "traffic_state",
@@ -897,8 +913,9 @@ export function FleetWorkspace({
         size: 170,
         minSize: 130,
         searchValue: (agent) =>
-          quotaSummary(trafficByClientRef.current.get(agent.id)),
-        cell: (agent) => quotaSummary(trafficByClientRef.current.get(agent.id)),
+          quotaSummary(trafficByClientRef.current.get(agent.id), formatBytes),
+        cell: (agent) =>
+          quotaSummary(trafficByClientRef.current.get(agent.id), formatBytes),
       },
       {
         id: "reset_day",
@@ -984,7 +1001,7 @@ export function FleetWorkspace({
         sortValue: (agent) =>
           memoryUsedRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
         searchValue: (agent) =>
-          formatMemoryUsed(latestRollupsRef.current.get(agent.id)),
+          formatMemoryUsed(latestRollupsRef.current.get(agent.id), formatBytes),
         cell: (agent) => {
           const rollup = latestRollupsRef.current.get(agent.id);
           return (
@@ -1003,7 +1020,7 @@ export function FleetWorkspace({
         sortValue: (agent) =>
           diskUsedRatio(latestRollupsRef.current.get(agent.id)) ?? -1,
         searchValue: (agent) =>
-          formatDiskUsed(latestRollupsRef.current.get(agent.id)),
+          formatDiskUsed(latestRollupsRef.current.get(agent.id), formatBytes),
         cell: (agent) => {
           const rollup = latestRollupsRef.current.get(agent.id);
           return (
@@ -1035,6 +1052,7 @@ export function FleetWorkspace({
       preferences.fleet_tag_visibility_overrides,
       preferences.show_country_flags,
       preferences.fleet_location_display_mode,
+      formatBytes,
       tagDisplayOrder,
       vpsNameDisplayMode,
     ],
@@ -2172,6 +2190,8 @@ function FleetInstanceDetail({
   vpsNameDisplayMode: VpsNameDisplayMode;
   wsState: string;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const detailTabNamespace = `fleet-detail-${useId().replace(/:/g, "")}`;
   const detailTabPanelId = `${detailTabNamespace}-tabpanel`;
   const [activeDetailTab, setActiveDetailTab] =
@@ -2546,7 +2566,11 @@ function FleetInstanceDetail({
             aggregateNetworkRates.length === 0 &&
             (telemetryRollupsTruncated || telemetryNetworkRatesTruncated)
               ? "Unknown in loaded telemetry pages"
-              : formatSignalTraffic(aggregateNetworkRates, networkRateSelection)
+              : formatSignalTraffic(
+                  aggregateNetworkRates,
+                  networkRateSelection,
+                  formatByteRateFromBitsPerSecond,
+                )
           }
           tone="blue"
         />
@@ -2566,7 +2590,7 @@ function FleetInstanceDetail({
           value={
             !latestRollup && telemetryRollupsTruncated
               ? "Unknown in loaded rollup page"
-              : formatMemoryUsed(latestRollup)
+              : formatMemoryUsed(latestRollup, formatBytes)
           }
           tone="blue"
         />
@@ -2575,7 +2599,7 @@ function FleetInstanceDetail({
           value={
             !latestRollup && telemetryRollupsTruncated
               ? "Unknown in loaded rollup page"
-              : formatDiskUsed(latestRollup)
+              : formatDiskUsed(latestRollup, formatBytes)
           }
           tone="green"
         />
@@ -2700,7 +2724,7 @@ function FleetInstanceDetail({
               value={
                 !latestRollup && telemetryRollupsTruncated
                   ? "Unknown in loaded rollup page; more may exist"
-                  : formatMemoryUsed(latestRollup)
+                  : formatMemoryUsed(latestRollup, formatBytes)
               }
             />
             <DetailLine
@@ -2709,7 +2733,7 @@ function FleetInstanceDetail({
               value={
                 !latestRollup && telemetryRollupsTruncated
                   ? "Unknown in loaded rollup page; more may exist"
-                  : formatDiskUsed(latestRollup)
+                  : formatDiskUsed(latestRollup, formatBytes)
               }
             />
             <DetailLine
@@ -2718,7 +2742,7 @@ function FleetInstanceDetail({
               value={
                 !latestRollup && telemetryRollupsTruncated
                   ? "Unknown in loaded rollup page; more may exist"
-                  : formatNetworkBytes(latestRollup)
+                  : formatNetworkBytes(latestRollup, formatBytes)
               }
             />
             <DetailLine
@@ -2732,6 +2756,7 @@ function FleetInstanceDetail({
                   : formatNetworkRateSummary(
                       aggregateNetworkRates,
                       networkRateSelection,
+                      formatByteRateFromBitsPerSecond,
                     )
               }
             />
@@ -3003,6 +3028,7 @@ function TrafficRulesDetail({
   vpsRuleValues: VpsRuleValueRecord[];
   vpsRuleValuesTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const policyById = new Map(policies.map((policy) => [policy.id, policy]));
   const alertByRule = new Map(
     policyAlerts.map((alert) => [alert.policy_rule_id, alert]),
@@ -3118,7 +3144,7 @@ function TrafficRulesDetail({
         ),
       },
     ],
-    [],
+    [formatBytes],
   );
   const vpsRuleColumns = useMemo<ConsoleDataGridColumn<VpsRuleValueRecord>[]>(
     () => [
@@ -3256,7 +3282,7 @@ function TrafficRulesDetail({
                 : undefined
             }
           >
-            {formatMetricValue(row.alert?.actual_value)}
+            {formatMetricValue(row.alert?.actual_value, formatBytes)}
           </span>
         ),
       },
@@ -3269,7 +3295,7 @@ function TrafficRulesDetail({
         cell: (row) =>
           row.alert?.threshold_value == null
             ? "condition value"
-            : formatMetricValue(row.alert.threshold_value),
+            : formatMetricValue(row.alert.threshold_value, formatBytes),
       },
       {
         id: "evaluated",
@@ -3285,7 +3311,7 @@ function TrafficRulesDetail({
               : "never",
       },
     ],
-    [],
+    [formatBytes],
   );
   const alertColumns = useMemo<ConsoleDataGridColumn<PolicyAlertRecord>[]>(
     () => [
@@ -3362,7 +3388,7 @@ function TrafficRulesDetail({
                 : undefined
             }
           >
-            {formatMetricValue(row.actual_value)}
+            {formatMetricValue(row.actual_value, formatBytes)}
           </span>
         ),
       },
@@ -3380,7 +3406,7 @@ function TrafficRulesDetail({
                 : undefined
             }
           >
-            {formatMetricValue(row.threshold_value)}
+            {formatMetricValue(row.threshold_value, formatBytes)}
           </span>
         ),
       },
@@ -3392,7 +3418,7 @@ function TrafficRulesDetail({
         cell: () => "open",
       },
     ],
-    [policyById],
+    [formatBytes, policyById],
   );
 
   return (
@@ -3477,7 +3503,7 @@ function TrafficRulesDetail({
           value={
             trafficMissingUnderCap
               ? unknownTrafficPage
-              : quotaSummary(trafficAccounting)
+              : quotaSummary(trafficAccounting, formatBytes)
           }
           tone="green"
         />
@@ -3921,6 +3947,8 @@ function FleetSelectionStatsTable({
   tagVisibilityOverrides: Record<string, boolean>;
   vpsNameDisplayMode: VpsNameDisplayMode;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const rows = agents
     .slice()
     .sort((left, right) =>
@@ -3965,6 +3993,7 @@ function FleetSelectionStatsTable({
                   {formatNetworkRateSummary(
                     rates,
                     networkRateSelections.get(agent.id),
+                    formatByteRateFromBitsPerSecond,
                   )}
                 </span>
                 <span role="cell">
@@ -3975,7 +4004,9 @@ function FleetSelectionStatsTable({
                     )
                     .join("; ") || "no rate rollup"}
                 </span>
-                <span role="cell">{formatNetworkBytes(rollup)}</span>
+                <span role="cell">
+                  {formatNetworkBytes(rollup, formatBytes)}
+                </span>
               </div>
             );
           })}
@@ -4109,12 +4140,13 @@ function FleetSelectionStatsTable({
                 {formatVpsName(agent, vpsNameDisplayMode)}
               </span>
               <span role="cell">{formatLoad(rollup?.cpu_load_1_avg)}</span>
-              <span role="cell">{formatMemoryUsed(rollup)}</span>
-              <span role="cell">{formatDiskUsed(rollup)}</span>
+              <span role="cell">{formatMemoryUsed(rollup, formatBytes)}</span>
+              <span role="cell">{formatDiskUsed(rollup, formatBytes)}</span>
               <span role="cell">
                 {formatNetworkRateSummary(
                   rates,
                   networkRateSelections.get(agent.id),
+                  formatByteRateFromBitsPerSecond,
                 )}
               </span>
               <span role="cell">{formatRollupSamples(rollup)}</span>
@@ -10125,7 +10157,10 @@ function formatMemoryUsedCompact(
   return ratio === null ? "None" : `${Math.round(ratio)}%`;
 }
 
-function formatMemoryUsed(rollup: TelemetryRollupRecord | null | undefined) {
+function formatMemoryUsed(
+  rollup: TelemetryRollupRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
+) {
   if (!rollup || rollup.memory_total_bytes_max <= 0) {
     return "Awaiting rollup";
   }
@@ -10140,7 +10175,10 @@ function formatDiskUsedCompact(
   return ratio === null ? "None" : `${Math.round(ratio)}%`;
 }
 
-function formatDiskUsed(rollup: TelemetryRollupRecord | null | undefined) {
+function formatDiskUsed(
+  rollup: TelemetryRollupRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
+) {
   if (!rollup || rollup.disk_total_bytes_max <= 0) {
     return "Awaiting rollup";
   }
@@ -10170,7 +10208,10 @@ function privilegeModeLabel(agent: AgentView) {
   return "privilege unknown";
 }
 
-function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
+function formatNetworkBytes(
+  rollup: TelemetryRollupRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
+) {
   if (
     !rollup ||
     (rollup.network_rx_bytes_max === 0 && rollup.network_tx_bytes_max === 0)
@@ -10183,6 +10224,7 @@ function formatNetworkBytes(rollup: TelemetryRollupRecord | null | undefined) {
 function formatNetworkRateSummary(
   rates: TelemetryNetworkRateRecord[],
   selection: NetworkRateInterfaceResolution | undefined,
+  formatByteRateFromBitsPerSecond: ByteRateFormatter,
 ) {
   if (selection && !selection.valid) {
     return "Live-rate interface rule unavailable";
@@ -10198,6 +10240,7 @@ function formatNetworkRateSummary(
 function formatSignalTraffic(
   rates: TelemetryNetworkRateRecord[],
   selection: NetworkRateInterfaceResolution,
+  formatByteRateFromBitsPerSecond: ByteRateFormatter,
 ) {
   if (!selection.valid) return "Live-rate rule unavailable";
   if (rates.length > 0) {
@@ -10251,18 +10294,10 @@ function formatTunnelCapability(
     : "Observation only";
 }
 
-function formatBytes(value: number) {
-  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-  let next = Math.max(0, value);
-  let unit = 0;
-  while (next >= 1024 && unit < units.length - 1) {
-    next /= 1024;
-    unit += 1;
-  }
-  return `${next >= 10 || unit === 0 ? Math.round(next) : next.toFixed(1)} ${units[unit]}`;
-}
-
-function formatMetricValue(value: number | null | undefined): string {
+function formatMetricValue(
+  value: number | null | undefined,
+  formatBytes: ByteCountFormatter,
+): string {
   if (value == null || !Number.isFinite(value)) {
     return "-";
   }
@@ -10297,6 +10332,7 @@ function formatSampleAge(seconds: number | null | undefined): string {
 
 function trafficNowSummary(
   traffic: TrafficAccountingRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
 ): string {
   if (!traffic) {
     return "not configured";
@@ -10311,6 +10347,7 @@ function trafficNowSummary(
 
 function cycleUsageSummary(
   traffic: TrafficAccountingRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
 ): string {
   if (!traffic) {
     return "not configured";
@@ -10377,6 +10414,7 @@ function trafficStateTone(
 
 function quotaSummary(
   traffic: TrafficAccountingRecord | null | undefined,
+  formatBytes: ByteCountFormatter,
 ): string {
   if (!traffic) {
     return "not set";
@@ -10590,6 +10628,7 @@ function NetworkInterfaceList({
 }: {
   snapshot: NetworkInterfacesSnapshot;
 }) {
+  const formatBytes = useByteCountFormatter();
   const sources: Array<
     [string, { status?: string; error?: string | null } | null | undefined]
   > = [
@@ -10635,7 +10674,9 @@ function NetworkInterfaceList({
               <strong>{networkInterface.name}</strong>
               <span>{interfaceStateSummary(networkInterface)}</span>
               <span>{interfaceAddressSummary(networkInterface)}</span>
-              <span>{interfaceTrafficSummary(networkInterface)}</span>
+              <span>
+                {interfaceTrafficSummary(networkInterface, formatBytes)}
+              </span>
             </div>
           ))}
       </div>
@@ -10676,6 +10717,7 @@ function interfaceAddressSummary(
 
 function interfaceTrafficSummary(
   networkInterface: NetworkInterfaceSnapshotRecord,
+  formatBytes: ByteCountFormatter,
 ) {
   const rx =
     typeof networkInterface.rx_bytes === "number"
@@ -10728,6 +10770,8 @@ function NetworkRateList({
   ratesTruncated: boolean;
   rollup: TelemetryRollupRecord | null | undefined;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   if (rates.length === 0) {
     return (
       <DetailLine
@@ -10770,7 +10814,7 @@ function NetworkRateList({
                   main={rate.interface}
                 />
                 <TelemetryStack
-                  detail={rateByteDetail(rate)}
+                  detail={rateByteDetail(rate, formatBytes)}
                   main={`RX ${formatByteRateFromBitsPerSecond(rate.rx_bps_avg)} / TX ${formatByteRateFromBitsPerSecond(rate.tx_bps_avg)}`}
                 />
                 <TelemetryStack
@@ -10779,7 +10823,7 @@ function NetworkRateList({
                 />
                 <TelemetryStack
                   detail={`${formatDuration(rate.bucket_secs)} interval`}
-                  main={rateDeltaDetail(rate)}
+                  main={rateDeltaDetail(rate, formatBytes)}
                 />
               </div>
             ))}
@@ -11037,11 +11081,17 @@ function rateBucketDetail(rate: TelemetryNetworkRateRecord): string {
   return `bucket ${formatCompactTime(rate.bucket_start)}`;
 }
 
-function rateByteDetail(rate: TelemetryNetworkRateRecord): string {
+function rateByteDetail(
+  rate: TelemetryNetworkRateRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   return `avg bytes RX ${formatBytes(rate.rx_bytes_avg)} / TX ${formatBytes(rate.tx_bytes_avg)}`;
 }
 
-function rateDeltaDetail(rate: TelemetryNetworkRateRecord): string {
+function rateDeltaDetail(
+  rate: TelemetryNetworkRateRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   if (rate.rx_bytes_delta === 0 && rate.tx_bytes_delta === 0) {
     return "delta pending";
   }

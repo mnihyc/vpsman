@@ -1,21 +1,27 @@
 import type { DashboardResourceMetric } from "./types";
 
 export type NetworkObservationMetric = "latency" | "loss" | "throughput";
+export type ByteUnitDisplayMode = "decimal" | "binary";
 
 export const INTERFACE_RATE_DEFINITION =
-  "Interval-average rate from non-negative deltas of cumulative interface byte counters between adjacent telemetry buckets; stored as bits per second and displayed as decimal bytes per second, never as an instantaneous line-speed sample.";
+  "Interval-average rate from non-negative deltas of cumulative interface byte counters between adjacent telemetry buckets; stored as bits per second and displayed as bytes per second using the operator's selected unit system, never as an instantaneous line-speed sample.";
 
 export function formatByteRateFromBitsPerSecond(
   value: number | null | undefined,
+  mode: ByteUnitDisplayMode = "decimal",
 ): string {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "No data";
   }
-  const units = ["B/s", "KB/s", "MB/s", "GB/s", "TB/s", "PB/s"];
+  const units =
+    mode === "binary"
+      ? ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s"]
+      : ["B/s", "KB/s", "MB/s", "GB/s", "TB/s"];
+  const base = mode === "binary" ? 1024 : 1_000;
   let scaled = Math.max(0, value) / 8;
   let unit = 0;
-  while (scaled >= 1_000 && unit < units.length - 1) {
-    scaled /= 1_000;
+  while (scaled >= base && unit < units.length - 1) {
+    scaled /= base;
     unit += 1;
   }
   if (scaled === 0) {
@@ -30,13 +36,22 @@ export function formatByteRateFromBitsPerSecond(
   return `${display} ${units[unit]}`;
 }
 
-export function formatByteCount(value: number): string {
-  if (!Number.isFinite(value)) return "No data";
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+export function formatByteCount(
+  value: number | null | undefined,
+  mode: ByteUnitDisplayMode = "decimal",
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "No data";
+  }
+  const units =
+    mode === "binary"
+      ? ["B", "KiB", "MiB", "GiB", "TiB"]
+      : ["B", "KB", "MB", "GB", "TB"];
+  const base = mode === "binary" ? 1024 : 1_000;
   let scaled = Math.max(0, value);
   let unit = 0;
-  while (scaled >= 1024 && unit < units.length - 1) {
-    scaled /= 1024;
+  while (scaled >= base && unit < units.length - 1) {
+    scaled /= base;
     unit += 1;
   }
   return `${scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1)} ${units[unit]}`;

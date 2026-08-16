@@ -35,10 +35,11 @@ import type {
   DashboardSummaryRecord,
   DashboardWindow,
 } from "../../types";
+import { INTERFACE_RATE_DEFINITION } from "../../telemetryMetrics";
 import {
-  formatByteRateFromBitsPerSecond,
-  INTERFACE_RATE_DEFINITION,
-} from "../../telemetryMetrics";
+  useByteCountFormatter,
+  useByteRateFormatter,
+} from "../../panelDisplay";
 import { formatCompactTime } from "../../utils";
 import { replaceHistoryEntry } from "../../historyEntryState";
 import { agentStatusPresentation } from "../../agentDisplayState";
@@ -824,6 +825,8 @@ function NetworkDashboard({
   network: DashboardNetworkRecord;
   window: DashboardWindow;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const rateLines: TimeSeriesChartLine[] = [
     {
       color: consolePalette.chart.blue,
@@ -974,6 +977,7 @@ function GroupDashboard({
 }: {
   clusters: DashboardLabelClusterRecord[];
 }) {
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   return (
     <div
       className="groupDashboardGrid"
@@ -1540,17 +1544,6 @@ function thresholdLabel(series: DashboardResourceSeriesRecord): string {
   if (tone === "warning") return "warning";
   if (tone === "neutral") return "missing";
   return "ok";
-}
-
-function formatBytes(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value))
-    return "No data";
-  if (value >= 1_000_000_000_000)
-    return `${(value / 1_000_000_000_000).toFixed(1)} TB`;
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)} GB`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} MB`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} KB`;
-  return `${Math.round(value)} B`;
 }
 
 function scopeLabel(preferences: DashboardPreferences): string {

@@ -6,6 +6,7 @@ const refreshToken = "b".repeat(64);
 const rotatedAccessToken = "c".repeat(64);
 const rotatedRefreshToken = "d".repeat(64);
 const preferences = {
+  byte_unit_display_mode: "decimal",
   bulk_output_compare_mode: "binary",
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,

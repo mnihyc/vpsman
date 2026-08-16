@@ -13,6 +13,10 @@ import {
   TerminalSquare,
   XCircle,
 } from "lucide-react";
+import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -125,6 +129,7 @@ export function TerminalSessionsPanel({
   onRefresh: () => void;
   privilegeMaterial: PrivilegeMaterial | null;
 }) {
+  const formatBytes = useByteCountFormatter();
   const [launchTargetId, setLaunchTargetId] = useState("");
   const [launchProfile, setLaunchProfile] =
     useState<TerminalLaunchProfile>("posix-login");
@@ -415,13 +420,13 @@ export function TerminalSessionsPanel({
       cell: (session) => (
         <span className="historyPrimary">
           <strong>{formatWindow(session)}</strong>
-          <small>{formatLimits(session)}</small>
+          <small>{formatLimits(session, formatBytes)}</small>
         </span>
       ),
       header: "Window",
       id: "window",
       searchValue: (session) =>
-        `${formatWindow(session)} ${formatLimits(session)}`,
+        `${formatWindow(session)} ${formatLimits(session, formatBytes)}`,
       sortValue: (session) => formatWindow(session),
     },
     {
@@ -435,14 +440,14 @@ export function TerminalSessionsPanel({
                 : undefined
             }
           >
-            {formatOutputRetention(session)}
+            {formatOutputRetention(session, formatBytes)}
           </small>
         </span>
       ),
       header: "Output",
       id: "output",
       searchValue: (session) =>
-        `${formatOutputRange(session)} ${formatOutputRetention(session)}`,
+        `${formatOutputRange(session)} ${formatOutputRetention(session, formatBytes)}`,
       sortValue: (session) => session.output_next_seq ?? 0,
     },
     {
@@ -1404,11 +1409,11 @@ export function TerminalSessionsPanel({
             <span>Output range</span>
             <strong>{formatOutputRange(session)}</strong>
             <span>Retention</span>
-            <strong>{formatOutputRetention(session)}</strong>
+            <strong>{formatOutputRetention(session, formatBytes)}</strong>
             <span>Window</span>
             <strong>{formatWindow(session)}</strong>
             <span>Limits</span>
-            <strong>{formatLimits(session)}</strong>
+            <strong>{formatLimits(session, formatBytes)}</strong>
             <span>Session lifecycle</span>
             <strong>{formatSessionLifecycle(session)}</strong>
             <span>Last input</span>
@@ -1758,7 +1763,10 @@ function formatWindow(session: TerminalSessionRecord): string {
   return `${session.cols} cols x ${session.rows} rows`;
 }
 
-function formatLimits(session: TerminalSessionRecord): string {
+function formatLimits(
+  session: TerminalSessionRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const idle = session.idle_timeout_secs
     ? `Idle timeout ${formatDuration(session.idle_timeout_secs)}`
     : "Idle timeout -";
@@ -1790,7 +1798,10 @@ function formatReplaySequence(first: number, next: number): string {
   return `Seq ${first}-${last} retained, next ${next}`;
 }
 
-function formatOutputRetention(session: TerminalSessionRecord): string {
+function formatOutputRetention(
+  session: TerminalSessionRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const input = formatLastInput(session);
   const retained =
     session.output_retained_bytes === null
@@ -1855,16 +1866,6 @@ function formatDuration(value: number): string {
     return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)}m`;
   }
   return `${value}s`;
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {

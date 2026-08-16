@@ -46,10 +46,8 @@ import type {
   TelemetryUptimeRecord,
   VpsRuleValueRecord,
 } from "../types";
-import {
-  formatByteRateFromBitsPerSecond,
-  formatUptime,
-} from "../telemetryMetrics";
+import { formatUptime } from "../telemetryMetrics";
+import { useByteCountFormatter, useByteRateFormatter } from "../panelDisplay";
 import {
   networkRateSelectionLabel,
   selectedNetworkRates,
@@ -745,6 +743,7 @@ function SummaryTab({
   onOpenFleetMetrics: () => void;
   onOpenJob: (jobId: string) => void;
 }) {
+  const formatBytes = useByteCountFormatter();
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Health" icon={<Gauge size={18} />}>
@@ -1175,6 +1174,7 @@ function BackupsTab({
   onOpenBackup: () => void;
   onOpenJob: (jobId: string) => void;
 }) {
+  const formatBytes = useByteCountFormatter();
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Backup requests" icon={<DatabaseBackup size={18} />}>
@@ -1272,6 +1272,8 @@ function NetworkTab({
   onOpenNetwork: () => void;
   onOpenNetworkEvidence: () => void;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const aggregateRates = selectedNetworkRates(
     related.networkRates,
     related.vpsRules,
@@ -2343,16 +2345,4 @@ function percent(used: number, total: number) {
     return "-";
   }
   return `${Math.max(0, Math.min(100, Math.round((used / total) * 100)))}%`;
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value < 0) return "-";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let next = value;
-  let unitIndex = 0;
-  while (next >= 1024 && unitIndex < units.length - 1) {
-    next /= 1024;
-    unitIndex += 1;
-  }
-  return `${next >= 10 || unitIndex === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[unitIndex]}`;
 }

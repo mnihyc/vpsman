@@ -2095,7 +2095,7 @@ test(
     );
     const traffic = edgeCard.locator(".vpsMonitorTraffic");
     await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
-      "1.7 TiB / 2.3 TiB · TX · 76.0%",
+      "1.9 TB / 2.5 TB · TX · 76.0%",
     );
     await expect(traffic).not.toContainText("/ Unlimited");
     await expect(traffic.locator('[role="meter"]')).toHaveAttribute(
@@ -2127,11 +2127,52 @@ test(
     expect(cycleUsageIndex).toBeGreaterThanOrEqual(0);
     expect(quotaIndex).toBeGreaterThanOrEqual(0);
     await expect(edgeRow.getByRole("gridcell").nth(cycleUsageIndex)).toHaveText(
-      "1.7 TiB / 2.3 TiB · TX · 76.0%",
+      "1.9 TB / 2.5 TB · TX · 76.0%",
     );
     await expect(edgeRow.getByRole("gridcell").nth(quotaIndex)).toHaveText(
-      "TX 2.3 TiB",
+      "TX 2.5 TB",
     );
+  },
+);
+
+test(
+  "applies the saved personal byte-unit preference across fleet displays",
+  { tag: "@mixed-traffic-quota" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the preference persistence and shared fleet formatter are viewport independent",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Monitor");
+    const quota = page
+      .getByLabel("VPS monitor cards")
+      .locator(".vpsMonitorCard", { hasText: "edge-sfo-01" })
+      .first()
+      .locator(".vpsMonitorTrafficQuota");
+    await expect(quota).toHaveText("1.9 TB / 2.5 TB · TX · 76.0%");
+
+    await openConsoleSubpage(page, "System", "Preferences");
+    await page.getByLabel("Byte unit system").selectOption("binary");
+    await page.getByRole("button", { name: "Save preferences" }).click();
+    await expect(
+      page.locator(".consoleStatusBadge", { hasText: /^Saved$/ }),
+    ).toBeVisible();
+    const savedPreferences = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { operatorPreferences: unknown[] };
+        }
+      ).__vpsmanTestRequests;
+      return requests.operatorPreferences.at(-1);
+    });
+    expect(savedPreferences).toMatchObject({
+      byte_unit_display_mode: "binary",
+    });
+
+    await openConsoleSubpage(page, "Fleet", "Monitor");
+    await expect(quota).toHaveText("1.7 TiB / 2.3 TiB · TX · 76.0%");
   },
 );
 
@@ -9043,7 +9084,7 @@ test("dispatches topology network tests and OSPF plan updates with local privile
     "Left → right; then right → left (sequential)",
   );
   await expect(speedPrompt).toContainText(
-    "5s per direction · 8 MiB cap · 1.234 Mbps cap",
+    "5s per direction · 8.4 MB cap · 1.234 Mbps cap",
   );
   await expect(speedPrompt).toContainText(
     "TCP 55201 · 2500 ms connect timeout",

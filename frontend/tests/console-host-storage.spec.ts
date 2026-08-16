@@ -20,7 +20,7 @@ test("keeps read-only storage routable and refreshes an explicit mount scope", a
   await expect(page).toHaveURL(/storage_client=agent-sfo-01/);
   const summary = panel.getByLabel("Storage inventory summary");
   await expect(summary.getByText("lsblk JSON", { exact: true })).toBeVisible();
-  await expect(summary.getByText("600 GiB", { exact: true })).toBeVisible();
+  await expect(summary.getByText("644 GB", { exact: true })).toBeVisible();
   await expect(summary.getByText("2 measured", { exact: true })).toBeVisible();
   await expect(summary.getByText("1", { exact: true })).toHaveCount(2);
 

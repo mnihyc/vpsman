@@ -27,6 +27,7 @@ import {
   networkObservationMetricDefinition,
   type NetworkObservationMetric,
 } from "../../telemetryMetrics";
+import { useByteCountFormatter } from "../../panelDisplay";
 import { formatCompactTime, timestampMillis } from "../../utils";
 import {
   pushHistoryEntry,
@@ -1182,6 +1183,7 @@ function EndpointRow({
   observation: NetworkObservationRecord | null;
   tunnel: TelemetryTunnelRecord;
 }) {
+  const formatBytes = useByteCountFormatter();
   const traffic = `${formatBytes(tunnel.rx_bytes)} RX / ${formatBytes(tunnel.tx_bytes)} TX`;
   const reachability = formatReachabilityObservation(observation);
   return (
@@ -1731,11 +1733,4 @@ function formatEvidenceTime(value: string): string {
     minute: "2-digit",
     month: "short",
   }).format(date);
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)} GB`;
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} MB`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)} KB`;
-  return `${Math.round(value)} B`;
 }

@@ -54,7 +54,7 @@ test("keeps host process scope and target routable while refreshing a read-only 
   await expect(
     inventory.getByText("node", { exact: true }).first(),
   ).toBeVisible();
-  await expect(inventory.getByText("146 MiB")).toBeVisible();
+  await expect(inventory.getByText("153 MB")).toBeVisible();
   const reportedCommand =
     "/usr/bin/node /srv/dashboard/server.js --listen 127.0.0.1:3000";
   const command = inventory.getByText(reportedCommand, { exact: true }).first();
@@ -152,7 +152,7 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   await expect(grid.getByText("Unknown", { exact: true })).toBeVisible();
   await expect(grid.getByText("started after observed").first()).toBeVisible();
   await expect(grid.getByText("Weight · Limits desired")).toBeVisible();
-  await expect(grid.getByText("1.0 MiB")).toBeVisible();
+  await expect(grid.getByText("1.0 MB")).toBeVisible();
   await expect(grid.getByText("2 processes, 2 PIDs")).toBeVisible();
   await expect(grid.getByText("1 restart", { exact: true })).toBeVisible();
   await expect(
@@ -164,7 +164,7 @@ test("shows restart and desired-only limit evidence in process supervisor invent
   ).toBeVisible();
   await activate(grid.getByText("ospf-worker"));
   await expect(
-    grid.getByText("CPU weight 39; 1.0 MiB memory; cgroup available"),
+    grid.getByText("CPU weight 39; 1.0 MB memory; cgroup available"),
   ).toBeVisible();
   await expect(grid.getByText("Supervisor config")).toHaveCount(0);
   await expect(grid.getByText(/backend process time series/i)).toHaveCount(0);
@@ -435,7 +435,7 @@ test("uses the common process inventory grid on mobile", async ({
   await expect(card).toBeVisible();
   await expect(card).toContainText("Timestamp inconsistent");
   await expect(card).toContainText("39");
-  await expect(card).toContainText("1.0 MiB");
+  await expect(card).toContainText("1.0 MB");
   await expect(card).toContainText("Unknown");
   await expect(card).toContainText("1 restart");
   await expect(card.locator(".gridMobileActions")).toHaveCount(0);

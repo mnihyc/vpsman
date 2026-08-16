@@ -1,5 +1,9 @@
 import { type ReactNode, useMemo, useRef, useState } from "react";
 import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
+import {
   Activity,
   ExternalLink,
   GitBranch,
@@ -102,6 +106,7 @@ export function TopologyEvidencePanel({
   trends: NetworkObservationTrendRecord[];
   tunnelPlans: TunnelPlanRecord[];
 }) {
+  const formatBytes = useByteCountFormatter();
   const networkJobs = useMemo(
     () =>
       jobs.filter((job) => networkCommands.has(job.command_type)).slice(0, 8),
@@ -142,6 +147,7 @@ export function TopologyEvidencePanel({
       clientLabel,
       outputs !== undefined,
       throughputBaselines,
+      formatBytes,
     );
   });
   const selectedPlanIds = appliedPlanId ? new Set([appliedPlanId]) : null;
@@ -156,10 +162,15 @@ export function TopologyEvidencePanel({
     .map(buildOspfRecommendationRow);
   const observationRows = latestObservationRows(observations).map(
     (observation) =>
-      buildObservationRow(observation, clientLabel, throughputBaselines),
+      buildObservationRow(
+        observation,
+        clientLabel,
+        throughputBaselines,
+        formatBytes,
+      ),
   );
   const trendRows = trends.map((trend) =>
-    buildTrendRow(trend, clientLabel, throughputBaselines),
+    buildTrendRow(trend, clientLabel, throughputBaselines, formatBytes),
   );
   const hasUnloadedOutput = rows.some(
     (row) => row.metric === "Output not loaded",
@@ -1652,6 +1663,7 @@ function buildTrendRow(
   trend: NetworkObservationTrendRecord,
   clientLabel: (clientId: string) => string,
   throughputBaselines: Map<string, ThroughputBaseline>,
+  formatBytes: ByteCountFormatter,
 ): TrendRow {
   const baseline = throughputBaselineFor(
     {
@@ -1760,6 +1772,7 @@ function buildObservationRow(
   observation: NetworkObservationRecord,
   clientLabel: (clientId: string) => string,
   throughputBaselines: Map<string, ThroughputBaseline>,
+  formatBytes: ByteCountFormatter,
 ): ObservationRow {
   const signalStatus =
     observation.healthy === true
@@ -1942,6 +1955,7 @@ function buildEvidenceRow(
   clientLabel: (clientId: string) => string,
   outputsLoaded: boolean,
   throughputBaselines: Map<string, ThroughputBaseline>,
+  formatBytes: ByteCountFormatter,
 ): EvidenceRow {
   const parsedStatus = parseStatusOutput(outputs);
   if (isProbeStatus(parsedStatus)) {
@@ -2217,16 +2231,6 @@ function formatMetric(value: number): string {
   return Number.isInteger(value)
     ? String(value)
     : value.toFixed(value < 10 ? 2 : 1);
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024) {
-    return `${formatMetric(value / 1024 / 1024)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${formatMetric(value / 1024)} KiB`;
-  }
-  return `${value} B`;
 }
 
 function formatLoss(value: number | null): string {

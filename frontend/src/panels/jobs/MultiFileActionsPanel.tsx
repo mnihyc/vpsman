@@ -1,4 +1,8 @@
 import { Download, RefreshCw, ShieldCheck, Upload } from "lucide-react";
+import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
 import { useMemo, useState } from "react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import { ConfirmationPrompt } from "../../components/ConfirmationPrompt";
@@ -144,6 +148,7 @@ export function MultiFileActionsPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
+  const formatBytes = useByteCountFormatter();
   const vpsRuleSearch = useVpsRuleSearchContext();
   const {
     captureReviewGeneration,
@@ -209,9 +214,9 @@ export function MultiFileActionsPanel({
   const downloadComparison = useMemo(
     () =>
       lastOperation?.type === "file_download"
-        ? buildDownloadComparison(lastOutputs)
+        ? buildDownloadComparison(lastOutputs, formatBytes)
         : null,
-    [lastOperation, lastOutputs],
+    [formatBytes, lastOperation, lastOutputs],
   );
   const actionFeedbackMessage = actionError ?? reviewStatus ?? actionMessage;
   const actionFeedbackTone = actionError
@@ -477,6 +482,7 @@ export function MultiFileActionsPanel({
           confirmation.targets,
           targets,
           agentById,
+          formatBytes,
         ),
       );
       setActionMessage(
@@ -515,6 +521,7 @@ export function MultiFileActionsPanel({
     uploadExistingPolicy,
     uploadFile,
     uploadOwnershipPolicy,
+    formatBytes,
   });
   const postRunItems = buildBulkPostRunItems({
     lastOperation,
@@ -1150,7 +1157,9 @@ export function MultiFileActionsPanel({
             : ""
         }
         items={
-          pendingConfirmation ? confirmationItems(pendingConfirmation) : []
+          pendingConfirmation
+            ? confirmationItems(pendingConfirmation, formatBytes)
+            : []
         }
         onCancel={() => setPendingConfirmation(null)}
         onConfirm={() => {
@@ -1325,6 +1334,7 @@ function groupBulkOutputs(
   targets: AgentView[],
   targetRecords: JobTargetRecord[],
   agentById: Map<string, AgentView>,
+  formatBytes: ByteCountFormatter,
 ): BulkSummaryGroup[] {
   const groups = new Map<string, BulkSummaryGroup>();
   const clientsWithStatus = new Set<string>();
@@ -1340,7 +1350,7 @@ function groupBulkOutputs(
     const state = status.status ?? "completed";
     const reason = status.reason ?? "";
     const preview = statusPreview(status);
-    const detail = statusDetail(status);
+    const detail = statusDetail(status, formatBytes);
     const label = statusLabel(status);
     const sha256Hex = status.sha256_hex ?? "";
     const key = `${status.type}:${state}:${reason}:${status.path}:${sha256Hex}:${status.size_bytes ?? ""}:${preview}`;
@@ -1421,6 +1431,7 @@ function successfulDownloadClientIds(groups: BulkSummaryGroup[]): string[] {
 
 function buildDownloadComparison(
   outputs: JobOutputRecord[],
+  formatBytes: ByteCountFormatter,
 ): BulkDownloadComparison | null {
   const records = downloadStatusRecords(outputs);
   if (records.length < 2) {
@@ -1441,9 +1452,9 @@ function buildDownloadComparison(
     };
   }
   if (records[0]?.status.source_kind === "directory") {
-    return buildDirectoryDownloadComparison(records);
+    return buildDirectoryDownloadComparison(records, formatBytes);
   }
-  return buildRegularFileDownloadComparison(records);
+  return buildRegularFileDownloadComparison(records, formatBytes);
 }
 
 function downloadStatusRecords(
@@ -1467,14 +1478,15 @@ function downloadStatusRecords(
 
 function buildRegularFileDownloadComparison(
   records: DownloadStatusRecord[],
+  formatBytes: ByteCountFormatter,
 ): BulkDownloadComparison {
   const variants = groupedDownloadVariants(records, fileContentKey, (record) =>
-    fileContentLabel(record.status),
+    fileContentLabel(record.status, formatBytes),
   );
   if (variants.length <= 1) {
     const status = records[0]?.status;
     return {
-      detail: `${records.length} VPSs match${status ? ` · ${fileContentLabel(status)}` : ""}`,
+      detail: `${records.length} VPSs match${status ? ` · ${fileContentLabel(status, formatBytes)}` : ""}`,
       extraRowCount: 0,
       rows: [],
       title: "Same file content",
@@ -1492,6 +1504,7 @@ function buildRegularFileDownloadComparison(
 
 function buildDirectoryDownloadComparison(
   records: DownloadStatusRecord[],
+  formatBytes: ByteCountFormatter,
 ): BulkDownloadComparison {
   const hierarchyVariants = groupedDownloadVariants(
     records,
@@ -1531,7 +1544,7 @@ function buildDirectoryDownloadComparison(
       tone: "same",
     };
   }
-  const exact = exactDirectoryFileDifferenceRows(records);
+  const exact = exactDirectoryFileDifferenceRows(records, formatBytes);
   if (exact) {
     return {
       detail: "Hierarchy matches; differing files are listed by relative path.",
@@ -1558,6 +1571,7 @@ function buildDirectoryDownloadComparison(
 
 function exactDirectoryFileDifferenceRows(
   records: DownloadStatusRecord[],
+  formatBytes: ByteCountFormatter,
 ): { extraRowCount: number; rows: BulkDownloadComparisonRow[] } | null {
   if (
     records.some(
@@ -1594,7 +1608,7 @@ function exactDirectoryFileDifferenceRows(
       const key = manifestEntryContentKey(entry);
       const variant = variants.get(key) ?? {
         clientIds: [],
-        label: manifestEntryContentLabel(entry),
+        label: manifestEntryContentLabel(entry, formatBytes),
       };
       variant.clientIds.push(manifest.clientId);
       variants.set(key, variant);
@@ -1640,7 +1654,10 @@ function fileContentKey(record: DownloadStatusRecord): string {
   return `${record.status.size_bytes ?? "unknown"}:${record.status.sha256_hex ?? "missing"}`;
 }
 
-function fileContentLabel(status: FileOperationStatus): string {
+function fileContentLabel(
+  status: FileOperationStatus,
+  formatBytes: ByteCountFormatter,
+): string {
   return `${typeof status.size_bytes === "number" ? formatBytes(status.size_bytes) : "unknown size"} · ${hashLabel("sha256", status.sha256_hex)}`;
 }
 
@@ -1689,6 +1706,7 @@ function manifestEntryContentKey(
 
 function manifestEntryContentLabel(
   entry: FileDownloadManifestEntry | undefined,
+  formatBytes: ByteCountFormatter,
 ): string {
   if (!entry) {
     return "missing";
@@ -1756,6 +1774,7 @@ function statusLabel(
 
 function statusDetail(
   status: NonNullable<ReturnType<typeof parseLatestFileStatus>>,
+  formatBytes: ByteCountFormatter,
 ): string {
   const parts = [status.path];
   if (typeof status.size_bytes === "number") {
@@ -1877,6 +1896,7 @@ function buildBulkPreflightItems({
   uploadExistingPolicy,
   uploadFile,
   uploadOwnershipPolicy,
+  formatBytes,
 }: {
   action: MultiFileAction;
   agentCount: number;
@@ -1892,6 +1912,7 @@ function buildBulkPreflightItems({
   uploadExistingPolicy: FileExistingPolicy;
   uploadFile: File | null;
   uploadOwnershipPolicy: FileOwnershipPolicy;
+  formatBytes: ByteCountFormatter;
 }): BulkPreflightItem[] {
   const targets = preview?.targets ?? localMatches;
   const targetCount = preview?.target_count ?? localMatches.length;
@@ -1932,6 +1953,7 @@ function buildBulkPreflightItems({
       uploadExistingPolicy,
       uploadFile,
       uploadOwnershipPolicy,
+      formatBytes,
     }),
     {
       detail: `${privilegeMaterial ? "Privilege material is unlocked for this browser session." : "Privilege unlock is required before running."} Stale agents may still reject with a command-version mismatch at execution; unavailable agents remain visible as failed/unavailable targets.`,
@@ -2068,6 +2090,7 @@ function bulkTransferEstimateItem({
   uploadExistingPolicy,
   uploadFile,
   uploadOwnershipPolicy,
+  formatBytes,
 }: {
   action: MultiFileAction;
   content: string;
@@ -2079,6 +2102,7 @@ function bulkTransferEstimateItem({
   uploadExistingPolicy: FileExistingPolicy;
   uploadFile: File | null;
   uploadOwnershipPolicy: FileOwnershipPolicy;
+  formatBytes: ByteCountFormatter;
 }): BulkPreflightItem {
   if (action === "download_files") {
     const worstCaseBytes = targetCount * FILE_BROWSER_ARCHIVE_LIMIT_BYTES;
@@ -2533,6 +2557,7 @@ function compactConfirmationDetail(
 
 function confirmationItems(
   confirmation: PendingBulkConfirmation,
+  formatBytes: ByteCountFormatter,
 ): Array<{ label: string; value: string | number }> {
   const operation = confirmation.operation;
   const items: Array<{ label: string; value: string | number }> = [
@@ -2605,16 +2630,6 @@ function confirmationItems(
     });
   }
   return items;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function formatMode(mode: number): string {

@@ -1,4 +1,5 @@
 import { Download, Upload } from "lucide-react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import { formatTime, shortHash, shortId } from "../../utils";
 
 export type RestoreArchiveTransferOption = {
@@ -33,6 +34,7 @@ export function RestoreArchiveTransferSelect({
   pending = false,
   value,
 }: RestoreArchiveTransferSelectProps) {
+  const formatBytes = useByteCountFormatter();
   const selected = options.find((option) => option.key === value) ?? null;
   return (
     <div className="restoreArchiveSelect">
@@ -140,17 +142,4 @@ export function RestoreArchiveTransferSelect({
       </div>
     </div>
   );
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }

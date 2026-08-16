@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
+import {
   FileText,
   Plus,
   RefreshCw,
@@ -82,6 +86,7 @@ export function ProcessSupervisorInventoryPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   selectedClientId?: string | null;
 }) {
+  const formatBytes = useByteCountFormatter();
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [actionWarning, setActionWarning] = useState(false);
@@ -559,10 +564,10 @@ export function ProcessSupervisorInventoryPanel({
       {
         cell: (row) => (
           <span className="historyPrimary">
-            <strong title={formatMemoryTooltip(row)}>
-              {formatMemoryPrimary(row)}
+            <strong title={formatMemoryTooltip(row, formatBytes)}>
+              {formatMemoryPrimary(row, formatBytes)}
             </strong>
-            <small title={formatMemoryTooltip(row)}>
+            <small title={formatMemoryTooltip(row, formatBytes)}>
               {formatProcessCardinality(row)}
             </small>
           </span>
@@ -571,7 +576,7 @@ export function ProcessSupervisorInventoryPanel({
         id: "memory",
         minSize: 100,
         searchValue: (row) =>
-          `${formatMemoryPrimary(row)} ${formatProcessCardinality(row)} ${formatCgroupEvidence(row) ?? ""}`,
+          `${formatMemoryPrimary(row, formatBytes)} ${formatProcessCardinality(row)} ${formatCgroupEvidence(row, formatBytes) ?? ""}`,
         size: 108,
         sortValue: (row) => row.cgroup_memory_current_bytes ?? -1,
       },
@@ -630,7 +635,7 @@ export function ProcessSupervisorInventoryPanel({
         sortValue: (row) => row.last_exit_unix ?? -1,
       },
     ],
-    [clientLabel],
+    [clientLabel, formatBytes],
   );
 
   return (
@@ -950,8 +955,8 @@ export function ProcessSupervisorInventoryPanel({
               <span>Timeline detail</span>
               <strong>{processTimingEvidence(row).detail}</strong>
               <span>Resource snapshot</span>
-              <strong title={formatResourceTooltip(row)}>
-                {formatResourceSecondary(row)}
+              <strong title={formatResourceTooltip(row, formatBytes)}>
+                {formatResourceSecondary(row, formatBytes)}
               </strong>
               <span>Automatic restart attempts</span>
               <strong>{processRestartEvidence(row).primary}</strong>
@@ -1149,6 +1154,7 @@ function formatCompactLimitEvidence(status: string | null): string {
 
 function formatCgroupEvidence(
   row: ProcessSupervisorInventoryRecord,
+  formatBytes: ByteCountFormatter,
 ): string | null {
   if (row.cgroup_status === "available") {
     const parts = [];
@@ -1199,13 +1205,19 @@ function formatCpuTooltip(row: ProcessSupervisorInventoryRecord): string {
     : `No cgroup CPU weight was reported; ${formatLimitEvidence(row.limit_effectiveness_status)}.`;
 }
 
-function formatMemoryPrimary(row: ProcessSupervisorInventoryRecord): string {
+function formatMemoryPrimary(
+  row: ProcessSupervisorInventoryRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   return row.cgroup_memory_current_bytes !== null
     ? formatBytes(row.cgroup_memory_current_bytes)
     : "No data";
 }
 
-function formatMemoryTooltip(row: ProcessSupervisorInventoryRecord): string {
+function formatMemoryTooltip(
+  row: ProcessSupervisorInventoryRecord,
+  formatBytes: ByteCountFormatter,
+): string {
   const memory =
     row.cgroup_memory_current_bytes !== null
       ? `${formatBytes(row.cgroup_memory_current_bytes)} current cgroup memory`
@@ -1240,6 +1252,7 @@ function formatProcessCardinality(
 
 function formatResourceSecondary(
   row: ProcessSupervisorInventoryRecord,
+  formatBytes: ByteCountFormatter,
 ): string {
   const parts = [
     row.cgroup_cpu_weight !== null
@@ -1255,8 +1268,11 @@ function formatResourceSecondary(
   return parts.join("; ");
 }
 
-function formatResourceTooltip(row: ProcessSupervisorInventoryRecord): string {
-  return `${formatCpuTooltip(row)} ${formatMemoryTooltip(row)} Cgroup status ${row.cgroup_status?.replace(/_/g, " ") ?? "not reported"}.`;
+function formatResourceTooltip(
+  row: ProcessSupervisorInventoryRecord,
+  formatBytes: ByteCountFormatter,
+): string {
+  return `${formatCpuTooltip(row)} ${formatMemoryTooltip(row, formatBytes)} Cgroup status ${row.cgroup_status?.replace(/_/g, " ") ?? "not reported"}.`;
 }
 
 function formatSourceCommand(value: string): string {
@@ -1337,19 +1353,6 @@ function formatObservedTime(value: string): string {
     return "Invalid timestamp";
   }
   return formatFullTime(value);
-}
-
-function formatBytes(value: number): string {
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  return `${value} B`;
 }
 
 function parseIsoMs(value: string): number | null {

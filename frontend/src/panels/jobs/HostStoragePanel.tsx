@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import { Database, FolderTree, HardDrive, RefreshCw } from "lucide-react";
 import { ActionFeedback } from "../../components/ActionFeedback";
 import {
@@ -50,6 +51,7 @@ export function HostStoragePanel({
   ) => Promise<HostStorageInventoryRecord>;
   onLoadTargets: (jobId: string) => Promise<JobTargetRecord[]>;
 }) {
+  const formatBytes = useByteCountFormatter();
   const [route, setRoute] = useState(readStorageRoute);
   const activeView = route.view;
   const [inventory, setInventory] = useState<HostStorageInventoryRecord | null>(
@@ -331,7 +333,7 @@ export function HostStoragePanel({
         sortValue: (device) => (device.read_only ? 1 : 0),
       },
     ],
-    [],
+    [formatBytes],
   );
 
   const mountColumns = useMemo<ConsoleDataGridColumn<HostMountRecord>[]>(
@@ -714,6 +716,7 @@ export function HostStoragePanel({
 }
 
 function FilesystemUsage({ device }: { device: HostBlockDeviceRecord }) {
+  const formatBytes = useByteCountFormatter();
   const percent = device.filesystem_used_percent;
   if (percent === null) {
     return <span className="mutedValue">Not reported</span>;
@@ -744,6 +747,7 @@ function DeviceDetails({
   device: HostBlockDeviceRecord;
   observedAt: string | null | undefined;
 }) {
+  const formatBytes = useByteCountFormatter();
   return (
     <div className="consoleInlineDetailGrid">
       <span>Path</span>
@@ -955,17 +959,4 @@ function compactText(value: string, limit: number): string {
     return value;
   }
   return `${value.slice(0, Math.max(1, limit - 3))}...`;
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-  const power = Math.min(
-    units.length - 1,
-    Math.floor(Math.log(value) / Math.log(1024)),
-  );
-  const scaled = value / 1024 ** power;
-  return `${scaled >= 100 || power === 0 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[power]}`;
 }

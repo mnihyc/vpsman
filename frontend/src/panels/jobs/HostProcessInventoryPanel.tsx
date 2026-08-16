@@ -25,6 +25,7 @@ import type {
   JobTargetRecord,
 } from "../../types";
 import { formatCompactTime, formatFullTime } from "../../utils";
+import { useByteCountFormatter } from "../../panelDisplay";
 
 const HOST_PROCESS_LIMIT = 512;
 
@@ -48,6 +49,11 @@ export function HostProcessInventoryPanel({
   onSelectedClientIdChange: (clientId: string | null) => void;
   selectedClientId: string | null;
 }) {
+  const formatBytes = useByteCountFormatter();
+  const formatKib = useCallback(
+    (value: number) => formatBytes(Math.max(0, value) * 1024),
+    [formatBytes],
+  );
   const [inventory, setInventory] = useState<HostProcessInventoryRecord | null>(
     null,
   );
@@ -261,7 +267,7 @@ export function HostProcessInventoryPanel({
         sortValue: (row) => row.ppid,
       },
     ],
-    [],
+    [formatKib],
   );
 
   const refreshUnavailable = !selectedAgent
@@ -492,21 +498,6 @@ export function HostProcessInventoryPanel({
 function compactCommand(command: string, name: string): string {
   const value = command.trim() || name;
   return value.length > 84 ? `${value.slice(0, 81)}...` : value;
-}
-
-function formatKib(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 KiB";
-  }
-  if (value < 1024) {
-    return `${Math.round(value)} KiB`;
-  }
-  const mib = value / 1024;
-  if (mib < 1024) {
-    return `${mib >= 100 ? mib.toFixed(0) : mib.toFixed(1)} MiB`;
-  }
-  const gib = mib / 1024;
-  return `${gib >= 100 ? gib.toFixed(0) : gib.toFixed(1)} GiB`;
 }
 
 function processStateLabel(state: string): string {

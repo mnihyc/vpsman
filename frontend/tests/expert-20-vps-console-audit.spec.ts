@@ -285,7 +285,7 @@ test("expert operator can scan and dispatch across a realistic 24 VPS fleet", as
   await expect(selectionPanel.getByText("RAM used").first()).toBeVisible();
   await expect(selectionPanel.getByText("Disk used").first()).toBeVisible();
   await expect(selectionPanel).not.toContainText("Disk free");
-  await expect(selectionPanel).toContainText("75% (16 GiB)");
+  await expect(selectionPanel).toContainText("75% (17 GB)");
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   await expect(

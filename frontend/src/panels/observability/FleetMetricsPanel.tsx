@@ -27,10 +27,8 @@ import type {
   DashboardScopeKind,
   DashboardWindow,
 } from "../../types";
-import {
-  formatByteRateFromBitsPerSecond,
-  resourceMetricDefinition,
-} from "../../telemetryMetrics";
+import { resourceMetricDefinition } from "../../telemetryMetrics";
+import { useByteRateFormatter } from "../../panelDisplay";
 import { formatCompactTime } from "../../utils";
 
 type FleetMetricsPanelProps = {
@@ -663,6 +661,7 @@ function MetricTile({
 }
 
 function GroupTile({ cluster }: { cluster: DashboardLabelClusterRecord }) {
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const boundedSuffix = cluster.counts_truncated
     ? " in the loaded operations page"
     : "";

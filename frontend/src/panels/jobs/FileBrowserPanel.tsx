@@ -1,5 +1,9 @@
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
+import {
   ArrowLeftRight,
   ChevronDown,
   ChevronRight,
@@ -161,6 +165,7 @@ export function FileBrowserPanel({
   privilegeMaterial: PrivilegeMaterial | null;
   setPrivilegeMaterial: (value: PrivilegeMaterial | null) => Promise<void>;
 }) {
+  const formatBytes = useByteCountFormatter();
   const saved = readBrowserState();
   const [targetClientId, setTargetClientId] = useState(
     saved.targetClientId || agents[0]?.id || "",
@@ -743,7 +748,13 @@ export function FileBrowserPanel({
           ? `Overwrite the newer contents of ${editorPath} with this preserved draft.`
           : `Save changes to ${editorPath}.`,
         undefined,
-        { diffPreview: textDiffPreview(editorSavedContent, editorContent) },
+        {
+          diffPreview: textDiffPreview(
+            editorSavedContent,
+            editorContent,
+            formatBytes,
+          ),
+        },
       );
     } catch (error) {
       reportActionError(error);
@@ -1738,7 +1749,12 @@ export function FileBrowserPanel({
                     </div>
                     <div>
                       <dt>Output</dt>
-                      <dd>{transferHandoffOutputLabel(transferHandoffHint)}</dd>
+                      <dd>
+                        {transferHandoffOutputLabel(
+                          transferHandoffHint,
+                          formatBytes,
+                        )}
+                      </dd>
                     </div>
                   </dl>
                 )}
@@ -2237,7 +2253,9 @@ export function FileBrowserPanel({
           pendingConfirmation ? fileConfirmationDetail(pendingConfirmation) : ""
         }
         items={
-          pendingConfirmation ? fileConfirmationItems(pendingConfirmation) : []
+          pendingConfirmation
+            ? fileConfirmationItems(pendingConfirmation, formatBytes)
+            : []
         }
         onCancel={() => setPendingConfirmation(null)}
         onConfirm={() => {
@@ -2353,7 +2371,10 @@ function transferHandoffText(
   return "Transfer evidence is owned by Remote / Transfers";
 }
 
-function transferHandoffOutputLabel(hint: TransferHandoffHint): string {
+function transferHandoffOutputLabel(
+  hint: TransferHandoffHint,
+  formatBytes: ByteCountFormatter,
+): string {
   const kind = hint.sourceKind
     ? hint.sourceKind.replace(/_/g, " ")
     : "download";
@@ -2443,6 +2464,7 @@ function TreeNode({
     updater: (current: Record<string, boolean>) => Record<string, boolean>,
   ) => void;
 }) {
+  const formatBytes = useByteCountFormatter();
   const entry = metadataByPath[path] ?? rootEntry();
   const children = entriesByPath[path] ?? [];
   const open = expandedPaths[path] ?? path === "/";
@@ -2850,6 +2872,7 @@ function fileConfirmationDetail(confirmation: PendingConfirmation): string {
 
 function fileConfirmationItems(
   confirmation: PendingConfirmation,
+  formatBytes: ByteCountFormatter,
 ): Array<{ label: string; value: ReactNode }> {
   const operation = confirmation.operation;
   const items: Array<{ label: string; value: ReactNode }> = [
@@ -3031,7 +3054,11 @@ function ownerGroupConfirmationValue(
   );
 }
 
-function textDiffPreview(before: string, after: string): string {
+function textDiffPreview(
+  before: string,
+  after: string,
+  formatBytes: ByteCountFormatter,
+): string {
   const beforeLines = splitComparableLines(before);
   const afterLines = splitComparableLines(after);
   let prefix = 0;
@@ -3126,14 +3153,6 @@ function parseMode(value: string): number {
 
 function formatMode(mode: number): string {
   return `0${(mode & 0o777).toString(8).padStart(3, "0")}`;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
-  if (value < 1024 * 1024 * 1024)
-    return `${(value / 1024 / 1024).toFixed(1)} MiB`;
-  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`;
 }
 
 function saveBlob(blob: Blob, name: string) {

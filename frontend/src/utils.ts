@@ -161,6 +161,7 @@ export const DEFAULT_OPERATOR_PREFERENCES: OperatorPreferences = {
   dashboard_curve_exclusions: [],
   dashboard_network_top_limit: 8,
   dashboard_resource_top_limit: 8,
+  byte_unit_display_mode: "decimal",
   fleet_location_display_mode: "country_only",
   fleet_tag_visibility_overrides: {},
   gateway_endpoints: "",
@@ -196,6 +197,10 @@ export function sanitizeOperatorPreferences(
     dashboard_resource_top_limit:
       source.dashboard_resource_top_limit ??
       DEFAULT_OPERATOR_PREFERENCES.dashboard_resource_top_limit,
+    byte_unit_display_mode:
+      source.byte_unit_display_mode === "binary"
+        ? "binary"
+        : DEFAULT_OPERATOR_PREFERENCES.byte_unit_display_mode,
     fleet_location_display_mode:
       source.fleet_location_display_mode === "country_region"
         ? "country_region"

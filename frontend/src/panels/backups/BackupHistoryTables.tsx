@@ -7,6 +7,10 @@ import {
   RotateCcw,
 } from "lucide-react";
 import {
+  useByteCountFormatter,
+  type ByteCountFormatter,
+} from "../../panelDisplay";
+import {
   ConsoleDataGrid,
   type ConsoleDataGridAction,
   type ConsoleDataGridColumn,
@@ -377,6 +381,7 @@ function BackupRequestsTable({
   onRetryBackup?: (backup: BackupRequestRecord) => void;
   rowsTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
       ? (artifacts.find((artifact) => artifact.id === backup.artifact_id) ??
@@ -661,6 +666,7 @@ function ArtifactHistoryTable({
   ) => void;
   rowsTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const backupForArtifact = (artifact: BackupArtifactRecord) =>
     backups.find((backup) => backup.artifact_id === artifact.id) ?? null;
   const columns: ConsoleDataGridColumn<BackupArtifactRecord>[] = [
@@ -922,6 +928,7 @@ function RestoreSourcesTable({
   onPlanRestoreSource?: (backup: BackupRequestRecord) => void;
   rowsTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const artifactForBackup = (backup: BackupRequestRecord) =>
     backup.artifact_id
       ? (artifacts.find((artifact) => artifact.id === backup.artifact_id) ??
@@ -969,11 +976,13 @@ function RestoreSourcesTable({
       size: 165,
       minSize: 135,
       sortValue: (backup) =>
-        restoreSourceReadiness(backup, artifactForBackup(backup)).sort,
+        restoreSourceReadiness(backup, artifactForBackup(backup), formatBytes)
+          .sort,
       searchValue: (backup) => {
         const readiness = restoreSourceReadiness(
           backup,
           artifactForBackup(backup),
+          formatBytes,
         );
         return `${readiness.label} ${readiness.detail}`;
       },
@@ -981,6 +990,7 @@ function RestoreSourcesTable({
         const readiness = restoreSourceReadiness(
           backup,
           artifactForBackup(backup),
+          formatBytes,
         );
         return (
           <span className="historyPrimary">
@@ -1107,7 +1117,11 @@ function RestoreSourcesTable({
         renderExpandedRow={(backup) => {
           const artifact = artifactForBackup(backup);
           const plan = latestPlanForBackup(backup);
-          const readiness = restoreSourceReadiness(backup, artifact);
+          const readiness = restoreSourceReadiness(
+            backup,
+            artifact,
+            formatBytes,
+          );
           return (
             <div className="gridDetailLine">
               <strong title={backup.id}>request {shortId(backup.id)}</strong>
@@ -1139,6 +1153,7 @@ function RestoreSourcesTable({
               const readiness = restoreSourceReadiness(
                 backup,
                 artifactForBackup(backup),
+                formatBytes,
               );
               return readiness.tone === "ok"
                 ? "Choose this artifact and continue to destination and path behavior."
@@ -1179,6 +1194,7 @@ function MigrationLinksTable({
   restorePlans: RestorePlanRecord[];
   rowsTruncated: boolean;
 }) {
+  const formatBytes = useByteCountFormatter();
   const sourceBackupForLink = (link: MigrationLinkRecord) =>
     backups.find((backup) => backup.id === link.source_backup_request_id) ??
     null;
@@ -1221,7 +1237,7 @@ function MigrationLinksTable({
         const backup = sourceBackupForLink(link);
         const artifact = artifactForBackup(backup);
         const readiness = backup
-          ? restoreSourceReadiness(backup, artifact)
+          ? restoreSourceReadiness(backup, artifact, formatBytes)
           : {
               label: "Unverified package",
               title:
@@ -1723,6 +1739,7 @@ function policyCadenceErrorDetail(policy: BackupPolicyRecord): string | null {
 function restoreSourceReadiness(
   backup: BackupRequestRecord,
   artifact: BackupArtifactRecord | null,
+  formatBytes: ByteCountFormatter,
 ): {
   detail: string;
   label: string;
@@ -1864,17 +1881,4 @@ function artifactVerificationShortLabel(
     deleted: "Deleted",
   };
   return labels[status] ?? artifactVerificationLabel(artifact);
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KiB`;
-  }
-  if (value < 1024 * 1024 * 1024) {
-    return `${(value / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }

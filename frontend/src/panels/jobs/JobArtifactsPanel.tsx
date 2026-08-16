@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useByteCountFormatter } from "../../panelDisplay";
 import { Archive, Copy, ExternalLink } from "lucide-react";
 import {
   ConsoleDataGrid,
@@ -63,6 +64,7 @@ export function JobArtifactsPanel({
   onOpenBackupsArtifacts,
   onOpenTransfers,
 }: JobArtifactsPanelProps) {
+  const formatBytes = useByteCountFormatter();
   const [typeFilter, setTypeFilter] = useState("all");
   const rowsTruncated =
     agentUpdateReleasesTruncated ||
@@ -115,9 +117,7 @@ export function JobArtifactsPanel({
       sortValue: (row) => row.type,
     },
     {
-      cell: (row) => (
-        <span>{row.sourceWorkflow}</span>
-      ),
+      cell: (row) => <span>{row.sourceWorkflow}</span>,
       header: "Source workflow",
       id: "source",
       minSize: 160,
@@ -201,7 +201,9 @@ export function JobArtifactsPanel({
           className="jobArtifactsSummary"
           aria-label="Job artifact inventory summary"
         >
-          <div title={`${formatLowerBoundCount(artifactTypes.length, rowsTruncated)} artifact types are represented${rowsTruncated ? " in loaded source pages" : ""}.`}>
+          <div
+            title={`${formatLowerBoundCount(artifactTypes.length, rowsTruncated)} artifact types are represented${rowsTruncated ? " in loaded source pages" : ""}.`}
+          >
             <span>Artifact types</span>
             <strong>
               {formatLowerBoundCount(artifactTypes.length, rowsTruncated)}
@@ -212,16 +214,24 @@ export function JobArtifactsPanel({
                 : "backup, transfer, and update artifact types"}
             </small>
           </div>
-          <div title={`${formatLowerBoundCount(rows.length, rowsTruncated)} artifact records are linked to source workflows${rowsTruncated ? " in loaded pages" : ""}.`}>
+          <div
+            title={`${formatLowerBoundCount(rows.length, rowsTruncated)} artifact records are linked to source workflows${rowsTruncated ? " in loaded pages" : ""}.`}
+          >
             <span>Records</span>
             <strong>{formatLowerBoundCount(rows.length, rowsTruncated)}</strong>
             <small>
-              linked to source workflows{rowsTruncated ? " in loaded pages" : ""}
+              linked to source workflows
+              {rowsTruncated ? " in loaded pages" : ""}
             </small>
           </div>
-          <div title={`${rowsTruncated ? "At least " : ""}${formatBytes(totalBytes)} is recorded across artifacts with known sizes.`}>
+          <div
+            title={`${rowsTruncated ? "At least " : ""}${formatBytes(totalBytes)} is recorded across artifacts with known sizes.`}
+          >
             <span>Stored bytes</span>
-            <strong>{rowsTruncated ? "≥" : ""}{formatBytes(totalBytes)}</strong>
+            <strong>
+              {rowsTruncated ? "≥" : ""}
+              {formatBytes(totalBytes)}
+            </strong>
             <small>
               known artifact sizes only{rowsTruncated ? " in loaded pages" : ""}
             </small>
@@ -550,20 +560,6 @@ function artifactVerificationClass(
     default:
       return "neutral";
   }
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let size = value;
-  let unitIndex = 0;
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unitIndex]}`;
 }
 
 async function copyText(value: string) {

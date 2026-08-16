@@ -29,12 +29,13 @@ import type {
   TelemetryRollupRecord,
   TrafficAccountingRecord,
 } from "../types";
+import { formatUptime, INTERFACE_RATE_DEFINITION } from "../telemetryMetrics";
 import {
-  formatByteCount as formatBytes,
-  formatByteRateFromBitsPerSecond,
-  formatUptime,
-  INTERFACE_RATE_DEFINITION,
-} from "../telemetryMetrics";
+  useByteCountFormatter,
+  useByteRateFormatter,
+  type ByteCountFormatter,
+  type ByteRateFormatter,
+} from "../panelDisplay";
 import { useHistoryEntryState } from "../historyEntryState";
 import {
   OPERATOR_MONITOR_DENSITY_STORAGE_KEY,
@@ -124,6 +125,8 @@ export function FleetMonitorPanel({
   onOpenVpsDetail,
   onOpenSharedViews,
 }: FleetMonitorPanelProps) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const historySlot = embedded ? "home.fleet-monitor" : "fleet.monitor";
   const controlIdPrefix = embedded ? "home-fleet-monitor" : "fleet-monitor";
   const [density, setDensity] = usePersistentMonitorCardDensity(
@@ -564,8 +567,8 @@ export function FleetMonitorPanel({
     fleetSnapshot.locations,
     fleetSnapshot.unspecifiedLocations,
   );
-  const rxSummary = `↓ ${formatRateOrUnavailable(fleetSnapshot.rxBps)}`;
-  const txSummary = `↑ ${formatRateOrUnavailable(fleetSnapshot.txBps)} · ${fleetSnapshot.freshNetworkCount} fresh`;
+  const rxSummary = `↓ ${formatRateOrUnavailable(fleetSnapshot.rxBps, formatByteRateFromBitsPerSecond)}`;
+  const txSummary = `↑ ${formatRateOrUnavailable(fleetSnapshot.txBps, formatByteRateFromBitsPerSecond)} · ${fleetSnapshot.freshNetworkCount} fresh`;
   const trafficTotal =
     fleetSnapshot.trafficCount > 0
       ? formatBytes(fleetSnapshot.trafficBytes)
@@ -917,6 +920,8 @@ export function VpsMonitorCard({
   systemInformation,
   traffic,
 }: VpsMonitorCardProps) {
+  const formatBytes = useByteCountFormatter();
+  const formatByteRateFromBitsPerSecond = useByteRateFormatter();
   const displayState = agentDisplayState(agent);
   const provider = providerProductLabel(
     tagValue(agent.tags, "provider"),
@@ -1045,7 +1050,7 @@ export function VpsMonitorCard({
       : monitoringState === "unavailable"
         ? "Unavailable"
         : trafficConfigured && traffic
-          ? formatTrafficUsage(traffic)
+          ? formatTrafficUsage(traffic, formatBytes)
           : "Unconfigured";
   const pingEvidenceParts =
     monitoringState === "loading"
@@ -1073,9 +1078,9 @@ export function VpsMonitorCard({
       : monitoringState === "unavailable"
         ? "Monitoring card evidence is unavailable; traffic configuration is not inferred."
         : quotaState === "unlimited" && traffic
-          ? `${formatTrafficTitle(traffic)} Traffic quota is unlimited.`
+          ? `${formatTrafficTitle(traffic, formatBytes)} Traffic quota is unlimited.`
           : trafficConfigured && traffic
-            ? formatTrafficTitle(traffic)
+            ? formatTrafficTitle(traffic, formatBytes)
             : "Traffic accounting rules and reset cycle are not configured.";
   const trafficRowTitle = [
     trafficEvidenceTitle,
@@ -1156,11 +1161,15 @@ export function VpsMonitorCard({
           value={formatPercent(cpuUsed)}
         />
         <MonitorMetric
-          context={formatMaximumCapacity(rollup?.memory_total_bytes_max)}
+          context={formatMaximumCapacity(
+            rollup?.memory_total_bytes_max,
+            formatBytes,
+          )}
           icon={<Gauge size={15} />}
           label={density === "compact" ? "RAM" : "Memory"}
           meterCaption={formatMaximumCapacityCaption(
             rollup?.memory_total_bytes_max,
+            formatBytes,
           )}
           meterMax={100}
           meterValue={memoryUsedPercent}
@@ -1169,11 +1178,15 @@ export function VpsMonitorCard({
           value={formatPercent(memoryUsedPercent)}
         />
         <MonitorMetric
-          context={formatMaximumCapacity(rollup?.disk_total_bytes_max)}
+          context={formatMaximumCapacity(
+            rollup?.disk_total_bytes_max,
+            formatBytes,
+          )}
           icon={<Server size={15} />}
           label="Disk"
           meterCaption={formatMaximumCapacityCaption(
             rollup?.disk_total_bytes_max,
+            formatBytes,
           )}
           meterMax={100}
           meterValue={diskUsedPercent}
@@ -1218,7 +1231,10 @@ export function VpsMonitorCard({
             networkTelemetryState,
             networkRateExpected,
           )}
-          value={formatRateOrUnavailable(rxBps)}
+          value={formatRateOrUnavailable(
+            rxBps,
+            formatByteRateFromBitsPerSecond,
+          )}
         />
         <MonitorFact
           label={density === "compact" ? "TX" : "Network TX"}
@@ -1232,7 +1248,10 @@ export function VpsMonitorCard({
             networkTelemetryState,
             networkRateExpected,
           )}
-          value={formatRateOrUnavailable(txBps)}
+          value={formatRateOrUnavailable(
+            txBps,
+            formatByteRateFromBitsPerSecond,
+          )}
         />
       </div>
       <div
@@ -2509,18 +2528,27 @@ function formatPercent(value: number | null) {
   return value === null ? "-" : `${Math.round(value)}%`;
 }
 
-function formatMaximumCapacity(total: number | null | undefined) {
+function formatMaximumCapacity(
+  total: number | null | undefined,
+  formatBytes: ByteCountFormatter,
+) {
   return typeof total === "number" && Number.isFinite(total) && total > 0
     ? formatBytes(total)
     : undefined;
 }
 
-function formatMaximumCapacityCaption(total: number | null | undefined) {
-  const capacity = formatMaximumCapacity(total);
+function formatMaximumCapacityCaption(
+  total: number | null | undefined,
+  formatBytes: ByteCountFormatter,
+) {
+  const capacity = formatMaximumCapacity(total, formatBytes);
   return capacity ? `${capacity} maximum` : "capacity unavailable";
 }
 
-function formatTrafficUsage(traffic: TrafficAccountingRecord) {
+function formatTrafficUsage(
+  traffic: TrafficAccountingRecord,
+  formatBytes: ByteCountFormatter,
+) {
   const used = formatBytes(traffic.total_bytes);
   const limitingQuota = trafficLimitingQuota(traffic);
   if (limitingQuota) {
@@ -2564,7 +2592,10 @@ function billingTitle(billing: BillingPlanView) {
     : `${billing.display}; no renewal anchor is configured. Billing cycle is independent of the traffic reset day.`;
 }
 
-function formatTrafficTitle(traffic: TrafficAccountingRecord) {
+function formatTrafficTitle(
+  traffic: TrafficAccountingRecord,
+  formatBytes: ByteCountFormatter,
+) {
   const state = traffic.state === "ok" ? "Current" : traffic.state;
   const overage =
     traffic.cycle_percent !== null && traffic.cycle_percent > 100
@@ -2607,7 +2638,10 @@ function formatLoad(value: number | null) {
   return value === null ? "-" : value.toFixed(2);
 }
 
-function formatRateOrUnavailable(value: number | null) {
+function formatRateOrUnavailable(
+  value: number | null,
+  formatByteRateFromBitsPerSecond: ByteRateFormatter,
+) {
   return value === null ? "-" : formatByteRateFromBitsPerSecond(value);
 }
 

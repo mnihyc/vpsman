@@ -379,6 +379,12 @@ fn validate_operator_preferences(preferences: &OperatorPreferences) -> Result<()
         return Err(ApiError::bad_request("invalid_fleet_location_display_mode"));
     }
     if !matches!(
+        preferences.byte_unit_display_mode.trim(),
+        "decimal" | "binary"
+    ) {
+        return Err(ApiError::bad_request("invalid_byte_unit_display_mode"));
+    }
+    if !matches!(
         preferences.sidebar_subpanel_default.trim(),
         "active" | "all"
     ) {

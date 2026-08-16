@@ -952,8 +952,8 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   ).toBeVisible();
   await expect(card.locator(".vpsMonitorMetric > strong small")).toHaveText([
     "(4-core)",
-    "(3.7 GiB)",
-    "(47 GiB)",
+    "(4.0 GB)",
+    "(50 GB)",
   ]);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
   await expect(pingDiagnostic).toHaveText("Primary Ping disabled");
@@ -1098,7 +1098,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   });
   await expect(
     memoryChart.locator(".dashboardWidgetHeader > small"),
-  ).toHaveText("Max · RAM 7.5 GiB · Swap 1.9 GiB");
+  ).toHaveText("Max · RAM 8.0 GB · Swap 2.0 GB");
   await expect(
     memoryChart.getByRole("button", { name: "Hide Swap used series" }),
   ).toHaveAttribute("aria-pressed", "true");
@@ -1109,7 +1109,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     name: "Aggregate reported disk used chart",
   });
   await expect(diskChart.locator(".dashboardWidgetHeader > small")).toHaveText(
-    "93 GiB maximum",
+    "100 GB maximum",
   );
 
   const range = detail.getByRole("group", { name: "History range" });
@@ -1232,27 +1232,27 @@ test("public monitoring identifies the most-used finite directional traffic quot
   });
   await expect(
     card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
-  ).toHaveText("1000 B / 800 B · TX · 125%");
+  ).toHaveText("1.0 KB / 800 B · TX · 125%");
   await expect(
     card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
   ).not.toContainText(/observed/i);
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
   await expect(
     card.locator(".publicMonitoringTraffic .vpsMonitorTrafficEvidenceRow"),
-  ).toContainText("RX 2.0 KiB · TX 1000 B");
+  ).toContainText("RX 2.0 KB · TX 1.0 KB");
   await card.click();
 
   const cycle = page.locator(".publicMonitoringTrafficCycle");
   await expect(cycle.getByText("TX 800 B", { exact: true })).toBeVisible();
   await expect(
     cycle.getByText("Observed RX", { exact: true }).locator(".."),
-  ).toContainText("2.0 KiB");
+  ).toContainText("2.0 KB");
   await expect(
     cycle.getByText("Observed TX", { exact: true }).locator(".."),
-  ).toContainText("1000 B");
+  ).toContainText("1.0 KB");
   await expect(
     cycle.getByText("Counted total", { exact: true }).locator(".."),
-  ).toContainText("1000 B");
+  ).toContainText("1.0 KB");
   await expect(cycle).not.toContainText("Unlimited");
 });
 
@@ -1287,24 +1287,24 @@ test("public monitoring uses counted directional traffic for an unlimited summar
   });
   const traffic = card.locator(".publicMonitoringTraffic");
   await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
-    "1000 B / Unlimited · TX",
+    "1.0 KB / Unlimited · TX",
   );
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
   await expect(traffic.locator(".vpsMonitorTrafficEvidenceRow")).toContainText(
-    "RX 2.0 KiB · TX 1000 B",
+    "RX 2.0 KB · TX 1.0 KB",
   );
 
   await card.click();
   const cycle = page.locator(".publicMonitoringTrafficCycle");
   await expect(
     cycle.getByText("Observed RX", { exact: true }).locator(".."),
-  ).toContainText("2.0 KiB");
+  ).toContainText("2.0 KB");
   await expect(
     cycle.getByText("Observed TX", { exact: true }).locator(".."),
-  ).toContainText("1000 B");
+  ).toContainText("1.0 KB");
   await expect(
     cycle.getByText("Counted total", { exact: true }).locator(".."),
-  ).toContainText("1000 B");
+  ).toContainText("1.0 KB");
 });
 
 test("public monitoring presents no-reset accumulation without a synthetic cycle", async ({
@@ -1319,7 +1319,7 @@ test("public monitoring presents no-reset accumulation without a synthetic cycle
   const traffic = card.locator(".publicMonitoringTraffic");
   await expect(traffic.locator(".vpsMonitorRowHeading")).toHaveText("Traffic");
   await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
-    "2.9 KiB / 12 KiB · Total · 25.0%",
+    "3.0 KB / 12 KB · Total · 25.0%",
   );
 
   await card.click();

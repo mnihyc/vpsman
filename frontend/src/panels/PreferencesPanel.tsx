@@ -15,6 +15,7 @@ import {
   MapPin,
   RotateCcw,
   Route,
+  Ruler,
   Save,
   ServerCog,
   Tags,
@@ -371,6 +372,44 @@ export function PreferencesPanel({
                   >
                     <option value="country_only">Country only</option>
                     <option value="country_region">Country + region</option>
+                  </select>
+                </label>
+              </PreferenceGroup>
+
+              <PreferenceGroup
+                description="Controls displayed byte quantities and byte-per-second rates across the console. Decimal is the default and uses powers of 1000; Binary uses powers of 1024. Stored byte values and explicitly configured rule units do not change."
+                icon={<Ruler size={18} />}
+                onReset={() =>
+                  resetDraftPatch({
+                    byte_unit_display_mode:
+                      DEFAULT_OPERATOR_PREFERENCES.byte_unit_display_mode,
+                  })
+                }
+                resetDisabled={
+                  draft.byte_unit_display_mode ===
+                  DEFAULT_OPERATOR_PREFERENCES.byte_unit_display_mode
+                }
+                scope="Personal"
+                title="Byte units"
+              >
+                <label>
+                  <span>Unit system</span>
+                  <select
+                    aria-label="Byte unit system"
+                    name="byte_unit_display_mode"
+                    onChange={(event) =>
+                      setDraft((current) => ({
+                        ...current,
+                        byte_unit_display_mode:
+                          event.target.value === "binary"
+                            ? "binary"
+                            : "decimal",
+                      }))
+                    }
+                    value={draft.byte_unit_display_mode}
+                  >
+                    <option value="decimal">Decimal · KB, MB, GB, TB</option>
+                    <option value="binary">Binary · KiB, MiB, GiB, TiB</option>
                   </select>
                 </label>
               </PreferenceGroup>

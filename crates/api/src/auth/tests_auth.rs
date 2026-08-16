@@ -2476,6 +2476,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         timezone: Some("UTC".to_string()),
         vps_name_display_mode: "name".to_string(),
         fleet_location_display_mode: "country_region".to_string(),
+        byte_unit_display_mode: "binary".to_string(),
         fleet_tag_visibility_overrides: BTreeMap::from([("provider:alpha".to_string(), true)]),
         gateway_server_public_key_hex: Some("11".repeat(32)),
         gateway_endpoints: "primary=gw.example.com:9443=10".to_string(),
@@ -2486,6 +2487,7 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         .await
         .unwrap();
     assert_eq!(updated.preferences.vps_name_display_mode, "name");
+    assert_eq!(updated.preferences.byte_unit_display_mode, "binary");
     assert_eq!(
         updated.preferences.fleet_location_display_mode,
         "country_region"
@@ -2516,6 +2518,10 @@ async fn operator_preferences_update_persists_to_authenticated_views() {
         .unwrap()
         .unwrap();
     assert_eq!(context.operator.preferences.vps_name_display_mode, "name");
+    assert_eq!(
+        context.operator.preferences.byte_unit_display_mode,
+        "binary"
+    );
     assert_eq!(
         context.operator.preferences.fleet_location_display_mode,
         "country_region"
@@ -2564,6 +2570,13 @@ async fn operator_preferences_route_rejects_invalid_values() {
                 ..OperatorPreferences::default()
             },
             "invalid_fleet_location_display_mode",
+        ),
+        (
+            OperatorPreferences {
+                byte_unit_display_mode: "iec".to_string(),
+                ..OperatorPreferences::default()
+            },
+            "invalid_byte_unit_display_mode",
         ),
         (
             OperatorPreferences {
@@ -2687,6 +2700,7 @@ async fn operator_preferences_route_persists_valid_payload() {
             sidebar_subpanel_default: "all".to_string(),
             timezone: Some(" America/Los_Angeles ".to_string()),
             vps_name_display_mode: "name".to_string(),
+            byte_unit_display_mode: "binary".to_string(),
             ..OperatorPreferences::default()
         }),
     )
@@ -2694,6 +2708,7 @@ async fn operator_preferences_route_persists_valid_payload() {
     .unwrap();
 
     assert_eq!(response.0.preferences.vps_name_display_mode, "name");
+    assert_eq!(response.0.preferences.byte_unit_display_mode, "binary");
     assert_eq!(
         response.0.preferences.timezone.as_deref(),
         Some("America/Los_Angeles")
