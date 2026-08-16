@@ -28,6 +28,8 @@ pub mod protocol;
 pub mod release_identity;
 #[path = "config/suite_config.rs"]
 pub mod suite_config;
+#[path = "selection/tag_order.rs"]
+pub mod tag_order;
 #[path = "selection/template.rs"]
 pub mod template;
 #[path = "protocol/tlv.rs"]
@@ -55,6 +57,7 @@ pub use private_file::*;
 pub use protocol::*;
 pub use release_identity::*;
 pub use suite_config::*;
+pub use tag_order::*;
 pub use template::*;
 pub use tlv::*;
 pub use transport::*;

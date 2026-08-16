@@ -1,0 +1,85 @@
+{
+  "cases": [
+    {
+      "name": "case-and-leading-zero-ties",
+      "input": [
+        "provider:A10",
+        "provider:a2",
+        "provider:A002",
+        "provider:a002",
+        "provider:A02",
+        "provider:a02",
+        "provider:A2"
+      ],
+      "expected": [
+        "provider:A2",
+        "provider:a2",
+        "provider:A02",
+        "provider:a02",
+        "provider:A002",
+        "provider:a002",
+        "provider:A10"
+      ]
+    },
+    {
+      "name": "punctuation-and-natural-numeric-chunks",
+      "input": [
+        "provider:A_2",
+        "provider:a.10",
+        "provider:A-10",
+        "provider:a-2",
+        "provider:A.2"
+      ],
+      "expected": [
+        "provider:a-2",
+        "provider:A-10",
+        "provider:A.2",
+        "provider:a.10",
+        "provider:A_2"
+      ]
+    },
+    {
+      "name": "numeric-padding-ties-defer-to-later-semantic-chunks",
+      "input": [
+        "provider:A02b",
+        "provider:A002a",
+        "provider:a2b",
+        "provider:A2a"
+      ],
+      "expected": [
+        "provider:A2a",
+        "provider:A002a",
+        "provider:a2b",
+        "provider:A02b"
+      ]
+    },
+    {
+      "name": "first-numeric-padding-tie-survives-later-equal-runs",
+      "input": [
+        "provider:A02B1",
+        "provider:A2B0001"
+      ],
+      "expected": [
+        "provider:A2B0001",
+        "provider:A02B1"
+      ]
+    },
+    {
+      "name": "first-colon-namespace-with-multi-colon-values",
+      "input": [
+        "provider:DC:10",
+        "provider:dc:2",
+        "provider:DC:02",
+        "provider:dc:1",
+        "provider:DC:2"
+      ],
+      "expected": [
+        "provider:dc:1",
+        "provider:DC:2",
+        "provider:dc:2",
+        "provider:DC:02",
+        "provider:DC:10"
+      ]
+    }
+  ]
+}

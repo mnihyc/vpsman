@@ -355,10 +355,10 @@ Compose deployments keep durable state under their `runtime/` directory:
 - active frontend payload: `runtime/frontend/current`
 - active CLI payload: `runtime/cli/current`
 
-The current canonical database is intentionally fresh-only and does not support
-an in-place update from an earlier schema model; review
-[migration compatibility](docs/migration-compatibility.md) before updating an
-older deployment.
+The current canonical database is intentionally fresh-first. Its sole supported
+in-place schema step is the checksum-pinned v0.3.5 `0001`–`0008` baseline to
+`0009`; review [migration compatibility](docs/migration-compatibility.md) before
+updating any deployment.
 
 Update an existing deployment:
 
@@ -370,6 +370,17 @@ cd /path/to/the/versioned-deployment
 # required:
 ./update.sh latest
 ```
+
+Create an immediate, validated PostgreSQL snapshot without stopping the
+application services:
+
+```sh
+./update.sh backup
+```
+
+The custom-format archive is written with mode `0600` under
+`runtime/update-backups/`. It is database-only; retain a separate encrypted,
+off-host backup of deployment configuration, secrets, and object data.
 
 Rollback swaps server, frontend, and CLI payload directories back together:
 

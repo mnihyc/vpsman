@@ -65,7 +65,7 @@ import {
   useReviewGenerationGuard,
   waitForReviewRender,
 } from "../hooks/useReviewGenerationGuard";
-import { useProjectedProductName } from "../hooks/useProjectedProductName";
+import { useProjectedMonitoringMetadata } from "../hooks/useProjectedMonitoringMetadata";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
@@ -91,6 +91,11 @@ import {
 } from "../panelDisplay";
 import { scrollIntoViewWithMotion } from "../motion";
 import { formatUptime } from "../telemetryMetrics";
+import {
+  formatSwapUsage,
+  systemInformationFacts,
+  type SystemInformationFact,
+} from "../systemInformation";
 import {
   resolveNetworkRateInterfaces,
   selectedNetworkRates,
@@ -196,6 +201,7 @@ import type {
 
 type FleetDetailTab =
   | "Overview"
+  | "System"
   | "Telemetry"
   | "Traffic & Rules"
   | "Jobs"
@@ -273,6 +279,7 @@ type WebhookDeliveryQueueSnapshot =
 
 const detailTabs: FleetDetailTab[] = [
   "Overview",
+  "System",
   "Telemetry",
   "Traffic & Rules",
   "Jobs",
@@ -2222,11 +2229,12 @@ function FleetInstanceDetail({
   const [configPreview, setConfigPreview] =
     useState<EffectiveAgentConfigResponse | null>(null);
   const provider = providerFromTags(agent.tags);
-  const productName = useProjectedProductName(
+  const monitoringMetadata = useProjectedMonitoringMetadata(
     apiToken,
     agent.id,
     productNameFromVpsRules(vpsRuleValues, agent.id),
   );
+  const productName = monitoringMetadata.productName;
   const country = countryFromTags(agent.tags);
   const region = regionTagValue(agent.tags);
   const providerProduct = providerProductLabel(provider, productName, "unset");
@@ -2251,6 +2259,7 @@ function FleetInstanceDetail({
     vpsRuleValues,
   );
   const networkRateSelection = resolveNetworkRateInterfaces(vpsRuleValues);
+  const swapUsage = formatSwapUsage(latestRollup, formatBytes);
 
   useEffect(() => {
     void runPanelAction(
@@ -2513,20 +2522,22 @@ function FleetInstanceDetail({
           <span className="mutedText">No tags assigned</span>
         ) : (
           sortTagsByDisplayOrder(agent.tags, tagDisplayOrder).map((tag) => (
-            <button
-              className="tagEditChip"
-              data-tooltip-disabled-reason={
-                tagPending ? "A tag change is already in progress" : undefined
-              }
-              disabled={tagPending}
-              key={tag}
-              onClick={() => void mutateTag("remove", tag)}
-              title={`Remove ${tag}`}
-              type="button"
-            >
+            <span className="tagEditChip" key={tag}>
               <span>{tag}</span>
-              <X size={13} />
-            </button>
+              <button
+                aria-label={`Remove tag ${tag}`}
+                className="tagEditChipRemove"
+                data-tooltip-disabled-reason={
+                  tagPending ? "A tag change is already in progress" : undefined
+                }
+                disabled={tagPending}
+                onClick={() => void mutateTag("remove", tag)}
+                title={`Remove ${tag}`}
+                type="button"
+              >
+                <X aria-hidden="true" size={13} />
+              </button>
+            </span>
           ))
         )}
       </div>
@@ -2697,6 +2708,12 @@ function FleetInstanceDetail({
             />
           </>
         )}
+        {activeDetailTab === "System" && (
+          <FleetSystemInformation
+            facts={systemInformationFacts(monitoringMetadata.systemInformation)}
+            loading={monitoringMetadata.loading}
+          />
+        )}
         {activeDetailTab === "Telemetry" && (
           <>
             <DetailLine
@@ -2727,6 +2744,13 @@ function FleetInstanceDetail({
                   : formatMemoryUsed(latestRollup, formatBytes)
               }
             />
+            {swapUsage ? (
+              <DetailLine
+                icon={<Server size={18} />}
+                label="Swap used"
+                value={swapUsage}
+              />
+            ) : null}
             <DetailLine
               icon={<Boxes size={18} />}
               label="Disk used"
@@ -11133,6 +11157,49 @@ function DetailLine({
         <strong>{label}</strong>
         <span className={mono ? "monoValue" : undefined}>{value}</span>
       </div>
+    </div>
+  );
+}
+
+function FleetSystemInformation({
+  facts,
+  loading,
+}: {
+  facts: SystemInformationFact[];
+  loading: boolean;
+}) {
+  if (facts.length === 0) {
+    return (
+      <div
+        aria-label="VPS system information"
+        className="fleetSystemInformationEmpty"
+      >
+        <Server size={18} />
+        <div>
+          <strong>
+            {loading
+              ? "Loading system information"
+              : "System information unavailable"}
+          </strong>
+          <span>
+            The agent has not reported OS, CPU, kernel, architecture, or
+            virtualization information.
+          </span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      aria-label="VPS system information"
+      className="consoleInlineDetailGrid fleetSystemInformationGrid"
+    >
+      {facts.map((fact) => (
+        <span key={fact.key}>
+          <strong>{fact.label}</strong>
+          <span title={fact.value}>{fact.value}</span>
+        </span>
+      ))}
     </div>
   );
 }

@@ -4,8 +4,10 @@ import {
   formatBillingRenewal,
   formatFullTime,
   formatTime,
+  formatUptimeStartTime,
   retainMutationSuccessAfterRefresh,
   trafficLimitingQuota,
+  trafficNonTotalSelectorDirection,
   trafficUnlimitedQuota,
   timestampMillis,
 } from "../src/utils";
@@ -20,6 +22,18 @@ test("formats Unix-second and Unix-millisecond timestamp strings", () => {
     expect(formatter(seconds, "UTC")).not.toBe(seconds);
     expect(formatter(milliseconds, "UTC")).not.toBe(milliseconds);
   }
+});
+
+test("derives the exact uptime start timestamp from its sample", () => {
+  expect(
+    formatUptimeStartTime(
+      "2026-06-05T20:35:00Z",
+      8 * 24 * 60 * 60 + 3 * 60 * 60,
+      "UTC",
+    ),
+  ).toBe(formatFullTime("2026-05-28T17:35:00Z", "UTC"));
+  expect(formatUptimeStartTime(null, 1, "UTC")).toBeNull();
+  expect(formatUptimeStartTime("invalid", 1, "UTC")).toBeNull();
 });
 
 test("keeps a completed mutation successful when its visible refresh fails", async () => {
@@ -58,6 +72,31 @@ test("keeps an unlimited directional quota tied to its counted bytes", () => {
       tx_bytes: 3_000,
     }),
   ).toEqual({ direction: "TX", used: 3_000 });
+});
+
+test("overrides only uniform non-total selector directions on monitor cards", () => {
+  expect(
+    trafficNonTotalSelectorDirection({
+      selector_breakdown: [{ direction: "rx" }, { direction: "rx" }],
+    }),
+  ).toBe("RX");
+  expect(
+    trafficNonTotalSelectorDirection({
+      selector_breakdown: [{ direction: "tx" }],
+    }),
+  ).toBe("TX");
+  expect(
+    trafficNonTotalSelectorDirection({
+      selector_breakdown: [{ direction: "tx/rx" }],
+    }),
+  ).toBe("Max");
+  for (const selector_breakdown of [
+    [{ direction: "total" }],
+    [{ direction: "rx" }, { direction: "tx" }],
+    [],
+  ]) {
+    expect(trafficNonTotalSelectorDirection({ selector_breakdown })).toBeNull();
+  }
 });
 
 test("displays standard or shorthand billing anchors as MM-DD", () => {

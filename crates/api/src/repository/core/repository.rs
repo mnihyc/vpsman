@@ -53,6 +53,12 @@ pub(crate) type MemoryPingSourceCheckKey = (String, Uuid, i64, u64);
 pub(crate) type MemoryPingSourceChecks = Arc<RwLock<HashMap<MemoryPingSourceCheckKey, u64>>>;
 type CapabilityDegradedJobTargets = HashMap<(Uuid, String), (String, String)>;
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MemoryTagOrderState {
+    pub(crate) names: Vec<String>,
+    pub(crate) namespace_natural_sort_enabled: bool,
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct MemoryState {
     pub(crate) agents: Arc<RwLock<Vec<AgentView>>>,
@@ -61,7 +67,7 @@ pub(crate) struct MemoryState {
     pub(crate) hidden_clients: Arc<RwLock<HashSet<String>>>,
     pub(crate) gateway_sessions: Arc<RwLock<Vec<GatewaySessionView>>>,
     pub(crate) client_status_history: Arc<RwLock<Vec<ClientStatusHistoryView>>>,
-    pub(crate) tags: Arc<RwLock<Vec<String>>>,
+    pub(crate) tag_order: Arc<RwLock<MemoryTagOrderState>>,
     pub(crate) vps_rule_values: Arc<RwLock<Vec<crate::model_alert_policies::VpsRuleValueRecord>>>,
     pub(crate) vps_rule_mutation: Arc<Mutex<()>>,
     pub(crate) traffic_counter_samples:

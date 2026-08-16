@@ -1157,6 +1157,120 @@
     grid-column: 2;
   }
 
+  .tagOrderPanel {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .tagOrderPanelHeader {
+    align-items: flex-start;
+  }
+
+  .tagOrderSaveBar {
+    position: sticky;
+    top: auto;
+    bottom: 0;
+    z-index: var(--z-sticky);
+    align-items: stretch;
+    flex-direction: column;
+    margin-right: -12px;
+    margin-bottom: -12px;
+    margin-left: -12px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 0;
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    box-shadow: 0 -4px 8px rgb(60 64 67 / 12%);
+    backdrop-filter: blur(8px);
+  }
+
+  .tagOrderSaveBar .buttonCluster {
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .tagOrderSaveBar .buttonCluster button {
+    flex: 1 1 min(100%, 140px);
+  }
+
+  .tagOrderRootHeader {
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 6px;
+    padding: 8px;
+  }
+
+  .tagOrderRootActions {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    width: 100%;
+  }
+
+  .tagOrderNaturalToggle {
+    min-width: 0;
+  }
+
+  .tagOrderNaturalToggle > span {
+    line-height: 1.25;
+    white-space: normal;
+  }
+
+  .tagOrderList {
+    gap: 6px;
+    padding: 7px;
+  }
+
+  .tagOrderBlockHeader {
+    grid-template-columns: 28px 28px minmax(0, 1fr) 28px;
+    gap: 5px;
+    padding: 6px 7px;
+  }
+
+  .tagOrderBlockIdentity {
+    gap: 2px 6px;
+  }
+
+  .tagOrderChildren {
+    padding-left: 0;
+  }
+
+  .tagOrderPanel .tagOrderRow {
+    grid-template-columns: 28px 22px minmax(0, 1fr) max-content;
+    grid-template-rows: 1fr;
+    gap: 5px;
+    width: 100%;
+    min-height: 48px;
+    max-height: 52px;
+    padding: 5px 7px;
+  }
+
+  .tagOrderPanel .tagOrderIndex,
+  .tagOrderPanel .tagOrderRow .tags,
+  .tagOrderPanel .tagOrderClients {
+    grid-column: auto;
+    grid-row: auto;
+  }
+
+  .tagOrderPanel .tagOrderRow .tags {
+    flex-wrap: nowrap;
+    overflow: hidden;
+  }
+
+  .tagOrderPanel .tagOrderRow .tags em {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tagOrderPanel .tagOrderClients,
+  .tagOrderPanel .tagOrderIndex {
+    font-size: 11px;
+  }
+
   .preferenceControls label.tagVisibilityLine .tags {
     grid-column: 2;
     grid-row: 1;

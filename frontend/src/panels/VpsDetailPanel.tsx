@@ -20,7 +20,7 @@ import { ActionFeedback } from "../components/ActionFeedback";
 import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { CountryBadge } from "../components/CountryFlag";
 import { useHistoryEntryState } from "../historyEntryState";
-import { useProjectedProductName } from "../hooks/useProjectedProductName";
+import { useProjectedMonitoringMetadata } from "../hooks/useProjectedMonitoringMetadata";
 import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
@@ -47,6 +47,11 @@ import type {
   VpsRuleValueRecord,
 } from "../types";
 import { formatUptime } from "../telemetryMetrics";
+import {
+  formatSwapUsage,
+  systemInformationFacts,
+  type SystemInformationFact,
+} from "../systemInformation";
 import { useByteCountFormatter, useByteRateFormatter } from "../panelDisplay";
 import {
   networkRateSelectionLabel,
@@ -73,6 +78,7 @@ import { VpsMonitoringDetailPanel } from "./VpsMonitoringDetailPanel";
 
 type VpsDetailTab =
   | "Summary"
+  | "System"
   | "Resources"
   | "Ping"
   | "Remote access"
@@ -139,6 +145,7 @@ type VpsDetailPanelProps = {
 
 const detailTabs: VpsDetailTab[] = [
   "Summary",
+  "System",
   "Resources",
   "Ping",
   "Remote access",
@@ -268,11 +275,12 @@ export function VpsDetailPanel({
       vpsRuleValues,
     ],
   );
-  const productName = useProjectedProductName(
+  const monitoringMetadata = useProjectedMonitoringMetadata(
     apiToken,
     agent?.id,
     agent ? productNameFromVpsRules(vpsRuleValues, agent.id) : null,
   );
+  const productName = monitoringMetadata.productName;
   const provider = agent ? providerTagValue(agent.tags) : null;
   const providerIdentity = providerProductLabel(provider, productName);
   const country = agent ? countryTagValue(agent.tags) : null;
@@ -498,9 +506,11 @@ export function VpsDetailPanel({
               label="Agent version"
               value={agentVersionLabel(agent)}
               detail={
-                agent.arch
-                  ? `Architecture ${agent.arch}`
-                  : "Architecture unavailable"
+                monitoringMetadata.systemInformation?.architecture
+                  ? "Agent build identity"
+                  : agent.arch
+                    ? `Architecture ${agent.arch}`
+                    : "Agent build identity"
               }
             />
             <VpsResourceFact
@@ -596,6 +606,14 @@ export function VpsDetailPanel({
               onOpenFleetAlerts={onOpenFleetAlerts}
               onOpenFleetMetrics={() => onOpenFleetMetrics(agent)}
               onOpenJob={onOpenJob}
+            />
+          )}
+          {activeTab === "System" && (
+            <SystemTab
+              facts={systemInformationFacts(
+                monitoringMetadata.systemInformation,
+              )}
+              loading={monitoringMetadata.loading}
             />
           )}
           {(activeTab === "Resources" || activeTab === "Ping") && (
@@ -744,6 +762,7 @@ function SummaryTab({
   onOpenJob: (jobId: string) => void;
 }) {
   const formatBytes = useByteCountFormatter();
+  const swapUsage = formatSwapUsage(related.rollup, formatBytes);
   return (
     <div className="vpsDetailGrid">
       <DetailBlock title="Health" icon={<Gauge size={18} />}>
@@ -763,6 +782,7 @@ function SummaryTab({
               : "No resource rollup"
           }
         />
+        {swapUsage ? <VpsFact label="Swap used" value={swapUsage} /> : null}
         <VpsFact
           label="Disk used"
           value={
@@ -888,6 +908,41 @@ function SummaryTab({
             detail="More backup history may exist outside the loaded page."
           />
         ) : null}
+      </DetailBlock>
+    </div>
+  );
+}
+
+function SystemTab({
+  facts,
+  loading,
+}: {
+  facts: SystemInformationFact[];
+  loading: boolean;
+}) {
+  if (facts.length === 0) {
+    return (
+      <div className="vpsDetailGrid" aria-label="VPS system information">
+        <DetailBlock title="System" icon={<Server size={18} />}>
+          <DetailState
+            loading={loading}
+            title={
+              loading
+                ? "Loading system information"
+                : "System information unavailable"
+            }
+            detail="The agent has not reported OS, CPU, kernel, architecture, or virtualization information."
+          />
+        </DetailBlock>
+      </div>
+    );
+  }
+  return (
+    <div className="vpsDetailGrid" aria-label="VPS system information">
+      <DetailBlock title="System" icon={<Server size={18} />}>
+        {facts.map((fact) => (
+          <VpsFact key={fact.key} label={fact.label} value={fact.value} />
+        ))}
       </DetailBlock>
     </div>
   );

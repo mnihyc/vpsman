@@ -8,25 +8,36 @@ import {
 } from "react";
 import {
   DndContext,
+  DragOverlay,
   KeyboardSensor,
   PointerSensor,
   closestCenter,
   useSensor,
   useSensors,
+  type Announcements,
+  type CollisionDetection,
   type DragEndEvent,
+  type DragOverEvent,
+  type DragStartEvent,
+  type DroppableContainer,
+  type KeyboardCoordinateGetter,
 } from "@dnd-kit/core";
 import {
   SortableContext,
-  arrayMove,
   sortableKeyboardCoordinates,
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  ArrowDownAZ,
+  ChevronRight,
+  ChevronsUpDown,
   GripVertical,
   Plus,
   RefreshCw,
+  RotateCcw,
+  Save,
   ShieldCheck,
   Tag,
   Trash2,
@@ -57,7 +68,9 @@ import type {
   FleetAlertPolicyRecord,
   ScheduleRecord,
   TagMutationResponse,
+  TagOrderState,
   TagView,
+  UpdateTagOrderRequest,
 } from "../types";
 import {
   buildPrivilegeAssertion,
@@ -74,9 +87,154 @@ import {
 } from "../searchExpression";
 import { useVpsRuleSearchContext } from "../vpsRuleSearchContext";
 import { formatVpsName, runPanelAction } from "../utils";
+import {
+  buildTagOrderBlocks,
+  moveTagOrderBlock,
+  moveTagOrderLeaf,
+  naturallySortTagOrderBlock,
+  naturallySortedTagNames,
+  normalizeNaturalTagOrder,
+  reconcileTagOrderDraft,
+  sameTagOrder,
+  tagNamespaceDisplayLabel,
+  tagOrderLeafId,
+  type TagOrderBlock,
+} from "../tagOrder";
 import { LocalTargetPreview } from "./TargetImpactPreview";
 
 const TAG_BULK_SELECTOR_STORAGE_KEY = "vpsman.tags.bulk.selectorExpression";
+const TAG_ORDER_EXPANSION_STORAGE_KEY = "vpsman.tags.order.expansion";
+const SILENT_TAG_ORDER_DND_ANNOUNCEMENTS: Announcements = {
+  onDragCancel: () => undefined,
+  onDragEnd: () => undefined,
+  onDragOver: () => undefined,
+  onDragStart: () => undefined,
+};
+
+type TagOrderDndData =
+  | {
+      expanded: boolean;
+      kind: "block";
+      names: string[];
+    }
+  | {
+      kind: "leaf";
+      name: string;
+      topLevel: boolean;
+    };
+
+const tagOrderKeyboardCoordinates: KeyboardCoordinateGetter = (event, args) => {
+  const direction =
+    event.code === "ArrowDown" || event.code === "ArrowRight"
+      ? 1
+      : event.code === "ArrowUp" || event.code === "ArrowLeft"
+        ? -1
+        : 0;
+  const { collisionRect } = args.context;
+  const activeData = readTagOrderDndData(args.context.active?.data.current);
+  if (direction === 0 || !collisionRect || !activeData) {
+    return sortableKeyboardCoordinates(event, args);
+  }
+
+  event.preventDefault();
+  const activeCenter = collisionRect.top + collisionRect.height / 2;
+  const target = eligibleTagOrderDroppables(
+    activeData,
+    args.context.droppableContainers.getEnabled(),
+  )
+    .filter((container) => container.id !== args.active)
+    .map((container) => ({
+      container,
+      rect: args.context.droppableRects.get(container.id),
+    }))
+    .filter(
+      (
+        candidate,
+      ): candidate is {
+        container: DroppableContainer;
+        rect: NonNullable<typeof candidate.rect>;
+      } => candidate.rect !== undefined,
+    )
+    .map((candidate) => ({
+      ...candidate,
+      distance:
+        direction *
+        (candidate.rect.top + candidate.rect.height / 2 - activeCenter),
+    }))
+    .filter((candidate) => candidate.distance > 1)
+    .sort(
+      (left, right) =>
+        left.distance - right.distance || left.rect.left - right.rect.left,
+    )[0];
+  if (!target) return undefined;
+  return {
+    x: target.rect.left + (target.rect.width - collisionRect.width) / 2,
+    y: target.rect.top + (target.rect.height - collisionRect.height) / 2,
+  };
+};
+
+const tagOrderCollisionDetection: CollisionDetection = (args) => {
+  const activeData = readTagOrderDndData(args.active.data.current);
+  return closestCenter({
+    ...args,
+    droppableContainers: activeData
+      ? eligibleTagOrderDroppables(activeData, args.droppableContainers)
+      : args.droppableContainers,
+  });
+};
+
+function eligibleTagOrderDroppables(
+  activeData: TagOrderDndData,
+  containers: DroppableContainer[],
+): DroppableContainer[] {
+  return containers.filter((container) => {
+    const candidate = readTagOrderDndData(container.data.current);
+    if (!candidate) return false;
+    if (activeData.kind === "block") {
+      return candidate.kind === "block" || candidate.topLevel;
+    }
+    if (candidate.kind === "leaf") return true;
+    return !candidate.expanded && !candidate.names.includes(activeData.name);
+  });
+}
+
+function readTagOrderDndData(data: unknown): TagOrderDndData | null {
+  if (!data || typeof data !== "object" || !("tagOrder" in data)) {
+    return null;
+  }
+  const tagOrder = (data as { tagOrder?: unknown }).tagOrder;
+  if (!tagOrder || typeof tagOrder !== "object" || !("kind" in tagOrder)) {
+    return null;
+  }
+  if (
+    tagOrder.kind === "block" &&
+    "expanded" in tagOrder &&
+    typeof tagOrder.expanded === "boolean" &&
+    "names" in tagOrder &&
+    Array.isArray(tagOrder.names) &&
+    tagOrder.names.every((name) => typeof name === "string")
+  ) {
+    return {
+      expanded: tagOrder.expanded,
+      kind: "block",
+      names: tagOrder.names,
+    };
+  }
+  if (
+    tagOrder.kind === "leaf" &&
+    "name" in tagOrder &&
+    typeof tagOrder.name === "string" &&
+    "topLevel" in tagOrder &&
+    typeof tagOrder.topLevel === "boolean"
+  ) {
+    return {
+      kind: "leaf",
+      name: tagOrder.name,
+      topLevel: tagOrder.topLevel,
+    };
+  }
+  return null;
+}
 
 type BulkTagMutationSnapshot = {
   action: "add" | "remove" | "delete";
@@ -90,6 +248,7 @@ export function FleetGroupsPanel({
   agents,
   error,
   loading,
+  namespaceNaturalSortEnabled,
   onAssignTag,
   onBulkMutateTags,
   onCreateTag,
@@ -108,6 +267,7 @@ export function FleetGroupsPanel({
   agents: AgentView[];
   error: string | null;
   loading: boolean;
+  namespaceNaturalSortEnabled: boolean;
   onAssignTag: (
     clientId: string,
     tag: string,
@@ -130,7 +290,7 @@ export function FleetGroupsPanel({
   onOpenSchedules?: () => void;
   onRefresh: () => void;
   onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
-  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
+  onUpdateTagOrder: (request: UpdateTagOrderRequest) => Promise<TagOrderState>;
   privilegeMaterial: PrivilegeMaterial | null;
   schedules: ScheduleRecord[];
   tags: TagView[];
@@ -229,6 +389,7 @@ export function FleetGroupsPanel({
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
             onOpenSchedules={onOpenSchedules}
             onUpdateTagOrder={onUpdateTagOrder}
+            namespaceNaturalSortEnabled={namespaceNaturalSortEnabled}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={runGroupAction}
@@ -633,6 +794,7 @@ function escapeRegExp(value: string) {
 function TagRegistry({
   actionFeedbackMessage,
   actionFeedbackTone,
+  namespaceNaturalSortEnabled,
   onClearActionFeedback,
   onCreateTag,
   onDeleteTag,
@@ -648,6 +810,7 @@ function TagRegistry({
 }: {
   actionFeedbackMessage: string | null;
   actionFeedbackTone: "danger" | "success";
+  namespaceNaturalSortEnabled: boolean;
   onClearActionFeedback: () => void;
   onCreateTag: (
     name: string,
@@ -661,7 +824,7 @@ function TagRegistry({
   ) => Promise<TagMutationResponse>;
   onOpenPrivilegeUnlock: () => void;
   onOpenSchedules?: () => void;
-  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
+  onUpdateTagOrder: (request: UpdateTagOrderRequest) => Promise<TagOrderState>;
   pending: boolean;
   privilegeMaterial: PrivilegeMaterial | null;
   runAction: (action: () => Promise<void>) => Promise<void>;
@@ -865,6 +1028,7 @@ function TagRegistry({
       />
       <TagOrderManager
         disabled={pending}
+        namespaceNaturalSortEnabled={namespaceNaturalSortEnabled}
         onUpdateTagOrder={onUpdateTagOrder}
         tags={tags}
       />
@@ -989,130 +1153,764 @@ function TagRegistry({
 
 function TagOrderManager({
   disabled,
+  namespaceNaturalSortEnabled,
   onUpdateTagOrder,
   tags,
 }: {
   disabled: boolean;
-  onUpdateTagOrder: (orderedTags: string[]) => Promise<TagView[]>;
+  namespaceNaturalSortEnabled: boolean;
+  onUpdateTagOrder: (request: UpdateTagOrderRequest) => Promise<TagOrderState>;
   tags: TagView[];
 }) {
-  const [orderedNames, setOrderedNames] = useState(() =>
-    tags.map((tag) => tag.name),
-  );
+  const incomingNames = useMemo(() => tags.map((tag) => tag.name), [tags]);
+  const [editor, setEditor] = useState<TagOrderEditorState>(() => ({
+    baseNames: incomingNames,
+    baseNaturalSortEnabled: namespaceNaturalSortEnabled,
+    names: incomingNames,
+    naturalSortEnabled: namespaceNaturalSortEnabled,
+  }));
   const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [activeDrag, setActiveDrag] = useState<TagOrderDragItem | null>(null);
+  const [dropTarget, setDropTarget] = useState<TagOrderDropTarget | null>(null);
+  const [dragAnnouncement, setDragAnnouncement] = useState("");
+  const [expansion, setExpansion] = useState<TagOrderExpansionState>(() =>
+    readTagOrderExpansionState(),
+  );
   const tagByName = useMemo(
     () => new Map(tags.map((tag) => [tag.name, tag])),
     [tags],
   );
-  const orderedTags = useMemo(
-    () =>
-      orderedNames
-        .map((name) => tagByName.get(name))
-        .filter((tag): tag is TagView => Boolean(tag)),
-    [orderedNames, tagByName],
+  const blocks = useMemo(
+    () => buildTagOrderBlocks(editor.names),
+    [editor.names],
   );
+  const tagIndexes = useMemo(
+    () => new Map(editor.names.map((name, index) => [name, index])),
+    [editor.names],
+  );
+  const totalAssignments = editor.names.reduce(
+    (total, name) => total + (tagByName.get(name)?.clients.length ?? 0),
+    0,
+  );
+  const multiTagBlocks = blocks.filter(
+    (block) => block.namespace !== null && block.names.length > 1,
+  );
+  const multiTagBlockIdsKey = multiTagBlocks
+    .map((block) => block.id)
+    .join("\u0000");
+  const currentExpandedBlockIds = new Set(expansion.expandedBlockIds);
+  const allCurrentBlocksExpanded =
+    multiTagBlocks.length > 0 &&
+    multiTagBlocks.every((block) => currentExpandedBlockIds.has(block.id));
+  const dirty =
+    editor.naturalSortEnabled !== editor.baseNaturalSortEnabled ||
+    !sameTagOrder(editor.names, editor.baseNames);
+  const interactionDisabled = disabled || saving;
+  const interactionDisabledReason = saving
+    ? "The updated tag order is being saved"
+    : disabled
+      ? "Tag order is locked while another group change is in progress"
+      : undefined;
+  const status = saving
+    ? "Saving order"
+    : saveError
+      ? saveError
+      : dirty
+        ? "Unsaved changes"
+        : "Saved";
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
+      coordinateGetter: tagOrderKeyboardCoordinates,
     }),
   );
 
   useEffect(() => {
-    setOrderedNames(tags.map((tag) => tag.name));
-  }, [tags]);
+    setEditor((current) => {
+      const clean =
+        current.naturalSortEnabled === current.baseNaturalSortEnabled &&
+        sameTagOrder(current.names, current.baseNames);
+      return {
+        baseNames: incomingNames,
+        baseNaturalSortEnabled: namespaceNaturalSortEnabled,
+        names: clean
+          ? incomingNames
+          : reconcileTagOrderDraft(
+              current.names,
+              incomingNames,
+              current.naturalSortEnabled,
+            ),
+        naturalSortEnabled: clean
+          ? namespaceNaturalSortEnabled
+          : current.naturalSortEnabled,
+      };
+    });
+  }, [incomingNames, namespaceNaturalSortEnabled]);
 
-  async function handleDragEnd(event: DragEndEvent) {
+  useEffect(() => {
+    writeTagOrderExpansionState(expansion);
+  }, [expansion]);
+
+  useEffect(() => {
+    setExpansion((current) => {
+      const expandedBlockIds = preserveExpandedTagOrderBlocks(
+        current.expandedBlockIds,
+        blocks,
+      );
+      return sameTagOrder(expandedBlockIds, current.expandedBlockIds)
+        ? current
+        : { ...current, expandedBlockIds };
+    });
+  }, [multiTagBlockIdsKey]);
+
+  function stageNames(nextNames: string[]) {
+    setSaveError(null);
+    setExpansion((current) => ({
+      ...current,
+      expandedBlockIds: preserveExpandedTagOrderBlocks(
+        current.expandedBlockIds,
+        buildTagOrderBlocks(nextNames),
+      ),
+    }));
+    setEditor((current) => ({ ...current, names: nextNames }));
+  }
+
+  function handleDragStart(event: DragStartEvent) {
+    const activeId = String(event.active.id);
+    const activeBlock = blocks.find(
+      (block) => block.names.length > 1 && block.id === activeId,
+    );
+    const activeName = tagNameForDndId(editor.names, activeId);
+    const nextActive = activeBlock
+      ? {
+          count: activeBlock.names.length,
+          id: activeId,
+          kind: "block" as const,
+          label: `${tagNamespaceDisplayLabel(activeBlock.names[0] ?? "tags")} group`,
+        }
+      : activeName
+        ? {
+            count: 1,
+            id: activeId,
+            kind: "tag" as const,
+            label: activeName,
+          }
+        : null;
+    setActiveDrag(nextActive);
+    setDropTarget(null);
+    if (nextActive) {
+      setDragAnnouncement(`Picked up ${nextActive.label}.`);
+    }
+  }
+
+  function handleDragOver(event: DragOverEvent) {
     const activeId = String(event.active.id);
     const overId = event.over ? String(event.over.id) : null;
-    if (!overId || activeId === overId || saving || disabled) {
+    const activeBlockIndex = blocks.findIndex(
+      (block) => block.names.length > 1 && block.id === activeId,
+    );
+    const overBlock = overId ? tagOrderBlockForDndId(blocks, overId) : null;
+    const overBlockIndex = overBlock ? blocks.indexOf(overBlock) : -1;
+    const activeName = tagNameForDndId(editor.names, activeId);
+    const exactOverName = overId
+      ? tagNameForDndId(editor.names, overId)
+      : undefined;
+    let nextDropTarget: TagOrderDropTarget | null = null;
+    if (
+      activeBlockIndex >= 0 &&
+      overBlock &&
+      activeBlockIndex !== overBlockIndex
+    ) {
+      nextDropTarget = {
+        id: tagOrderTopLevelDndId(overBlock),
+        placement: activeBlockIndex < overBlockIndex ? "after" : "before",
+      };
+    } else if (activeName && exactOverName && activeName !== exactOverName) {
+      nextDropTarget = {
+        id: tagOrderLeafId(exactOverName),
+        placement:
+          editor.names.indexOf(activeName) < editor.names.indexOf(exactOverName)
+            ? "after"
+            : "before",
+      };
+    } else if (activeName && overBlock && overId === overBlock.id) {
+      const firstBlockName = overBlock.names[0];
+      if (firstBlockName && activeName !== firstBlockName) {
+        const sameBlock = overBlock.names.includes(activeName);
+        nextDropTarget = {
+          id: sameBlock ? tagOrderLeafId(firstBlockName) : overBlock.id,
+          placement:
+            sameBlock ||
+            editor.names.indexOf(activeName) >
+              editor.names.indexOf(firstBlockName)
+              ? "before"
+              : "after",
+        };
+      }
+    }
+    setDropTarget(nextDropTarget);
+    if (
+      nextDropTarget &&
+      (nextDropTarget.id !== dropTarget?.id ||
+        nextDropTarget.placement !== dropTarget.placement)
+    ) {
+      const targetLabel = tagOrderDndTargetLabel(blocks, nextDropTarget.id);
+      if (targetLabel) {
+        setDragAnnouncement(`Move ${nextDropTarget.placement} ${targetLabel}.`);
+      }
+    }
+  }
+
+  function handleDragCancel() {
+    setActiveDrag(null);
+    setDropTarget(null);
+    setDragAnnouncement("Reorder canceled.");
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : null;
+    const draggedLabel = activeDrag?.label ?? "item";
+    setActiveDrag(null);
+    setDropTarget(null);
+    if (!overId || activeId === overId || interactionDisabled) {
+      setDragAnnouncement(`${draggedLabel} stayed in its current position.`);
       return;
     }
-    const oldIndex = orderedNames.indexOf(activeId);
-    const newIndex = orderedNames.indexOf(overId);
-    if (oldIndex < 0 || newIndex < 0) {
+    const activeBlock = blocks.find(
+      (block) => block.names.length > 1 && block.id === activeId,
+    );
+    const overBlock = tagOrderBlockForDndId(blocks, overId);
+    if (activeBlock) {
+      if (!overBlock) {
+        setDragAnnouncement(`${draggedLabel} stayed in its current position.`);
+        return;
+      }
+      const nextNames = moveTagOrderBlock(
+        editor.names,
+        activeBlock.id,
+        overBlock.id,
+        editor.naturalSortEnabled,
+      );
+      if (sameTagOrder(nextNames, editor.names)) {
+        setDragAnnouncement(`${draggedLabel} stayed in its current position.`);
+        return;
+      }
+      stageNames(nextNames);
+      setDragAnnouncement(
+        `${draggedLabel} order staged.${editor.naturalSortEnabled ? " Automatic namespace sorting was reapplied." : ""}`,
+      );
       return;
     }
-    const nextOrder = arrayMove(orderedNames, oldIndex, newIndex);
-    setOrderedNames(nextOrder);
+    const activeName = tagNameForDndId(editor.names, activeId);
+    const exactOverName = tagNameForDndId(editor.names, overId);
+    const activeIndex = activeName ? editor.names.indexOf(activeName) : -1;
+    const overBlockStart = overBlock?.names[0];
+    const overName =
+      exactOverName ??
+      (overBlock &&
+      overBlockStart &&
+      activeIndex < editor.names.indexOf(overBlockStart)
+        ? overBlock.names[overBlock.names.length - 1]
+        : overBlockStart);
+    if (!activeName || !overName) {
+      setDragAnnouncement(`${draggedLabel} stayed in its current position.`);
+      return;
+    }
+    const nextNames = moveTagOrderLeaf(
+      editor.names,
+      activeName,
+      overName,
+      editor.naturalSortEnabled,
+    );
+    if (sameTagOrder(nextNames, editor.names)) {
+      setDragAnnouncement(`${draggedLabel} stayed in its current position.`);
+      return;
+    }
+    stageNames(nextNames);
+    setDragAnnouncement(
+      `${draggedLabel} order staged.${editor.naturalSortEnabled ? " Automatic namespace sorting was reapplied." : ""}`,
+    );
+  }
+
+  async function saveOrder() {
+    if (!dirty || interactionDisabled) return;
     setSaving(true);
-    setStatus("Saving order");
+    setSaveError(null);
     try {
-      const updated = await onUpdateTagOrder(nextOrder);
-      setOrderedNames(updated.map((tag) => tag.name));
-      setStatus("Order saved");
+      const updated = await onUpdateTagOrder({
+        namespace_natural_sort_enabled: editor.naturalSortEnabled,
+        ordered_tags: editor.names,
+      });
+      const updatedNames = updated.tags.map((tag) => tag.name);
+      setEditor({
+        baseNames: updatedNames,
+        baseNaturalSortEnabled: updated.namespace_natural_sort_enabled,
+        names: updatedNames,
+        naturalSortEnabled: updated.namespace_natural_sort_enabled,
+      });
     } catch (error) {
-      setOrderedNames(tags.map((tag) => tag.name));
-      setStatus(error instanceof Error ? error.message : "Order save failed");
+      setSaveError(
+        error instanceof Error ? error.message : "Order save failed",
+      );
     } finally {
       setSaving(false);
     }
   }
 
+  function revertOrder() {
+    if (!dirty || interactionDisabled) return;
+    setSaveError(null);
+    setEditor((current) => ({
+      ...current,
+      names: current.baseNames,
+      naturalSortEnabled: current.baseNaturalSortEnabled,
+    }));
+  }
+
+  function toggleNaturalSort(enabled: boolean) {
+    if (interactionDisabled) return;
+    setSaveError(null);
+    setEditor((current) => ({
+      ...current,
+      names: enabled ? normalizeNaturalTagOrder(current.names) : current.names,
+      naturalSortEnabled: enabled,
+    }));
+  }
+
+  function toggleAllBlocks() {
+    const currentIds = new Set(multiTagBlocks.map((block) => block.id));
+    setExpansion((current) => {
+      const next = new Set(
+        current.expandedBlockIds.filter((id) => !currentIds.has(id)),
+      );
+      if (!allCurrentBlocksExpanded) {
+        for (const id of currentIds) next.add(id);
+      }
+      return { ...current, expandedBlockIds: Array.from(next) };
+    });
+  }
+
   return (
-    <details className="tagOrderPanel">
-      <summary className="tagOrderSummary">
+    <section
+      aria-busy={saving}
+      aria-label="Manage display order"
+      className="tagOrderPanel"
+    >
+      <div className="tagOrderPanelHeader">
         <div>
           <strong>Manage display order</strong>
-          <span>{tags.length} groups</span>
+          <span>Stage the shared fleet tag order, then save it once.</span>
         </div>
-        {status && (
-          <span
-            className={`consoleStatusBadge ${saving || status !== "Order saved" ? "warning" : "ok"}`}
-          >
-            {status}
-          </span>
-        )}
-      </summary>
-      {orderedTags.length === 0 ? (
-        <div className="emptyState compactEmptyState">
-          <ShieldCheck size={20} />
-          <strong>No groups</strong>
-          <span>Create groups before setting fleet display order.</span>
-        </div>
-      ) : (
-        <DndContext
-          collisionDetection={closestCenter}
-          onDragEnd={(event) => void handleDragEnd(event)}
-          sensors={sensors}
+        <span
+          aria-live="polite"
+          className={`consoleStatusBadge ${saveError ? "danger" : dirty || saving ? "warning" : "ok"}`}
+          role={saveError ? "alert" : "status"}
         >
-          <SortableContext
-            items={orderedTags.map((tag) => tag.name)}
-            strategy={verticalListSortingStrategy}
+          {status}
+        </span>
+      </div>
+      <div
+        aria-label="Tag order staged actions"
+        className={`tagOrderSaveBar${saving ? " saving" : ""}`}
+      >
+        <span>
+          {dirty
+            ? "Review the staged hierarchy before saving it fleet-wide."
+            : "The displayed hierarchy matches the saved fleet order."}
+        </span>
+        <div className="buttonCluster">
+          <button
+            className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              interactionDisabledReason ??
+              (!dirty
+                ? "There are no staged order changes to revert"
+                : undefined)
+            }
+            disabled={!dirty || interactionDisabled}
+            onClick={revertOrder}
+            type="button"
           >
-            <div className="tagOrderList" role="list">
-              {orderedTags.map((tag, index) => (
+            <RotateCcw aria-hidden="true" size={15} />
+            <span>Revert</span>
+          </button>
+          <button
+            className="primaryAction compactAction"
+            data-tooltip-disabled-reason={
+              interactionDisabledReason ??
+              (!dirty ? "There are no staged order changes to save" : undefined)
+            }
+            disabled={!dirty || interactionDisabled}
+            onClick={() => void saveOrder()}
+            type="button"
+          >
+            <Save aria-hidden="true" size={15} />
+            <span>{saving ? "Saving" : "Save order"}</span>
+          </button>
+        </div>
+      </div>
+      <div className="tagOrderRoot">
+        <div className="tagOrderRootHeader">
+          <button
+            aria-expanded={expansion.rootOpen}
+            aria-label={`${expansion.rootOpen ? "Collapse" : "Expand"} Total tag order`}
+            className="tagOrderDisclosure"
+            onClick={() =>
+              setExpansion((current) => ({
+                ...current,
+                rootOpen: !current.rootOpen,
+              }))
+            }
+            type="button"
+          >
+            <ChevronRight aria-hidden="true" size={16} />
+          </button>
+          <div className="tagOrderRootIdentity">
+            <strong>Total</strong>
+            <span>
+              {editor.names.length} exact tag
+              {editor.names.length === 1 ? "" : "s"}
+              {" · "}
+              {totalAssignments} assignment
+              {totalAssignments === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="tagOrderRootActions">
+            <label className="tagOrderNaturalToggle">
+              <input
+                checked={editor.naturalSortEnabled}
+                disabled={interactionDisabled}
+                onChange={(event) => toggleNaturalSort(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Automatically sort tags within namespace groups</span>
+            </label>
+            <button
+              aria-label={
+                allCurrentBlocksExpanded
+                  ? "Collapse all tag groups"
+                  : "Expand all tag groups"
+              }
+              className="iconButton"
+              disabled={multiTagBlocks.length === 0}
+              onClick={toggleAllBlocks}
+              title={
+                allCurrentBlocksExpanded
+                  ? "Collapse all precise tag lists."
+                  : "Expand all precise tag lists."
+              }
+              type="button"
+            >
+              <ChevronsUpDown aria-hidden="true" size={16} />
+            </button>
+          </div>
+        </div>
+        {expansion.rootOpen && (
+          <DndContext
+            accessibility={{
+              announcements: SILENT_TAG_ORDER_DND_ANNOUNCEMENTS,
+            }}
+            collisionDetection={tagOrderCollisionDetection}
+            onDragCancel={handleDragCancel}
+            onDragEnd={handleDragEnd}
+            onDragOver={handleDragOver}
+            onDragStart={handleDragStart}
+            sensors={sensors}
+          >
+            <SortableContext
+              items={blocks.map(tagOrderTopLevelDndId)}
+              strategy={verticalListSortingStrategy}
+            >
+              {editor.names.length === 0 ? (
+                <div className="emptyState compactEmptyState">
+                  <ShieldCheck size={20} />
+                  <strong>No groups</strong>
+                  <span>Create groups before setting fleet display order.</span>
+                </div>
+              ) : (
+                <div className="tagOrderList" role="list">
+                  {blocks.map((block) => {
+                    const multiTagBlock =
+                      block.namespace !== null && block.names.length > 1;
+                    if (multiTagBlock) {
+                      return (
+                        <SortableTagOrderBlock
+                          activeDragId={activeDrag?.id ?? null}
+                          block={block}
+                          disabled={interactionDisabled}
+                          disabledReason={interactionDisabledReason}
+                          dropTarget={dropTarget}
+                          expanded={currentExpandedBlockIds.has(block.id)}
+                          key={block.id}
+                          naturalSortEnabled={editor.naturalSortEnabled}
+                          onSort={() =>
+                            stageNames(
+                              naturallySortTagOrderBlock(
+                                editor.names,
+                                block.id,
+                              ),
+                            )
+                          }
+                          onToggle={() =>
+                            setExpansion((current) => ({
+                              ...current,
+                              expandedBlockIds: toggleStoredValue(
+                                current.expandedBlockIds,
+                                block.id,
+                              ),
+                            }))
+                          }
+                          tagByName={tagByName}
+                          tagIndexes={tagIndexes}
+                        />
+                      );
+                    }
+                    const name = block.names[0];
+                    const tag = name ? tagByName.get(name) : undefined;
+                    if (!name || !tag) return null;
+                    return (
+                      <SortableTagOrderRow
+                        child={false}
+                        disabled={interactionDisabled}
+                        disabledReason={interactionDisabledReason}
+                        dropPlacement={
+                          dropTarget?.id === tagOrderLeafId(name) &&
+                          activeDrag?.id !== tagOrderLeafId(name)
+                            ? dropTarget.placement
+                            : null
+                        }
+                        id={tagOrderLeafId(name)}
+                        index={(tagIndexes.get(name) ?? 0) + 1}
+                        key={name}
+                        tag={tag}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </SortableContext>
+            <DragOverlay dropAnimation={null}>
+              {activeDrag ? (
+                <div className="tagOrderDragOverlay">
+                  <GripVertical aria-hidden="true" size={15} />
+                  <strong>{activeDrag.label}</strong>
+                  {activeDrag.kind === "block" && (
+                    <span>
+                      {activeDrag.count} exact tag
+                      {activeDrag.count === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+              ) : null}
+            </DragOverlay>
+          </DndContext>
+        )}
+      </div>
+      <span aria-live="polite" className="srOnly" role="status">
+        {dragAnnouncement}
+      </span>
+    </section>
+  );
+}
+
+type TagOrderEditorState = {
+  baseNames: string[];
+  baseNaturalSortEnabled: boolean;
+  names: string[];
+  naturalSortEnabled: boolean;
+};
+
+type TagOrderExpansionState = {
+  expandedBlockIds: string[];
+  rootOpen: boolean;
+};
+
+type TagOrderDragItem = {
+  count: number;
+  id: string;
+  kind: "block" | "tag";
+  label: string;
+};
+
+type TagOrderDropPlacement = "after" | "before";
+
+type TagOrderDropTarget = {
+  id: string;
+  placement: TagOrderDropPlacement;
+};
+
+function SortableTagOrderBlock({
+  activeDragId,
+  block,
+  disabled,
+  disabledReason,
+  dropTarget,
+  expanded,
+  naturalSortEnabled,
+  onSort,
+  onToggle,
+  tagByName,
+  tagIndexes,
+}: {
+  activeDragId: string | null;
+  block: TagOrderBlock;
+  disabled: boolean;
+  disabledReason?: string;
+  dropTarget: TagOrderDropTarget | null;
+  expanded: boolean;
+  naturalSortEnabled: boolean;
+  onSort: () => void;
+  onToggle: () => void;
+  tagByName: Map<string, TagView>;
+  tagIndexes: Map<string, number>;
+}) {
+  const {
+    attributes,
+    isDragging,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+  } = useSortable({
+    data: {
+      tagOrder: {
+        expanded,
+        kind: "block",
+        names: block.names,
+      } satisfies TagOrderDndData,
+    },
+    disabled,
+    id: block.id,
+  });
+  const firstName = block.names[0] ?? block.namespace ?? "tags";
+  const label = tagNamespaceDisplayLabel(firstName);
+  const naturallySorted = sameTagOrder(
+    block.names,
+    naturallySortedTagNames(block.names),
+  );
+  const startIndex = (tagIndexes.get(block.names[0] ?? "") ?? 0) + 1;
+  const endIndex =
+    (tagIndexes.get(block.names[block.names.length - 1] ?? "") ?? 0) + 1;
+  const indexRange =
+    startIndex === endIndex ? `${startIndex}` : `${startIndex}–${endIndex}`;
+  const assignmentCount = block.names.reduce(
+    (total, name) => total + (tagByName.get(name)?.clients.length ?? 0),
+    0,
+  );
+  const sortDisabled = disabled || naturalSortEnabled || naturallySorted;
+  const sortDisabledReason = disabledReason
+    ? disabledReason
+    : naturalSortEnabled
+      ? "Automatic natural sorting is enabled for every tag group"
+      : naturallySorted
+        ? "This tag group is already in natural order"
+        : undefined;
+  return (
+    <div
+      className={`tagOrderBlock${isDragging ? " dragging" : ""}${dropTarget?.id === block.id && activeDragId !== block.id ? ` dropTarget drop${capitalizeDropPlacement(dropTarget.placement)}` : ""}`}
+      ref={setNodeRef}
+      role="listitem"
+      style={{
+        transform: CSS.Transform.toString(transform),
+        transition,
+      }}
+    >
+      <div className="tagOrderBlockHeader">
+        <button
+          aria-label={`Reorder ${label} tag group`}
+          className="tagOrderHandle"
+          data-tooltip-disabled-reason={disabledReason}
+          disabled={disabled}
+          type="button"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical aria-hidden="true" size={15} />
+        </button>
+        <button
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${label} tag group`}
+          className="tagOrderDisclosure"
+          onClick={onToggle}
+          type="button"
+        >
+          <ChevronRight aria-hidden="true" size={15} />
+        </button>
+        <div className="tagOrderBlockIdentity">
+          <strong>{label}</strong>
+          <span>{indexRange}</span>
+          <span>
+            {block.names.length} tag{block.names.length === 1 ? "" : "s"}
+            {" · "}
+            {assignmentCount} assignment{assignmentCount === 1 ? "" : "s"}
+          </span>
+        </div>
+        <button
+          aria-label={`Sort ${label} tag group naturally`}
+          className="iconButton tagOrderNaturalSort"
+          data-tooltip-disabled-reason={sortDisabledReason}
+          disabled={sortDisabled}
+          onClick={onSort}
+          title={`Sort ${label} tag group naturally.`}
+          type="button"
+        >
+          <ArrowDownAZ aria-hidden="true" size={15} />
+        </button>
+      </div>
+      {expanded && (
+        <SortableContext
+          items={block.names.map(tagOrderLeafId)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div
+            aria-label={`${label} precise tags`}
+            className="tagOrderChildren"
+            role="list"
+          >
+            {block.names.map((name) => {
+              const tag = tagByName.get(name);
+              if (!tag) return null;
+              return (
                 <SortableTagOrderRow
-                  disabled={disabled || saving}
-                  disabledReason={
-                    saving
-                      ? "The updated group order is being saved"
-                      : disabled
-                        ? "Group order is locked while another group change is in progress"
-                        : undefined
+                  child
+                  disabled={disabled}
+                  disabledReason={disabledReason}
+                  dropPlacement={
+                    dropTarget?.id === tagOrderLeafId(name) &&
+                    activeDragId !== tagOrderLeafId(name)
+                      ? dropTarget.placement
+                      : null
                   }
-                  index={index}
-                  key={tag.name}
+                  id={tagOrderLeafId(name)}
+                  index={(tagIndexes.get(name) ?? 0) + 1}
+                  key={name}
                   tag={tag}
                 />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
+              );
+            })}
+          </div>
+        </SortableContext>
       )}
-    </details>
+    </div>
   );
 }
 
 function SortableTagOrderRow({
+  child,
   disabled,
   disabledReason,
+  dropPlacement,
+  id,
   index,
   tag,
 }: {
+  child: boolean;
   disabled: boolean;
   disabledReason?: string;
+  dropPlacement: TagOrderDropPlacement | null;
+  id: string;
   index: number;
   tag: TagView;
 }) {
@@ -1123,10 +1921,20 @@ function SortableTagOrderRow({
     setNodeRef,
     transform,
     transition,
-  } = useSortable({ disabled, id: tag.name });
+  } = useSortable({
+    data: {
+      tagOrder: {
+        kind: "leaf",
+        name: tag.name,
+        topLevel: !child,
+      } satisfies TagOrderDndData,
+    },
+    disabled,
+    id,
+  });
   return (
     <div
-      className={`tagOrderRow${isDragging ? " dragging" : ""}`}
+      className={`tagOrderRow${child ? " child" : ""}${isDragging ? " dragging" : ""}${dropPlacement ? ` dropTarget drop${capitalizeDropPlacement(dropPlacement)}` : ""}`}
       ref={setNodeRef}
       role="listitem"
       style={{
@@ -1143,10 +1951,10 @@ function SortableTagOrderRow({
         {...attributes}
         {...listeners}
       >
-        <GripVertical size={15} />
+        <GripVertical aria-hidden="true" size={15} />
       </button>
-      <span className="tagOrderIndex">{index + 1}</span>
-      <span className="tags">
+      <span className="tagOrderIndex">{index}</span>
+      <span className="tags" title={tag.name}>
         <em>{tag.name}</em>
       </span>
       <span className="tagOrderClients">
@@ -1154,6 +1962,97 @@ function SortableTagOrderRow({
       </span>
     </div>
   );
+}
+
+function tagOrderTopLevelDndId(block: TagOrderBlock): string {
+  const name = block.names[0] ?? "";
+  return block.names.length > 1 ? block.id : tagOrderLeafId(name);
+}
+
+function tagOrderBlockForDndId(
+  blocks: readonly TagOrderBlock[],
+  id: string,
+): TagOrderBlock | undefined {
+  return blocks.find(
+    (block) =>
+      block.id === id ||
+      block.names.some((name) => tagOrderLeafId(name) === id),
+  );
+}
+
+function tagNameForDndId(
+  names: readonly string[],
+  id: string,
+): string | undefined {
+  return names.find((name) => tagOrderLeafId(name) === id);
+}
+
+function tagOrderDndTargetLabel(
+  blocks: readonly TagOrderBlock[],
+  id: string,
+): string | undefined {
+  const name = blocks
+    .flatMap((block) => block.names)
+    .find((candidate) => tagOrderLeafId(candidate) === id);
+  if (name) return name;
+  const block = blocks.find((candidate) => candidate.id === id);
+  const firstName = block?.names[0];
+  return firstName ? `${tagNamespaceDisplayLabel(firstName)} group` : undefined;
+}
+
+function capitalizeDropPlacement(
+  placement: TagOrderDropPlacement,
+): "After" | "Before" {
+  return placement === "after" ? "After" : "Before";
+}
+
+function toggleStoredValue(values: readonly string[], value: string): string[] {
+  return values.includes(value)
+    ? values.filter((candidate) => candidate !== value)
+    : [...values, value];
+}
+
+function preserveExpandedTagOrderBlocks(
+  expandedBlockIds: readonly string[],
+  nextBlocks: readonly TagOrderBlock[],
+): string[] {
+  return nextBlocks
+    .filter(
+      (block) => block.names.length > 1 && expandedBlockIds.includes(block.id),
+    )
+    .map((block) => block.id);
+}
+
+function readTagOrderExpansionState(): TagOrderExpansionState {
+  if (typeof window === "undefined") {
+    return { expandedBlockIds: [], rootOpen: true };
+  }
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(TAG_ORDER_EXPANSION_STORAGE_KEY) ?? "null",
+    ) as Partial<TagOrderExpansionState> | null;
+    return {
+      expandedBlockIds: Array.isArray(parsed?.expandedBlockIds)
+        ? parsed.expandedBlockIds.filter(
+            (value): value is string => typeof value === "string",
+          )
+        : [],
+      rootOpen: typeof parsed?.rootOpen === "boolean" ? parsed.rootOpen : true,
+    };
+  } catch {
+    return { expandedBlockIds: [], rootOpen: true };
+  }
+}
+
+function writeTagOrderExpansionState(state: TagOrderExpansionState) {
+  try {
+    window.localStorage.setItem(
+      TAG_ORDER_EXPANSION_STORAGE_KEY,
+      JSON.stringify(state),
+    );
+  } catch {
+    // Browser-local presentation state is best effort only.
+  }
 }
 
 function TagAssignments({
@@ -1280,9 +2179,18 @@ function TagAssignments({
           selector,
           [agent.id],
         );
+        const preview = await onBulkMutateTags({
+          action: "remove",
+          confirmed: false,
+          privilege_assertion: null,
+          selector_expression: selector,
+          target_client_ids: [agent.id],
+          tag,
+        });
         const response = await onBulkMutateTags({
           action: "remove",
           confirmed: true,
+          preview_hash: preview.preview_hash,
           privilege_assertion: privilegeAssertion,
           selector_expression: selector,
           target_client_ids: [agent.id],
@@ -1326,10 +2234,19 @@ function TagAssignments({
         removal.selectorExpression,
         [removal.agentId],
       );
+      const preview = await onBulkMutateTags({
+        action: "add",
+        confirmed: false,
+        privilege_assertion: null,
+        selector_expression: removal.selectorExpression,
+        target_client_ids: [removal.agentId],
+        tag: removal.tag,
+      });
       setLastMutation(
         await onBulkMutateTags({
           action: "add",
           confirmed: true,
+          preview_hash: preview.preview_hash,
           privilege_assertion: privilegeAssertion,
           selector_expression: removal.selectorExpression,
           target_client_ids: [removal.agentId],
@@ -1507,26 +2424,31 @@ function TagAssignments({
                     );
                     const dependencyLabel = dependencySummaryText(dependencies);
                     return (
-                      <button
-                        aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
+                      <span
                         className={`tagRemoveChip${dependencies.total > 0 ? " linked" : ""}`}
-                        data-tooltip-disabled-reason={
-                          pending
-                            ? "Wait for the current group assignment change to finish"
-                            : undefined
-                        }
-                        disabled={pending}
                         key={tag}
-                        onClick={() => void removeTag(editingAgent, tag)}
-                        title={`Remove ${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
-                        type="button"
+                        title={`${tag} (${groupKindLabel(tag).toLowerCase()}). ${dependencyLabel}`}
                       >
                         <span>{tag}</span>
                         {dependencies.total > 0 && (
                           <small>{dependencyLabel}</small>
                         )}
-                        <X size={12} />
-                      </button>
+                        <button
+                          aria-label={`Remove ${tag} from ${formatVpsName(editingAgent, vpsNameDisplayMode)}`}
+                          className="tagEditChipRemove"
+                          data-tooltip-disabled-reason={
+                            pending
+                              ? "Wait for the current group assignment change to finish"
+                              : undefined
+                          }
+                          disabled={pending}
+                          onClick={() => void removeTag(editingAgent, tag)}
+                          title={`Remove ${tag}`}
+                          type="button"
+                        >
+                          <X aria-hidden="true" size={12} />
+                        </button>
+                      </span>
                     );
                   })}
                 </span>

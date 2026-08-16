@@ -1032,7 +1032,7 @@ test("keeps group-assignment feedback with the VPS whose mutation produced it", 
         return requestLog.bulkTagMutations.length;
       });
     })
-    .toBe(1);
+    .toBe(2);
   await fraRow.click({ button: "right" });
   await activate(
     page.getByRole("menuitem", { name: "Edit groups", exact: true }),

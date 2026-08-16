@@ -118,8 +118,22 @@ new connections; historical session and audit evidence is not rewritten.
 ## Control-Plane Backup
 
 Define an RPO, retention period, encryption method, and off-host destination
-before production use. The following creates a consistent maintenance-window
-backup for the default filesystem object store:
+before production use. For an immediate database-only restore point, run:
+
+```bash
+cd /path/to/the/versioned-deployment
+./update.sh backup
+```
+
+This creates a transactionally consistent live PostgreSQL archive under
+`runtime/update-backups/`, validates it with `pg_restore --list`, and leaves the
+application services running. The archive is mode `0600`, local, unencrypted,
+and unpruned. It does not include deployment configuration, secrets,
+`runtime/data`, or an external object store, so it is not a full control-plane
+backup.
+
+The following creates a consistent maintenance-window backup for the default
+filesystem object store:
 
 ```bash
 set -Eeuo pipefail
@@ -281,7 +295,9 @@ docker compose ps
 ```
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
-The current canonical schema supports fresh databases only. Keep an existing
+The sole supported in-place schema step is applying
+`0009_fleet_tag_settings.sql` to a database with the exact v0.3.5
+`0001`–`0008` migration files and checksums. Keep any earlier or different
 database with its matching application release, or move reviewed data through
 a separate export/import procedure into a fresh database.
 

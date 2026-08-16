@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
+use vpsman_common::insert_tags_into_last_namespace_blocks;
 
 use crate::{
     model::{
@@ -12,14 +13,15 @@ use crate::{
         UpsertAgentIdentityRequest,
     },
     repository::Repository,
+    repository_inventory::{
+        ensure_postgres_tags_in_order, memory_tag_order_map, sort_agent_tags_by_order,
+    },
     repository_jobs::{
         mark_active_targets_agent_lost_for_client_in_tx,
         skip_unstarted_queued_targets_for_client_in_tx,
     },
     util::unix_now,
 };
-
-const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
 
 fn normalized_numeric_client_id_digits(client_id: &str) -> Option<String> {
     let digits = client_id.strip_prefix("v-").unwrap_or(client_id);
@@ -335,15 +337,17 @@ impl Repository {
                         }
                     }
                 }
-                {
-                    let mut known_tags = memory.tags.write().await;
-                    for tag in &tags {
-                        if !known_tags.iter().any(|known| known == tag) {
-                            known_tags.push(tag.clone());
-                        }
-                    }
-                }
-                let view = {
+                let memory_tag_order = {
+                    let mut tag_order = memory.tag_order.write().await;
+                    let natural_sort = tag_order.namespace_natural_sort_enabled;
+                    insert_tags_into_last_namespace_blocks(
+                        &mut tag_order.names,
+                        &tags,
+                        natural_sort,
+                    );
+                    memory_tag_order_map(&tag_order.names)
+                };
+                let mut view = {
                     let mut agents = memory.agents.write().await;
                     if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
                         if agent.status == "deleted" {
@@ -396,6 +400,7 @@ impl Repository {
                         }
                     }
                 };
+                sort_agent_tags_by_order(&mut view.tags, &memory_tag_order);
                 if let Some(prior_status) = prior_status.filter(|status| status != "offline") {
                     memory
                         .client_status_history
@@ -614,8 +619,11 @@ impl Repository {
                     .await?;
                 }
 
+                let tag_ids = ensure_postgres_tags_in_order(&mut tx, &tags).await?;
                 for tag in &tags {
-                    let tag_id = upsert_postgres_tag(&mut tx, tag).await?;
+                    let tag_id = *tag_ids
+                        .get(tag)
+                        .with_context(|| format!("tag_order_insert_missing:{tag}"))?;
                     sqlx::query(
                         r#"
                         INSERT INTO client_tags (client_id, tag_id)
@@ -1576,26 +1584,6 @@ pub(crate) async fn require_visible_memory_clients(
     });
     anyhow::ensure!(all_visible, error_code.to_string());
     Ok(())
-}
-
-async fn upsert_postgres_tag(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tag: &str,
-) -> Result<Uuid> {
-    let row = sqlx::query(
-        r#"
-        INSERT INTO tags (id, name, display_order)
-        VALUES ($1, $2, (SELECT COALESCE(MAX(display_order), 0) + $3 FROM tags))
-        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(tag)
-    .bind(TAG_DISPLAY_ORDER_STEP)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(row.try_get("id")?)
 }
 
 async fn fetch_postgres_key_revocation(

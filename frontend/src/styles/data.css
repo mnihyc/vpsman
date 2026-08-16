@@ -2421,71 +2421,187 @@
   border-top: 1px solid var(--border);
 }
 
-.tagOrderSummary {
+.tagOrderPanelHeader,
+.tagOrderSaveBar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px;
   min-width: 0;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--canvas);
-  cursor: pointer;
-  list-style: none;
-  padding: 10px 12px;
 }
 
-.tagOrderSummary::-webkit-details-marker {
-  display: none;
-}
-
-.tagOrderSummary::before {
-  content: "+";
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--primary-text);
-  font-weight: 800;
-}
-
-.tagOrderPanel[open] .tagOrderSummary::before {
-  content: "-";
-}
-
-.tagOrderSummary > div {
+.tagOrderPanelHeader > div {
   display: grid;
   gap: 3px;
   min-width: 0;
-  margin-right: auto;
 }
 
-.tagOrderSummary strong {
+.tagOrderPanelHeader strong {
   color: var(--text);
   font-size: 14px;
 }
 
-.tagOrderSummary span {
+.tagOrderPanelHeader > div > span,
+.tagOrderSaveBar > span {
   color: var(--muted);
   font-size: 12px;
 }
 
-.tagOrderPanel[open] .tagOrderSummary {
-  margin-bottom: 10px;
-}
-
-.tagOrderList {
-  display: grid;
+.tagOrderRoot {
   min-width: 0;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   background: var(--surface);
   overflow: hidden;
+}
+
+.tagOrderRootHeader {
+  display: grid;
+  grid-template-columns: 30px minmax(120px, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px 10px;
+  background: var(--canvas);
+}
+
+.tagOrderDisclosure {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tagOrderDisclosure:hover,
+.tagOrderDisclosure:focus-visible {
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  outline: none;
+}
+
+.tagOrderDisclosure svg {
+  transition: transform 140ms ease;
+}
+
+.tagOrderDisclosure[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.tagOrderRootIdentity,
+.tagOrderBlockIdentity {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.tagOrderRootIdentity strong,
+.tagOrderBlockIdentity strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.tagOrderRootIdentity span,
+.tagOrderBlockIdentity span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tagOrderRootActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tagOrderNaturalToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tagOrderNaturalToggle input {
+  margin: 0;
+}
+
+.tagOrderNaturalToggle:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.tagOrderList {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 9px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface);
+}
+
+.tagOrderBlock {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.tagOrderBlock.dragging {
+  position: relative;
+  z-index: 2;
+  opacity: 0.42;
+  border-color: var(--primary);
+  box-shadow: 0 8px 20px rgb(60 64 67 / 18%);
+}
+
+.tagOrderBlock.dropBefore,
+.tagOrderRow.dropBefore {
+  box-shadow: inset 0 3px 0 var(--primary);
+}
+
+.tagOrderBlock.dropAfter,
+.tagOrderRow.dropAfter {
+  box-shadow: inset 0 -3px 0 var(--primary);
+}
+
+.tagOrderBlockHeader {
+  display: grid;
+  grid-template-columns: 34px 30px minmax(120px, 1fr) 32px;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 46px;
+  padding: 6px 9px;
+  background: var(--canvas);
+}
+
+.tagOrderChildren {
+  display: grid;
+  min-width: 0;
+  padding-left: 34px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface);
 }
 
 .tagOrderRow {
@@ -2496,19 +2612,36 @@
   min-width: 0;
   min-height: 46px;
   padding: 7px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
   background: var(--surface);
 }
 
-.tagOrderRow:last-child {
+.tagOrderRow.child {
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.tagOrderRow.child:last-child {
   border-bottom: 0;
 }
 
 .tagOrderRow.dragging {
   position: relative;
   z-index: 1;
+  opacity: 0.42;
   background: var(--primary-selected);
   box-shadow: 0 8px 20px rgb(60 64 67 / 18%);
+}
+
+.tagOrderRow .tags {
+  min-width: 0;
+}
+
+.tagOrderRow .tags em {
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .tagOrderHandle {
@@ -2522,6 +2655,7 @@
   background: var(--surface);
   color: var(--muted);
   cursor: grab;
+  touch-action: none;
 }
 
 .tagOrderHandle:active {
@@ -2541,6 +2675,63 @@
 }
 
 .tagOrderClients {
+  white-space: nowrap;
+}
+
+.tagOrderNaturalSort {
+  width: 28px;
+  height: 28px;
+}
+
+.tagOrderSaveBar {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-raised);
+  transition: opacity 140ms ease;
+}
+
+.tagOrderSaveBar.saving {
+  opacity: 0.72;
+}
+
+.tagOrderSaveBar .buttonCluster {
+  margin-left: auto;
+}
+
+.tagOrderDragOverlay {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  width: min(340px, calc(100vw - 32px));
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 10px 24px rgb(60 64 67 / 24%);
+  color: var(--text);
+}
+
+.tagOrderDragOverlay > svg,
+.tagOrderDragOverlay > span {
+  color: var(--muted);
+}
+
+.tagOrderDragOverlay > strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tagOrderDragOverlay > span {
+  font-size: 11px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
@@ -3773,7 +3964,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  font-family:
+    "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
   font-size: 16px;
   font-variant-emoji: emoji;
 }

@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
-use serde_json::json;
-use sqlx::Row;
+use serde_json::{json, Value};
+use sqlx::{Postgres, Row, Transaction};
 use uuid::Uuid;
-use vpsman_common::{expression_references_vps_rules, payload_hash, Expression, VpsRuleContext};
+use vpsman_common::{
+    expression_references_vps_rules, insert_tags_into_last_namespace_blocks,
+    normalize_tag_namespace_blocks, payload_hash, Expression, VpsRuleContext,
+};
 
 use crate::model::*;
 use crate::repository::Repository;
@@ -26,6 +29,7 @@ use crate::selector_expression::{
 use crate::unix_now;
 
 const TAG_DISPLAY_ORDER_STEP: i64 = 1024;
+const TAG_NATURAL_SORT_SETTING_KEY: &str = "order.namespace_natural_sort_enabled";
 
 pub(crate) fn display_name_key(display_name: &str) -> String {
     display_name.trim().to_lowercase()
@@ -198,7 +202,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tags.read().await);
+                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
                 let selected = client_ids.map(|client_ids| {
                     client_ids
                         .iter()
@@ -283,7 +287,7 @@ impl Repository {
     pub(crate) async fn list_tags(&self) -> Result<Vec<TagView>> {
         match self {
             Self::Memory(memory) => {
-                let mut names = memory.tags.read().await.clone();
+                let mut names = memory.tag_order.read().await.names.clone();
                 let mut seen = names.iter().cloned().collect::<HashSet<_>>();
                 let hidden = memory.hidden_clients.read().await;
                 let agents = memory.agents.read().await;
@@ -297,6 +301,7 @@ impl Repository {
                         }
                     }
                 }
+                let tag_order = memory_tag_order_map(&names);
                 Ok(names
                     .into_iter()
                     .enumerate()
@@ -307,7 +312,7 @@ impl Repository {
                                 !hidden.contains(&agent.id)
                                     && agent.tags.iter().any(|tag| tag == &name)
                             })
-                            .cloned()
+                            .map(|agent| agent_with_ordered_tags(agent, &tag_order))
                             .collect(),
                         display_order: tag_display_order(index),
                         name,
@@ -365,6 +370,83 @@ impl Repository {
         }
     }
 
+    pub(crate) async fn tag_order_state(&self) -> Result<TagOrderState> {
+        let (ordered_tags, namespace_natural_sort_enabled) = match self {
+            Self::Memory(memory) => {
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let hidden = memory.hidden_clients.read().await;
+                let agents = memory.agents.read().await;
+                let discovered = agents
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .flat_map(|agent| agent.tags.iter().cloned())
+                    .collect::<Vec<_>>();
+                drop(agents);
+                drop(hidden);
+                let mut tag_order = memory.tag_order.write().await;
+                let natural_sort = tag_order.namespace_natural_sort_enabled;
+                insert_tags_into_last_namespace_blocks(
+                    &mut tag_order.names,
+                    &discovered,
+                    natural_sort,
+                );
+                let ordered_tags = ordered_tag_metadata(&tag_order.names);
+                (ordered_tags, tag_order.namespace_natural_sort_enabled)
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                    .execute(&mut *tx)
+                    .await?;
+                let namespace_natural_sort_enabled =
+                    read_postgres_tag_order_setting(&mut tx).await?;
+                let rows = sqlx::query(
+                    r#"
+                    SELECT name, display_order
+                    FROM tags
+                    ORDER BY display_order, created_at, name
+                    "#,
+                )
+                .fetch_all(&mut *tx)
+                .await?;
+                let ordered_tags = rows
+                    .into_iter()
+                    .map(|row| Ok((row.try_get("name")?, row.try_get("display_order")?)))
+                    .collect::<Result<Vec<(String, i64)>, sqlx::Error>>()?;
+                tx.commit().await?;
+                (ordered_tags, namespace_natural_sort_enabled)
+            }
+        };
+        Ok(TagOrderState {
+            tags: self.tag_views_for_ordered_tags(&ordered_tags).await?,
+            namespace_natural_sort_enabled,
+        })
+    }
+
+    async fn tag_views_for_ordered_tags(
+        &self,
+        ordered_tags: &[(String, i64)],
+    ) -> Result<Vec<TagView>> {
+        let mut current = self
+            .list_tags()
+            .await?
+            .into_iter()
+            .map(|tag| (tag.name.clone(), tag))
+            .collect::<HashMap<_, _>>();
+        Ok(ordered_tags
+            .iter()
+            .map(|(name, display_order)| {
+                let mut tag = current.remove(name).unwrap_or_else(|| TagView {
+                    name: name.clone(),
+                    display_order: *display_order,
+                    clients: Vec::new(),
+                });
+                tag.display_order = *display_order;
+                tag
+            })
+            .collect())
+    }
+
     pub(crate) async fn create_tag(&self, request: CreateTagRequest) -> Result<TagView> {
         let CreateTagRequest { name, .. } = request;
         self.create_tag_name(name).await
@@ -373,15 +455,20 @@ impl Repository {
     pub(crate) async fn create_tag_name(&self, name: String) -> Result<TagView> {
         match self {
             Self::Memory(memory) => {
-                let mut tags = memory.tags.write().await;
-                let display_order = match tags.iter().position(|tag| tag == &name) {
-                    Some(index) => tag_display_order(index),
-                    None => {
-                        let index = tags.len();
-                        tags.push(name.clone());
-                        tag_display_order(index)
-                    }
-                };
+                let mut tag_order = memory.tag_order.write().await;
+                let natural_sort = tag_order.namespace_natural_sort_enabled;
+                insert_tags_into_last_namespace_blocks(
+                    &mut tag_order.names,
+                    std::slice::from_ref(&name),
+                    natural_sort,
+                );
+                let display_order = tag_display_order(
+                    tag_order
+                        .names
+                        .iter()
+                        .position(|tag| tag == &name)
+                        .context("created tag missing from memory order")?,
+                );
                 Ok(TagView {
                     name,
                     display_order,
@@ -389,19 +476,9 @@ impl Repository {
                 })
             }
             Self::Postgres(pool) => {
-                let id = Uuid::new_v4();
-                sqlx::query(
-                    r#"
-                    INSERT INTO tags (id, name, display_order)
-                    VALUES ($1, $2, (SELECT COALESCE(MAX(display_order), 0) + $3 FROM tags))
-                    ON CONFLICT (name) DO NOTHING
-                    "#,
-                )
-                .bind(id)
-                .bind(&name)
-                .bind(TAG_DISPLAY_ORDER_STEP)
-                .execute(pool)
-                .await?;
+                let mut tx = pool.begin().await?;
+                ensure_postgres_tags_in_order(&mut tx, std::slice::from_ref(&name)).await?;
+                tx.commit().await?;
                 let row = sqlx::query("SELECT display_order FROM tags WHERE name = $1")
                     .bind(&name)
                     .fetch_one(pool)
@@ -418,43 +495,76 @@ impl Repository {
     pub(crate) async fn update_tag_order(
         &self,
         request: &UpdateTagOrderRequest,
-    ) -> Result<Vec<TagView>> {
+        updated_by: Uuid,
+    ) -> Result<TagOrderState> {
         match self {
             Self::Memory(memory) => {
-                let current = self.list_tags().await?;
-                let ordered = normalize_tag_order(
-                    current.iter().map(|tag| tag.name.clone()).collect(),
-                    &request.ordered_tags,
-                )?;
-                *memory.tags.write().await = ordered;
-                self.list_tags().await
+                let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+                let hidden = memory.hidden_clients.read().await;
+                let agents = memory.agents.read().await;
+                let discovered = agents
+                    .iter()
+                    .filter(|agent| !hidden.contains(&agent.id))
+                    .flat_map(|agent| agent.tags.iter().cloned())
+                    .collect::<Vec<_>>();
+                drop(agents);
+                drop(hidden);
+                let mut tag_order = memory.tag_order.write().await;
+                let mut current = tag_order.names.clone();
+                for tag in discovered {
+                    if !current.iter().any(|known| known == &tag) {
+                        current.push(tag);
+                    }
+                }
+                let mut ordered = normalize_tag_order(current, &request.ordered_tags)?;
+                if request.namespace_natural_sort_enabled {
+                    normalize_tag_namespace_blocks(&mut ordered);
+                }
+                tag_order.names = ordered;
+                tag_order.namespace_natural_sort_enabled = request.namespace_natural_sort_enabled;
+                let ordered = tag_order.names.clone();
+                drop(tag_order);
+                Ok(TagOrderState {
+                    tags: self
+                        .tag_views_for_ordered_tags(&ordered_tag_metadata(&ordered))
+                        .await?,
+                    namespace_natural_sort_enabled: request.namespace_natural_sort_enabled,
+                })
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let rows = sqlx::query(
+                lock_postgres_tag_order_setting(&mut tx).await?;
+                let current = lock_postgres_tags_in_order(&mut tx)
+                    .await?
+                    .into_iter()
+                    .map(|(_, name)| name)
+                    .collect::<Vec<_>>();
+                let mut ordered = normalize_tag_order(current, &request.ordered_tags)?;
+                if request.namespace_natural_sort_enabled {
+                    normalize_tag_namespace_blocks(&mut ordered);
+                }
+                rewrite_postgres_tag_order(&mut tx, &ordered).await?;
+                sqlx::query(
                     r#"
-                    SELECT name
-                    FROM tags
-                    ORDER BY display_order, created_at, name
-                    FOR UPDATE
+                    UPDATE fleet_tag_settings
+                    SET value_json = to_jsonb($2::boolean),
+                        updated_by = $3,
+                        updated_at = now()
+                    WHERE setting_key = $1
                     "#,
                 )
-                .fetch_all(&mut *tx)
+                .bind(TAG_NATURAL_SORT_SETTING_KEY)
+                .bind(request.namespace_natural_sort_enabled)
+                .bind(updated_by)
+                .execute(&mut *tx)
                 .await?;
-                let current = rows
-                    .into_iter()
-                    .map(|row| row.try_get("name"))
-                    .collect::<Result<Vec<String>, _>>()?;
-                let ordered = normalize_tag_order(current, &request.ordered_tags)?;
-                for (index, name) in ordered.iter().enumerate() {
-                    sqlx::query("UPDATE tags SET display_order = $1 WHERE name = $2")
-                        .bind(tag_display_order(index))
-                        .bind(name)
-                        .execute(&mut *tx)
-                        .await?;
-                }
                 tx.commit().await?;
-                self.list_tags().await
+                Ok(TagOrderState {
+                    tags: self
+                        .tag_views_for_ordered_tags(&ordered_tag_metadata(&ordered))
+                        .await?,
+                    namespace_natural_sort_enabled: request.namespace_natural_sort_enabled,
+                })
             }
         }
     }
@@ -465,6 +575,22 @@ impl Repository {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 require_visible_memory_clients(memory, &[client_id.to_string()], "agent_not_found")
                     .await?;
+                let display_order = {
+                    let mut tag_order = memory.tag_order.write().await;
+                    let natural_sort = tag_order.namespace_natural_sort_enabled;
+                    insert_tags_into_last_namespace_blocks(
+                        &mut tag_order.names,
+                        &[tag.to_string()],
+                        natural_sort,
+                    );
+                    tag_display_order(
+                        tag_order
+                            .names
+                            .iter()
+                            .position(|existing| existing == tag)
+                            .context("assigned tag missing from memory order")?,
+                    )
+                };
                 let mut agents = memory.agents.write().await;
                 if let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) {
                     if !agent.tags.iter().any(|existing| existing == tag) {
@@ -472,11 +598,10 @@ impl Repository {
                     }
                 }
                 drop(agents);
-                let tag_view = self.create_tag_name(tag.to_string()).await?;
                 let hidden = memory.hidden_clients.read().await;
                 Ok(TagView {
                     name: tag.to_string(),
-                    display_order: tag_view.display_order,
+                    display_order,
                     clients: memory
                         .agents
                         .read()
@@ -491,7 +616,6 @@ impl Repository {
                 })
             }
             Self::Postgres(pool) => {
-                let tag_id = Uuid::new_v4();
                 let mut tx = pool.begin().await?;
                 lock_postgres_agent_identity_lifecycle(&mut tx).await?;
                 require_visible_postgres_clients_in_tx(
@@ -500,18 +624,7 @@ impl Repository {
                     "agent_not_found",
                 )
                 .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO tags (id, name, display_order)
-                    VALUES ($1, $2, (SELECT COALESCE(MAX(display_order), 0) + $3 FROM tags))
-                    ON CONFLICT (name) DO NOTHING
-                    "#,
-                )
-                .bind(tag_id)
-                .bind(tag)
-                .bind(TAG_DISPLAY_ORDER_STEP)
-                .execute(&mut *tx)
-                .await?;
+                ensure_postgres_tags_in_order(&mut tx, &[tag.to_string()]).await?;
                 sqlx::query(
                     r#"
                     INSERT INTO client_tags (client_id, tag_id)
@@ -584,10 +697,13 @@ impl Repository {
                 .await?;
                 let mut changed = 0_usize;
                 if matches!(request.action, BulkTagMutationAction::Add) {
-                    let mut tags = memory.tags.write().await;
-                    if !tags.iter().any(|tag| tag == &request.tag) {
-                        tags.push(request.tag.clone());
-                    }
+                    let mut tag_order = memory.tag_order.write().await;
+                    let natural_sort = tag_order.namespace_natural_sort_enabled;
+                    insert_tags_into_last_namespace_blocks(
+                        &mut tag_order.names,
+                        std::slice::from_ref(&request.tag),
+                        natural_sort,
+                    );
                 }
                 let hidden = memory.hidden_clients.read().await.clone();
                 let target_ids = targets
@@ -646,18 +762,8 @@ impl Repository {
                 )
                 .await?;
                 if matches!(request.action, BulkTagMutationAction::Add) {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO tags (id, name, display_order)
-                        VALUES ($1, $2, (SELECT COALESCE(MAX(display_order), 0) + $3 FROM tags))
-                        ON CONFLICT (name) DO NOTHING
-                        "#,
-                    )
-                    .bind(Uuid::new_v4())
-                    .bind(&request.tag)
-                    .bind(TAG_DISPLAY_ORDER_STEP)
-                    .execute(&mut *tx)
-                    .await?;
+                    ensure_postgres_tags_in_order(&mut tx, std::slice::from_ref(&request.tag))
+                        .await?;
                 }
                 let mut changed = 0_u64;
                 for agent in &targets {
@@ -751,7 +857,12 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
-                memory.tags.write().await.retain(|existing| existing != tag);
+                memory
+                    .tag_order
+                    .write()
+                    .await
+                    .names
+                    .retain(|existing| existing != tag);
                 let mut changed = 0_usize;
                 let mut agents = memory.agents.write().await;
                 for agent in agents.iter_mut() {
@@ -778,6 +889,8 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                lock_postgres_tag_order_setting(&mut tx).await?;
+                lock_postgres_tags_in_order(&mut tx).await?;
                 let result = sqlx::query("DELETE FROM tags WHERE name = $1")
                     .bind(tag)
                     .execute(&mut *tx)
@@ -1536,7 +1649,7 @@ impl Repository {
                 if memory.hidden_clients.read().await.contains(client_id) {
                     anyhow::bail!("agent_not_found:{client_id}");
                 }
-                let tag_order = memory_tag_order_map(&memory.tags.read().await);
+                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
                 memory
                     .agents
                     .read()
@@ -1681,7 +1794,7 @@ impl Repository {
             Self::Memory(memory) => {
                 let agents = memory.agents.read().await;
                 let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tags.read().await);
+                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
                 agents
                     .iter()
                     .filter(|agent| !hidden.contains(&agent.id))
@@ -1758,7 +1871,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
-                let tag_order = memory_tag_order_map(&memory.tags.read().await);
+                let tag_order = memory_tag_order_map(&memory.tag_order.read().await.names);
                 Ok(memory
                     .agents
                     .read()
@@ -1972,8 +2085,156 @@ fn simulate_remove_tag(
     (after_agents, changed)
 }
 
+pub(crate) async fn ensure_postgres_tags_in_order(
+    tx: &mut Transaction<'_, Postgres>,
+    requested_tags: &[String],
+) -> Result<HashMap<String, Uuid>> {
+    let namespace_natural_sort_enabled = lock_postgres_tag_order_setting(tx).await?;
+    let current_rows = lock_postgres_tags_in_order(tx).await?;
+    let current = current_rows
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    let current_names = current.iter().collect::<HashSet<_>>();
+    let mut additions = Vec::new();
+    let mut seen_additions = HashSet::new();
+    for tag in requested_tags {
+        if !current_names.contains(tag) && seen_additions.insert(tag.clone()) {
+            additions.push(tag.clone());
+        }
+    }
+
+    let mut ordered = current.clone();
+    insert_tags_into_last_namespace_blocks(
+        &mut ordered,
+        &additions,
+        namespace_natural_sort_enabled,
+    );
+    for name in &additions {
+        let index = ordered
+            .iter()
+            .position(|candidate| candidate == name)
+            .context("new tag missing from computed Postgres order")?;
+        sqlx::query(
+            r#"
+            INSERT INTO tags (id, name, display_order)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (name) DO NOTHING
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(name)
+        .bind(tag_display_order(index))
+        .execute(&mut **tx)
+        .await?;
+    }
+    if ordered != current {
+        rewrite_postgres_tag_order(tx, &ordered).await?;
+    }
+
+    if requested_tags.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name
+        FROM tags
+        WHERE name = ANY($1)
+        "#,
+    )
+    .bind(requested_tags.to_vec())
+    .fetch_all(&mut **tx)
+    .await?;
+    let ids = rows
+        .into_iter()
+        .map(|row| Ok((row.try_get("name")?, row.try_get("id")?)))
+        .collect::<Result<HashMap<String, Uuid>, sqlx::Error>>()?;
+    let requested_names = requested_tags.iter().collect::<HashSet<_>>();
+    anyhow::ensure!(
+        ids.len() == requested_names.len(),
+        "tag_order_insert_incomplete"
+    );
+    Ok(ids)
+}
+
+async fn lock_postgres_tag_order_setting(tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
+    let value: sqlx::types::Json<Value> = sqlx::query_scalar(
+        r#"
+        SELECT value_json
+        FROM fleet_tag_settings
+        WHERE setting_key = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(TAG_NATURAL_SORT_SETTING_KEY)
+    .fetch_one(&mut **tx)
+    .await?;
+    value
+        .0
+        .as_bool()
+        .context("tag order setting must be a JSON boolean")
+}
+
+async fn read_postgres_tag_order_setting(tx: &mut Transaction<'_, Postgres>) -> Result<bool> {
+    let value: sqlx::types::Json<Value> = sqlx::query_scalar(
+        r#"
+        SELECT value_json
+        FROM fleet_tag_settings
+        WHERE setting_key = $1
+        "#,
+    )
+    .bind(TAG_NATURAL_SORT_SETTING_KEY)
+    .fetch_one(&mut **tx)
+    .await?;
+    value
+        .0
+        .as_bool()
+        .context("tag order setting must be a JSON boolean")
+}
+
+async fn lock_postgres_tags_in_order(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<(Uuid, String)>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name
+        FROM tags
+        ORDER BY display_order, created_at, name
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("id")?, row.try_get("name")?)))
+        .collect::<Result<Vec<_>, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
+async fn rewrite_postgres_tag_order(
+    tx: &mut Transaction<'_, Postgres>,
+    ordered: &[String],
+) -> Result<()> {
+    for (index, name) in ordered.iter().enumerate() {
+        sqlx::query("UPDATE tags SET display_order = $1 WHERE name = $2")
+            .bind(tag_display_order(index))
+            .bind(name)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+
 fn tag_display_order(index: usize) -> i64 {
     (index as i64 + 1) * TAG_DISPLAY_ORDER_STEP
+}
+
+fn ordered_tag_metadata(ordered: &[String]) -> Vec<(String, i64)> {
+    ordered
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), tag_display_order(index)))
+        .collect()
 }
 
 fn normalize_tag_order(current: Vec<String>, requested: &[String]) -> Result<Vec<String>> {
@@ -1989,15 +2250,15 @@ fn normalize_tag_order(current: Vec<String>, requested: &[String]) -> Result<Vec
         }
         ordered.push(tag.clone());
     }
-    for tag in current {
-        if seen.insert(tag.clone()) {
-            ordered.push(tag);
-        }
-    }
+    let omitted = current
+        .into_iter()
+        .filter(|tag| seen.insert(tag.clone()))
+        .collect::<Vec<_>>();
+    insert_tags_into_last_namespace_blocks(&mut ordered, &omitted, false);
     Ok(ordered)
 }
 
-fn memory_tag_order_map(tags: &[String]) -> HashMap<String, usize> {
+pub(crate) fn memory_tag_order_map(tags: &[String]) -> HashMap<String, usize> {
     tags.iter()
         .enumerate()
         .map(|(index, tag)| (tag.clone(), index))
@@ -2010,7 +2271,7 @@ fn agent_with_ordered_tags(agent: &AgentView, tag_order: &HashMap<String, usize>
     agent
 }
 
-fn sort_agent_tags_by_order(tags: &mut [String], tag_order: &HashMap<String, usize>) {
+pub(crate) fn sort_agent_tags_by_order(tags: &mut [String], tag_order: &HashMap<String, usize>) {
     tags.sort_by(|left, right| compare_memory_tags(left, right, tag_order));
 }
 

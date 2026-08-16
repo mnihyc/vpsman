@@ -49,7 +49,9 @@ import {
   displayNameOrUnnamed,
   formatBillingRenewal,
   formatTime,
+  formatUptimeStartTime,
   trafficLimitingQuota,
+  trafficNonTotalSelectorDirection,
   trafficQuotaState,
   trafficUnlimitedQuota,
   timestampMillis,
@@ -81,6 +83,7 @@ type FleetMonitorPanelProps = {
 export type FleetMonitorDensity = MonitorCardDensity;
 type FleetMonitorSort =
   | "warning"
+  | "name"
   | "traffic"
   | "cpu"
   | "memory"
@@ -95,6 +98,7 @@ type MonitorRecordBounds = {
 };
 const monitorSortOptions: Array<{ label: string; value: FleetMonitorSort }> = [
   { label: "Warnings first", value: "warning" },
+  { label: "Name", value: "name" },
   { label: "Traffic use", value: "traffic" },
   { label: "CPU use", value: "cpu" },
   { label: "Memory", value: "memory" },
@@ -934,6 +938,10 @@ export function VpsMonitorCard({
   const identityTitle = [provider, countryLabel, region]
     .filter(Boolean)
     .join(" · ");
+  const uptimeStartTime = formatUptimeStartTime(
+    systemInformation?.uptime_observed_at,
+    systemInformation?.uptime_secs,
+  );
   const currentRates = coherentNetworkRates(rates);
   const rxBps = sumNetworkRate(currentRates, "rx");
   const txBps = sumNetworkRate(currentRates, "tx");
@@ -1120,7 +1128,7 @@ export function VpsMonitorCard({
         className="vpsMonitorCardName"
         title={`${displayNameOrUnnamed(agent.display_name)} · ${identityTitle}`}
       >
-        {density === "compact" && showCountryFlags && country ? (
+        {showCountryFlags && country ? (
           <CountryFlag country={country} decorative fallback="none" />
         ) : null}
         <span className="vpsMonitorCardNameText">
@@ -1305,8 +1313,8 @@ export function VpsMonitorCard({
         <span
           data-fact-kind="uptime"
           title={
-            systemInformation?.uptime_observed_at
-              ? `Observed ${formatTime(systemInformation.uptime_observed_at)}`
+            uptimeStartTime
+              ? `Up since ${uptimeStartTime}`
               : "Latest reported uptime is unavailable"
           }
         >
@@ -2113,6 +2121,11 @@ function compareMonitorAgents({
         )
       );
     }
+    const nameDelta =
+      displayNameOrUnnamed(left.display_name).localeCompare(
+        displayNameOrUnnamed(right.display_name),
+      ) || left.id.localeCompare(right.id);
+    if (mode === "name") return nameDelta;
     const warningDelta =
       monitorWarningRank(
         right,
@@ -2134,7 +2147,7 @@ function compareMonitorAgents({
         networkRateExpected,
         evidenceLoading,
       );
-    if (mode === "warning" && warningDelta !== 0) return warningDelta;
+    if (mode === "warning") return warningDelta || nameDelta;
     const leftTraffic = trafficSortValue(traffic.get(left.id));
     const rightTraffic = trafficSortValue(traffic.get(right.id));
     if (mode === "traffic" && rightTraffic !== leftTraffic)
@@ -2554,18 +2567,19 @@ function formatTrafficUsage(
   formatBytes: ByteCountFormatter,
 ) {
   const used = formatBytes(traffic.total_bytes);
+  const selectorDirection = trafficNonTotalSelectorDirection(traffic);
   const limitingQuota = trafficLimitingQuota(traffic);
   if (limitingQuota) {
     const percent =
       limitingQuota.percent >= 100
         ? limitingQuota.percent.toFixed(0)
         : limitingQuota.percent.toFixed(1);
-    return `${formatBytes(limitingQuota.used)} / ${formatBytes(limitingQuota.quota)} · ${limitingQuota.direction} · ${percent}%`;
+    return `${formatBytes(limitingQuota.used)} / ${formatBytes(limitingQuota.quota)} · ${selectorDirection ?? limitingQuota.direction} · ${percent}%`;
   }
   if (trafficQuotaState(traffic) === "unlimited") {
     const unlimited = trafficUnlimitedQuota(traffic);
     return unlimited
-      ? `${formatBytes(unlimited.used)} / Unlimited · ${unlimited.direction}`
+      ? `${formatBytes(unlimited.used)} / Unlimited · ${selectorDirection ?? unlimited.direction}`
       : `${used} / Unlimited`;
   }
   const percent = traffic.cycle_percent;
@@ -2577,6 +2591,8 @@ function formatTrafficUsage(
 function trafficUsageDirection(
   traffic: TrafficAccountingRecord,
 ): string | null {
+  const selectorDirection = trafficNonTotalSelectorDirection(traffic);
+  if (selectorDirection) return selectorDirection;
   const limitingQuota = trafficLimitingQuota(traffic);
   if (limitingQuota) return limitingQuota.direction;
   return trafficQuotaState(traffic) === "unlimited"

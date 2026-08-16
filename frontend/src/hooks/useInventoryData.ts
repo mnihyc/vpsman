@@ -31,7 +31,9 @@ import type {
   JobTargetSelection,
   PrivilegeAssertion,
   TagMutationResponse,
+  TagOrderState,
   TagView,
+  UpdateTagOrderRequest,
   UpdateConfigurationPresetRequest,
   UpdateConfigurationPresetResponse,
   UpsertRuntimeConfigPatchGeneratorRequest,
@@ -44,6 +46,8 @@ export function useInventoryData(
   onFleetChanged: () => Promise<void>,
 ) {
   const [tags, setTags] = useState<TagView[]>([]);
+  const [namespaceNaturalSortEnabled, setNamespaceNaturalSortEnabled] =
+    useState(false);
   const [configurationPresets, setConfigurationPresets] = useState<
     ConfigurationPresetRecord[]
   >([]);
@@ -117,6 +121,7 @@ export function useInventoryData(
       }
       const generation = tagInventoryLoadGeneration.current + 1;
       tagInventoryLoadGeneration.current = generation;
+      const tagOrderGenerationAtLoad = tagOrderMutationGeneration.current;
       const runtimeApplyGeneration =
         runtimeConfigApplyLoadGeneration.current + 1;
       runtimeConfigApplyLoadGeneration.current = runtimeApplyGeneration;
@@ -133,7 +138,7 @@ export function useInventoryData(
             runtimeConfigApplyStatesResult,
             patchGeneratorsResult,
           ] = await Promise.allSettled([
-            apiGet<TagView[]>("/api/v1/tags", apiToken),
+            apiGet<TagOrderState>("/api/v1/tags/order", apiToken),
             apiGet<RuntimeConfigApplyStateRecord[]>(
               "/api/v1/runtime-config/apply-state",
               apiToken,
@@ -163,6 +168,7 @@ export function useInventoryData(
           ) {
             onUnauthorized();
             setTags([]);
+            setNamespaceNaturalSortEnabled(false);
             setRuntimeConfigApplyStates([]);
             setRuntimeConfigPatchGenerators([]);
             setTagInventoryEvidenceAvailable(false);
@@ -172,8 +178,14 @@ export function useInventoryData(
             setRuntimeConfigApplyError("Operator login required");
             return;
           }
-          if (tagsResult.status === "fulfilled") {
-            setTags(tagsResult.value);
+          if (
+            tagsResult.status === "fulfilled" &&
+            tagOrderMutationGeneration.current === tagOrderGenerationAtLoad
+          ) {
+            setTags(tagsResult.value.tags);
+            setNamespaceNaturalSortEnabled(
+              tagsResult.value.namespace_natural_sort_enabled,
+            );
           }
           if (runtimeConfigApplyStatesResult.status === "fulfilled") {
             if (
@@ -478,23 +490,26 @@ export function useInventoryData(
   );
 
   const updateTagOrder = useCallback(
-    async (orderedTags: string[]) => {
+    async (request: UpdateTagOrderRequest) => {
       const operationGeneration = tagOrderMutationGeneration.current + 1;
       tagOrderMutationGeneration.current = operationGeneration;
-      const response = await apiPut<TagView[]>("/api/v1/tags/order", apiToken, {
-        ordered_tags: orderedTags,
-      });
+      const response = await apiPut<TagOrderState>(
+        "/api/v1/tags/order",
+        apiToken,
+        request,
+      );
       if (
         currentApiToken.current !== apiToken ||
         tagOrderMutationGeneration.current !== operationGeneration
       ) {
         return response;
       }
-      setTags(response);
-      await refreshTagInventoryAfterMutation();
+      tagOrderMutationGeneration.current = operationGeneration + 1;
+      setTags(response.tags);
+      setNamespaceNaturalSortEnabled(response.namespace_natural_sort_enabled);
       return response;
     },
-    [apiToken, refreshTagInventoryAfterMutation],
+    [apiToken],
   );
 
   const assignTag = useCallback(
@@ -780,6 +795,7 @@ export function useInventoryData(
     currentApiToken.current = "";
     tagInventoryError.current = null;
     setTags([]);
+    setNamespaceNaturalSortEnabled(false);
     setConfigurationPresets([]);
     setConfigurationSources([]);
     setRuntimeConfigApplyStates([]);
@@ -823,6 +839,7 @@ export function useInventoryData(
     loadConfigurationInventory,
     loadConfigurationSources,
     loadRuntimeConfigApplyStates,
+    namespaceNaturalSortEnabled,
     runtimeConfigApplyEvidenceAvailable,
     runtimeConfigApplyError,
     runtimeConfigApplyLoading,

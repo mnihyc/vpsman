@@ -21,6 +21,7 @@ Usage:
   ./update.sh first-start [latest|vX.Y.Z]
   ./update.sh latest
   ./update.sh vX.Y.Z
+  ./update.sh backup
   ./update.sh rollback
   ./update.sh recover
 
@@ -36,9 +37,11 @@ Environment:
 The updater accepts only release v0.2.0 or newer. Before payload activation it
 verifies any existing migration history against the target release and saves a
 PostgreSQL archive under runtime/update-backups/. Updates and rollbacks stop
-application writers before taking that archive. A successful first-start prints
-the generated gateway public key for agent installation and the privilege salt
-that operators must save for browser and CLI privilege unlock.
+application writers before taking that archive. The backup command creates an
+immediate validated PostgreSQL snapshot without stopping application services.
+A successful first-start prints the generated gateway public key for agent
+installation and the privilege salt that operators must save for browser and
+CLI privilege unlock.
 USAGE
 }
 
@@ -78,13 +81,13 @@ valid_release_tag() {
 }
 
 case "$target" in
-  latest | rollback | recover) ;;
+  latest | backup | rollback | recover) ;;
   *)
     valid_release_tag "$target" ||
-      fail "release target must be latest, rollback, recover, or an exact vX.Y.Z tag"
+      fail "release target must be latest, backup, rollback, recover, or an exact vX.Y.Z tag"
     ;;
 esac
-if [[ "$mode" == "first-start" && ( "$target" == "rollback" || "$target" == "recover" ) ]]; then
+if [[ "$mode" == "first-start" && ( "$target" == "backup" || "$target" == "rollback" || "$target" == "recover" ) ]]; then
   fail "first-start accepts only latest or an exact release tag"
 fi
 
@@ -526,6 +529,7 @@ remove_backup_partial() {
 
 backup_database() {
   local output="$1"
+  local backup_label="${2:-PostgreSQL pre-activation backup}"
   local backup_dir backup_name partial
   backup_dir="${output%/*}"
   backup_name="${output##*/}"
@@ -545,11 +549,11 @@ backup_database() {
   if ! compose exec -T postgres sh -ceu \
     'exec pg_dump --format=custom --no-owner --no-acl -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >"$partial"; then
     remove_backup_partial "$partial"
-    fail "PostgreSQL pre-activation backup failed"
+    fail "$backup_label failed"
   fi
   if ! database_backup_is_valid "$partial"; then
     remove_backup_partial "$partial"
-    fail "PostgreSQL pre-activation backup failed pg_restore validation"
+    fail "$backup_label failed pg_restore validation"
   fi
 
   if ! mv -T --no-clobber -- "$partial" "$output"; then
@@ -900,12 +904,15 @@ cleanup_abandoned_backup_partials() {
   local -a partials=()
 
   shopt -s nullglob
-  partials=("$backup_dir"/.pre-update-*.dump.partial.*)
+  partials=(
+    "$backup_dir"/.manual-*.dump.partial.*
+    "$backup_dir"/.pre-update-*.dump.partial.*
+  )
   shopt -u nullglob
   for path in "${partials[@]}"; do
     name="${path##*/}"
     [[ -f "$path" && ! -L "$path" &&
-      "$name" =~ ^\.pre-update-[0-9]{8}T[0-9]{6}Z-v[0-9A-Za-z.-]+\.dump\.partial\.[0-9A-Za-z]{6}$ ]] ||
+      "$name" =~ ^\.(manual|pre-update)-[0-9]{8}T[0-9]{6}Z-v[0-9A-Za-z.-]+\.dump\.partial\.[0-9A-Za-z]{6}$ ]] ||
       fail "unrecognized PostgreSQL backup partial $path; preserve it for manual inspection"
     remove_backup_partial "$path"
   done
@@ -1009,14 +1016,14 @@ require_tool sha384sum
 
 mkdir -p "$runtime_dir" "$transactions_dir" "$runtime_dir/update-backups"
 exec 9>"$runtime_dir/update.lock"
-flock -n 9 || fail "another update, rollback, or recovery is already running"
+flock -n 9 || fail "another update, rollback, recovery, or backup is already running"
 
 cleanup_abandoned_backup_partials
 cleanup_abandoned_transaction_dirs
 active_transaction="$(find_active_transaction)"
 if [[ -n "$active_transaction" ]]; then
   if [[ "$target" != "recover" ]]; then
-    fail "an interrupted transaction exists; run ./update.sh recover before another update"
+    fail "an interrupted transaction exists; run ./update.sh recover before another updater operation"
   fi
   recover_transaction "$active_transaction"
   exit 0
@@ -1027,6 +1034,23 @@ if [[ "$target" == "recover" ]]; then
 fi
 
 compose config --quiet
+
+if [[ "$target" == "backup" ]]; then
+  [[ -f "$script_dir/RELEASE_TAG" && ! -L "$script_dir/RELEASE_TAG" ]] ||
+    fail "RELEASE_TAG is missing or invalid; reconcile the active release before backup"
+  active_release_tag="$(<"$script_dir/RELEASE_TAG")"
+  valid_release_tag "$active_release_tag" ||
+    fail "RELEASE_TAG is missing or invalid; reconcile the active release before backup"
+  require_supported_release "$active_release_tag"
+  wait_for_postgres || fail "PostgreSQL did not become ready for backup"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  backup_name="manual-$timestamp-$active_release_tag.dump"
+  backup_database \
+    "$runtime_dir/update-backups/$backup_name" \
+    "PostgreSQL manual backup"
+  log "database backup complete: runtime/update-backups/$backup_name"
+  exit 0
+fi
 
 if [[ "$target" == "rollback" ]]; then
   [[ "$mode" != "first-start" ]] || fail "first-start cannot target rollback"

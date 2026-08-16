@@ -944,6 +944,7 @@ export function useDashboardData(activeView: ActiveView) {
     telemetryTunnels: fleet.telemetryTunnels,
     telemetryUptimes: fleet.telemetryUptimes,
     tags: inventory.tags,
+    namespaceNaturalSortEnabled: inventory.namespaceNaturalSortEnabled,
     tagsError: inventory.tagsError,
     tagsLoading: inventory.tagsLoading,
     tagInventoryEvidenceAvailable: inventory.tagInventoryEvidenceAvailable,

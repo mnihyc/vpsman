@@ -4,8 +4,20 @@ use super::{
     validate_persisted_tag_name, validate_telemetry_network_rate_query,
     validate_telemetry_rollup_query,
 };
-use crate::model::{TelemetryNetworkRateQuery, TelemetryRollupQuery};
-use axum::http::StatusCode;
+use crate::{
+    gateway_client::GatewayDispatchClient,
+    model::{OperatorPreferences, OperatorRecord, TelemetryNetworkRateQuery, TelemetryRollupQuery},
+    repository::{MemoryState, Repository},
+    security::SCOPE_FLEET_READ,
+    state::{AppState, DispatcherRuntimeConfig},
+};
+use axum::{
+    body::{to_bytes, Body},
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, Request, StatusCode},
+};
+use tokio::sync::broadcast;
+use tower::ServiceExt;
+use uuid::Uuid;
 
 #[test]
 fn runtime_config_patch_reports_server_managed_port_forwarding() {
@@ -95,4 +107,189 @@ fn deleting_agent_collects_each_declared_tunnel_peer_once() {
         ],
     );
     assert_eq!(peers.into_iter().collect::<Vec<_>>(), ["edge-b", "edge-c"]);
+}
+
+#[tokio::test]
+async fn tag_order_routes_enforce_authority_and_exact_json_contracts() {
+    let (state, memory) = tag_order_route_test_state();
+    state
+        .repo
+        .create_tag_name("provider:A10".to_string())
+        .await
+        .unwrap();
+    state
+        .repo
+        .create_tag_name("provider:A2".to_string())
+        .await
+        .unwrap();
+    let fleet_reader = issue_tag_order_token(&state, &memory, "viewer", &[SCOPE_FLEET_READ]).await;
+    let inventory_operator =
+        issue_tag_order_token(&state, &memory, "operator", &["inventory:write"]).await;
+    let write_scoped_viewer =
+        issue_tag_order_token(&state, &memory, "viewer", &["inventory:write"]).await;
+    let read_only_operator =
+        issue_tag_order_token(&state, &memory, "operator", &[SCOPE_FLEET_READ]).await;
+    let router = crate::routes::build_router(state.clone());
+
+    let get_response = router
+        .clone()
+        .oneshot(tag_order_request("GET", &fleet_reader, None))
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_json: serde_json::Value = serde_json::from_slice(
+        &to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        get_json,
+        serde_json::json!({
+            "tags": [
+                {"name": "provider:A10", "display_order": 1024, "clients": []},
+                {"name": "provider:A2", "display_order": 2048, "clients": []}
+            ],
+            "namespace_natural_sort_enabled": false
+        })
+    );
+
+    let denied_get = router
+        .clone()
+        .oneshot(tag_order_request("GET", &inventory_operator, None))
+        .await
+        .unwrap();
+    assert_eq!(denied_get.status(), StatusCode::FORBIDDEN);
+
+    let put_body = serde_json::json!({
+        "ordered_tags": ["provider:A10", "provider:A2"],
+        "namespace_natural_sort_enabled": true
+    });
+    let put_response = router
+        .clone()
+        .oneshot(tag_order_request(
+            "PUT",
+            &inventory_operator,
+            Some(put_body.clone()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(put_response.status(), StatusCode::OK);
+    let put_json: serde_json::Value = serde_json::from_slice(
+        &to_bytes(put_response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        put_json,
+        serde_json::json!({
+            "tags": [
+                {"name": "provider:A2", "display_order": 1024, "clients": []},
+                {"name": "provider:A10", "display_order": 2048, "clients": []}
+            ],
+            "namespace_natural_sort_enabled": true
+        })
+    );
+
+    for denied_token in [&write_scoped_viewer, &read_only_operator] {
+        let response = router
+            .clone()
+            .oneshot(tag_order_request(
+                "PUT",
+                denied_token,
+                Some(put_body.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    for malformed in [
+        serde_json::json!({"ordered_tags": ["provider:A2", "provider:A10"]}),
+        serde_json::json!({
+            "ordered_tags": ["provider:A2", "provider:A10"],
+            "namespace_natural_sort_enabled": true,
+            "natural_sort": true
+        }),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(tag_order_request(
+                "PUT",
+                &inventory_operator,
+                Some(malformed),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+fn tag_order_route_test_state() -> (AppState, MemoryState) {
+    let memory = MemoryState::default();
+    let (events, _) = broadcast::channel(1);
+    (
+        AppState {
+            repo: Repository::Memory(memory.clone()),
+            events,
+            internal_token: None,
+            gateway: GatewayDispatchClient::default(),
+            backup_object_store: None,
+            update_release_policy: Default::default(),
+            fleet_alert_policy: Default::default(),
+            job_output_artifact_min_bytes: 32_768,
+            artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
+            require_registered_agent_updates: false,
+            suite_config_path: "config/vpsman.toml".into(),
+            dispatcher_config: DispatcherRuntimeConfig::default(),
+        },
+        memory,
+    )
+}
+
+async fn issue_tag_order_token(
+    state: &AppState,
+    memory: &MemoryState,
+    role: &str,
+    scopes: &[&str],
+) -> String {
+    let operator = OperatorRecord {
+        id: Uuid::new_v4(),
+        username: format!("tag-order-{role}-{}", Uuid::new_v4()),
+        password_hash: "test-only-session-issued-directly".to_string(),
+        role: role.to_string(),
+        scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+        preferences: OperatorPreferences::default(),
+        totp_enabled: false,
+        totp_secret_ciphertext_hex: None,
+        totp_secret_nonce_hex: None,
+        totp_secret_salt_hex: None,
+        totp_last_accepted_step: None,
+        status: "active".to_string(),
+        session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+        created_at: crate::unix_now().to_string(),
+        disabled_at: None,
+        deleted_at: None,
+    };
+    memory.operators.write().await.push(operator.clone());
+    state
+        .repo
+        .issue_session(operator.view())
+        .await
+        .unwrap()
+        .access_token
+}
+
+fn tag_order_request(method: &str, token: &str, body: Option<serde_json::Value>) -> Request<Body> {
+    let mut request = Request::builder()
+        .method(method)
+        .uri("/api/v1/tags/order")
+        .header(AUTHORIZATION, format!("Bearer {token}"));
+    if body.is_some() {
+        request = request.header(CONTENT_TYPE, "application/json");
+    }
+    request
+        .body(body.map_or_else(Body::empty, |value| Body::from(value.to_string())))
+        .unwrap()
 }

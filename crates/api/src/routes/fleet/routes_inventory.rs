@@ -17,10 +17,10 @@ use crate::{
         GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
         RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
         RuntimeConfigPatchGeneratorView, RuntimeConfigPatchRequest, RuntimeConfigPatchResponse,
-        TagMutationResponse, TagView, TelemetryNetworkRateQuery, TelemetryNetworkRateView,
-        TelemetryRollupQuery, TelemetryRollupView, TelemetrySampleQuery, TelemetrySampleView,
-        TelemetryTunnelQuery, TelemetryTunnelView, UpdateAgentAliasRequest, UpdateTagOrderRequest,
-        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        TagMutationResponse, TagOrderState, TagView, TelemetryNetworkRateQuery,
+        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetrySampleQuery,
+        TelemetrySampleView, TelemetryTunnelQuery, TelemetryTunnelView, UpdateAgentAliasRequest,
+        UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
     runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
@@ -307,29 +307,34 @@ pub(crate) async fn list_tags(
     )?))
 }
 
+pub(crate) async fn get_tag_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TagOrderState>, ApiError> {
+    let _operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    Ok(Json(state.repo.tag_order_state().await.map_err(
+        ApiError::internal_mapper(
+            "tag_order_unavailable",
+            "The tag order could not be loaded.",
+        ),
+    )?))
+}
+
 pub(crate) async fn update_tag_order(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<UpdateTagOrderRequest>,
-) -> Result<Json<Vec<TagView>>, ApiError> {
-    let _operator = state
+) -> Result<Json<TagOrderState>, ApiError> {
+    let operator = state
         .require_operator_role_and_scope(&headers, "operator", "inventory:write")
         .await?;
-    validate_tag_order_request(
-        &request,
-        &state
-            .repo
-            .list_tags()
-            .await
-            .map_err(ApiError::internal_mapper(
-                "tags_unavailable",
-                "Tags could not be loaded.",
-            ))?,
-    )?;
+    validate_tag_order_request(&request)?;
     Ok(Json(
         state
             .repo
-            .update_tag_order(&request)
+            .update_tag_order(&request, operator.operator.id)
             .await
             .map_err(tag_order_error)?,
     ))
@@ -983,23 +988,13 @@ fn validate_legacy_tag_name_for_cleanup(tag: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_tag_order_request(
-    request: &UpdateTagOrderRequest,
-    current: &[TagView],
-) -> Result<(), ApiError> {
+fn validate_tag_order_request(request: &UpdateTagOrderRequest) -> Result<(), ApiError> {
     if request.ordered_tags.len() > 1000 {
         return Err(ApiError::bad_request("too_many_ordered_tags"));
     }
-    let current_names = current
-        .iter()
-        .map(|tag| tag.name.as_str())
-        .collect::<HashSet<_>>();
     let mut seen = HashSet::new();
     for tag in &request.ordered_tags {
         validate_persisted_tag_name(tag)?;
-        if !current_names.contains(tag.as_str()) {
-            return Err(ApiError::bad_request("unknown_tag"));
-        }
         if !seen.insert(tag.as_str()) {
             return Err(ApiError::bad_request("duplicate_tag"));
         }

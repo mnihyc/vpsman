@@ -82,7 +82,11 @@ Every update must keep these boundaries explicit:
 ### Database migrations
 
 - The current migrations are a canonical fresh-database model for the current
-  repository components, not an in-place upgrade path from an earlier schema.
+  repository components, not a general in-place upgrade path from an earlier
+  schema. The sole supported exception is applying
+  `0009_fleet_tag_settings.sql` to a database with the exact v0.3.5
+  `0001`–`0008` migration files and checksums; all earlier or different
+  baselines remain export/import-only.
 - Use the canonical `visible_clients` view for live operator workflows and
   assignments. Use the base `clients` table only when identity lifecycle or
   historical evidence must include tombstoned VPSs; do not hide deleted VPSs by
@@ -101,9 +105,10 @@ Every update must keep these boundaries explicit:
   the same change.
 - Never edit `_sqlx_migrations`, replace checksums in an existing database, or
   mark an unapplied migration as applied.
-- Do not infer a schema compatibility boundary from a release tag or construct
-  a historical baseline by copying the current canonical migration files.
-  Retained data crossing baselines requires a separately reviewed export/import.
+- Do not infer any other schema compatibility boundary from a release tag or
+  construct a historical baseline by copying the current canonical migration
+  files. Retained data crossing any other baseline requires a separately
+  reviewed export/import.
 - Add the compatibility note and run `bash scripts/audit-migrations.sh`.
 
 ### Adding an audit event

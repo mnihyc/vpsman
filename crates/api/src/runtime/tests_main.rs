@@ -431,12 +431,54 @@ async fn memory_tag_order_controls_registry_and_agent_tag_reads() {
         vec!["provider:alpha", "role:edge", "country:US", "app:web"]
     );
 
-    repo.update_tag_order(&UpdateTagOrderRequest {
-        ordered_tags: vec!["app:web".to_string(), "role:edge".to_string()],
-    })
+    repo.update_tag_order(
+        &UpdateTagOrderRequest {
+            ordered_tags: vec!["app:web".to_string(), "role:edge".to_string()],
+            namespace_natural_sort_enabled: false,
+        },
+        Uuid::new_v4(),
+    )
     .await
     .unwrap();
 
+    let listed_tags = repo.list_tags().await.unwrap();
+    assert_eq!(
+        listed_tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+    );
+    assert!(listed_tags
+        .iter()
+        .all(|tag| tag.clients.iter().all(|agent| {
+            agent.tags == ["app:web", "role:edge", "provider:alpha", "country:US"]
+        })));
+    assert_eq!(
+        repo.agent_by_id("client-a").await.unwrap().tags,
+        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+    );
+
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await[0]
+            .tags
+            .push("legacy:direct".to_string());
+    }
+    let state = repo.tag_order_state().await.unwrap();
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "app:web",
+            "role:edge",
+            "provider:alpha",
+            "country:US",
+            "legacy:direct",
+        ]
+    );
     assert_eq!(
         repo.list_tags()
             .await
@@ -444,11 +486,184 @@ async fn memory_tag_order_controls_registry_and_agent_tag_reads() {
             .into_iter()
             .map(|tag| tag.name)
             .collect::<Vec<_>>(),
-        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+        [
+            "app:web",
+            "role:edge",
+            "provider:alpha",
+            "country:US",
+            "legacy:direct",
+        ]
     );
+}
+
+#[tokio::test]
+async fn memory_tag_order_setting_governs_every_tag_creation_path() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    upsert_memory_agent(
+        &memory.agents,
+        &AgentHello {
+            client_id: "client-a".to_string(),
+            process_incarnation_id: Uuid::new_v4(),
+            agent_version: "test".to_string(),
+            os_release: "test".to_string(),
+            arch: "x86_64".to_string(),
+            cpu_model: None,
+            kernel_release: None,
+            virtualization: None,
+            update_heartbeat: None,
+            internal_build_number: 1,
+            capabilities: Default::default(),
+        },
+    )
+    .await;
+    for tag in [
+        "provider:A10",
+        "provider:A2",
+        "country:US",
+        "provider:B10",
+        "provider:B2",
+        "plain",
+    ] {
+        repo.create_tag_name(tag.to_string()).await.unwrap();
+    }
+
+    let enabled = repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: [
+                    "provider:A10",
+                    "provider:A2",
+                    "country:US",
+                    "provider:B10",
+                    "provider:B2",
+                    "plain",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                namespace_natural_sort_enabled: true,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+    assert!(enabled.namespace_natural_sort_enabled);
     assert_eq!(
-        repo.agent_by_id("client-a").await.unwrap().tags,
-        vec!["app:web", "role:edge", "provider:alpha", "country:US"]
+        enabled
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "provider:A2",
+            "provider:A10",
+            "country:US",
+            "provider:B2",
+            "provider:B10",
+            "plain",
+        ]
+    );
+
+    repo.create_tag_name("provider:A02".to_string())
+        .await
+        .unwrap();
+    repo.assign_agent_tag("client-a", "provider:B1")
+        .await
+        .unwrap();
+    repo.bulk_mutate_tags(
+        &BulkTagMutationRequest {
+            action: BulkTagMutationAction::Add,
+            tag: "provider:B02".to_string(),
+            selector_expression: "id:client-a".to_string(),
+            target_client_ids: vec!["client-a".to_string()],
+            confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+    let identity = repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("client-b".to_string()),
+                client_public_key_hex: "42".repeat(32),
+                display_name: Some("Client B".to_string()),
+                tags: vec!["provider:A1".to_string(), "provider:A10".to_string()],
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(identity.tags, ["provider:A10", "provider:A1"]);
+
+    let state = repo.tag_order_state().await.unwrap();
+    assert!(state.namespace_natural_sort_enabled);
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "provider:A2",
+            "provider:A10",
+            "country:US",
+            "provider:A1",
+            "provider:A02",
+            "provider:B1",
+            "provider:B2",
+            "provider:B02",
+            "provider:B10",
+            "plain",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn memory_stale_tag_order_save_keeps_new_tag_in_last_namespace_block() {
+    let repo = Repository::Memory(MemoryState::default());
+    for tag in ["provider:A", "country:US", "provider:B", "plain"] {
+        repo.create_tag_name(tag.to_string()).await.unwrap();
+    }
+    let stale_order = ["provider:A", "country:US", "provider:B", "plain"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    repo.create_tag_name("provider:C".to_string())
+        .await
+        .unwrap();
+
+    let saved = repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: stale_order,
+                namespace_natural_sort_enabled: false,
+            },
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "provider:A",
+            "country:US",
+            "provider:B",
+            "provider:C",
+            "plain",
+        ]
     );
 }
 

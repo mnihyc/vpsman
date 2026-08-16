@@ -15,7 +15,7 @@ rollback procedures. The same runbook is stored at
 |-- .env.example                 # template for .env
 |-- compose.yml                  # compose service graph and volume mounts
 |-- nginx.conf                   # frontend reverse-proxy config
-|-- update.sh                    # manifest-driven release start/update/rollback
+|-- update.sh                    # release start/update/rollback and database backup
 |-- AGENT_GATEWAY_INSTALL.md     # agent install notes
 |-- vpsctl -> runtime/cli/current/vpsctl  # updater-created host CLI link
 |-- config/
@@ -34,7 +34,7 @@ rollback procedures. The same runbook is stored at
     |           |-- file-transfers/          # file-transfer handoff artifacts
     |           `-- file-transfer-sources/   # uploaded source artifacts
     |-- downloads/               # downloaded release metadata
-    |-- update-backups/          # automatic pre-activation database dumps
+    |-- update-backups/          # automatic and operator-requested database dumps
     |-- transactions/            # interrupted update recovery state
     |-- update.lock              # updater concurrency lock
     |-- server/
@@ -140,6 +140,16 @@ for server, frontend, and CLI together. Use `update.sh recover` after an
 interrupted transaction. Successful activation updates `RELEASE_TAG`; a rollback
 to a legacy payload without embedded release metadata removes the marker rather
 than leaving a false recovery identity.
+
+`update.sh backup` immediately creates a validated custom-format PostgreSQL
+snapshot under `runtime/update-backups/` without stopping the application
+services. The command shares the updater lock, refuses to overlap interrupted
+release recovery, writes through a mode-0600 same-directory partial, validates
+the archive with `pg_restore --list`, and publishes it without overwriting an
+existing file. PostgreSQL supplies one transactionally consistent snapshot
+while application writes continue. These local archives are database-only,
+unencrypted, and unpruned; they do not contain `runtime/data`, deployment
+configuration, or secrets and do not replace the full control-plane backup.
 
 The host CLI is `runtime/cli/current/vpsctl`. Because the API container is not
 published directly, point the CLI at the Nginx origin:

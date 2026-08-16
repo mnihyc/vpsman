@@ -1951,6 +1951,7 @@ export function App() {
         agents={dashboard.agents}
         error={dashboard.tagsError}
         loading={dashboard.tagsLoading}
+        namespaceNaturalSortEnabled={dashboard.namespaceNaturalSortEnabled}
         onAssignTag={dashboard.assignTag}
         onCreateTag={dashboard.createTag}
         onBulkMutateTags={dashboard.bulkMutateTags}

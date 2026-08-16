@@ -237,7 +237,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     cardNamed(privateGrid, "Total quota · Monthly").locator(
       ".countryFlagGlyph",
     ),
-  ).toHaveCount(0);
+  ).toHaveText("🇸🇬");
   await capture(page, "private-monitor-comfortable.png");
 
   await cardNamed(privateGrid, "Total quota · Monthly").click();
@@ -453,7 +453,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
     publicCardNamed(sharedGrid, "Total quota · Monthly").locator(
       ".countryFlagGlyph",
     ),
-  ).toHaveCount(0);
+  ).toHaveText("🇸🇬");
   await expect(
     publicCardNamed(sharedGrid, "Rates intentionally empty").locator(
       ".vpsMonitorFlowFacts strong",

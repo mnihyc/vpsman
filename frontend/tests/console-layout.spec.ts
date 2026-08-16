@@ -2108,6 +2108,11 @@ test(
     );
     await expect(traffic.locator(".unlimitedTrafficTrack")).toHaveCount(0);
 
+    await page
+      .getByRole("button", { name: "Comfortable", exact: true })
+      .click();
+    await expect(edgeCard.locator(".countryFlagGlyph")).toHaveText("🇺🇸");
+
     await openConsoleSubpage(page, "Fleet", "Instances");
     const grid = page.getByLabel("VPS instance records data grid");
     for (const columnName of ["Cycle Usage", "Quota"]) {
@@ -2292,6 +2297,27 @@ test("exposes traffic columns and the VPS Traffic & Rules drilldown", async ({
   await expect(selectedIdentity.getByLabel("VPS tags")).not.toContainText(
     "provider:alpha",
   );
+  const canonicalDetail = page.getByLabel("Canonical VPS detail");
+  expect(
+    await canonicalDetail
+      .getByRole("tab")
+      .evaluateAll((tabs) =>
+        tabs.slice(0, 3).map((tab) => tab.textContent?.trim()),
+      ),
+  ).toEqual(["Summary", "System", "Resources"]);
+  await canonicalDetail.getByRole("tab", { name: "System" }).click();
+  const canonicalSystem = canonicalDetail.getByLabel("VPS system information");
+  await expect(canonicalSystem).toContainText("Ubuntu 24.04 LTS");
+  await expect(canonicalSystem).toContainText(
+    "AMD EPYC 7B13 64-Core Processor",
+  );
+  await expect(canonicalSystem).toContainText("6.8.0-31-generic");
+  await expect(canonicalSystem).toContainText("x86_64");
+  await expect(canonicalSystem).toContainText("KVM");
+  await canonicalDetail.getByRole("tab", { name: "Resources" }).click();
+  await expect(canonicalDetail).toContainText("Memory / swap used");
+  await expect(canonicalDetail).toContainText("Swap used");
+  await expect(canonicalDetail).toContainText("Max · RAM 8.0 GB · Swap 4.0 GB");
   await page.getByRole("tab", { name: "Network" }).click();
   const edgeDetail = page
     .locator(".vpsDetailBlock", { hasText: "Traffic & Rules" })
@@ -8005,6 +8031,20 @@ test("shows telemetry only for explicitly saved tunnel endpoints", async ({
   await expect(locationFact).toContainText("US");
   await expect(locationFact.locator(".countryFlag")).toBeVisible();
   await expect(detail).not.toContainText("Contact evidence");
+  expect(
+    await detail
+      .getByRole("tab")
+      .evaluateAll((tabs) =>
+        tabs.slice(0, 3).map((tab) => tab.textContent?.trim()),
+      ),
+  ).toEqual(["Overview", "System", "Telemetry"]);
+  await activate(detail.getByRole("tab", { name: "System" }));
+  const inlineSystem = detail.getByLabel("VPS system information");
+  await expect(inlineSystem).toContainText("Ubuntu 24.04 LTS");
+  await expect(inlineSystem).toContainText("AMD EPYC 7B13 64-Core Processor");
+  await expect(inlineSystem).toContainText("6.8.0-31-generic");
+  await expect(inlineSystem).toContainText("x86_64");
+  await expect(inlineSystem).toContainText("KVM");
   await activate(detail.getByRole("tab", { name: "Network" }));
   await expect(detail).toContainText("sfo-fra-gre");
   await expect(detail).toContainText("external-openvpn-observed");
@@ -8043,6 +8083,10 @@ test("keeps each expanded VPS network evidence scoped to that VPS", async ({
   const coreDetail = grid
     .locator(".gridExpandedRow", { hasText: "core-fra-02" })
     .first();
+  await activate(coreDetail.getByRole("tab", { name: "System" }));
+  await expect(coreDetail.getByLabel("VPS system information")).toContainText(
+    "System information unavailable",
+  );
   await activate(edgeDetail.getByRole("tab", { name: "Telemetry" }));
   await activate(coreDetail.getByRole("tab", { name: "Telemetry" }));
   const edgeRate = edgeDetail

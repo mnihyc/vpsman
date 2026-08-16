@@ -611,6 +611,40 @@ test("expanded VPS detail scopes row actions and preview-binds inline tag change
   });
   await activate(prompt.getByRole("button", { name: "Cancel" }));
 
+  const roleTag = detail.locator(".tagEditChip", { hasText: "role:edge" });
+  await roleTag.getByText("role:edge", { exact: true }).click();
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: { bulkTagMutations: unknown[] };
+          }
+        ).__vpsmanTestRequests.bulkTagMutations.length,
+    ),
+  ).toBe(0);
+
+  await activate(roleTag.getByRole("button", { name: "Remove tag role:edge" }));
+  await expect(detail).toContainText("remove role:edge: 1 changed, 0 skipped");
+  const removalRequests = await page.evaluate(() =>
+    (
+      window as unknown as {
+        __vpsmanTestRequests: { bulkTagMutations: unknown[] };
+      }
+    ).__vpsmanTestRequests.bulkTagMutations.slice(-2),
+  );
+  expect(removalRequests).toHaveLength(2);
+  expect(removalRequests[0]).toMatchObject({
+    action: "remove",
+    confirmed: false,
+    tag: "role:edge",
+  });
+  expect(removalRequests[1]).toMatchObject({
+    action: "remove",
+    confirmed: true,
+    tag: "role:edge",
+  });
+
   await detail.getByLabel("Fleet inline tag").fill("maintenance:inline");
   await activate(detail.getByRole("button", { name: "Add", exact: true }));
   await expect(detail).toContainText(

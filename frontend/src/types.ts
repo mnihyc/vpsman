@@ -3548,6 +3548,16 @@ export type TagView = {
   clients: AgentView[];
 };
 
+export type TagOrderState = {
+  tags: TagView[];
+  namespace_natural_sort_enabled: boolean;
+};
+
+export type UpdateTagOrderRequest = {
+  ordered_tags: string[];
+  namespace_natural_sort_enabled: boolean;
+};
+
 export type BulkTagMutationRequest = {
   action: "add" | "remove";
   tag: string;

@@ -1,8 +1,10 @@
 # Migration Compatibility
 
 The current schema is an intentional clean baseline for a fresh PostgreSQL
-database. It does not support upgrading a database created by an earlier schema
-model in place.
+database. The sole supported in-place step is applying
+`0009_fleet_tag_settings.sql` to a database whose applied migrations are the
+exact v0.3.5 `0001`–`0008` files and checksums. Earlier or different canonical
+baselines are not supported in place.
 
 Do not edit `_sqlx_migrations`, replace checksums in an existing database, or
 mark migrations as applied. Retained data requires a separately reviewed
@@ -20,14 +22,16 @@ export/import into a fresh database.
 | `0006_agent_updates.sql` | Agent update release and artifact-verification state. |
 | `0007_configuration_presets_file_transfer.sql` | System/custom configuration presets, explicit per-VPS overrides, runtime-config apply state, tunnel-plan adapter definitions, file-transfer sessions, and source artifacts. |
 | `0008_system_metrics.sql` | Durable sufficient-stat control-plane metric rollups promoted from 60-second evidence into bounded long-term tiers for the System dashboard. |
+| `0009_fleet_tag_settings.sql` | Fleet-wide tag-order settings stored beside the canonical flat tag display order. |
 
 `scripts/audit-migrations.sh` verifies sequential filenames, a documented role
 for every migration, unique index names, trailing newlines, and unsafe DDL
-patterns. It intentionally does not claim compatibility with a tagged or
-deployed database.
+patterns. That structural audit does not establish upgrade compatibility; the
+checksum-pinned v0.3.5 regression for `0009` and this explicit declaration are
+the compatibility evidence for the sole supported in-place step.
 
-These migrations support only a fresh database used by the current repository
-components. No release tag is a declared schema-upgrade boundary, and copying
-the current canonical files must not be presented as an older release
-baseline. Moving retained data between baselines requires the separately
+Except for the explicit v0.3.5 `0001`–`0008` to `0009` step above, these
+migrations support only a fresh database used by the current repository
+components. Copying migration files must not be presented as a historical
+baseline. Moving retained data from any other baseline requires the separately
 reviewed export/import process described above.

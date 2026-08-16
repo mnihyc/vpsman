@@ -263,6 +263,23 @@ export function formatBillingRenewal(
 
 export type TrafficQuotaState = "finite" | "unlimited" | "unset";
 
+export function trafficNonTotalSelectorDirection(traffic: {
+  selector_breakdown?: Array<{ direction?: string | null }> | null;
+}): "RX" | "TX" | "Max" | null {
+  const directions = traffic.selector_breakdown?.map(
+    ({ direction }) => direction,
+  );
+  if (!directions?.length || directions.some((direction) => !direction)) {
+    return null;
+  }
+  const direction = directions[0];
+  if (directions.some((candidate) => candidate !== direction)) return null;
+  if (direction === "rx") return "RX";
+  if (direction === "tx") return "TX";
+  if (direction === "tx/rx") return "Max";
+  return null;
+}
+
 export type TrafficLimitingQuota = {
   direction: "RX" | "TX" | "Total";
   percent: number;
@@ -518,6 +535,31 @@ export function formatFullTime(
     year: "numeric",
     ...(timeZone ? { timeZone } : {}),
   });
+}
+
+export function formatUptimeStartTime(
+  observedAt: string | null | undefined,
+  uptimeSecs: number | null | undefined,
+  timeZone = preferredTimeZone,
+): string | null {
+  if (
+    !observedAt ||
+    uptimeSecs === null ||
+    uptimeSecs === undefined ||
+    !Number.isFinite(uptimeSecs) ||
+    uptimeSecs < 0
+  ) {
+    return null;
+  }
+  const startedAtMs =
+    timestampMillis(observedAt) - Math.floor(uptimeSecs) * 1_000;
+  if (
+    !Number.isFinite(startedAtMs) ||
+    Number.isNaN(new Date(startedAtMs).getTime())
+  ) {
+    return null;
+  }
+  return formatFullTime(String(startedAtMs), timeZone);
 }
 
 export function timestampMillis(value: string): number {

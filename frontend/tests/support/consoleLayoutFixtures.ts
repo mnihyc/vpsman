@@ -25,6 +25,7 @@ import type {
   OperatorAuthEventRecord,
   ScheduleRecord,
   TagMutationResponse,
+  TagView,
   TrafficAccountingRecord,
   VpsRuleValueRecord,
 } from "../../src/types";
@@ -1934,6 +1935,7 @@ const auditLogs = [
 const tags = [
   {
     clients: [agents[0], agents[1]],
+    display_order: 0,
     name: "edge",
   },
 ];
@@ -3608,6 +3610,12 @@ export async function installConsoleApiMock(
     privilegeVerificationDelayMs?: number;
     privilegeVerificationFailure?: "denied" | "unavailable";
     schedulesOverride?: ScheduleRecord[];
+    tagOrderStateOverride?: {
+      namespace_natural_sort_enabled: boolean;
+      tags: TagView[];
+    };
+    tagOrderUpdateDelayMs?: number;
+    tagOrderUpdateFailure?: boolean;
     telemetryFailurePath?: "network-rates" | "rollups" | "tunnels";
     telemetryNetworkRateScales?: number[];
     trafficAccountingOverride?: Partial<(typeof trafficAccounting)[number]>;
@@ -3703,6 +3711,9 @@ export async function installConsoleApiMock(
       suiteConfigTomlFixture,
       suiteConfigValidationFixture,
       tagsFixture,
+      tagOrderStateOverrideFixture,
+      tagOrderUpdateDelayMsFixture,
+      tagOrderUpdateFailureFixture,
       telemetryFailurePathFixture,
       telemetryNetworkRateScalesFixture,
       terminalSessionsFixture,
@@ -3910,6 +3921,35 @@ export async function installConsoleApiMock(
           (agent) => !deletedAgentIds.has(agent.id),
         );
       const visibleAgents = () => dashboardAgents();
+      let currentTagOrderState = structuredClone(
+        tagOrderStateOverrideFixture ?? {
+          namespace_natural_sort_enabled: false,
+          tags: tagsFixture,
+        },
+      );
+      let nextTagOrderGetGate: Promise<void> | null = null;
+      let releaseNextTagOrderGet: (() => void) | null = null;
+      Object.defineProperty(window, "__vpsmanSetTagOrderState", {
+        configurable: true,
+        value: (state: typeof currentTagOrderState) => {
+          currentTagOrderState = structuredClone(state);
+        },
+      });
+      Object.defineProperty(window, "__vpsmanGateNextTagOrderGet", {
+        configurable: true,
+        value: () => {
+          nextTagOrderGetGate = new Promise<void>((resolve) => {
+            releaseNextTagOrderGet = resolve;
+          });
+        },
+      });
+      Object.defineProperty(window, "__vpsmanReleaseTagOrderGet", {
+        configurable: true,
+        value: () => {
+          releaseNextTagOrderGet?.();
+          releaseNextTagOrderGet = null;
+        },
+      });
       const visibleTunnelPlans = () =>
         tunnelPlansFixture.filter(
           (plan) =>
@@ -3945,6 +3985,8 @@ export async function installConsoleApiMock(
         artifactCleanupPreviews: [] as unknown[],
         bulkTagMutations: [] as unknown[],
         tagDeletes: [] as unknown[],
+        tagOrderReads: [] as unknown[],
+        tagOrderUpdates: [] as unknown[],
         bulkResolve: [] as unknown[],
         runtimeConfigPatches: [] as unknown[],
         configurationPresetMutations: [] as unknown[],
@@ -4887,12 +4929,12 @@ export async function installConsoleApiMock(
           network_rx_bytes_max: [18, 18.4, 18.9][index] * 1_000_000_000,
           network_tx_bytes_max: [8, 8.2, 8.45][index] * 1_000_000_000,
           sample_count: 1,
-          swap_available_bytes_avg: null,
-          swap_available_bytes_min: null,
-          swap_sample_count: 0,
-          swap_total_bytes_max: null,
-          swap_used_ratio_avg: null,
-          swap_used_ratio_max: null,
+          swap_available_bytes_avg: [3.2, 3, 2.8][index] * 1_000_000_000,
+          swap_available_bytes_min: [3.1, 2.9, 2.7][index] * 1_000_000_000,
+          swap_sample_count: 1,
+          swap_total_bytes_max: 4_000_000_000,
+          swap_used_ratio_avg: 1 - [3.2, 3, 2.8][index] / 4,
+          swap_used_ratio_max: 1 - [3.1, 2.9, 2.7][index] / 4,
           tcp_sockets_latest: [34, 41, 38][index],
           udp_sockets_latest: [5, 6, 5][index],
           updated_at: bucketStart,
@@ -5732,12 +5774,12 @@ export async function installConsoleApiMock(
                     network_rx_bytes_max: 71_303_168,
                     network_tx_bytes_max: 68_157_440,
                     sample_count: 1,
-                    swap_available_bytes_avg: 0,
-                    swap_available_bytes_min: 0,
-                    swap_sample_count: 0,
-                    swap_total_bytes_max: 0,
-                    swap_used_ratio_avg: null,
-                    swap_used_ratio_max: null,
+                    swap_available_bytes_avg: 2_800_000_000,
+                    swap_available_bytes_min: 2_700_000_000,
+                    swap_sample_count: 1,
+                    swap_total_bytes_max: 4_000_000_000,
+                    swap_used_ratio_avg: 0.3,
+                    swap_used_ratio_max: 0.325,
                     tcp_sockets_latest: 37,
                     udp_sockets_latest: 4,
                     updated_at: "2026-06-05T20:35:00Z",
@@ -5746,14 +5788,14 @@ export async function installConsoleApiMock(
             system_information:
               client.id === "agent-sfo-01"
                 ? {
-                    architecture: null,
-                    cpu_model: null,
-                    kernel_release: null,
-                    os_name: null,
-                    reported_at: null,
+                    architecture: "x86_64",
+                    cpu_model: "AMD EPYC 7B13 64-Core Processor",
+                    kernel_release: "6.8.0-31-generic",
+                    os_name: "Ubuntu 24.04 LTS",
+                    reported_at: "2026-06-05T20:35:00Z",
                     uptime_observed_at: "2026-06-05T20:35:00Z",
                     uptime_secs: 702_000,
-                    virtualization: null,
+                    virtualization: "kvm",
                   }
                 : null,
             traffic:
@@ -7947,6 +7989,67 @@ export async function installConsoleApiMock(
             },
           );
         }
+        if (pathname === "/api/v1/tags/order" && method === "GET") {
+          const response = structuredClone(currentTagOrderState);
+          const gate = nextTagOrderGetGate;
+          nextTagOrderGetGate = null;
+          await gate;
+          requests.tagOrderReads.push(response);
+          return jsonResponse(response);
+        }
+        if (pathname === "/api/v1/tags/order" && method === "PUT") {
+          if (tagOrderUpdateDelayMsFixture > 0) {
+            await new Promise((resolve) =>
+              window.setTimeout(resolve, tagOrderUpdateDelayMsFixture),
+            );
+          }
+          const body = await readJsonBody(input, init);
+          const bodyRecord =
+            body && typeof body === "object" && !Array.isArray(body)
+              ? (body as Record<string, unknown>)
+              : null;
+          const allowedKeys = new Set([
+            "namespace_natural_sort_enabled",
+            "ordered_tags",
+          ]);
+          if (
+            !bodyRecord ||
+            Object.keys(bodyRecord).some((key) => !allowedKeys.has(key)) ||
+            Object.keys(bodyRecord).length !== allowedKeys.size ||
+            typeof bodyRecord.namespace_natural_sort_enabled !== "boolean" ||
+            !Array.isArray(bodyRecord.ordered_tags) ||
+            bodyRecord.ordered_tags.some((name) => typeof name !== "string") ||
+            new Set(bodyRecord.ordered_tags).size !==
+              bodyRecord.ordered_tags.length ||
+            bodyRecord.ordered_tags.some(
+              (name) =>
+                typeof name === "string" &&
+                !currentTagOrderState.tags.some((tag) => tag.name === name),
+            )
+          ) {
+            return jsonResponse({ error: "invalid_tag_order_request" }, 400);
+          }
+          requests.tagOrderUpdates.push(body);
+          if (tagOrderUpdateFailureFixture) {
+            return jsonResponse({ error: "tag_order_update_failed" }, 503);
+          }
+          const request = bodyRecord as {
+            namespace_natural_sort_enabled: boolean;
+            ordered_tags: string[];
+          };
+          const tagByName = new Map(
+            currentTagOrderState.tags.map((tag) => [tag.name, tag]),
+          );
+          currentTagOrderState = {
+            namespace_natural_sort_enabled:
+              request.namespace_natural_sort_enabled,
+            tags: request.ordered_tags.flatMap((name, displayOrder) => {
+              const tag = tagByName.get(name);
+              return tag ? [{ ...tag, display_order: displayOrder }] : [];
+            }),
+          };
+          return jsonResponse(currentTagOrderState);
+        }
         if (pathname === "/api/v1/tags") {
           return jsonResponse(tagsFixture);
         }
@@ -7987,9 +8090,17 @@ export async function installConsoleApiMock(
           const request = body as {
             action?: "add" | "remove";
             confirmed?: boolean;
+            preview_hash?: string | null;
             tag?: string;
             target_client_ids?: string[];
           };
+          const previewHash = "7".repeat(64);
+          if (request.confirmed && request.preview_hash !== previewHash) {
+            return jsonResponse(
+              { error: "tag_mutation_preview_hash_required" },
+              409,
+            );
+          }
           const targetIds = Array.isArray(request.target_client_ids)
             ? request.target_client_ids
             : [];
@@ -8006,7 +8117,7 @@ export async function installConsoleApiMock(
             affected,
             changed_count: changedCount,
             confirmation_required: !request.confirmed,
-            preview_hash: "7".repeat(64),
+            preview_hash: previewHash,
             schedule_impacts: bulkTagScheduleImpactsFixture,
             skipped_count: affected.length - changedCount,
             tag: request.tag ?? "",
@@ -9971,6 +10082,9 @@ export async function installConsoleApiMock(
       suiteConfigTomlFixture: suiteConfigToml,
       suiteConfigValidationFixture: suiteConfigValidation,
       tagsFixture: tags,
+      tagOrderStateOverrideFixture: options.tagOrderStateOverride ?? null,
+      tagOrderUpdateDelayMsFixture: options.tagOrderUpdateDelayMs ?? 0,
+      tagOrderUpdateFailureFixture: options.tagOrderUpdateFailure ?? false,
       telemetryFailurePathFixture: options.telemetryFailurePath ?? null,
       telemetryNetworkRateScalesFixture: options.telemetryNetworkRateScales ?? [
         1,

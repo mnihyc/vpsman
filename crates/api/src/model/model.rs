@@ -1154,6 +1154,13 @@ pub(crate) struct DeleteTagRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateTagOrderRequest {
     pub(crate) ordered_tags: Vec<String>,
+    pub(crate) namespace_natural_sort_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TagOrderState {
+    pub(crate) tags: Vec<TagView>,
+    pub(crate) namespace_natural_sort_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

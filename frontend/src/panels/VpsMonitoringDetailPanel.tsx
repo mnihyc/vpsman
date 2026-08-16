@@ -409,6 +409,18 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
     0,
   );
   const interfaces = new Set(data.network.map((row) => row.interface)).size;
+  const memoryCapacity = maximumPositiveValue(
+    data.resources.map((row) => row.memory_total_bytes_max),
+  );
+  const swapCapacity = maximumPositiveValue(
+    data.resources.map((row) => row.swap_total_bytes_max),
+  );
+  const memoryCapacityDetail =
+    resources.memory.lines.length > 1 && memoryCapacity && swapCapacity
+      ? `Max · RAM ${formatBytes(memoryCapacity)} · Swap ${formatBytes(swapCapacity)}`
+      : memoryCapacity
+        ? `Max ${formatBytes(memoryCapacity)}`
+        : undefined;
 
   return (
     <section
@@ -447,9 +459,14 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
         />
         <MonitoringChart
           data={resources.memory}
+          detail={memoryCapacityDetail}
           emptyLabel="Memory history is unavailable for this range"
           exportFileName={`${safeFilePart(data.client.id)}-memory-${data.range.window}`}
-          title="Memory used"
+          title={
+            resources.memory.lines.length > 1
+              ? "Memory / swap used"
+              : "Memory used"
+          }
           valueFormatter={formatPercent}
         />
         <MonitoringChart
@@ -500,6 +517,17 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
       </div>
     </section>
   );
+}
+
+function maximumPositiveValue(
+  values: Array<number | null | undefined>,
+): number | null {
+  return values.reduce<number | null>((maximum, value) => {
+    const finite = finiteNumber(value);
+    return finite !== null && finite > 0
+      ? Math.max(maximum ?? 0, finite)
+      : maximum;
+  }, null);
 }
 
 function PingHistory({
@@ -823,6 +851,12 @@ function resourceCharts(
 } {
   const bucketed = latestRowsByEpoch(rows, stepSecs);
   const times = timeline.times;
+  const hasSwapHistory = [...bucketed.values()].some(
+    (row) =>
+      row.swap_sample_count > 0 &&
+      (row.swap_total_bytes_max ?? 0) > 0 &&
+      finiteNumber(row.swap_used_ratio_avg) !== null,
+  );
   return {
     connections: {
       times,
@@ -895,6 +929,22 @@ function resourceCharts(
               ? row.memory_used_ratio_avg * 100
               : null,
         ),
+        ...(hasSwapHistory
+          ? [
+              resourceLine(
+                "Swap used",
+                consolePalette.chart.orange,
+                timeline,
+                bucketed,
+                (row) =>
+                  row.swap_sample_count > 0 &&
+                  (row.swap_total_bytes_max ?? 0) > 0 &&
+                  finiteNumber(row.swap_used_ratio_avg) !== null
+                    ? (row.swap_used_ratio_avg ?? 0) * 100
+                    : null,
+              ),
+            ]
+          : []),
       ],
     },
     disk: {

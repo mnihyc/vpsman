@@ -2425,11 +2425,11 @@
 }
 
 .vpsMonitorAuxFacts > span[data-fact-kind="connection"] {
-  flex: 0.45 1 38px;
+  flex: 0.45 1 42px;
 }
 
 .vpsMonitorAuxFacts > span[data-fact-kind="uptime"] {
-  flex: 0.7 1 56px;
+  flex: 0.7 1 68px;
 }
 
 .vpsMonitorAuxFacts > span {
@@ -7850,26 +7850,44 @@ button.vpsDetailRecord:hover {
   border-radius: 999px;
   background: var(--surface);
   color: var(--text-secondary);
-  cursor: pointer;
+  cursor: default;
   font-size: 12px;
   font-weight: 700;
-  padding: 3px 8px 3px 10px;
+  padding: 3px 4px 3px 10px;
 }
 
-.tagEditChip:hover:not(:disabled) {
-  border-color: var(--primary);
-  background: var(--canvas);
-  color: var(--primary-text);
-}
-
-.tagEditChip span {
+.tagEditChip > span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.tagEditChip svg {
-  flex: 0 0 auto;
+.tagEditChipRemove {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
+}
+
+.tagEditChipRemove:hover:not(:disabled),
+.tagEditChipRemove:focus-visible {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tagEditChipRemove:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.tagEditChipRemove svg {
+  flex: 0 0 auto;
+  color: currentColor;
 }
 
 .sectionHeader {
@@ -8544,6 +8562,48 @@ button.vpsDetailRecord:hover {
   border-radius: 8px;
   overflow: hidden;
   margin-top: 0;
+}
+
+.fleetSystemInformationGrid,
+.fleetSystemInformationEmpty {
+  grid-column: 1 / -1;
+  margin: 14px;
+}
+
+.fleetDetailPane .fleetSystemInformationGrid > span > span {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.fleetSystemInformationEmpty {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-neutral);
+  color: var(--muted);
+  padding: 12px;
+}
+
+.fleetSystemInformationEmpty > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fleetSystemInformationEmpty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.fleetSystemInformationEmpty span {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .fleetNodeDetailCard .timeline {

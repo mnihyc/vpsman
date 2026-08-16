@@ -50,6 +50,7 @@ const customMockTests = new Set([
   "home shows a useful empty state when no VPS agents are loaded",
   "fleet monitor keeps unsettled evidence neutral while cards load",
   "fleet monitor keeps an intentionally empty rate selection out of partial telemetry",
+  "fleet monitor sorts warning ties by name and client ID",
   "fleet monitor cards remain readable for 0 generated VPS fixtures",
   "fleet monitor cards remain readable for 1 generated VPS fixtures",
   "fleet monitor cards remain readable for 8 generated VPS fixtures",
@@ -2274,6 +2275,17 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await expect(
     edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"] strong'),
   ).toHaveText("8d 3h");
+  await expect(
+    edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"]'),
+  ).toHaveAttribute("title", /^Up since .+2026/);
+  await expect(
+    edgeCard.locator('.vpsMonitorAuxFacts > [data-fact-kind="uptime"]'),
+  ).toHaveCSS("flex-basis", "68px");
+  await expect(
+    edgeCard
+      .locator('.vpsMonitorAuxFacts > [data-fact-kind="connection"]')
+      .first(),
+  ).toHaveCSS("flex-basis", "42px");
   const snapshot = page.getByLabel("VPS cards current totals");
   await expect(snapshot.locator("strong[title], em[title]")).toHaveCount(0);
   await expect(edgeCard.locator(".vpsMonitorTraffic")).toHaveAttribute(
@@ -2407,6 +2419,52 @@ test("fleet monitor cards are density-distinct and open canonical detail", async
   await page.reload();
   await expect(monitor).toHaveAttribute("data-density", "compact");
   await expect(monitor).toHaveAttribute("data-sort", "warning");
+});
+
+test("fleet monitor sorts warning ties by name and client ID", async ({
+  page,
+}) => {
+  const names = ["Zulu offline", "Alpha", "Alpha", "Beta"];
+  const ids = ["sort-offline", "sort-b", "sort-a", "sort-beta"];
+  await installConsoleApiMock(page, {
+    agentListOverride: makeMonitorAgentFixtures(4).map((agent, index) => ({
+      ...agent,
+      display_name: names[index],
+      id: ids[index],
+      last_seen_at: new Date().toISOString(),
+      status: index === 0 ? ("offline" as const) : ("online" as const),
+    })),
+  });
+  await gotoConsoleHome(page);
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+
+  const sort = page.getByLabel("VPS cards sort");
+  await expect(sort.locator("option").nth(0)).toHaveText("Warnings first");
+  await expect(sort.locator("option").nth(1)).toHaveText("Name");
+
+  const monitor = page.getByLabel("VPS monitor cards");
+  const cardNames = monitor.locator(".vpsMonitorCardNameText");
+  await expect(cardNames).toHaveText([
+    "Zulu offline",
+    "Alpha",
+    "Alpha",
+    "Beta",
+  ]);
+  await expect(
+    monitor.locator(".vpsMonitorCardMain > small").nth(1),
+  ).toContainText("gamma");
+  await expect(
+    monitor.locator(".vpsMonitorCardMain > small").nth(2),
+  ).toContainText("beta");
+
+  await sort.selectOption("name");
+  await expect(cardNames).toHaveText([
+    "Alpha",
+    "Alpha",
+    "Beta",
+    "Zulu offline",
+  ]);
+  await expect(monitor).toHaveAttribute("data-sort", "name");
 });
 
 for (const fixtureCount of [0, 1, 8, 20, 100, 1_000]) {
@@ -2793,6 +2851,24 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
   const unlockedAssignmentDrawer = page.getByLabel(
     /^Edit groups · edge-sfo-01/,
   );
+  const roleEdgeChip = unlockedAssignmentDrawer
+    .locator(".tagRemoveChip")
+    .filter({ hasText: "role:edge" });
+  await expect(roleEdgeChip).toHaveCSS("border-radius", "999px");
+  await expect(roleEdgeChip).toHaveCSS("border-top-style", "solid");
+  await expect(roleEdgeChip.getByRole("button")).toHaveCount(1);
+  await roleEdgeChip.getByText("role:edge", { exact: true }).click();
+  const requestsBeforeRemove = await page.evaluate(() => {
+    const requestLog = (
+      window as unknown as {
+        __vpsmanTestRequests: {
+          bulkTagMutations: Array<Record<string, unknown>>;
+        };
+      }
+    ).__vpsmanTestRequests;
+    return requestLog.bulkTagMutations;
+  });
+  expect(requestsBeforeRemove).toHaveLength(0);
   await activate(
     unlockedAssignmentDrawer.getByRole("button", {
       name: "Remove role:edge from edge-sfo-01",
@@ -2837,15 +2913,31 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
     ).__vpsmanTestRequests;
     return requestLog.bulkTagMutations;
   });
-  expect(undoRequests.at(-2)).toMatchObject({
+  expect(undoRequests.at(-4)).toMatchObject({
+    action: "remove",
+    confirmed: false,
+    privilege_assertion: null,
+    tag: "role:edge",
+    target_client_ids: ["agent-sfo-01"],
+  });
+  expect(undoRequests.at(-3)).toMatchObject({
     action: "remove",
     confirmed: true,
+    preview_hash: "7".repeat(64),
+    tag: "role:edge",
+    target_client_ids: ["agent-sfo-01"],
+  });
+  expect(undoRequests.at(-2)).toMatchObject({
+    action: "add",
+    confirmed: false,
+    privilege_assertion: null,
     tag: "role:edge",
     target_client_ids: ["agent-sfo-01"],
   });
   expect(undoRequests.at(-1)).toMatchObject({
     action: "add",
     confirmed: true,
+    preview_hash: "7".repeat(64),
     tag: "role:edge",
     target_client_ids: ["agent-sfo-01"],
   });

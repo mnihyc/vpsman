@@ -1,17 +1,28 @@
 import { useEffect, useState } from "react";
 import { apiGet } from "../api";
 import { selectorExpressionForClientIds } from "../searchExpression";
-import type { MonitoringCardsPageView } from "../types";
+import type {
+  MonitoringCardView,
+  MonitoringCardsPageView,
+  SystemInformationView,
+} from "../types";
 
-export function useProjectedProductName(
+type ProjectedMonitoringMetadata = {
+  loading: boolean;
+  productName: string | null;
+  systemInformation: SystemInformationView | null;
+};
+
+export function useProjectedMonitoringMetadata(
   apiToken: string,
   clientId: string | null | undefined,
-  fallback: string | null = null,
-): string | null {
+  fallbackProductName: string | null = null,
+): ProjectedMonitoringMetadata {
   const [projection, setProjection] = useState<{
     apiToken: string;
+    card: MonitoringCardView | null;
     clientId: string;
-    value: string | null;
+    failed: boolean;
   } | null>(null);
 
   useEffect(() => {
@@ -36,25 +47,36 @@ export function useProjectedProductName(
     )
       .then((page) => {
         if (!active) return;
-        const card = page.items.find((item) => item.client.id === clientId);
         setProjection({
           apiToken,
+          card: page.items.find((item) => item.client.id === clientId) ?? null,
           clientId,
-          value: card?.product_name ?? null,
+          failed: false,
         });
       })
       .catch(() => {
-        // Product metadata is optional. Retain the caller's authorized
-        // fallback if the narrow fleet-read projection is unavailable.
+        if (!active) return;
+        // Display metadata is optional. Retain the caller's authorized
+        // product fallback and leave system information unavailable.
+        setProjection({ apiToken, card: null, clientId, failed: true });
       });
     return () => {
       active = false;
     };
   }, [apiToken, clientId]);
 
-  return projection &&
+  const current =
+    projection &&
     projection.apiToken === apiToken &&
     projection.clientId === clientId
-    ? projection.value
-    : fallback;
+      ? projection
+      : null;
+  return {
+    loading: Boolean(apiToken && clientId && !current),
+    productName:
+      current && !current.failed
+        ? (current.card?.product_name ?? null)
+        : fallbackProductName,
+    systemInformation: current?.card?.system_information ?? null,
+  };
 }

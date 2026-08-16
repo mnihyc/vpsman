@@ -68,7 +68,7 @@ use crate::{
     routes_inventory::{
         assign_agent_tag, bulk_mutate_tags, create_server_runtime_config_patch_request, create_tag,
         delete_agent, delete_runtime_config_patch_generator, delete_tag, fleet_summary,
-        list_agents, list_gateway_sessions, list_runtime_config_apply_states,
+        get_tag_order, list_agents, list_gateway_sessions, list_runtime_config_apply_states,
         list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
         list_telemetry_rollups, list_telemetry_samples, list_telemetry_tunnels,
         render_runtime_config_patch_generator, resolve_bulk_targets, update_agent_alias,
@@ -391,7 +391,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/history/export", get(export_history))
         .route("/api/v1/tags", get(list_tags).post(create_tag))
         .route("/api/v1/tags/bulk", post(bulk_mutate_tags))
-        .route("/api/v1/tags/order", put(update_tag_order))
+        .route(
+            "/api/v1/tags/order",
+            get(get_tag_order).put(update_tag_order),
+        )
         .route("/api/v1/tags/{tag}", delete(delete_tag))
         .route(
             "/api/v1/configuration-presets",

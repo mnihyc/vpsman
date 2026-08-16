@@ -51,6 +51,7 @@ import {
   formatBillingRenewal,
   formatCompactTime,
   formatFullTime,
+  formatUptimeStartTime,
   formatVirtualizationLabel,
   trafficLimitingQuota,
   trafficUnlimitedQuota,
@@ -74,6 +75,7 @@ type Density = MonitorCardDensity;
 type CardStatusFilter = "all" | "online" | "warning" | "offline";
 type PublicMonitorSort =
   | "warning"
+  | "name"
   | "traffic"
   | "cpu"
   | "memory"
@@ -89,6 +91,7 @@ const publicMonitorSortOptions: Array<{
   value: PublicMonitorSort;
 }> = [
   { label: "Warnings first", value: "warning" },
+  { label: "Name", value: "name" },
   { label: "Traffic use", value: "traffic" },
   { label: "CPU use", value: "cpu" },
   { label: "Memory", value: "memory" },
@@ -1020,7 +1023,7 @@ function PublicMonitoringCardView({
           .filter(Boolean)
           .join(" · ")}
       >
-        {density === "compact" && country ? (
+        {country ? (
           <CountryFlag country={country} decorative fallback="none" />
         ) : null}
         <span className="vpsMonitorCardNameText">
@@ -2327,9 +2330,13 @@ function PublicMonitoringKpiStrip({
     });
   }
   if (visibility?.system_information) {
+    const uptimeStartTime = formatUptimeStartTime(
+      card.system_information?.uptime_observed_at,
+      card.system_information?.uptime_secs,
+    );
     facts.push({
-      detail: card.system_information?.uptime_observed_at
-        ? `Observed ${formatCompactTime(card.system_information.uptime_observed_at)}`
+      detail: uptimeStartTime
+        ? `Up since ${uptimeStartTime}`
         : "Latest reported uptime is unavailable",
       kind: "uptime",
       label: "Uptime",
@@ -3059,7 +3066,7 @@ function comparePublicMonitoringCards(
   const name = () =>
     (left.display_name || "Unnamed VPS").localeCompare(
       right.display_name || "Unnamed VPS",
-    );
+    ) || left.client_key.localeCompare(right.client_key);
   const provider = (card: PublicMonitoringCard) =>
     publicTagValues(card.tags ?? [], "provider")[0] ?? "provider unset";
   const region = (card: PublicMonitoringCard) =>
@@ -3089,7 +3096,8 @@ function comparePublicMonitoringCards(
     }
   };
   const statusDelta = statusRank(right) - statusRank(left);
-  if (mode === "warning" && statusDelta !== 0) return statusDelta;
+  if (mode === "name") return name();
+  if (mode === "warning") return statusDelta || name();
   const trafficUse = (card: PublicMonitoringCard) => {
     if (!card.traffic?.configured) return -1;
     return (
@@ -3545,11 +3553,15 @@ function publicMonitoringAuxiliaryFacts(
     });
   }
   if (visibility?.system_information) {
+    const uptimeStartTime = formatUptimeStartTime(
+      card.system_information?.uptime_observed_at,
+      card.system_information?.uptime_secs,
+    );
     facts.push({
       kind: "uptime",
       label: "Uptime",
-      title: card.system_information?.uptime_observed_at
-        ? `Observed ${formatFullTime(card.system_information.uptime_observed_at)}`
+      title: uptimeStartTime
+        ? `Up since ${uptimeStartTime}`
         : "Latest reported uptime is unavailable",
       value: formatUptime(card.system_information?.uptime_secs),
     });

@@ -678,7 +678,7 @@ test("public monitoring reuses the Unicode country flag renderer", async ({
     "Shared edge · Northwind · Storage-Box 4 · Provider Transit · US · Virginia",
   );
   await page.getByRole("button", { name: "Comfortable", exact: true }).click();
-  await expect(card.locator(".countryFlagGlyph")).toHaveCount(0);
+  await expect(card.locator(".countryFlagGlyph")).toHaveText("🇺🇸");
   await expect(card.locator(".vpsMonitorCardMain > small")).toHaveText(
     "Updated just now",
   );
@@ -995,6 +995,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
   ).toHaveCSS("background-image", /repeating-linear-gradient/);
   const cardUptime = card.locator('[data-fact-kind="uptime"]');
   await expect(cardUptime).toContainText("8d");
+  await expect(cardUptime).toHaveAttribute("title", /^Up since .+2026/);
   await expect(card).not.toContainText("/ 0 B");
   await expect(card).not.toContainText(/No (recent|continuous) history/);
   await expect(
@@ -1407,6 +1408,38 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
   await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
 
   const grid = page.getByLabel("Shared VPS cards");
+  const sort = page.getByLabel("Shared VPS sort");
+  await expect(sort.locator("option")).toHaveText([
+    "Warnings first",
+    "Name",
+    "Traffic use",
+    "CPU use",
+    "Memory",
+    "Region",
+    "Provider",
+  ]);
+  await expect(grid.getByRole("link")).toHaveCount(8);
+  await expect(grid.locator(".vpsMonitorCardNameText")).toHaveText([
+    "Mumbai worker",
+    "Shared edge",
+    "Sydney backup",
+    "Frankfurt build",
+    "London cache",
+    "New York API",
+    "Tokyo relay",
+    "Toronto transit",
+  ]);
+  await sort.selectOption("name");
+  await expect(grid.locator(".vpsMonitorCardNameText")).toHaveText([
+    "Frankfurt build",
+    "London cache",
+    "Mumbai worker",
+    "New York API",
+    "Shared edge",
+    "Sydney backup",
+    "Tokyo relay",
+    "Toronto transit",
+  ]);
   await page.getByLabel("Search shared VPSs").fill("Storage-Box 4");
   await expect(grid.getByRole("link")).toHaveCount(1);
   await page.getByLabel("Search shared VPSs").fill("");
@@ -1421,10 +1454,32 @@ test("public monitoring mirrors fleet tag, provider, and sort controls when iden
     /Tokyo relay · Online shared monitoring card/,
   );
   await page.getByLabel("Filter shared VPSs by tag").selectOption("all");
-  await page.getByLabel("Shared VPS sort").selectOption("cpu");
+  await sort.selectOption("cpu");
   await expect(grid.getByRole("link").first()).toHaveAccessibleName(
     /Toronto transit · Online shared monitoring card/,
   );
+});
+
+test("public monitoring warning sort uses client key as the stable name tie-breaker", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, {
+    cardCount: 3,
+    duplicateSortNames: true,
+    identityContext: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const duplicateCards = page
+    .getByLabel("Shared VPS cards")
+    .getByRole("link", { name: /Duplicate node/ });
+  await expect(duplicateCards).toHaveCount(2);
+  await expect(
+    duplicateCards.nth(0).locator(".vpsMonitorCardName"),
+  ).toHaveAttribute("title", /Hetzner/);
+  await expect(
+    duplicateCards.nth(1).locator(".vpsMonitorCardName"),
+  ).toHaveAttribute("title", /Vultr/);
 });
 
 test("public monitoring grid and detail have complete screenshot coverage", async ({
@@ -1775,6 +1830,7 @@ async function installPublicMonitoringApiMock(
     cardCount = 1,
     detailAllowed = true,
     directionalUnlimited = false,
+    duplicateSortNames = false,
     edgeCases = false,
     identityContext = false,
     mixedTrafficQuotas = false,
@@ -1795,6 +1851,7 @@ async function installPublicMonitoringApiMock(
     cardCount?: number;
     detailAllowed?: boolean;
     directionalUnlimited?: boolean;
+    duplicateSortNames?: boolean;
     edgeCases?: boolean;
     identityContext?: boolean;
     mixedTrafficQuotas?: boolean;
@@ -2313,6 +2370,10 @@ async function installPublicMonitoringApiMock(
         : card.traffic,
     };
   });
+  if (duplicateSortNames && cards.length >= 3) {
+    cards[1] = { ...cards[1], display_name: "Duplicate node" };
+    cards[2] = { ...cards[2], display_name: "Duplicate node" };
+  }
 
   await page.route(
     /\/api\/v1\/public\/monitoring-shares\/[^/?]+\/(?:bootstrap|data)(?:\?.*)?$/,

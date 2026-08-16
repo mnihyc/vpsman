@@ -535,6 +535,56 @@ if grep -Fq 'updater-super-password-must-not-print' "$FIRST_START/update.log"; t
   fail "first-start printed the super password"
 fi
 
+MANUAL_BACKUP="$SMOKE_ROOT/manual-backup"
+cp -a "$FIRST_START" "$MANUAL_BACKUP"
+: >"$MANUAL_BACKUP/docker.log"
+if ! VPSMAN_SMOKE_TIMESTAMP=20260726T010100Z \
+  run_updater "$MANUAL_BACKUP" backup \
+  >"$MANUAL_BACKUP/backup.log" 2>&1; then
+  fail "manual database backup fixture failed"
+fi
+manual_backup_path="$MANUAL_BACKUP/runtime/update-backups/manual-20260726T010100Z-v9.8.7.dump"
+assert_backup_mode_0600 "$manual_backup_path" "manual database backup"
+grep -Fq 'pg_dump --format=custom' "$MANUAL_BACKUP/docker.log" ||
+  fail "manual database backup did not invoke pg_dump"
+grep -Fq 'pg_restore --list' "$MANUAL_BACKUP/docker.log" ||
+  fail "manual database backup did not validate the archive"
+grep -Fq \
+  'database backup complete: runtime/update-backups/manual-20260726T010100Z-v9.8.7.dump' \
+  "$MANUAL_BACKUP/backup.log" ||
+  fail "manual database backup did not report its output path"
+if grep -Eq '^(stop|up .* (api|gateway|worker|frontend)( |$))' \
+  "$MANUAL_BACKUP/docker.log"; then
+  fail "manual database backup mutated application service state"
+fi
+assert_no_active_transaction "$MANUAL_BACKUP" "manual database backup"
+
+MANUAL_ABANDONED="$SMOKE_ROOT/manual-abandoned-partial"
+cp -a "$FIRST_START" "$MANUAL_ABANDONED"
+: >"$MANUAL_ABANDONED/docker.log"
+manual_abandoned_partial="$MANUAL_ABANDONED/runtime/update-backups/.manual-20260726T010120Z-v9.8.7.dump.partial.Ab12Cd"
+printf 'abandoned manual backup bytes\n' >"$manual_abandoned_partial"
+chmod 0600 "$manual_abandoned_partial"
+VPSMAN_SMOKE_TIMESTAMP=20260726T010121Z \
+  run_updater "$MANUAL_ABANDONED" backup \
+  >"$MANUAL_ABANDONED/backup.log" 2>&1
+[[ ! -e "$manual_abandoned_partial" ]] ||
+  fail "manual backup did not clean a recognized abandoned partial"
+grep -Fq 'removed 1 abandoned PostgreSQL backup partial' \
+  "$MANUAL_ABANDONED/backup.log" ||
+  fail "manual abandoned-partial cleanup was not reported"
+
+run_updater "$FIRST_START" --help >"$FIRST_START/help.log"
+grep -Fq './update.sh backup' "$FIRST_START/help.log" ||
+  fail "updater help does not advertise the backup command"
+if run_updater "$FIRST_START" first-start backup \
+  >"$FIRST_START/first-start-backup.log" 2>&1; then
+  fail "first-start unexpectedly accepted backup as a release target"
+fi
+grep -Fq 'first-start accepts only latest or an exact release tag' \
+  "$FIRST_START/first-start-backup.log" ||
+  fail "first-start backup rejection was not explicit"
+
 VERSION_FLOW="$SMOKE_ROOT/version-flow"
 MUTATION_FAILURE="$SMOKE_ROOT/mutation-failure"
 cp -a "$FIRST_START" "$VERSION_FLOW"
@@ -1103,4 +1153,4 @@ grep -Fq 'unsafe server archive path' "$MALICIOUS/update.log" ||
   fail "path-traversal archive escaped its transaction directory"
 
 printf '%s\n' \
-  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_gateway_public_key_output","first_start_privilege_salt_output","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'
+  '{"deploy_updater_smoke":"ok","checks":["first_start","first_start_gateway_public_key_output","first_start_privilege_salt_output","manual_database_backup","version_manifest_asset_selection","atomic_validated_backup","successful_version_update","successful_rollback","finalization_mutation_failure_guard","finalization_mutation_failure_recovery","same_release_recovery_guard","same_tag_payload_drift_guard","same_tag_missing_payload_guard","same_tag_stopped_service_guard","same_tag_unready_service_guard","exact_same_release_noop","latest_same_release_noop","failed_first_start_database_restore","pg_dump_partial_cleanup","backup_validation_failure_cleanup","backup_collision_refusal","abandoned_backup_partial_cleanup","suspicious_backup_partial_refusal","missing_backup_recovery_guard","recovery_stop_failure_guard","interrupted_activation_recovery","healthy_finalize_recovery","finalized_journal_cleanup","abandoned_staging_cleanup","placeholder_password_refusal","invalid_tag_refusal","zero_padded_core_tag_refusal","noncanonical_health_timeout_refusal","unsafe_asset_refusal","archive_path_traversal_refusal"]}'

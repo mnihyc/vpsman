@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, fs, path::Path, str::FromStr, time::Duration};
 
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use chrono::{Datelike, Utc};
@@ -35,6 +35,7 @@ use crate::{
         FleetAlertQuery, JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest,
         NewServerArtifact, PingTargetRecord, PreviewConfigurationPresetRequest,
         PreviewConfigurationSourceOverrideRequest, SchedulePrivilegeMutationRequest,
+        UpdateTagOrderRequest, UpsertAgentIdentityRequest,
         UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     model_alert_notifications::{
@@ -6972,6 +6973,292 @@ async fn postgres_confirmed_bulk_tag_mutation_waits_for_agent_lifecycle_lock() {
 }
 
 #[tokio::test]
+async fn postgres_tag_order_setting_governs_every_tag_creation_path_atomically() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    insert_client(&db.pool, "tag-order-client-a", None).await;
+    for tag in [
+        "provider:A10",
+        "provider:A2",
+        "country:US",
+        "provider:B10",
+        "provider:B2",
+        "plain",
+    ] {
+        db.repo.create_tag_name(tag.to_string()).await.unwrap();
+    }
+
+    let enabled = db
+        .repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: [
+                    "provider:A10",
+                    "provider:A2",
+                    "country:US",
+                    "provider:B10",
+                    "provider:B2",
+                    "plain",
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+                namespace_natural_sort_enabled: true,
+            },
+            operator.operator.id,
+        )
+        .await
+        .unwrap();
+    assert!(enabled.namespace_natural_sort_enabled);
+
+    db.repo
+        .create_tag_name("provider:A02".to_string())
+        .await
+        .unwrap();
+    db.repo
+        .assign_agent_tag("tag-order-client-a", "provider:B1")
+        .await
+        .unwrap();
+    db.repo
+        .bulk_mutate_tags(
+            &BulkTagMutationRequest {
+                action: BulkTagMutationAction::Add,
+                tag: "provider:B02".to_string(),
+                selector_expression: "id:tag-order-client-a".to_string(),
+                target_client_ids: vec!["tag-order-client-a".to_string()],
+                confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    db.repo
+        .upsert_agent_identity(
+            &UpsertAgentIdentityRequest {
+                client_id: Some("tag-order-client-b".to_string()),
+                client_public_key_hex: "42".repeat(32),
+                display_name: Some("Tag order client B".to_string()),
+                tags: vec!["provider:A1".to_string()],
+                replace_existing_key: false,
+                confirmed: true,
+                privilege_assertion: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let state = db.repo.tag_order_state().await.unwrap();
+    assert!(state.namespace_natural_sort_enabled);
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "provider:A2",
+            "provider:A10",
+            "country:US",
+            "provider:A1",
+            "provider:A02",
+            "provider:B1",
+            "provider:B2",
+            "provider:B02",
+            "provider:B10",
+            "plain",
+        ]
+    );
+    let setting: (serde_json::Value, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT value_json, updated_by
+        FROM fleet_tag_settings
+        WHERE setting_key = 'order.namespace_natural_sort_enabled'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(setting, (json!(true), Some(operator.operator.id)));
+
+    let stale = db
+        .repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: vec!["unknown:tag".to_string()],
+                namespace_natural_sort_enabled: false,
+            },
+            operator.operator.id,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("unknown_tag"));
+    let after_rejection = db.repo.tag_order_state().await.unwrap();
+    assert!(after_rejection.namespace_natural_sort_enabled);
+    assert_eq!(
+        after_rejection
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_tag_create_and_order_save_share_one_serialization_lock() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .create_tag_name("provider:A10".to_string())
+        .await
+        .unwrap();
+    db.repo
+        .create_tag_name("provider:A2".to_string())
+        .await
+        .unwrap();
+    let create_repo = db.repo.clone();
+    let update_repo = db.repo.clone();
+    let update_operator_id = operator.operator.id;
+    let (created, updated) = tokio::time::timeout(Duration::from_secs(10), async move {
+        let update_request = UpdateTagOrderRequest {
+            ordered_tags: vec!["provider:A10".to_string(), "provider:A2".to_string()],
+            namespace_natural_sort_enabled: true,
+        };
+        tokio::join!(
+            create_repo.create_tag_name("provider:A02".to_string()),
+            update_repo.update_tag_order(&update_request, update_operator_id,)
+        )
+    })
+    .await
+    .expect("tag create and order save must not deadlock");
+    created.unwrap();
+    updated.unwrap();
+
+    let state = db.repo.tag_order_state().await.unwrap();
+    assert!(state.namespace_natural_sort_enabled);
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["provider:A2", "provider:A02", "provider:A10"]
+    );
+    let orders =
+        sqlx::query_scalar::<_, i64>("SELECT display_order FROM tags ORDER BY display_order")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(orders, vec![1024, 2048, 3072]);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_tag_delete_save_and_create_share_one_serialization_lock() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    for tag in ["provider:A10", "provider:A2", "country:SG"] {
+        db.repo.create_tag_name(tag.to_string()).await.unwrap();
+    }
+    let delete_repo = db.repo.clone();
+    let create_repo = db.repo.clone();
+    let update_repo = db.repo.clone();
+    let update_operator_id = operator.operator.id;
+    let (deleted, created, updated) = tokio::time::timeout(Duration::from_secs(10), async move {
+        let update_request = UpdateTagOrderRequest {
+            ordered_tags: vec!["country:SG".to_string()],
+            namespace_natural_sort_enabled: true,
+        };
+        tokio::join!(
+            delete_repo.delete_tag("provider:A10", true, false),
+            create_repo.create_tag_name("provider:A02".to_string()),
+            update_repo.update_tag_order(&update_request, update_operator_id),
+        )
+    })
+    .await
+    .expect("tag delete, create, and order save must not deadlock");
+    deleted.unwrap();
+    created.unwrap();
+    updated.unwrap();
+
+    let state = db.repo.tag_order_state().await.unwrap();
+    assert!(state.namespace_natural_sort_enabled);
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        ["country:SG", "provider:A2", "provider:A02"]
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_stale_tag_order_save_keeps_new_tag_in_last_namespace_block() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    for tag in ["provider:A", "country:US", "provider:B", "plain"] {
+        db.repo.create_tag_name(tag.to_string()).await.unwrap();
+    }
+    let stale_order = ["provider:A", "country:US", "provider:B", "plain"]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    db.repo
+        .create_tag_name("provider:C".to_string())
+        .await
+        .unwrap();
+
+    let saved = db
+        .repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: stale_order,
+                namespace_natural_sort_enabled: false,
+            },
+            operator.operator.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        saved
+            .tags
+            .iter()
+            .map(|tag| tag.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "provider:A",
+            "country:US",
+            "provider:B",
+            "provider:C",
+            "plain",
+        ]
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn filter_limit_regression_postgres_rules_and_policies() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -8604,6 +8891,155 @@ async fn postgres_telemetry_sample_prune_shares_limit_with_ping_facts_atomically
 }
 
 #[tokio::test]
+async fn postgres_exact_v035_baseline_applies_fleet_tag_settings_in_place() {
+    let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!("skipping Postgres migration test: VPSMAN_TEST_POSTGRES_URL is unset");
+            return;
+        }
+    };
+    let baseline_dir = std::env::temp_dir().join(format!(
+        "vpsman-v035-migrations-{}",
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&baseline_dir).unwrap();
+    let migrations_dir = workspace_migrations_dir();
+    for (name, expected_sha256) in [
+        (
+            "0001_identity_access.sql",
+            "884f950940275597749a575ab30780369ea2a5adb17889e1c29c5dd1b2fd1167",
+        ),
+        (
+            "0002_jobs_schedules_commands.sql",
+            "031f27cfbdce3b593dcfc144b122c7d2bff4d56e7a4c074fea373da9e0f04883",
+        ),
+        (
+            "0003_telemetry_alerts_history.sql",
+            "f1408e33815cb10b98b1061d1d0275874357ed7803218252796846572e7c7e3b",
+        ),
+        (
+            "0004_backups_restores.sql",
+            "120ebf2284a7035f7ad51f9989e79e871c93f9b5690a0681abcc0248165833e9",
+        ),
+        (
+            "0005_network_tunnels.sql",
+            "dc77d215b22080f9036b43afcc8a15f0bc6295bfab0a0884dd116271b0f35131",
+        ),
+        (
+            "0006_agent_updates.sql",
+            "150ec74e23db6fe98c6ba6de723c369ea219c8c12ab2295dda5e4ceea78a2158",
+        ),
+        (
+            "0007_configuration_presets_file_transfer.sql",
+            "6ff29337a5408b8a9f34536a53be4fa189c0d326251abb53bdbd4b489f99fe8c",
+        ),
+        (
+            "0008_system_metrics.sql",
+            "83fb85dd37b217e2f94995074c851fddbf852c3327b062ecc534d1058763e8a8",
+        ),
+    ] {
+        let bytes = fs::read(migrations_dir.join(name)).unwrap();
+        assert_eq!(payload_hash(&bytes), expected_sha256, "migration: {name}");
+        fs::copy(migrations_dir.join(name), baseline_dir.join(name)).unwrap();
+    }
+    let db = PgReliabilityTestDb::new_with_migrations(&base_url, &baseline_dir)
+        .await
+        .expect("failed to create exact v0.3.5 baseline database");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        8
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.fleet_tag_settings') IS NULL",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    let retained_tags = [
+        (Uuid::new_v4(), "provider:Z", -2048_i64),
+        (Uuid::new_v4(), "country:SG", 7168_i64),
+    ];
+    for (id, name, display_order) in &retained_tags {
+        sqlx::query("INSERT INTO tags (id, name, display_order) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(name)
+            .bind(display_order)
+            .execute(&db.pool)
+            .await
+            .unwrap();
+    }
+
+    sqlx::migrate::Migrator::new(migrations_dir.as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0009 must apply after exact v0.3.5 migration checksums");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        9
+    );
+    let setting: (serde_json::Value, Option<Uuid>) = sqlx::query_as(
+        r#"
+        SELECT value_json, updated_by
+        FROM fleet_tag_settings
+        WHERE setting_key = 'order.namespace_natural_sort_enabled'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(setting, (json!(false), None));
+    let tags_after: Vec<(Uuid, String, i64)> =
+        sqlx::query_as("SELECT id, name, display_order FROM tags ORDER BY name")
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let mut expected_tags = retained_tags
+        .into_iter()
+        .map(|(id, name, display_order)| (id, name.to_string(), display_order))
+        .collect::<Vec<_>>();
+    expected_tags.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(tags_after, expected_tags);
+    let order_state = db.repo.tag_order_state().await.unwrap();
+    assert!(!order_state.namespace_natural_sort_enabled);
+    assert_eq!(
+        order_state
+            .tags
+            .iter()
+            .map(|tag| (tag.name.as_str(), tag.display_order))
+            .collect::<Vec<_>>(),
+        [("provider:Z", -2048), ("country:SG", 7168)]
+    );
+
+    let future_value = json!({"shape": ["opaque", 1]});
+    sqlx::query("INSERT INTO fleet_tag_settings (setting_key, value_json) VALUES ($1, $2)")
+        .bind("future.order.mode")
+        .bind(&future_value)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let stored_future_value: serde_json::Value =
+        sqlx::query_scalar("SELECT value_json FROM fleet_tag_settings WHERE setting_key = $1")
+            .bind("future.order.mode")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_future_value, future_value);
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
+#[tokio::test]
 async fn postgres_fresh_schema_omits_obsolete_no_reset_epoch_indexes() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -8640,6 +9076,10 @@ impl PgReliabilityTestDb {
     }
 
     async fn new(base_url: &str) -> anyhow::Result<Self> {
+        Self::new_with_migrations(base_url, &workspace_migrations_dir()).await
+    }
+
+    async fn new_with_migrations(base_url: &str, migrations_dir: &Path) -> anyhow::Result<Self> {
         let base_options = PgConnectOptions::from_str(base_url)?;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -8653,7 +9093,7 @@ impl PgReliabilityTestDb {
             .max_connections(4)
             .connect_with(base_options.database(&db_name))
             .await?;
-        let migrator = sqlx::migrate::Migrator::new(workspace_migrations_dir()).await?;
+        let migrator = sqlx::migrate::Migrator::new(migrations_dir).await?;
         migrator.run(&pool).await?;
         let repo = Repository::Postgres(pool.clone());
         Ok(Self {
