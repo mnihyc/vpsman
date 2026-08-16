@@ -5241,21 +5241,6 @@ fn traffic_accounting_for_client_with_selector_override(
         ));
         let mut row_state = "ok".to_string();
         let mut row_reasons = Vec::new();
-        let selector_epochs_seen = match selector.direction.as_str() {
-            "rx" => usage.rx_counter_epochs_seen,
-            "tx" => usage.tx_counter_epochs_seen,
-            _ => usage
-                .rx_counter_epochs_seen
-                .max(usage.tx_counter_epochs_seen),
-        };
-        if selector_epochs_seen > 1 {
-            row_state = "incomplete".to_string();
-            row_reasons.push("counter reset interval excluded".to_string());
-            incomplete_reasons.push(format!(
-                "{} counter reset interval excluded",
-                selector.canonical
-            ));
-        }
         if sample_age.is_some_and(|age| age > TRAFFIC_SAMPLE_STALE_SECS) {
             if row_state == "ok" {
                 row_state = "stale".to_string();

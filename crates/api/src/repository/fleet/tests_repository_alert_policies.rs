@@ -614,6 +614,25 @@ fn no_reset_accounting_adds_retained_ledger_without_changing_latest_counter() {
 }
 
 #[test]
+fn historical_counter_resets_remain_evidence_without_degrading_current_accounting() {
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let mut reset_usage = usage("eth0", now.timestamp());
+    reset_usage.rx_counter_epochs_seen = 2;
+    reset_usage.tx_counter_epochs_seen = 2;
+
+    let accounting =
+        traffic_accounting_for_client("edge-a", &traffic_rules("eth0"), &[reset_usage], now);
+
+    assert_eq!(accounting.counter_epochs_seen, 2);
+    assert_eq!(accounting.state, "ok");
+    assert!(accounting.incomplete_reasons.is_empty());
+    assert_eq!(accounting.selector_breakdown[0].state, "ok");
+    assert!(accounting.selector_breakdown[0]
+        .incomplete_reasons
+        .is_empty());
+}
+
+#[test]
 fn traffic_selectors_reject_overlapping_directions() {
     let error = parse_traffic_selector_list("eth0,eth0+rx").unwrap_err();
     assert!(error

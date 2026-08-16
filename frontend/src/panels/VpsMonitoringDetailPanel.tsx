@@ -501,7 +501,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
           data={trafficHistory}
           detail={
             trafficResets
-              ? `RX and TX shown by default; select Total volume to compare their sum · ${trafficResets} counter reset ${trafficResets === 1 ? "interval" : "intervals"} preserved as incomplete evidence`
+              ? `RX and TX shown by default; select Total volume to compare their sum · ${trafficResets} counter-reset ${trafficResets === 1 ? "interval" : "intervals"} excluded from traffic totals`
               : "RX and TX shown by default; select Total volume to compare their sum · only interfaces selected by authoritative traffic-accounting rules"
           }
           emptyLabel={

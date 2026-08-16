@@ -213,7 +213,7 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   traffic. A bucket containing only reset intervals has `sample_count = 0`, a
   positive `reset_count`, and nullable RX, TX, and total values, so its chart
   remains a gap. A mixed bucket retains its valid deltas and its reset count as
-  explicit incomplete evidence.
+  explicit reset-gap evidence without degrading current accounting state.
 - Long-term traffic counters keep the latest accepted counter for each logical
   minute and default to ten years. Pruning preserves one pre-cutoff baseline per
   VPS/source/interface stream, and configured retention cannot be shorter than
