@@ -61,7 +61,7 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "1.5 Gbps",
   },
   {
-    help: `Existing traffic-selector syntax for aggregate live rates and charts. By default, an absent or unset rule follows traffic.selectors. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store that reference explicitly, clear a previously edited value or enter [] to select every reported interface, or override with interface selectors such as eth0,eth1. A +rx or +tx suffix is accepted but ignored here: live speed always keeps separate RX and TX values for every selected interface. Direction suffixes remain meaningful to traffic accounting only.`,
+    help: `Existing traffic-selector syntax for aggregate live rates and charts. By default, an absent or unset rule follows traffic.selectors. Enter ${NETWORK_RATE_TRAFFIC_SELECTOR_REFERENCE_SYNTAX} to store that reference explicitly, clear a previously edited value or enter [] to select every reported interface, or override with interface selectors such as eth0,eth1. Direction suffixes such as +rx, +tx, or +tx/rx are accepted but ignored here: live speed always keeps separate RX and TX values for every selected interface. Direction suffixes remain meaningful to traffic accounting only.`,
     inputMode: "text",
     key: "network.rate.interfaces",
     label: "Live rate interfaces",
@@ -100,11 +100,11 @@ export const VPS_RULE_FIELD_DEFINITIONS: readonly VpsRuleFieldDefinition[] = [
     placeholder: "500GB",
   },
   {
-    help: "Traffic selectors as comma-separated interface+direction tokens, for example ens3, eth0+tx, or tun0+rx.",
+    help: "Traffic selectors as comma-separated interface+direction tokens. Bare interfaces total RX + TX; +rx or +tx selects one direction; +tx/rx uses the larger direction. +rx+tx and +tx+rx normalize to the bare-interface total.",
     inputMode: "text",
     key: "traffic.selectors",
     label: "Interfaces / selectors",
-    placeholder: "ens3, eth0+tx",
+    placeholder: "ens3, eth0+tx/rx",
   },
 ];
 
@@ -441,13 +441,19 @@ function parseTrafficSelectorText(input: string): ParsedTrafficSelector | null {
   ).trim();
   const directionInput =
     directionSeparator >= 0 ? rest.slice(directionSeparator + 1) : undefined;
-  const direction = (directionInput ?? "total").trim().toLowerCase();
+  const directionToken = (directionInput ?? "total").trim().toLowerCase();
+  const direction =
+    directionToken === "rx+tx" || directionToken === "tx+rx"
+      ? "total"
+      : directionToken === "rx/tx" || directionToken === "tx/rx"
+        ? "tx/rx"
+        : directionToken;
   if (
     !interfaceName ||
     utf8ByteLength(interfaceName) > MAX_TRAFFIC_INTERFACE_BYTES ||
     /[,+:\s\p{Cc}]/u.test(interfaceName) ||
     !new Set(["host", "tunnel"]).has(source) ||
-    !new Set(["rx", "tx", "total"]).has(direction)
+    !new Set(["rx", "tx", "total", "tx/rx"]).has(direction)
   ) {
     return null;
   }

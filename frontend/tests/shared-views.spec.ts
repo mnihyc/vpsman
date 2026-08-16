@@ -628,9 +628,15 @@ test("public cards keep an intentionally empty network-rate selection neutral", 
   const card = page.getByRole("link", {
     name: /Shared edge · Online shared monitoring card/,
   });
-  await expect(
-    card.locator(".publicMonitoringTraffic .vpsMonitorTrafficQuota"),
-  ).toContainText("· Total · 25.0%");
+  const trafficQuota = card.locator(
+    ".publicMonitoringTraffic .vpsMonitorTrafficQuota",
+  );
+  await expect(trafficQuota).toContainText("· Total · 25.0%");
+  await expect(trafficQuota).toHaveCSS("font-weight", "700");
+  await expect(trafficQuota.locator(".vpsMonitorTrafficDirection")).toHaveCSS(
+    "font-weight",
+    "400",
+  );
   await expect(card).toBeVisible();
   await expect(card.getByText("Online", { exact: true })).toBeVisible();
   await expect(card.getByText("Online · Warning", { exact: true })).toHaveCount(

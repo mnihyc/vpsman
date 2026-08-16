@@ -151,9 +151,9 @@ Config > Rules scopes aggregate live rate through `network.rate.interfaces`:
 - Empty input or `[]` explicitly selects every reported interface.
 - Any other value uses the existing interface/direction selector grammar. For
   example, `eth0,eth1+tx` selects `eth0` and `eth1`. Live-rate scope ignores
-  `+rx` and `+tx` suffixes and retains both separately reported speed
-  directions for every selected interface. Those suffixes remain meaningful
-  only to authoritative traffic accounting.
+  direction suffixes and retains both separately reported speed directions for
+  every selected interface. Those suffixes remain meaningful only to
+  authoritative traffic accounting.
 
 This scope controls aggregate rate values on VPS cards, charts, the dashboard,
 and public monitoring views. It does not filter agent collection or retained
@@ -190,6 +190,10 @@ state; they never silently sum arbitrary interfaces as billing traffic.
 - RX, TX, and total bytes remain exact even when usage exceeds a quota. A visual
   progress track may fill completely, but the numeric percentage and totals may
   exceed 100%.
+- A bare interface (or `+total`) counts RX plus TX. The aliases `+rx+tx` and
+  `+tx+rx` normalize to that bare form. `+rx` and `+tx` count one direction;
+  `+tx/rx` (also accepted as `+rx/tx`) retains both directional values but uses
+  the greater value for that selector's accounted cycle and latest totals.
 - `traffic.reset_day=-1` keeps accounting configured without a calendar reset.
   Its total is the sum of valid deltas from all retained counter evidence;
   cycle start and end are absent, and counter-reset intervals remain gaps. Days

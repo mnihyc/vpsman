@@ -12,10 +12,11 @@ use super::{
     parse_traffic_selector_list, parse_vps_rule_value, policy_identifier_value,
     policy_state_is_alert_eligible, policy_webhook_repair_is_recent,
     resolve_network_rate_interface_selection, traffic_accounting_for_client,
-    traffic_cycle_starts_for_clients, validate_billing_rule_group, NetworkRateSelectorReference,
-    NetworkRateSelectorSpec, PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord,
-    TrafficCounterRollupRecord, TrafficCounterSampleRecord, TrafficCounterStreamUsage,
-    TrafficHistoryStream, TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
+    traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
+    validate_billing_rule_group, NetworkRateSelectorReference, NetworkRateSelectorSpec,
+    PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord, TrafficCounterRollupRecord,
+    TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
+    TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
     VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
@@ -149,6 +150,11 @@ fn live_rate_selector_reuses_traffic_selector_syntax_and_explicit_all_marker() {
     assert_eq!(exact.json["mode"], "exact");
     assert_eq!(exact.json["selectors"][0]["direction"], "total");
     assert_eq!(exact.json["selectors"][1]["direction"], "tx");
+
+    let aliases = parse_network_rate_interfaces("eth2+tx+rx, eth3+rx/tx").unwrap();
+    assert_eq!(aliases.raw, "eth2,eth3+tx/rx");
+    assert_eq!(aliases.json["selectors"][0]["direction"], "total");
+    assert_eq!(aliases.json["selectors"][1]["direction"], "tx/rx");
 
     assert_eq!(
         parse_network_rate_interfaces("tunnel:wg0")
@@ -617,6 +623,22 @@ fn traffic_selectors_reject_overlapping_directions() {
     let selectors = parse_traffic_selector_list("eth0+rx,eth0+tx").unwrap();
     assert_eq!(selectors.len(), 2);
 
+    for input in ["eth0+tx/rx,eth0+rx", "eth0+rx/tx,eth0+tx"] {
+        let error = parse_traffic_selector_list(input).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("traffic_selector_direction_overlap"));
+    }
+
+    let max = parse_traffic_selector("eth0+rx/tx").unwrap();
+    assert_eq!(max.direction, "tx/rx");
+    assert_eq!(max.canonical, "eth0+tx/rx");
+    for input in ["eth0+rx+tx", "eth0+tx+rx"] {
+        let total = parse_traffic_selector(input).unwrap();
+        assert_eq!(total.direction, "total");
+        assert_eq!(total.canonical, "eth0");
+    }
+
     assert!(parse_traffic_selector(&format!("{}+rx", "x".repeat(129))).is_err());
     assert!(parse_traffic_selector("eth0\0+rx").is_err());
 }
@@ -641,6 +663,7 @@ fn traffic_direction_accounting_is_defensively_idempotent() {
     let rx = parse_traffic_selector("eth0+rx").unwrap();
     let total = parse_traffic_selector("eth0").unwrap();
     let tx = parse_traffic_selector("eth0+tx").unwrap();
+    let max = parse_traffic_selector("eth1+tx/rx").unwrap();
     let mut counted = HashMap::new();
 
     assert_eq!(
@@ -653,6 +676,15 @@ fn traffic_direction_accounting_is_defensively_idempotent() {
     );
     assert_eq!(
         claim_traffic_selector_directions(&mut counted, &tx),
+        (false, false)
+    );
+    assert_eq!(
+        claim_traffic_selector_directions(&mut counted, &max),
+        (true, true)
+    );
+    let max_rx = parse_traffic_selector("eth1+rx").unwrap();
+    assert_eq!(
+        claim_traffic_selector_directions(&mut counted, &max_rx),
         (false, false)
     );
 }
@@ -683,6 +715,75 @@ fn directional_traffic_keeps_diagnostics_without_changing_billing_totals() {
     assert_eq!(split.diagnostic_rx_bytes, 100);
     assert_eq!(split.diagnostic_tx_bytes, 200);
     assert_eq!(split.diagnostic_total_bytes, 300);
+}
+
+#[test]
+fn max_traffic_keeps_directional_values_but_uses_per_selector_maximum_totals() {
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let eth0 = usage("eth0", now.timestamp());
+
+    let tx_wins = traffic_accounting_for_client(
+        "edge-a",
+        &traffic_rules("eth0+rx/tx"),
+        std::slice::from_ref(&eth0),
+        now,
+    );
+    assert_eq!(tx_wins.selectors, vec!["eth0+tx/rx"]);
+    assert_eq!(tx_wins.rx_bytes, 100);
+    assert_eq!(tx_wins.tx_bytes, 200);
+    assert_eq!(tx_wins.total_bytes, 200);
+    assert_eq!(tx_wins.latest_rx_bytes, 1_000);
+    assert_eq!(tx_wins.latest_tx_bytes, 2_000);
+    assert_eq!(tx_wins.latest_total_bytes, 2_000);
+    assert_eq!(tx_wins.diagnostic_total_bytes, 300);
+    assert_eq!(tx_wins.selector_breakdown[0].direction, "tx/rx");
+    assert_eq!(tx_wins.selector_breakdown[0].cycle_rx_bytes, 100);
+    assert_eq!(tx_wins.selector_breakdown[0].cycle_tx_bytes, 200);
+    assert_eq!(tx_wins.selector_breakdown[0].cycle_total_bytes, 200);
+
+    let mut eth1 = usage("eth1", now.timestamp());
+    eth1.cycle_rx = 400;
+    eth1.cycle_tx = 50;
+    eth1.latest_rx = 4_000;
+    eth1.latest_tx = 500;
+    let multiple = traffic_accounting_for_client(
+        "edge-a",
+        &traffic_rules("eth0+tx/rx,eth1+rx/tx"),
+        &[eth0.clone(), eth1],
+        now,
+    );
+    assert_eq!(multiple.rx_bytes, 500);
+    assert_eq!(multiple.tx_bytes, 250);
+    assert_eq!(multiple.total_bytes, 600);
+    assert_eq!(multiple.latest_rx_bytes, 5_000);
+    assert_eq!(multiple.latest_tx_bytes, 2_500);
+    assert_eq!(multiple.latest_total_bytes, 6_000);
+    assert_eq!(multiple.diagnostic_total_bytes, 750);
+    assert_eq!(multiple.selector_breakdown[0].cycle_total_bytes, 200);
+    assert_eq!(multiple.selector_breakdown[1].cycle_total_bytes, 400);
+
+    let mut tie = eth0.clone();
+    tie.cycle_tx = tie.cycle_rx;
+    tie.latest_tx = tie.latest_rx;
+    let tied = traffic_accounting_for_client(
+        "edge-a",
+        &traffic_rules("eth0+tx/rx"),
+        std::slice::from_ref(&tie),
+        now,
+    );
+    assert_eq!(tied.total_bytes, 100);
+    assert_eq!(tied.latest_total_bytes, 1_000);
+
+    let override_accounting = traffic_accounting_for_client_with_selector_override(
+        "edge-a",
+        &traffic_rules("eth0"),
+        &[eth0],
+        now,
+        Some("eth0+rx/tx"),
+    );
+    assert_eq!(override_accounting.selectors, vec!["eth0+tx/rx"]);
+    assert_eq!(override_accounting.total_bytes, 200);
+    assert_eq!(override_accounting.latest_total_bytes, 2_000);
 }
 
 #[test]

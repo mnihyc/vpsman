@@ -135,7 +135,10 @@ function selectorInterfaces(
       interfaceName.length === 0 ||
       new TextEncoder().encode(interfaceName).length > 128 ||
       /[,+:\s\u0000-\u001f\u007f-\u009f]/u.test(interfaceName) ||
-      (direction !== "rx" && direction !== "tx" && direction !== "total") ||
+      (direction !== "rx" &&
+        direction !== "tx" &&
+        direction !== "total" &&
+        direction !== "tx/rx") ||
       typeof canonical !== "string"
     ) {
       return null;

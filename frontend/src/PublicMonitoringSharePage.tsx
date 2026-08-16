@@ -1322,6 +1322,9 @@ function PublicTrafficRow({
   const problem = publicTrafficProblem(traffic);
   const portSpeed = traffic.port_speed?.display;
   const cycleSummary = traffic.configured ? trafficCycleSummary(traffic) : "";
+  const cycleSummaryDirection = traffic.configured
+    ? trafficCycleSummaryDirection(traffic)
+    : null;
   const resetContext = traffic.configured
     ? traffic.reset_day === -1
       ? null
@@ -1367,7 +1370,10 @@ function PublicTrafficRow({
           <span className="publicMonitoringPortSpeed">{portSpeed}</span>
         ) : trafficEvidenceInHeadingOnly ? (
           <strong className="vpsMonitorTrafficQuota">
-            {cycleSummary || "Unconfigured"}
+            {trafficQuotaText(
+              cycleSummary || "Unconfigured",
+              cycleSummaryDirection,
+            )}
           </strong>
         ) : null}
       </div>
@@ -1406,12 +1412,18 @@ function PublicTrafficRow({
         <div className="vpsMonitorTrafficEvidenceRow">
           <small>{trafficObservedDetail}</small>
           <strong className="vpsMonitorTrafficQuota">
-            {cycleSummary || "Unconfigured"}
+            {trafficQuotaText(
+              cycleSummary || "Unconfigured",
+              cycleSummaryDirection,
+            )}
           </strong>
         </div>
       ) : trafficEvidenceInHeadingOnly ? null : (
         <strong className="vpsMonitorTrafficQuota">
-          {cycleSummary || "Unconfigured"}
+          {trafficQuotaText(
+            cycleSummary || "Unconfigured",
+            cycleSummaryDirection,
+          )}
         </strong>
       )}
       {density === "comfortable" && problem ? (
@@ -3412,6 +3424,31 @@ function trafficCycleSummary(traffic: PublicTrafficMetric): string {
     return `${formatBytes(countedTotal)} · quota evidence incomplete`;
   }
   return `${formatBytes(countedTotal)} · quota unavailable`;
+}
+
+function trafficCycleSummaryDirection(
+  traffic: PublicTrafficMetric,
+): string | null {
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) return limitingQuota.direction;
+  return trafficQuotaState(traffic) === "unlimited"
+    ? (trafficUnlimitedQuota(traffic)?.direction ?? null)
+    : null;
+}
+
+function trafficQuotaText(label: string, direction: string | null) {
+  if (!direction) return label;
+  const marker = ` · ${direction}`;
+  const markerIndex = label.indexOf(marker);
+  if (markerIndex < 0) return label;
+  const directionIndex = markerIndex + 3;
+  return (
+    <>
+      {label.slice(0, directionIndex)}
+      <span className="vpsMonitorTrafficDirection">{direction}</span>
+      {label.slice(directionIndex + direction.length)}
+    </>
+  );
 }
 
 function formatPublicSocketCount(value: number | null | undefined) {

@@ -2094,8 +2094,12 @@ test(
       "edge-sfo-01 · alpha · LN.V2.HKGv3 · US",
     );
     const traffic = edgeCard.locator(".vpsMonitorTraffic");
-    await expect(traffic.locator(".vpsMonitorTrafficQuota")).toHaveText(
-      "1.9 TB / 2.5 TB · TX · 76.0%",
+    const trafficQuota = traffic.locator(".vpsMonitorTrafficQuota");
+    await expect(trafficQuota).toHaveText("1.9 TB / 2.5 TB · TX · 76.0%");
+    await expect(trafficQuota).toHaveCSS("font-weight", "700");
+    await expect(trafficQuota.locator(".vpsMonitorTrafficDirection")).toHaveCSS(
+      "font-weight",
+      "400",
     );
     await expect(traffic).not.toContainText("/ Unlimited");
     await expect(traffic.locator('[role="meter"]')).toHaveAttribute(
@@ -2571,6 +2575,7 @@ test(
       ).__releaseVpsRulesEffective?.("agent-sfo-01");
     });
 
+    await vpsRuleTextbox(editor, "Billing price").blur();
     await expect(vpsRuleTextbox(editor, "Billing price")).toHaveValue(
       "77.00 USD/y",
     );
@@ -2599,6 +2604,10 @@ test(
     );
     await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
     await vpsRuleTextbox(editor, "Billing price").fill("29 USD/m");
+    await expect(vpsRuleTextbox(editor, "Billing price")).toHaveValue(
+      "29 USD/m",
+    );
+    await vpsRuleTextbox(editor, "Billing price").blur();
     await expect(vpsRuleTextbox(editor, "Billing price")).toHaveValue(
       "29.00 USD/m",
     );
@@ -2670,12 +2679,111 @@ test(
     expect(rawText).not.toContain("billing.price=");
 
     await liveRateInterfaces.fill("");
+    await expect(liveRateInterfaces).toHaveValue("");
+    expect(await rawValues.inputValue()).toContain("network.rate.interfaces=");
+    await liveRateInterfaces.blur();
     await expect(liveRateInterfaces).toHaveValue("[]");
     await vpsRuleTextbox(editor, "Total quota").fill("");
+    await vpsRuleTextbox(editor, "Total quota").blur();
     await expect(vpsRuleTextbox(editor, "Total quota")).toHaveValue("");
     rawText = await rawValues.inputValue();
     expect(rawText).toContain("network.rate.interfaces=[]");
     expect(rawText).not.toContain("traffic.quota.total=");
+  },
+);
+
+test(
+  "normalizes typed VPS rule drafts only after blur",
+  { tag: "@vps-rules-blur-normalization" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "rule-value normalization is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    const billingPrice = vpsRuleTextbox(editor, "Billing price");
+    const rawValues = editor.getByLabel("VPS rule set values");
+
+    await billingPrice.pressSequentially("29 USD/m");
+    await expect(billingPrice).toHaveValue("29 USD/m");
+    expect(await rawValues.inputValue()).toContain("billing.price=29 USD/m");
+    await billingPrice.blur();
+    await expect(billingPrice).toHaveValue("29.00 USD/m");
+    expect(await rawValues.inputValue()).toContain("billing.price=29.00 USD/m");
+
+    await billingPrice.fill("  unknown pattern  ");
+    await expect(billingPrice).toHaveValue("  unknown pattern  ");
+    await billingPrice.blur();
+    await expect(billingPrice).toHaveValue("  unknown pattern  ");
+    expect(await rawValues.inputValue()).toContain(
+      "billing.price=  unknown pattern  ",
+    );
+    await editor
+      .getByRole("button", { name: "Preview changes", exact: true })
+      .click();
+    await expect(
+      editor.locator(".vpsRulesActionFeedback.actionFeedbackDanger"),
+    ).toContainText(
+      "VPS rule billing.price has an invalid value: unknown pattern",
+    );
+
+    await billingPrice.fill("");
+    await expect(billingPrice).toHaveValue("");
+    expect(await rawValues.inputValue()).toContain("billing.price=");
+    await billingPrice.blur();
+    expect(await rawValues.inputValue()).not.toContain("billing.price=");
+  },
+);
+
+test(
+  "normalizes valid raw VPS rule lines on blur without losing rejected input",
+  { tag: "@vps-rules-raw-blur-normalization" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "rule-value normalization is viewport-independent",
+    );
+
+    await page.goto("/#/config/rules/agent-sfo-01");
+    await waitForConsoleShell(page);
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Bulk rule editor",
+    });
+    await editor.getByText("Advanced raw key/value", { exact: true }).click();
+    const rawValues = editor.getByLabel("VPS rule set values");
+    const draft = [
+      " traffic.quota.total = 04.00 tb ",
+      "billing.price= 29 usd/m ",
+      "billing.price=31 usd/m",
+      "",
+      "unknown.rule = keep  me ",
+      "broken line ",
+      "traffic.reset_day=tomorrow ",
+      "product.name=  Storage-Box   4  ",
+      "network.rate.interfaces=",
+    ].join("\n");
+    await rawValues.fill(draft);
+    await expect(rawValues).toHaveValue(draft);
+
+    await rawValues.blur();
+    await expect(rawValues).toHaveValue(
+      [
+        "traffic.quota.total=4TB",
+        "billing.price= 29 usd/m ",
+        "billing.price=31 usd/m",
+        "",
+        "unknown.rule = keep  me ",
+        "broken line ",
+        "traffic.reset_day=tomorrow ",
+        "product.name=Storage-Box 4",
+        "network.rate.interfaces=[]",
+      ].join("\n"),
+    );
   },
 );
 

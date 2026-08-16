@@ -3540,25 +3540,56 @@ function vpsRuleEditKeys(valuesText: string, unsetKeys: string[]): string[] {
   return Array.from(keys).sort((left, right) => left.localeCompare(right));
 }
 
+type VpsRuleTextLine = {
+  content: string;
+  ending: string;
+};
+
+type ParsedVpsRuleTextLine = {
+  equals: number;
+  key: (typeof VPS_RULE_KEYS)[number];
+};
+
+function splitVpsRuleTextLines(text: string): VpsRuleTextLine[] {
+  const lines: VpsRuleTextLine[] = [];
+  const pattern = /([^\r\n]*)(\r\n|\r|\n|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    if (!match[0]) {
+      break;
+    }
+    lines.push({ content: match[1], ending: match[2] });
+    if (!match[2]) {
+      break;
+    }
+  }
+  return lines;
+}
+
+function joinVpsRuleTextLines(lines: VpsRuleTextLine[]): string {
+  return lines.map((line) => `${line.content}${line.ending}`).join("");
+}
+
+function parseVpsRuleTextLine(content: string): ParsedVpsRuleTextLine | null {
+  const equals = content.indexOf("=");
+  if (equals <= 0) {
+    return null;
+  }
+  const key = content.slice(0, equals).trim();
+  if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
+    return null;
+  }
+  return { equals, key: key as (typeof VPS_RULE_KEYS)[number] };
+}
+
 function parseVpsRuleTextValues(text: string): Record<string, string> {
   const values: Record<string, string> = {};
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line) {
+  for (const line of splitVpsRuleTextLines(text)) {
+    const parsed = parseVpsRuleTextLine(line.content);
+    if (!parsed) {
       continue;
     }
-    const equals = line.indexOf("=");
-    if (equals <= 0) {
-      continue;
-    }
-    const key = line.slice(0, equals).trim();
-    if (!VPS_RULE_KEYS.includes(key as (typeof VPS_RULE_KEYS)[number])) {
-      continue;
-    }
-    const value = normalizeVpsRuleValue(key, line.slice(equals + 1));
-    if (value || key === "network.rate.interfaces") {
-      values[key] = value || "[]";
-    }
+    values[parsed.key] = line.content.slice(parsed.equals + 1);
   }
   return values;
 }
@@ -3570,23 +3601,85 @@ function serializeVpsRuleTextValues(values: Record<string, string>): string {
   }).join("\n");
 }
 
-function updateVpsRuleTextValue(
+function updateVpsRuleTextDraftValue(
   text: string,
   key: (typeof VPS_RULE_KEYS)[number],
   value: string,
 ): string {
-  const values = parseVpsRuleTextValues(text);
-  const trimmed = value.trim();
-  if (key === "network.rate.interfaces" && !trimmed) {
-    values[key] = "[]";
-    return serializeVpsRuleTextValues(values);
+  const lines = splitVpsRuleTextLines(text);
+  let matchingLine = -1;
+  let matchingEquals = -1;
+  lines.forEach((line, index) => {
+    const parsed = parseVpsRuleTextLine(line.content);
+    if (parsed?.key === key) {
+      matchingLine = index;
+      matchingEquals = parsed.equals;
+    }
+  });
+  if (matchingLine >= 0) {
+    const line = lines[matchingLine];
+    line.content = `${line.content.slice(0, matchingEquals + 1)}${value}`;
+    return joinVpsRuleTextLines(lines);
   }
-  if (trimmed) {
-    values[key] = trimmed;
-  } else {
-    delete values[key];
+  if (lines.length > 0 && !lines[lines.length - 1].ending) {
+    const separator = text.includes("\r\n")
+      ? "\r\n"
+      : text.includes("\r")
+        ? "\r"
+        : "\n";
+    lines[lines.length - 1].ending = separator;
   }
-  return serializeVpsRuleTextValues(values);
+  lines.push({ content: `${key}=${value}`, ending: "" });
+  return joinVpsRuleTextLines(lines);
+}
+
+function normalizeVpsRuleTextValueOnBlur(
+  text: string,
+  key: (typeof VPS_RULE_KEYS)[number],
+  value: string,
+): string {
+  const canonicalValue = tryNormalizeVpsRuleValue(key, value);
+  const lines = splitVpsRuleTextLines(text);
+  if (canonicalValue !== null) {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (parseVpsRuleTextLine(lines[index].content)?.key === key) {
+        lines[index].content = `${key}=${canonicalValue}`;
+        return joinVpsRuleTextLines(lines);
+      }
+    }
+    return updateVpsRuleTextDraftValue(text, key, canonicalValue);
+  }
+  if (value.trim()) {
+    return text;
+  }
+  return joinVpsRuleTextLines(
+    lines.filter((line) => parseVpsRuleTextLine(line.content)?.key !== key),
+  );
+}
+
+function normalizeVpsRuleTextOnBlur(text: string): string {
+  const lines = splitVpsRuleTextLines(text);
+  const parsedLines = lines.map((line) => parseVpsRuleTextLine(line.content));
+  const keyCounts = new Map<(typeof VPS_RULE_KEYS)[number], number>();
+  for (const parsed of parsedLines) {
+    if (parsed) {
+      keyCounts.set(parsed.key, (keyCounts.get(parsed.key) ?? 0) + 1);
+    }
+  }
+  lines.forEach((line, index) => {
+    const parsed = parsedLines[index];
+    if (!parsed || keyCounts.get(parsed.key) !== 1) {
+      return;
+    }
+    const canonicalValue = tryNormalizeVpsRuleValue(
+      parsed.key,
+      line.content.slice(parsed.equals + 1),
+    );
+    if (canonicalValue !== null) {
+      line.content = `${parsed.key}=${canonicalValue}`;
+    }
+  });
+  return joinVpsRuleTextLines(lines);
 }
 
 function affectedAlertPolicyRules(
@@ -3687,7 +3780,7 @@ const VPS_RULE_VALIDATION_MESSAGES: Record<string, string> = {
   traffic_selector_interface_invalid:
     "Use an exact interface name without spaces or wildcards.",
   traffic_selector_direction_invalid:
-    "Selector direction must be rx, tx, or total.",
+    "Selector direction must be rx, tx, total, tx/rx (or rx/tx), or rx+tx (or tx+rx).",
   traffic_selector_duplicate: "Remove the duplicate selector.",
   traffic_selector_direction_overlap:
     "Do not select the same interface direction more than once.",
@@ -4749,14 +4842,25 @@ function VpsRulesPanel({
                         disabled={applyPending}
                         inputMode={field.inputMode ?? "text"}
                         onChange={(event) => {
+                          const value = event.currentTarget.value;
                           ruleDraftTouchedRef.current = true;
                           setPrefillPending(false);
                           setPrefillFeedback(null);
                           setValuesText((current) =>
-                            updateVpsRuleTextValue(
+                            updateVpsRuleTextDraftValue(
                               current,
                               field.key,
-                              event.target.value,
+                              value,
+                            ),
+                          );
+                        }}
+                        onBlur={(event) => {
+                          const value = event.currentTarget.value;
+                          setValuesText((current) =>
+                            normalizeVpsRuleTextValueOnBlur(
+                              current,
+                              field.key,
+                              value,
                             ),
                           );
                         }}
@@ -4781,6 +4885,11 @@ function VpsRulesPanel({
                       setPrefillPending(false);
                       setPrefillFeedback(null);
                       setValuesText(event.target.value);
+                    }}
+                    onBlur={() => {
+                      setValuesText((current) =>
+                        normalizeVpsRuleTextOnBlur(current),
+                      );
                     }}
                   />
                 </details>

@@ -2611,6 +2611,10 @@ span.vpsMonitorSparkline.empty {
   overflow-wrap: anywhere;
 }
 
+.vpsMonitorTrafficDirection {
+  font-weight: 400;
+}
+
 .vpsMonitorTrafficEvidenceRow {
   display: flex;
   align-items: baseline;

@@ -590,10 +590,14 @@ fn parse_traffic_selector(item: &str) -> Result<TrafficSelector, String> {
             }),
         "traffic_selector_interface_invalid",
     )?;
-    ensure(
-        matches!(direction.as_str(), "rx" | "tx" | "total"),
-        "traffic_selector_direction_invalid",
-    )?;
+    let direction = match direction.as_str() {
+        "rx" => "rx",
+        "tx" => "tx",
+        "total" | "rx+tx" | "tx+rx" => "total",
+        "tx/rx" | "rx/tx" => "tx/rx",
+        _ => return Err("traffic_selector_direction_invalid".to_string()),
+    }
+    .to_string();
     let canonical = if source == "host" {
         if direction == "total" {
             interface.to_string()
@@ -677,6 +681,16 @@ mod tests {
                 VPS_RULE_KEY_TRAFFIC_SELECTORS,
                 " HOST:eth0+TX, TUNNEL:wg0+RX ",
                 "eth0+tx,tunnel:wg0+rx",
+            ),
+            (
+                VPS_RULE_KEY_TRAFFIC_SELECTORS,
+                " eth0+TX+RX, ens3+RX/TX ",
+                "eth0,ens3+tx/rx",
+            ),
+            (
+                VPS_RULE_KEY_NETWORK_RATE_INTERFACES,
+                " eth0+RX+TX, ens3+TX/RX ",
+                "eth0,ens3+tx/rx",
             ),
         ];
         for (key, input, expected) in cases {
@@ -828,6 +842,38 @@ mod tests {
             parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, &oversized_interface).unwrap_err(),
             "traffic_selector_interface_invalid"
         );
+        for invalid in [
+            "eth0+rx+rx",
+            "eth0+tx+tx",
+            "eth0+rx/rx",
+            "eth0+tx/tx",
+            "eth0+rx/tx+rx",
+        ] {
+            assert_eq!(
+                parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, invalid).unwrap_err(),
+                "traffic_selector_direction_invalid"
+            );
+        }
+        assert_eq!(
+            parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, "eth0+tx/rx,eth0+rx").unwrap_err(),
+            "traffic_selector_direction_overlap"
+        );
+    }
+
+    #[test]
+    fn selector_total_and_max_aliases_have_one_canonical_representation() {
+        for input in ["eth0", "eth0+total", "eth0+rx+tx", "eth0+tx+rx"] {
+            let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input).unwrap();
+            assert_eq!(parsed.raw, "eth0", "input={input}");
+            assert_eq!(parsed.json["selectors"][0]["direction"], "total");
+            assert_eq!(parsed.json["selectors"][0]["canonical"], "eth0");
+        }
+        for input in ["ens3+tx/rx", "ens3+rx/tx"] {
+            let parsed = parse_vps_rule_value(VPS_RULE_KEY_TRAFFIC_SELECTORS, input).unwrap();
+            assert_eq!(parsed.raw, "ens3+tx/rx", "input={input}");
+            assert_eq!(parsed.json["selectors"][0]["direction"], "tx/rx");
+            assert_eq!(parsed.json["selectors"][0]["canonical"], "ens3+tx/rx");
+        }
     }
 
     #[test]

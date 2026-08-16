@@ -1052,6 +1052,10 @@ export function VpsMonitorCard({
         : trafficConfigured && traffic
           ? formatTrafficUsage(traffic, formatBytes)
           : "Unconfigured";
+  const trafficEvidenceDirection =
+    monitoringState === "ready" && trafficConfigured && traffic
+      ? trafficUsageDirection(traffic)
+      : null;
   const pingEvidenceParts =
     monitoringState === "loading"
       ? ["Loading…"]
@@ -1325,7 +1329,7 @@ export function VpsMonitorCard({
             </span>
           ) : trafficEvidenceInHeadingOnly ? (
             <strong className="vpsMonitorTrafficQuota">
-              {trafficEvidenceLabel}
+              {trafficQuotaText(trafficEvidenceLabel, trafficEvidenceDirection)}
             </strong>
           ) : null}
         </span>
@@ -1361,12 +1365,12 @@ export function VpsMonitorCard({
               {formatBytes(traffic.diagnostic_tx_bytes)}
             </small>
             <strong className="vpsMonitorTrafficQuota">
-              {trafficEvidenceLabel}
+              {trafficQuotaText(trafficEvidenceLabel, trafficEvidenceDirection)}
             </strong>
           </div>
         ) : trafficEvidenceInHeadingOnly ? null : (
           <strong className="vpsMonitorTrafficQuota">
-            {trafficEvidenceLabel}
+            {trafficQuotaText(trafficEvidenceLabel, trafficEvidenceDirection)}
           </strong>
         )}
         {density === "comfortable" && trafficProblem ? (
@@ -2568,6 +2572,31 @@ function formatTrafficUsage(
   return percent === null
     ? `${used} used`
     : `${used} used · limiting quota ${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
+}
+
+function trafficUsageDirection(
+  traffic: TrafficAccountingRecord,
+): string | null {
+  const limitingQuota = trafficLimitingQuota(traffic);
+  if (limitingQuota) return limitingQuota.direction;
+  return trafficQuotaState(traffic) === "unlimited"
+    ? (trafficUnlimitedQuota(traffic)?.direction ?? null)
+    : null;
+}
+
+function trafficQuotaText(label: string, direction: string | null) {
+  if (!direction) return label;
+  const marker = ` · ${direction}`;
+  const markerIndex = label.indexOf(marker);
+  if (markerIndex < 0) return label;
+  const directionIndex = markerIndex + 3;
+  return (
+    <>
+      {label.slice(0, directionIndex)}
+      <span className="vpsMonitorTrafficDirection">{direction}</span>
+      {label.slice(directionIndex + direction.length)}
+    </>
+  );
 }
 
 function formatSocketCount(value: number | null | undefined) {

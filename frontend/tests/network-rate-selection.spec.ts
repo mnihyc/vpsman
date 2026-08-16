@@ -141,6 +141,24 @@ test("live-rate selection filters interfaces but keeps RX and TX", () => {
   expect(selectedNetworkRates(rates, exact)).toEqual([]);
 });
 
+test("live-rate selection accepts accounting aggregation suffixes without combining directions", () => {
+  const exact = [
+    rule(
+      "network.rate.interfaces",
+      {
+        mode: "exact",
+        selectors: [selector("eth0", "tx/rx"), selector("eth1", "total")],
+      },
+      "eth0+tx/rx,eth1",
+    ),
+  ];
+
+  const selected = selectedNetworkRates(rates, exact);
+  expect(selected.map((rate) => rate.interface)).toEqual(["eth0", "eth1"]);
+  expect(selected[0]).toMatchObject({ rx_bps_avg: 8_000, tx_bps_avg: 16_000 });
+  expect(selected[1]).toMatchObject({ rx_bps_avg: 32_000, tx_bps_avg: 64_000 });
+});
+
 function rule(
   key: string,
   valueJson: VpsRuleValueRecord["value_json"],
@@ -163,7 +181,7 @@ function rule(
 
 function selector(
   interfaceName: string,
-  direction: "rx" | "tx" | "total",
+  direction: "rx" | "tx" | "total" | "tx/rx",
   source: "host" | "tunnel" = "host",
 ) {
   return {

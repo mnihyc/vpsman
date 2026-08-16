@@ -4967,6 +4967,14 @@ fn claim_traffic_selector_directions(
     (newly_counted & 0b01 != 0, newly_counted & 0b10 != 0)
 }
 
+fn traffic_selector_total(selector: &TrafficSelector, rx_bytes: i64, tx_bytes: i64) -> i64 {
+    if selector.direction == "tx/rx" {
+        rx_bytes.max(tx_bytes)
+    } else {
+        rx_bytes.saturating_add(tx_bytes)
+    }
+}
+
 fn parse_byte_size(input: &str) -> Result<i64> {
     let value = input.trim();
     anyhow::ensure!(!value.is_empty(), "byte_size_empty");
@@ -5142,10 +5150,12 @@ fn traffic_accounting_for_client_with_selector_override(
     let cycle_bounds = (reset_day != Some(-1)).then(|| cycle_bounds(reset_day.unwrap_or(1), now));
     let mut rx_bytes = 0_i64;
     let mut tx_bytes = 0_i64;
+    let mut total_bytes = 0_i64;
     let mut diagnostic_rx_bytes = 0_i64;
     let mut diagnostic_tx_bytes = 0_i64;
     let mut latest_rx = 0_i64;
     let mut latest_tx = 0_i64;
+    let mut latest_total = 0_i64;
     let mut last_sample_unix = None::<i64>;
     let mut counted_directions = HashMap::new();
     let mut diagnostic_streams = HashSet::new();
@@ -5217,8 +5227,18 @@ fn traffic_accounting_for_client_with_selector_override(
         }
         rx_bytes += selected_cycle_rx;
         tx_bytes += selected_cycle_tx;
+        total_bytes = total_bytes.saturating_add(traffic_selector_total(
+            selector,
+            selected_cycle_rx,
+            selected_cycle_tx,
+        ));
         latest_rx += selected_latest_rx;
         latest_tx += selected_latest_tx;
+        latest_total = latest_total.saturating_add(traffic_selector_total(
+            selector,
+            selected_latest_rx,
+            selected_latest_tx,
+        ));
         let mut row_state = "ok".to_string();
         let mut row_reasons = Vec::new();
         let selector_epochs_seen = match selector.direction.as_str() {
@@ -5251,15 +5271,17 @@ fn traffic_accounting_for_client_with_selector_override(
             latest_tx_bytes: diagnostic_latest_tx,
             cycle_rx_bytes: diagnostic_cycle_rx,
             cycle_tx_bytes: diagnostic_cycle_tx,
-            cycle_total_bytes: diagnostic_cycle_rx.saturating_add(diagnostic_cycle_tx),
+            cycle_total_bytes: traffic_selector_total(
+                selector,
+                diagnostic_cycle_rx,
+                diagnostic_cycle_tx,
+            ),
             sample_age_secs: sample_age,
             state: row_state,
             incomplete_reasons: row_reasons,
         });
     }
-    let total_bytes = rx_bytes.saturating_add(tx_bytes);
     let diagnostic_total_bytes = diagnostic_rx_bytes.saturating_add(diagnostic_tx_bytes);
-    let latest_total = latest_rx.saturating_add(latest_tx);
     let cycle_percent = [
         quota_total
             .filter(|quota| *quota > 0)
