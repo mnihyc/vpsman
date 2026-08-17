@@ -64,7 +64,7 @@ pub(crate) async fn load_system_dashboard(
         .saturating_add(1)
         .min(MAX_CHART_POINTS as u64) as i64;
     let collected =
-        collect_system_dashboard_snapshot(&state)
+        collect_system_dashboard_snapshot(state)
             .await
             .map_err(ApiError::internal_mapper(
                 "system_dashboard_unavailable",
@@ -86,7 +86,7 @@ pub(crate) async fn load_system_dashboard(
         bucket_secs,
         effective_points,
         current: collected.current,
-        capacity: suite_capacity(&state),
+        capacity: suite_capacity(state),
         series: system_metric_series(rollups),
         notes: collected.notes,
     })
