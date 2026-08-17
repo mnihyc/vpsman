@@ -253,6 +253,8 @@ export function JobOperationEditor({
   setSupervisorLogBytes,
   setSupervisorName,
   setUpdateArtifactUrl,
+  setUpdateCheckActivate,
+  setUpdateCheckRestartAgent,
   setUpdateCheckVersionUrl,
   setUpdateActivationSha256Hex,
   setUpdateRestartAgent,
@@ -266,6 +268,8 @@ export function JobOperationEditor({
   supervisorName,
   shellScript,
   updateArtifactUrl,
+  updateCheckActivate,
+  updateCheckRestartAgent,
   updateCheckVersionUrl,
   updateActivationSha256Hex,
   updateRestartAgent,
@@ -355,6 +359,8 @@ export function JobOperationEditor({
   setSupervisorLogBytes: (value: number) => void;
   setSupervisorName: (value: string) => void;
   setUpdateArtifactUrl: (value: string) => void;
+  setUpdateCheckActivate: (value: boolean) => void;
+  setUpdateCheckRestartAgent: (value: boolean) => void;
   setUpdateCheckVersionUrl: (value: string) => void;
   setUpdateActivationSha256Hex: (value: string) => void;
   setUpdateRestartAgent: (value: boolean) => void;
@@ -368,6 +374,8 @@ export function JobOperationEditor({
   supervisorName: string;
   shellScript: string;
   updateArtifactUrl: string;
+  updateCheckActivate: boolean;
+  updateCheckRestartAgent: boolean;
   updateCheckVersionUrl: string;
   updateActivationSha256Hex: string;
   updateRestartAgent: boolean;
@@ -1008,8 +1016,8 @@ export function JobOperationEditor({
         <div>
           <strong>Version manifest</strong>
           <span>
-            Checks version.json and stages its newer architecture-specific
-            artifact without activating or restarting it
+            Checks version.json and selects the matching architecture-specific
+            artifact for each VPS
           </span>
         </div>
         <label
@@ -1024,9 +1032,35 @@ export function JobOperationEditor({
             value={updateCheckVersionUrl}
           />
         </label>
+        <label className="checkRow">
+          <input
+            checked={updateCheckActivate}
+            onChange={(event) => {
+              const activate = event.target.checked;
+              setUpdateCheckActivate(activate);
+              if (!activate) {
+                setUpdateCheckRestartAgent(false);
+              }
+            }}
+            type="checkbox"
+          />
+          <span>Activate if newer</span>
+        </label>
+        <label className="checkRow">
+          <input
+            checked={updateCheckRestartAgent}
+            disabled={!updateCheckActivate}
+            onChange={(event) =>
+              setUpdateCheckRestartAgent(event.target.checked)
+            }
+            type="checkbox"
+          />
+          <span>Restart agent</span>
+        </label>
         <div className="operationSafetyNote" role="note">
-          Activation is a separate reviewed action after the staged SHA-256 is
-          visible.
+          Each VPS selects and verifies its own architecture-specific artifact.
+          When enabled, activation uses that VPS-specific staged SHA-256; one
+          shared SHA-256 is not required.
         </div>
       </div>
     );

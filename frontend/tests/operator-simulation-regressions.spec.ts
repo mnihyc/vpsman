@@ -690,11 +690,11 @@ test("shows the effective agent update policy without inferring from optional TO
     /github\.com/,
   );
   await expect(composer).toContainText(
-    "stages its newer architecture-specific artifact without activating or restarting it",
+    "selects the matching architecture-specific artifact for each VPS",
   );
-  await expect(composer).toContainText(
-    "Activation is a separate reviewed action",
-  );
+  await expect(composer).toContainText("one shared SHA-256 is not required");
+  await expect(composer.getByLabel("Activate if newer")).toBeChecked();
+  await expect(composer.getByLabel("Restart agent")).toBeChecked();
   await expect
     .poll(async () => {
       const [composerBounds, inputBounds] = await Promise.all([

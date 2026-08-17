@@ -538,6 +538,17 @@ export function JobDispatchPanel({
       DEFAULT_UPDATE_VERSION_URL,
       preserveHistoryState,
     );
+  const [updateCheckActivate, setUpdateCheckActivate] = useDispatchHistoryState(
+    "updateCheckActivate",
+    true,
+    preserveHistoryState,
+  );
+  const [updateCheckRestartAgent, setUpdateCheckRestartAgent] =
+    useDispatchHistoryState(
+      "updateCheckRestartAgent",
+      true,
+      preserveHistoryState,
+    );
   const [updateActivationSha256Hex, setUpdateActivationSha256Hex] =
     useDispatchHistoryState(
       "updateActivationSha256Hex",
@@ -829,8 +840,13 @@ export function JobDispatchPanel({
       setUpdateSha256Hex(dispatchPreset.updateSha256Hex ?? "");
     }
     if (dispatchPreset.mode === "agent_update_check") {
+      const activate = dispatchPreset.updateCheckActivate ?? true;
       setUpdateCheckVersionUrl(
         dispatchPreset.updateCheckVersionUrl ?? DEFAULT_UPDATE_VERSION_URL,
+      );
+      setUpdateCheckActivate(activate);
+      setUpdateCheckRestartAgent(
+        activate && (dispatchPreset.updateCheckRestartAgent ?? true),
       );
     }
     if (dispatchPreset.mode === "agent_update_activate") {
@@ -1005,6 +1021,8 @@ export function JobDispatchPanel({
     maxTimeoutSecs,
     updateActivationSha256Hex,
     updateArtifactUrl,
+    updateCheckActivate,
+    updateCheckRestartAgent,
     updateCheckVersionUrl,
     updateRestartAgent,
     updateRollbackSha256Hex,
@@ -1440,6 +1458,8 @@ export function JobDispatchPanel({
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
+      updateCheckActivate,
+      updateCheckRestartAgent,
       updateActivationSha256Hex,
       updateRestartAgent,
       updateRollbackSha256Hex,
@@ -1617,10 +1637,17 @@ export function JobDispatchPanel({
         setUpdateSha256Hex(operation.sha256_hex);
         return;
       case "agent_update_check":
-        setMode("agent_update_check");
-        setUpdateCheckVersionUrl(
-          operation.version_url ?? DEFAULT_UPDATE_VERSION_URL,
-        );
+        {
+          const activate = operation.activate ?? true;
+          setMode("agent_update_check");
+          setUpdateCheckVersionUrl(
+            operation.version_url ?? DEFAULT_UPDATE_VERSION_URL,
+          );
+          setUpdateCheckActivate(activate);
+          setUpdateCheckRestartAgent(
+            activate && (operation.restart_agent ?? true),
+          );
+        }
         return;
       case "agent_update_activate":
         setMode("agent_update_activate");
@@ -1683,6 +1710,8 @@ export function JobDispatchPanel({
       updateArtifactUrl,
       updateSha256Hex,
       updateCheckVersionUrl,
+      updateCheckActivate,
+      updateCheckRestartAgent,
       updateActivationSha256Hex,
       updateRestartAgent,
       updateRollbackSha256Hex,
@@ -2292,6 +2321,8 @@ export function JobDispatchPanel({
           setSupervisorLogBytes={setSupervisorLogBytes}
           setSupervisorName={setSupervisorName}
           setUpdateArtifactUrl={setUpdateArtifactUrl}
+          setUpdateCheckActivate={setUpdateCheckActivate}
+          setUpdateCheckRestartAgent={setUpdateCheckRestartAgent}
           setUpdateCheckVersionUrl={setUpdateCheckVersionUrl}
           setUpdateActivationSha256Hex={setUpdateActivationSha256Hex}
           setUpdateRestartAgent={setUpdateRestartAgent}
@@ -2308,6 +2339,8 @@ export function JobDispatchPanel({
           supervisorLogBytes={supervisorLogBytes}
           supervisorName={supervisorName}
           updateArtifactUrl={updateArtifactUrl}
+          updateCheckActivate={updateCheckActivate}
+          updateCheckRestartAgent={updateCheckRestartAgent}
           updateCheckVersionUrl={updateCheckVersionUrl}
           updateActivationSha256Hex={updateActivationSha256Hex}
           updateRestartAgent={updateRestartAgent}
@@ -2597,10 +2630,19 @@ function operationReviewItems(
     return [];
   }
   if (operation.type === "agent_update_check") {
+    const activate = operation.activate ?? true;
+    const restartAgent = activate && (operation.restart_agent ?? true);
     return [
-      { label: "Effect", value: "Check and stage verified artifact only" },
-      { label: "Activation", value: "No" },
-      { label: "Agent restart", value: "No" },
+      {
+        label: "Effect",
+        value: activate
+          ? restartAgent
+            ? "Check and stage each VPS's matching architecture-specific artifact, then activate it and restart the agent"
+            : "Check and stage each VPS's matching architecture-specific artifact, then activate it"
+          : "Check and stage each VPS's matching architecture-specific artifact only",
+      },
+      { label: "Activation", value: activate ? "Yes" : "No" },
+      { label: "Agent restart", value: restartAgent ? "Yes" : "No" },
       { label: "Manifest", value: operation.version_url ?? "Agent default" },
     ];
   }

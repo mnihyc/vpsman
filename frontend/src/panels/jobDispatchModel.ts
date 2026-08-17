@@ -66,6 +66,8 @@ export function buildOperation(
   updateArtifactUrl: string,
   updateSha256Hex: string,
   updateCheckVersionUrl: string,
+  updateCheckActivate: boolean,
+  updateCheckRestartAgent: boolean,
   updateActivationSha256Hex: string,
   updateRestartAgent: boolean,
   updateRollbackSha256Hex: string,
@@ -175,13 +177,13 @@ export function buildOperation(
       ? {
           type: "agent_update_check",
           version_url: versionUrl,
-          activate: false,
-          restart_agent: false,
+          activate: updateCheckActivate,
+          restart_agent: updateCheckActivate && updateCheckRestartAgent,
         }
       : {
           type: "agent_update_check",
-          activate: false,
-          restart_agent: false,
+          activate: updateCheckActivate,
+          restart_agent: updateCheckActivate && updateCheckRestartAgent,
         };
   }
   if (mode === "agent_update_activate") {

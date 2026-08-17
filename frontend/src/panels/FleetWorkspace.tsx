@@ -1160,6 +1160,8 @@ export function FleetWorkspace({
         rows.map((agent) => agent.id),
       ),
       maxTimeoutSecs: 300,
+      updateCheckActivate: true,
+      updateCheckRestartAgent: true,
       updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
     });
   }

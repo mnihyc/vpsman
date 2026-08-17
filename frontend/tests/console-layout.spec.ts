@@ -3095,30 +3095,38 @@ test("opens manual update check dispatch from fleet selection", async ({
   await expect(page.getByLabel("Max timeout seconds")).toHaveValue("300");
   await expect(page.getByText("Version manifest")).toBeVisible();
   await expect(
-    page.getByText(/without activating or restarting it/),
+    page.getByText(/matching architecture-specific artifact for each VPS/),
   ).toBeVisible();
   await expect(
-    page.getByText(/Activation is a separate reviewed action/),
+    page.getByText(/one shared SHA-256 is not required/),
   ).toBeVisible();
-  await expect(page.getByLabel(/activate/i)).toHaveCount(0);
-  await expect(page.getByLabel(/restart/i)).toHaveCount(0);
+  const activateIfNewer = page.getByLabel("Activate if newer");
+  const restartAgent = page.getByLabel("Restart agent");
+  await expect(activateIfNewer).toBeChecked();
+  await expect(restartAgent).toBeChecked();
+  await expect(restartAgent).toBeEnabled();
+
+  await activateIfNewer.uncheck();
+  await expect(restartAgent).not.toBeChecked();
+  await expect(restartAgent).toBeDisabled();
+  await activateIfNewer.check();
+  await restartAgent.check();
 
   await unlockPrivilegeFromTop(page);
   await expect(
-    page.getByText(/without activating or restarting it/),
+    page.getByText(/matching architecture-specific artifact for each VPS/),
   ).toBeVisible();
   await page
     .locator("#console-main-content")
     .getByRole("button", { name: "Dispatch", exact: true })
     .click();
   const confirmation = page.getByLabel("Confirm job dispatch");
-  await expect(confirmation).toHaveClass(/\bnormal\b/);
-  await expect(confirmation).not.toHaveClass(/\bdanger\b/);
+  await expect(confirmation).toHaveClass(/\bdanger\b/);
   await expect(confirmation).toContainText(
-    "Check and stage verified artifact only",
+    "Check and stage each VPS's matching architecture-specific artifact, then activate it and restart the agent",
   );
-  await expect(confirmation).toContainText("ActivationNo");
-  await expect(confirmation).toContainText("Agent restartNo");
+  await expect(confirmation).toContainText("ActivationYes");
+  await expect(confirmation).toContainText("Agent restartYes");
   await expect(confirmation).toContainText("Protected operation");
   await confirmation.getByRole("button", { name: "Dispatch job" }).click();
 
@@ -3133,8 +3141,8 @@ test("opens manual update check dispatch from fleet selection", async ({
   expect(updateRequest).toMatchObject({
     command: "agent_update_check",
     operation: {
-      activate: false,
-      restart_agent: false,
+      activate: true,
+      restart_agent: true,
       type: "agent_update_check",
       version_url: DEFAULT_UPDATE_VERSION_URL,
     },

@@ -367,6 +367,8 @@ export function AgentUpdateReleasesPanel({
               onOpenDispatchPreset({
                 mode: "agent_update_check",
                 selectorExpression: "",
+                updateCheckActivate: true,
+                updateCheckRestartAgent: true,
                 updateCheckVersionUrl: DEFAULT_UPDATE_VERSION_URL,
               })
             }

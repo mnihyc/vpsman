@@ -37,6 +37,8 @@ export type JobDispatchPreset = {
   supervisorName?: string;
   updateActivationSha256Hex?: string;
   updateArtifactUrl?: string;
+  updateCheckActivate?: boolean;
+  updateCheckRestartAgent?: boolean;
   updateCheckVersionUrl?: string;
   updateRestartAgent?: boolean;
   updateRollbackSha256Hex?: string;

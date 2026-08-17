@@ -157,10 +157,12 @@ cargo run -p vpsctl -- agent-update-check \
   --confirmed
 ```
 
-This default checks and stages only, matching the dashboard. Add both
-`--activate --restart-agent` only when the same reviewed job should promote the
-staged binary and restart immediately; otherwise use the separate activation
-command after inspecting the staged SHA-256.
+The CLI default checks and stages only. The dashboard exposes **Activate if
+newer** and **Restart agent** and defaults both on for fleet update shortcuts,
+so every VPS can select, verify, promote, and restart its own
+architecture-specific manifest artifact in the same reviewed job. Clear
+**Activate if newer** for a stage-only check. CLI operators add
+`--activate --restart-agent` for the same combined behavior.
 
 Manual update jobs download from the supplied external HTTPS URL, verify
 SHA-256, stage the binary, and create local rollback material. Use Jobs >
