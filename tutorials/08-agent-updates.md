@@ -55,7 +55,7 @@ Corrupt cache data is ignored with a warning and never replaces bootstrap
 identity or gateway trust settings.
 
 Operators can enable or disable autonomous updates from the dashboard under
-Config > Bulk patch with the built-in updater patch generators.
+Config > VPS override patch with the built-in updater patch generators.
 These generators are ordinary operator-managed records once cloned: they can be
 edited, reused for bulk patch review, or deleted if they are operator-managed.
 The CLI can apply the same setting with an incremental config patch:
@@ -71,9 +71,15 @@ unmanaged_restart_agent = true
 ```
 
 ```sh
+preview_json="$(cargo run -p vpsctl -- config-patch \
+  --config-file ./enable-autonomous-updater.toml \
+  --tags edge)"
+preview_hash="$(jq -er '.preview_hash' <<<"$preview_json")"
+
 cargo run -p vpsctl -- config-patch \
   --config-file ./enable-autonomous-updater.toml \
   --tags edge \
+  --preview-hash "$preview_hash" \
   --confirmed
 ```
 

@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
-use vpsman_common::validate_incremental_config_patch_section;
 
 use crate::{
     model::{
@@ -11,6 +10,7 @@ use crate::{
         UpsertRuntimeConfigPatchGeneratorRequest,
     },
     repository::Repository,
+    runtime_config_workspace::validate_runtime_config_bulk_patch,
     unix_now,
 };
 
@@ -221,15 +221,13 @@ impl Repository {
             &request.values,
             &generator.field_schema,
         )?;
-        let patch: toml::Value =
-            toml::from_str(&rendered).context("failed to parse rendered config patch TOML")?;
-        let affected_sections = validate_rendered_patch(&patch)?;
-        crate::runtime_config::validate_runtime_config_patch_toml(&rendered)?;
+        let (operations, affected_sections) = validate_runtime_config_bulk_patch(&rendered)?;
         Ok(RuntimeConfigPatchGeneratorRenderView {
             generator_id: generator.id,
             name: generator.name,
             toml: rendered,
-            patch: serde_json::to_value(&patch).context("failed to serialize rendered patch")?,
+            patch: serde_json::to_value(&operations)
+                .context("failed to serialize rendered patch operations")?,
             affected_sections,
             docs_metadata: generator.docs_metadata,
             generated_at: unix_now().to_string(),
@@ -427,10 +425,7 @@ fn patch_generator_from_row(row: sqlx::postgres::PgRow) -> Result<RuntimeConfigP
 
 fn validate_patch_generator_renderable(body: &str, field_schema: &JsonValue) -> Result<()> {
     let rendered = render_generator_body(body, &serde_json::json!({}), field_schema)?;
-    let patch: toml::Value =
-        toml::from_str(&rendered).context("failed to parse config generator TOML")?;
-    validate_rendered_patch(&patch)?;
-    crate::runtime_config::validate_runtime_config_patch_toml(&rendered)?;
+    validate_runtime_config_bulk_patch(&rendered)?;
     Ok(())
 }
 
@@ -504,24 +499,6 @@ fn toml_literal(value: &JsonValue) -> Result<String> {
         JsonValue::Null => String::new(),
         JsonValue::Object(_) => anyhow::bail!("generator object values are not supported"),
     })
-}
-
-fn validate_rendered_patch(patch: &toml::Value) -> Result<Vec<String>> {
-    let Some(table) = patch.as_table() else {
-        anyhow::bail!("config patch generator output must be a TOML table");
-    };
-    anyhow::ensure!(
-        !table.is_empty(),
-        "config patch generator output must contain at least one section"
-    );
-    let mut sections = Vec::new();
-    for section in table.keys() {
-        validate_incremental_config_patch_section(section)
-            .map_err(|message| anyhow::anyhow!(message))?;
-        sections.push(section.clone());
-    }
-    sections.sort();
-    Ok(sections)
 }
 
 fn builtin_patch_generators() -> Vec<RuntimeConfigPatchGeneratorView> {

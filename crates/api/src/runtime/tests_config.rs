@@ -1,13 +1,14 @@
 use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::{
     gateway_client::GatewayDispatchClient,
     job_request::validate_job_command,
     model::{
         AuthContext, CreateJobRequest, OperatorPreferences, OperatorView,
-        RenderRuntimeConfigPatchGeneratorRequest, UpsertRuntimeConfigPatchGeneratorRequest,
+        RenderRuntimeConfigPatchGeneratorRequest, RuntimeConfigOverrideCandidate,
+        RuntimeConfigOverrideReplacement, UpsertRuntimeConfigPatchGeneratorRequest,
     },
     repository::{MemoryState, Repository},
     repository_ingest::upsert_memory_agent,
@@ -16,13 +17,18 @@ use crate::{
         compose_runtime_config, dispatch_runtime_config_for_clients,
         request_runtime_config_reload_for_agent,
     },
+    runtime_config_workspace::{
+        load_runtime_config_workspace, preview_runtime_config_override,
+        runtime_config_override_revision,
+    },
     state::AppState,
 };
 use uuid::Uuid;
 use vpsman_common::{
-    runtime_config_content_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode,
-    AgentRuntimeConfig, AgentUpdateConfig, JobCommand, RuntimeConfigReconcileResource,
-    RuntimeConfigReconcileScope, MAX_RUNTIME_CONFIG_FIELD_BYTES, MAX_RUNTIME_CONFIG_REASON_BYTES,
+    plan_tunnel, runtime_config_content_hash, AgentCapabilitySnapshot, AgentHello,
+    AgentPrivilegeMode, AgentRuntimeConfig, AgentUpdateConfig, JobCommand,
+    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, TunnelAddressPair, TunnelKind,
+    TunnelPlanInput, MAX_RUNTIME_CONFIG_FIELD_BYTES, MAX_RUNTIME_CONFIG_REASON_BYTES,
 };
 
 fn reconnect_scope(authoritative: bool, port_forwarding: bool) -> RuntimeConfigReconcileScope {
@@ -73,6 +79,292 @@ fn memory_admin() -> AuthContext {
         },
         session_id: None,
     }
+}
+
+#[tokio::test]
+async fn memory_runtime_config_override_cas_rejects_stale_review_and_resets() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "runtime-cas-memory".to_string(),
+                process_incarnation_id: Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                cpu_model: None,
+                kernel_release: None,
+                virtualization: None,
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let operator = memory_admin();
+    let absent = runtime_config_override_revision(None);
+    let saved = repo
+        .replace_runtime_config_overrides_cas(
+            &[RuntimeConfigOverrideReplacement {
+                client_id: "runtime-cas-memory".to_string(),
+                expected_revision: absent.clone(),
+                toml: Some("telemetry_interval_secs = 41\n".to_string()),
+            }],
+            "memory-cas",
+            &operator,
+        )
+        .await
+        .unwrap();
+    let revision = runtime_config_override_revision(saved.first());
+    let stale = repo
+        .replace_runtime_config_overrides_cas(
+            &[RuntimeConfigOverrideReplacement {
+                client_id: "runtime-cas-memory".to_string(),
+                expected_revision: absent,
+                toml: Some("telemetry_interval_secs = 42\n".to_string()),
+            }],
+            "memory-cas-stale",
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("review_stale"));
+    repo.replace_runtime_config_overrides_cas(
+        &[RuntimeConfigOverrideReplacement {
+            client_id: "runtime-cas-memory".to_string(),
+            expected_revision: revision,
+            toml: None,
+        }],
+        "memory-cas-reset",
+        &operator,
+    )
+    .await
+    .unwrap();
+    assert!(repo
+        .list_runtime_config_overrides(Some("runtime-cas-memory"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn memory_runtime_config_guard_keeps_tunnel_source_stable_through_repreview_and_commit() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        for client_id in ["runtime-guard-memory-left", "runtime-guard-memory-right"] {
+            upsert_memory_agent(
+                &memory.agents,
+                &AgentHello {
+                    client_id: client_id.to_string(),
+                    process_incarnation_id: Uuid::new_v4(),
+                    agent_version: "test".to_string(),
+                    os_release: "test".to_string(),
+                    arch: "x86_64".to_string(),
+                    cpu_model: None,
+                    kernel_release: None,
+                    virtualization: None,
+                    update_heartbeat: None,
+                    internal_build_number: 1,
+                    capabilities: AgentCapabilitySnapshot::default(),
+                },
+            )
+            .await;
+        }
+    }
+    let input = runtime_config_guard_tunnel_input(
+        "runtime-guard-memory",
+        "runtime-guard-memory-left",
+        "runtime-guard-memory-right",
+    );
+    let planned = plan_tunnel(&input).unwrap();
+    let operator = memory_admin();
+    let persisted = repo
+        .record_tunnel_plan(&input, &planned, true, &operator)
+        .await
+        .unwrap();
+    let state = test_state(repo.clone());
+    let candidate = RuntimeConfigOverrideCandidate::Structured {
+        value: serde_json::json!({"telemetry_interval_secs": 47}),
+    };
+    let reviewed = preview_runtime_config_override(&state, "runtime-guard-memory-left", &candidate)
+        .await
+        .unwrap();
+
+    let guard = repo.lock_runtime_config_desired_state().await.unwrap();
+    let writer_repo = repo.clone();
+    let writer_input = input.clone();
+    let writer_plan = planned.clone();
+    let writer_operator = operator.clone();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (finished_tx, mut finished_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let _ = started_tx.send(());
+        let result = writer_repo
+            .update_tunnel_plan(
+                persisted.id,
+                persisted.revision,
+                &writer_input,
+                &writer_plan,
+                false,
+                &writer_operator,
+            )
+            .await;
+        let _ = finished_tx.send(result);
+    });
+    started_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut finished_rx)
+            .await
+            .is_err()
+    );
+
+    let locked_preview =
+        preview_runtime_config_override(&state, "runtime-guard-memory-left", &candidate)
+            .await
+            .unwrap();
+    assert_eq!(locked_preview.preview_hash, reviewed.preview_hash);
+    repo.replace_runtime_config_overrides_cas_locked(
+        guard,
+        &[RuntimeConfigOverrideReplacement {
+            client_id: "runtime-guard-memory-left".to_string(),
+            expected_revision: locked_preview.override_revision,
+            toml: locked_preview.canonical_toml,
+        }],
+        "memory-guard-commit",
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let updated = tokio::time::timeout(std::time::Duration::from_secs(2), finished_rx)
+        .await
+        .expect("tunnel writer should resume after override commit")
+        .expect("tunnel writer result channel should stay open")
+        .expect("tunnel writer should succeed");
+    assert!(!updated.enabled);
+    assert_eq!(
+        repo.list_runtime_config_overrides(Some("runtime-guard-memory-left"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+fn runtime_config_guard_tunnel_input(
+    name: &str,
+    left_client_id: &str,
+    right_client_id: &str,
+) -> TunnelPlanInput {
+    TunnelPlanInput {
+        name: name.to_string(),
+        interface_name: "guard0".to_string(),
+        kind: TunnelKind::Gre,
+        runtime_control: Default::default(),
+        runtime_topology: Default::default(),
+        left_client_id: left_client_id.to_string(),
+        right_client_id: right_client_id.to_string(),
+        left_remote_underlay: "198.51.100.10".to_string(),
+        right_remote_underlay: "203.0.113.20".to_string(),
+        left_local_underlay: None,
+        right_local_underlay: None,
+        address_pool_cidr: "10.91.0.0/30".to_string(),
+        reserved_addresses: Vec::new(),
+        ipv4_tunnel: Some(TunnelAddressPair {
+            left: "10.91.0.0".to_string(),
+            right: "10.91.0.1".to_string(),
+            prefix_len: 31,
+        }),
+        ipv6_address_pool_cidr: None,
+        ipv6_tunnel: None,
+        latency_primary_family: Default::default(),
+        bandwidth_mbps: 100,
+        left_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        right_mtu: vpsman_common::default_tunnel_mtu(TunnelKind::Gre),
+        ospf: None,
+    }
+}
+
+#[tokio::test]
+async fn runtime_config_workspace_projects_identity_free_desired_and_replacement_preview() {
+    let repo = Repository::Memory(MemoryState::default());
+    if let Repository::Memory(memory) = &repo {
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: "workspace-client".to_string(),
+                process_incarnation_id: Uuid::new_v4(),
+                agent_version: "test".to_string(),
+                os_release: "test".to_string(),
+                arch: "x86_64".to_string(),
+                cpu_model: None,
+                kernel_release: None,
+                virtualization: None,
+                update_heartbeat: None,
+                internal_build_number: 1,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+    }
+    let state = test_state(repo.clone());
+    let workspace = load_runtime_config_workspace(&state, "workspace-client")
+        .await
+        .unwrap();
+    assert!(workspace.desired.get("display_name").is_none());
+    assert!(workspace.desired.get("tags").is_none());
+    assert!(workspace.desired.get("version").is_none());
+    assert!(!workspace.saved_override.exists);
+    let desired = compose_runtime_config(&state, "workspace-client", 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        workspace.desired_content_hash,
+        runtime_config_content_hash(&desired).unwrap()
+    );
+    assert!(workspace.field_schema.iter().any(|field| field.path
+        == "network.runtime_status_telemetry_plans"
+        && field.owner == "server"));
+
+    let preview = preview_runtime_config_override(
+        &state,
+        "workspace-client",
+        &RuntimeConfigOverrideCandidate::Structured {
+            value: serde_json::json!({"telemetry_interval_secs": 45}),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview.desired["telemetry_interval_secs"], 45);
+    assert_eq!(preview.candidate_override["telemetry_interval_secs"], 45);
+    assert!(preview
+        .canonical_toml
+        .as_deref()
+        .is_some_and(|toml| toml.contains("telemetry_interval_secs = 45")));
+
+    repo.replace_runtime_config_overrides_cas(
+        &[RuntimeConfigOverrideReplacement {
+            client_id: "workspace-client".to_string(),
+            expected_revision: runtime_config_override_revision(None),
+            toml: Some("[network\n".to_string()),
+        }],
+        "malformed-fixture",
+        &memory_admin(),
+    )
+    .await
+    .unwrap();
+    let recovery = preview_runtime_config_override(
+        &state,
+        "workspace-client",
+        &RuntimeConfigOverrideCandidate::Reset,
+    )
+    .await
+    .unwrap();
+    assert!(recovery.changes.is_empty());
+    assert!(recovery.recovery_sync_required);
+    assert!(!recovery.storage_only);
 }
 
 #[test]
@@ -128,9 +420,12 @@ async fn agent_requested_runtime_config_reload_compares_hash_before_queuing() {
     assert!(no_op.is_empty());
     assert!(repo.list_jobs(10).await.unwrap().is_empty());
 
-    repo.upsert_runtime_config_overrides(
-        &["client-a".to_string()],
-        "telemetry_interval_secs = 30\n",
+    repo.replace_runtime_config_overrides_cas(
+        &[RuntimeConfigOverrideReplacement {
+            client_id: "client-a".to_string(),
+            expected_revision: runtime_config_override_revision(None),
+            toml: Some("telemetry_interval_secs = 30\n".to_string()),
+        }],
         "operator runtime config update",
         &memory_admin(),
     )
@@ -327,12 +622,12 @@ async fn runtime_config_pending_evidence_never_regresses_to_an_older_generation(
     let repo = Repository::Memory(MemoryState::default());
     let newer = AgentRuntimeConfig {
         version: 22,
-        display_name: "newer".to_string(),
+        telemetry_interval_secs: 122,
         ..AgentRuntimeConfig::default()
     };
     let older = AgentRuntimeConfig {
         version: 21,
-        display_name: "older".to_string(),
+        telemetry_interval_secs: 121,
         ..AgentRuntimeConfig::default()
     };
     let newer_hash = runtime_config_content_hash(&newer).unwrap();
@@ -548,9 +843,12 @@ async fn reconnect_queues_current_desired_state_instead_of_stale_applied_snapsho
     repo.promote_runtime_config_apply_from_agent_hash("client-a", &applied_hash)
         .await
         .unwrap();
-    repo.upsert_runtime_config_overrides(
-        &["client-a".to_string()],
-        "telemetry_interval_secs = 30\n",
+    repo.replace_runtime_config_overrides_cas(
+        &[RuntimeConfigOverrideReplacement {
+            client_id: "client-a".to_string(),
+            expected_revision: runtime_config_override_revision(None),
+            toml: Some("telemetry_interval_secs = 30\n".to_string()),
+        }],
         "new desired state",
         &memory_admin(),
     )
@@ -659,7 +957,7 @@ async fn runtime_config_apply_state_promotes_only_completed_sync_target() {
     let job_id = Uuid::new_v4();
     let config = AgentRuntimeConfig {
         version: 12,
-        display_name: "server-managed".to_string(),
+        telemetry_interval_secs: 77,
         ..AgentRuntimeConfig::default()
     };
     let hash = runtime_config_content_hash(&config).unwrap();
@@ -713,7 +1011,7 @@ async fn runtime_config_apply_state_promotes_only_completed_sync_target() {
         .expect("applied config should be readable");
     assert_eq!(applied.0, 12);
     assert_eq!(applied.1, hash);
-    assert_eq!(applied.2.display_name, "server-managed");
+    assert_eq!(applied.2.telemetry_interval_secs, 77);
 }
 
 #[tokio::test]
@@ -722,7 +1020,7 @@ async fn runtime_config_apply_state_keeps_failed_sync_pending_failed() {
     let job_id = Uuid::new_v4();
     let config = AgentRuntimeConfig {
         version: 13,
-        display_name: "not-applied".to_string(),
+        telemetry_interval_secs: 78,
         ..AgentRuntimeConfig::default()
     };
     let hash = runtime_config_content_hash(&config).unwrap();
@@ -842,7 +1140,7 @@ async fn runtime_config_apply_state_is_per_client_for_partial_and_skipped_syncs(
     let previous_job_id = Uuid::new_v4();
     let previous_config = AgentRuntimeConfig {
         version: 19,
-        display_name: "previously-applied".to_string(),
+        telemetry_interval_secs: 79,
         ..AgentRuntimeConfig::default()
     };
     let previous_hash = runtime_config_content_hash(&previous_config).unwrap();
@@ -878,12 +1176,12 @@ async fn runtime_config_apply_state_is_per_client_for_partial_and_skipped_syncs(
     let rollout_job_id = Uuid::new_v4();
     let config_a = AgentRuntimeConfig {
         version: 20,
-        display_name: "applied-a".to_string(),
+        telemetry_interval_secs: 80,
         ..AgentRuntimeConfig::default()
     };
     let config_b = AgentRuntimeConfig {
         version: 20,
-        display_name: "pending-b".to_string(),
+        telemetry_interval_secs: 81,
         ..AgentRuntimeConfig::default()
     };
     let hash_a = runtime_config_content_hash(&config_a).unwrap();
@@ -978,7 +1276,7 @@ async fn runtime_config_apply_state_is_per_client_for_partial_and_skipped_syncs(
         .expect("client-b applied state should remain");
     assert_eq!(applied_b.0, 19);
     assert_eq!(applied_b.1, previous_hash);
-    assert_eq!(applied_b.2.display_name, "previously-applied");
+    assert_eq!(applied_b.2.telemetry_interval_secs, 79);
 }
 
 #[test]
@@ -1147,7 +1445,7 @@ async fn runtime_config_patch_generator_fields_use_four_kibibyte_limit() {
             domain: "runtime".to_string(),
             description: "operator-managed generator".to_string(),
             field_schema: serde_json::json!({}),
-            raw_generator_body: "[telemetry]\nfull_secs = 300\n".to_string(),
+            raw_generator_body: "telemetry_interval_secs = 300\n".to_string(),
             docs_metadata: serde_json::json!({}),
             confirmed: true,
         }),
@@ -1166,7 +1464,7 @@ async fn runtime_config_patch_generator_fields_use_four_kibibyte_limit() {
             domain: "runtime".to_string(),
             description: "operator-managed generator".to_string(),
             field_schema: serde_json::json!({}),
-            raw_generator_body: "[telemetry]\nfull_secs = 300\n".to_string(),
+            raw_generator_body: "telemetry_interval_secs = 300\n".to_string(),
             docs_metadata: serde_json::json!({}),
             confirmed: true,
         }),

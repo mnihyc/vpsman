@@ -1956,10 +1956,10 @@ if env \
   VPSMAN_AGENT_ENABLE_SERVICE=0 \
   "${common_env[@]}" \
   bash deploy/install-agent.sh >"$SMOKE_TMPDIR/obsolete-env.log" 2>&1; then
-  echo "expected deploy installer to reject runtime config env in bootstrap install" >&2
+  echo "expected deploy installer to reject server inventory metadata in bootstrap install" >&2
   exit 1
 fi
-grep -q "VPSMAN_AGENT_DISPLAY_NAME is server runtime config" \
+grep -q "VPSMAN_AGENT_DISPLAY_NAME is server inventory metadata" \
   "$SMOKE_TMPDIR/obsolete-env.log"
 
 jq -n \

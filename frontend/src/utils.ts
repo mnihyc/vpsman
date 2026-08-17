@@ -98,7 +98,7 @@ export function getPageDescription(view: ActiveView): string {
     case "Network":
       return "Topology, tunnels, port forwarding, tests, routing, and evidence";
     case "Config":
-      return "Runtime config patches, configuration presets, and guarded per-VPS reads";
+      return "Server-desired runtime hierarchies, explicit VPS overrides, and configuration sources";
     case "Observability":
       return "Read-only fleet, network, process, alert, webhook, and dashboard analysis";
     case "Audit":

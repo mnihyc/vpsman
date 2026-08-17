@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -10,8 +10,9 @@ use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
     tunnel_topology_identity_hash, validate_agent_config_shape, AgentConfig, AgentNetworkConfig,
-    AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, JobCommand,
-    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelManager,
+    AgentPingTarget, AgentPortForwardingConfig, AgentRuntimeConfig,
+    AgentRuntimeStatusTelemetryPlan, JobCommand, RuntimeConfigReconcileResource,
+    RuntimeConfigReconcileScope, RuntimeTunnelAdapterCommands, RuntimeTunnelManager,
     TunnelEndpointSide, TunnelKind,
 };
 
@@ -285,10 +286,110 @@ pub(crate) async fn compose_runtime_config_for_agent_with_read_model(
     preset_toml: &str,
     tunnel_plans: &[TunnelPlanView],
 ) -> Result<AgentRuntimeConfig, ApiError> {
+    let override_toml = state
+        .repo
+        .list_runtime_config_overrides(Some(&agent.id))
+        .await?
+        .into_iter()
+        .next()
+        .map(|record| record.toml);
+    compose_runtime_config_for_agent_with_read_model_and_override(
+        state,
+        agent,
+        version,
+        preset_toml,
+        tunnel_plans,
+        override_toml.as_deref(),
+    )
+    .await
+}
+
+/// Composes the authoritative runtime document using an explicit per-VPS
+/// override. `None` intentionally means "inherit everything" and does not
+/// consult the stored override row. The configuration workspace uses this to
+/// preview replacements and to recover from malformed stored override text.
+pub(crate) async fn compose_runtime_config_for_agent_with_read_model_and_override(
+    state: &AppState,
+    agent: &AgentView,
+    version: u64,
+    preset_toml: &str,
+    tunnel_plans: &[TunnelPlanView],
+    override_toml: Option<&str>,
+) -> Result<AgentRuntimeConfig, ApiError> {
+    let managed = load_runtime_config_managed_inputs(state, &agent.id, tunnel_plans).await?;
+    compose_runtime_config_for_agent_with_managed_inputs(
+        agent,
+        version,
+        preset_toml,
+        tunnel_plans,
+        override_toml,
+        &managed,
+    )
+}
+
+pub(crate) struct RuntimeConfigManagedInputs {
+    port_forwarding: AgentPortForwardingConfig,
+    ping_targets: Vec<AgentPingTarget>,
+    runtime_adapters: BTreeMap<String, RuntimeTunnelAdapterCommands>,
+}
+
+pub(crate) async fn load_runtime_config_managed_inputs(
+    state: &AppState,
+    client_id: &str,
+    tunnel_plans: &[TunnelPlanView],
+) -> Result<RuntimeConfigManagedInputs, ApiError> {
+    let mut definition_ids = BTreeSet::new();
+    for plan in tunnel_plans
+        .iter()
+        .filter(|plan| plan.enabled)
+        .filter(|plan| plan.left_client_id == client_id || plan.right_client_id == client_id)
+        .filter(|plan| plan.plan.runtime_control.manager == RuntimeTunnelManager::CustomAdapter)
+    {
+        let definition_id = if plan.left_client_id == client_id {
+            plan.plan
+                .runtime_control
+                .left_adapter_definition_id
+                .as_deref()
+        } else {
+            plan.plan
+                .runtime_control
+                .right_adapter_definition_id
+                .as_deref()
+        }
+        .ok_or_else(|| ApiError::conflict("runtime_tunnel_adapter_definition_required"))?;
+        definition_ids.insert(definition_id.to_string());
+    }
+    let mut runtime_adapters = BTreeMap::new();
+    for definition_id in definition_ids {
+        runtime_adapters.insert(
+            definition_id.clone(),
+            state
+                .repo
+                .resolve_runtime_tunnel_adapter(&definition_id)
+                .await
+                .map_err(ApiError::from)?,
+        );
+    }
+    Ok(RuntimeConfigManagedInputs {
+        port_forwarding: state
+            .repo
+            .port_forwarding_config_for_client(client_id)
+            .await?,
+        ping_targets: state.repo.ping_targets_for_client(client_id).await?,
+        runtime_adapters,
+    })
+}
+
+pub(crate) fn compose_runtime_config_for_agent_with_managed_inputs(
+    agent: &AgentView,
+    version: u64,
+    preset_toml: &str,
+    tunnel_plans: &[TunnelPlanView],
+    override_toml: Option<&str>,
+    managed: &RuntimeConfigManagedInputs,
+) -> Result<AgentRuntimeConfig, ApiError> {
     let mut effective = AgentConfig {
         client_id: agent.id.clone(),
-        display_name: agent.display_name.clone(),
-        tags: agent.tags.clone(),
         ..AgentConfig::default()
     };
 
@@ -296,33 +397,29 @@ pub(crate) async fn compose_runtime_config_for_agent_with_read_model(
         merge_configuration_preset_toml(&mut effective, preset_toml)
             .context("runtime_config_preset_merge_failed")?;
     }
-    for override_record in state
-        .repo
-        .list_runtime_config_overrides(Some(&agent.id))
-        .await?
-    {
-        merge_runtime_config_toml(&mut effective, &override_record.toml)
+    if let Some(override_toml) = override_toml {
+        merge_runtime_config_toml(&mut effective, override_toml)
             .context("runtime_config_override_merge_failed")?;
     }
-    apply_enabled_tunnel_plans(state, &agent.id, tunnel_plans, &mut effective).await?;
-    effective.network.port_forwarding = state
-        .repo
-        .port_forwarding_config_for_client(&agent.id)
-        .await?;
-    effective.network.ping_targets = state.repo.ping_targets_for_client(&agent.id).await?;
+    apply_enabled_tunnel_plans(
+        &agent.id,
+        tunnel_plans,
+        &managed.runtime_adapters,
+        &mut effective,
+    )?;
+    effective.network.port_forwarding = managed.port_forwarding.clone();
+    effective.network.ping_targets = managed.ping_targets.clone();
     validate_agent_config_shape(&effective)
         .map_err(|error| anyhow::anyhow!("composed_runtime_config_invalid:{error}"))?;
 
     Ok(AgentRuntimeConfig {
         version,
-        display_name: effective.display_name,
         backup: effective.backup,
         update: effective.update,
         execution: effective.execution,
         telemetry: effective.telemetry,
         network: effective.network,
         telemetry_interval_secs: effective.telemetry_interval_secs,
-        tags: effective.tags,
     })
 }
 
@@ -374,10 +471,10 @@ async fn push_runtime_config_job(
     Ok(response)
 }
 
-async fn apply_enabled_tunnel_plans(
-    state: &AppState,
+fn apply_enabled_tunnel_plans(
     client_id: &str,
     plans: &[TunnelPlanView],
+    runtime_adapters: &BTreeMap<String, RuntimeTunnelAdapterCommands>,
     effective: &mut AgentConfig,
 ) -> Result<(), ApiError> {
     let mut has_mutating_plan = false;
@@ -409,11 +506,12 @@ async fn apply_enabled_tunnel_plans(
                 }
                 .ok_or_else(|| ApiError::conflict("runtime_tunnel_adapter_definition_required"))?;
                 Some(
-                    state
-                        .repo
-                        .resolve_runtime_tunnel_adapter(definition_id)
-                        .await
-                        .map_err(ApiError::from)?,
+                    runtime_adapters
+                        .get(definition_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ApiError::conflict("runtime_tunnel_adapter_definition_required")
+                        })?,
                 )
             } else {
                 None
@@ -481,31 +579,14 @@ fn merge_runtime_config_value(config: &mut AgentConfig, patch: toml::Value) -> R
     Ok(())
 }
 
-pub(crate) fn validate_runtime_config_patch_toml(toml_document: &str) -> Result<()> {
-    let patch: toml::Value =
-        toml::from_str(toml_document).context("failed to parse runtime config patch TOML")?;
-    if !patch.is_table() {
-        anyhow::bail!("runtime_config_patch_toml_invalid");
-    }
-    reject_server_managed_runtime_config_keys(&patch)?;
-    reject_configuration_preset_owned_runtime_config_keys(&patch)?;
-    let mut merged = toml::Value::try_from(AgentConfig::default())
-        .context("failed to serialize base runtime config")?;
-    merge_toml_value(&mut merged, patch)?;
-    let config: AgentConfig = merged
-        .try_into()
-        .context("failed to deserialize runtime config patch")?;
-    validate_agent_config_shape(&config)
-        .map_err(|error| anyhow::anyhow!("failed to validate runtime config patch: {error}"))?;
-    Ok(())
-}
-
 fn reject_server_managed_runtime_config_keys(patch: &toml::Value) -> Result<()> {
     let Some(table) = patch.as_table() else {
         anyhow::bail!("runtime_config_patch_toml_invalid");
     };
     const IMMUTABLE_TOP_LEVEL_KEYS: &[&str] = &[
         "client_id",
+        "display_name",
+        "tags",
         "tcp_endpoints",
         "noise",
         "server_public_key",

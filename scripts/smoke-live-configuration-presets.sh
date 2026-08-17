@@ -223,14 +223,14 @@ assert_configuration_preset_runtime_visible() {
         .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
         | (.data_base64 | @base64d | fromjson)
         | .type == "config_read"
-          and (.toml | contains("proc_root = \"" + $proc_root + "\""))
-          and (.toml | contains("working_directory = \"" + $cwd + "\""))
-          and (.toml | contains("environment_policy = \"clean\""))
-          and (.toml | contains($env))
-          and (.toml | contains("pty_policy = \"disabled\""))
-          and (.toml | contains("process_cleanup = \"direct_child\""))
-          and (.toml | contains($ospf_status))
-          and (.toml | contains($ospf_update))
+          and (.runtime_config.telemetry.proc_root == $proc_root)
+          and (.runtime_config.execution.working_directory == $cwd)
+          and (.runtime_config.execution.environment_policy == "clean")
+          and (.runtime_config.execution.environment_set.VPSMAN_EXEC_POLICY_SMOKE == $env)
+          and (.runtime_config.execution.pty_policy == "disabled")
+          and (.runtime_config.execution.process_cleanup == "direct_child")
+          and (.runtime_config.network.ospf_status_command.argv | index($ospf_status) != null)
+          and (.runtime_config.network.ospf_update_command.argv | index($ospf_update) != null)
       ' <<<"$outputs_json" >/dev/null; then
       return
     fi

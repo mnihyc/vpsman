@@ -247,8 +247,7 @@ assert_runtime_config_visible() {
     .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | .type == "config_read"
-      and (.toml | contains("[network]"))
-      and (.toml | contains("status_probe_timeout_secs = " + $timeout))
+      and (.runtime_config.network.status_probe_timeout_secs == ($timeout | tonumber))
   ' <<<"$outputs_json" >/dev/null
 }
 
@@ -308,23 +307,22 @@ rejected_preset_body="$(jq -nc \
   '{
     selector_expression: ("id:" + $client),
     target_client_ids: [$client],
-    toml: $toml,
-    reason: "smoke reject preset-owned field",
-    confirmed: true,
+    patch: $toml,
+    reason: "smoke reject preset-owned field"
   }')"
 rejected_preset_json="$SMOKE_TMPDIR/rejected-preset-owned.json"
 rejected_preset_status="$(curl -sS -o "$rejected_preset_json" -w "%{http_code}" \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer $access_token" \
   -d "$rejected_preset_body" \
-  "$api_url/api/v1/runtime-config/patch")"
+  "$api_url/api/v1/runtime-config/overrides/bulk/preview")"
 if [[ "$rejected_preset_status" != "400" ]]; then
   echo "expected preset-owned runtime config patch to return 400, got $rejected_preset_status" >&2
   cat "$rejected_preset_json" >&2 || true
   exit 1
 fi
 jq -e '
-  .error == "runtime_config_patch_configuration_preset_field_forbidden"
+  .error == "runtime_config_bulk_patch_field_forbidden"
     and .status == 400
 ' "$rejected_preset_json" >/dev/null
 if grep -Fq "$rejected_proc_root" "$agent_config"; then
@@ -332,22 +330,39 @@ if grep -Fq "$rejected_proc_root" "$agent_config"; then
   exit 1
 fi
 
-reject_body="$(jq -nc \
+reject_preview_body="$(jq -nc \
   --arg client "$client_id" \
   --rawfile toml "$runtime_patch" \
   '{
     selector_expression: ("id:" + $client),
     target_client_ids: [$client],
-    toml: $toml,
+    patch: $toml,
+    reason: "smoke reject"
+  }')"
+reject_preview="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $access_token" \
+  -d "$reject_preview_body" \
+  "$api_url/api/v1/runtime-config/overrides/bulk/preview")"
+reject_body="$(jq -nc \
+  --arg client "$client_id" \
+  --rawfile toml "$runtime_patch" \
+  --arg preview_hash "$(jq -r '.preview_hash' <<<"$reject_preview")" \
+  '{
+    selector_expression: ("id:" + $client),
+    target_client_ids: [$client],
+    patch: $toml,
     reason: "smoke reject",
+    preview_hash: $preview_hash,
     confirmed: true,
+    privilege_assertion: null
   }')"
 reject_json="$SMOKE_TMPDIR/reject.json"
 reject_status="$(curl -sS -o "$reject_json" -w "%{http_code}" \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer $access_token" \
   -d "$reject_body" \
-  "$api_url/api/v1/runtime-config/patch")"
+  "$api_url/api/v1/runtime-config/overrides/bulk/apply")"
 if [[ "$reject_status" != "403" ]]; then
   echo "expected no-privilege-unlock runtime config patch to return 403, got $reject_status" >&2
   cat "$reject_json" >&2 || true
@@ -359,15 +374,25 @@ if grep -Fq "status_probe_timeout_secs = $runtime_status_probe_timeout_secs" "$a
   exit 1
 fi
 
+cli_preview_json="$(VPSMAN_API_TOKEN="$access_token" \
+  target/debug/vpsctl --api-url "$api_url" config-patch \
+    --config-file "$runtime_patch" \
+    --clients "$client_id")"
+cli_preview_hash="$(jq -er '.preview_hash' <<<"$cli_preview_json")"
 push_json="$(VPSMAN_SUPER_PASSWORD="$super_password" \
 VPSMAN_API_TOKEN="$access_token" \
   target/debug/vpsctl --api-url "$api_url" config-patch \
     --config-file "$runtime_patch" \
     --clients "$client_id" \
     --super-salt-hex "$super_salt_hex" \
+    --preview-hash "$cli_preview_hash" \
     --confirmed)"
 job_id="$(jq -r '.sync_job_ids[0]' <<<"$push_json")"
-jq -e '.target_count == 1 and (.sync_job_ids | length == 1)' <<<"$push_json" >/dev/null
+jq -e '
+  .preview.changed_target_count == 1
+    and (.preview.target_client_ids | length == 1)
+    and (.sync_job_ids | length == 1)
+' <<<"$push_json" >/dev/null
 smoke_wait_api_job_status "$api_url" "$job_id" completed 45 >/dev/null
 
 if grep -Fq "status_probe_timeout_secs = $runtime_status_probe_timeout_secs" "$agent_config"; then

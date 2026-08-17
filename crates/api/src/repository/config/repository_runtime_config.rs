@@ -1,19 +1,29 @@
 use anyhow::Result;
 use sqlx::{Postgres, Row, Transaction};
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 use vpsman_common::AgentRuntimeConfig;
 
+use crate::runtime_config_workspace::runtime_config_override_revision;
 use crate::{
     model::{
         AuditLogView, AuthContext, RuntimeConfigApplyStateRecord, RuntimeConfigApplyStateView,
-        RuntimeConfigOverrideView,
+        RuntimeConfigOverrideReplacement, RuntimeConfigOverrideView,
     },
     repository::{MemoryState, Repository},
-    repository_key_lifecycle::{
-        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
-    },
+    repository_key_lifecycle::require_visible_memory_clients,
     unix_now,
 };
+
+pub(crate) enum RuntimeConfigDesiredStateGuard {
+    Memory {
+        memory: Box<MemoryState>,
+        _agent_lifecycle: OwnedMutexGuard<()>,
+    },
+    Postgres {
+        tx: Transaction<'static, Postgres>,
+    },
+}
 
 pub(crate) async fn queue_runtime_config_apply_memory_state(
     memory: &MemoryState,
@@ -584,121 +594,331 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn upsert_runtime_config_overrides(
+    pub(crate) async fn list_runtime_config_overrides_for_clients(
         &self,
         client_ids: &[String],
-        toml: &str,
+    ) -> Result<Vec<RuntimeConfigOverrideView>> {
+        if client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self {
+            Self::Memory(memory) => {
+                let selected = client_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let hidden = memory.hidden_clients.read().await;
+                let mut overrides = memory
+                    .runtime_config_overrides
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|record| {
+                        selected.contains(record.client_id.as_str())
+                            && !hidden.contains(&record.client_id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                overrides.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+                Ok(overrides)
+            }
+            Self::Postgres(pool) => {
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
+                        override_record.client_id,
+                        override_record.toml,
+                        override_record.reason,
+                        override_record.updated_at::text AS updated_at,
+                        override_record.updated_by
+                    FROM client_runtime_config_overrides override_record
+                    JOIN visible_clients client ON client.id = override_record.client_id
+                    WHERE override_record.client_id = ANY($1::text[])
+                    ORDER BY override_record.client_id
+                    "#,
+                )
+                .bind(client_ids)
+                .fetch_all(pool)
+                .await?;
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(RuntimeConfigOverrideView {
+                            client_id: row.try_get("client_id")?,
+                            toml: row.try_get("toml")?,
+                            reason: row.try_get("reason")?,
+                            updated_at: row.try_get("updated_at")?,
+                            updated_by: row.try_get("updated_by")?,
+                        })
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Holds every desired-config input stable while a reviewed override is
+    /// re-previewed and committed. Reads continue; preset/Ping/client changes,
+    /// tunnel or adapter changes, and port-forward changes wait for the guard.
+    pub(crate) async fn lock_runtime_config_desired_state(
+        &self,
+    ) -> Result<RuntimeConfigDesiredStateGuard> {
+        match self {
+            Self::Memory(memory) => {
+                let agent_lifecycle = memory.agent_key_lifecycle.clone().lock_owned().await;
+                Ok(RuntimeConfigDesiredStateGuard::Memory {
+                    memory: Box::new(memory.clone()),
+                    _agent_lifecycle: agent_lifecycle,
+                })
+            }
+            Self::Postgres(pool) => {
+                anyhow::ensure!(
+                    pool.options().get_max_connections() >= 2,
+                    "runtime_config_desired_state_pool_capacity_too_small"
+                );
+                let mut tx = pool.begin().await?;
+                sqlx::query("SET LOCAL lock_timeout = '10s'")
+                    .execute(&mut *tx)
+                    .await?;
+                let lifecycle_locked = sqlx::query_scalar::<_, bool>(
+                    "SELECT pg_try_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                anyhow::ensure!(lifecycle_locked, "runtime_config_desired_state_busy");
+                sqlx::query(
+                    "LOCK TABLE tunnel_plans, network_adapter_definitions, port_forward_rules IN SHARE MODE",
+                )
+                .execute(&mut *tx)
+                .await?;
+                Ok(RuntimeConfigDesiredStateGuard::Postgres { tx })
+            }
+        }
+    }
+
+    /// Atomically compare-and-replace a set of sparse per-VPS overrides. This
+    /// convenience path acquires the same complete desired-state guard used by
+    /// the preview/apply routes.
+    #[cfg(test)]
+    pub(crate) async fn replace_runtime_config_overrides_cas(
+        &self,
+        replacements: &[RuntimeConfigOverrideReplacement],
         reason: &str,
         operator: &AuthContext,
     ) -> Result<Vec<RuntimeConfigOverrideView>> {
-        match self {
-            Self::Memory(memory) => {
-                let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
+        let guard = self.lock_runtime_config_desired_state().await?;
+        self.replace_runtime_config_overrides_cas_locked(guard, replacements, reason, operator)
+            .await
+    }
+
+    /// Commits against the exact desired-state snapshot protected by `guard`.
+    /// Callers may safely re-preview after acquiring the guard and before
+    /// entering this method; no contributing source can change in between.
+    pub(crate) async fn replace_runtime_config_overrides_cas_locked(
+        &self,
+        guard: RuntimeConfigDesiredStateGuard,
+        replacements: &[RuntimeConfigOverrideReplacement],
+        reason: &str,
+        operator: &AuthContext,
+    ) -> Result<Vec<RuntimeConfigOverrideView>> {
+        let mut replacements = replacements.to_vec();
+        replacements.sort_by(|left, right| left.client_id.cmp(&right.client_id));
+        replacements.dedup_by(|left, right| left.client_id == right.client_id);
+        let client_ids = replacements
+            .iter()
+            .map(|replacement| replacement.client_id.clone())
+            .collect::<Vec<_>>();
+        match guard {
+            RuntimeConfigDesiredStateGuard::Memory {
+                memory,
+                _agent_lifecycle,
+            } => {
                 require_visible_memory_clients(
-                    memory,
-                    client_ids,
+                    &memory,
+                    &client_ids,
                     "runtime_config_target_no_longer_available",
                 )
                 .await?;
-                let now = unix_now().to_string();
                 let mut overrides = memory.runtime_config_overrides.write().await;
-                for client_id in client_ids {
-                    if let Some(existing) = overrides
-                        .iter_mut()
-                        .find(|override_record| override_record.client_id == *client_id)
-                    {
-                        existing.toml = toml.to_string();
-                        existing.reason = reason.to_string();
-                        existing.updated_at = now.clone();
-                        existing.updated_by = Some(operator.operator.id);
-                    } else {
-                        overrides.push(RuntimeConfigOverrideView {
-                            client_id: client_id.clone(),
-                            toml: toml.to_string(),
-                            reason: reason.to_string(),
-                            updated_at: now.clone(),
-                            updated_by: Some(operator.operator.id),
-                        });
+                for replacement in &replacements {
+                    let current = overrides
+                        .iter()
+                        .find(|record| record.client_id == replacement.client_id);
+                    anyhow::ensure!(
+                        runtime_config_override_revision(current) == replacement.expected_revision,
+                        "runtime_config_override_review_stale"
+                    );
+                }
+                let now = unix_now().to_string();
+                for replacement in &replacements {
+                    match replacement.toml.as_deref() {
+                        Some(toml) => {
+                            if let Some(existing) = overrides
+                                .iter_mut()
+                                .find(|record| record.client_id == replacement.client_id)
+                            {
+                                existing.toml = toml.to_string();
+                                existing.reason = reason.to_string();
+                                existing.updated_at = now.clone();
+                                existing.updated_by = Some(operator.operator.id);
+                            } else {
+                                overrides.push(RuntimeConfigOverrideView {
+                                    client_id: replacement.client_id.clone(),
+                                    toml: toml.to_string(),
+                                    reason: reason.to_string(),
+                                    updated_at: now.clone(),
+                                    updated_by: Some(operator.operator.id),
+                                });
+                            }
+                        }
+                        None => {
+                            overrides.retain(|record| record.client_id != replacement.client_id)
+                        }
                     }
                 }
                 let selected = overrides
                     .iter()
-                    .filter(|override_record| client_ids.contains(&override_record.client_id))
+                    .filter(|record| client_ids.contains(&record.client_id))
                     .cloned()
                     .collect::<Vec<_>>();
                 drop(overrides);
                 let mut audits = memory.audits.write().await;
-                for client_id in client_ids {
+                for replacement in &replacements {
                     audits.push(AuditLogView {
                         id: Uuid::new_v4(),
                         actor_id: Some(operator.operator.id),
-                        action: "runtime_config.client_patch_upserted".to_string(),
-                        target: format!("client:{client_id}"),
+                        action: if replacement.toml.is_some() {
+                            "runtime_config.client_override_replaced".to_string()
+                        } else {
+                            "runtime_config.client_override_reset".to_string()
+                        },
+                        target: format!("client:{}", replacement.client_id),
                         command_hash: None,
                         metadata: runtime_config_override_audit_metadata(
-                            client_id, reason, operator,
+                            &replacement.client_id,
+                            reason,
+                            operator,
                         ),
                         created_at: now.clone(),
                     });
                 }
+                drop(_agent_lifecycle);
                 Ok(selected)
             }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                require_visible_postgres_clients_in_tx(
-                    &mut tx,
-                    client_ids,
-                    "runtime_config_target_no_longer_available",
-                )
-                .await?;
-                for client_id in client_ids {
-                    sqlx::query(
-                        r#"
-                        INSERT INTO client_runtime_config_overrides (
-                            client_id, toml, reason, updated_by, updated_at
-                        )
-                        VALUES ($1, $2, $3, $4, now())
-                        ON CONFLICT (client_id)
-                        DO UPDATE SET
-                            toml = EXCLUDED.toml,
-                            reason = EXCLUDED.reason,
-                            updated_by = EXCLUDED.updated_by,
-                            updated_at = now()
-                        "#,
+            RuntimeConfigDesiredStateGuard::Postgres { mut tx } => {
+                for client_id in &client_ids {
+                    let visible = sqlx::query_scalar::<_, String>(
+                        "SELECT id FROM clients WHERE id = $1 AND hidden_at IS NULL FOR UPDATE",
                     )
                     .bind(client_id)
-                    .bind(toml)
-                    .bind(reason)
-                    .bind(operator.operator.id)
-                    .execute(&mut *tx)
+                    .fetch_optional(&mut *tx)
                     .await?;
+                    anyhow::ensure!(
+                        visible.is_some(),
+                        "runtime_config_target_no_longer_available"
+                    );
+                }
+                for replacement in &replacements {
+                    let current = sqlx::query(
+                        r#"
+                        SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
+                        FROM client_runtime_config_overrides
+                        WHERE client_id = $1
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&replacement.client_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(runtime_config_override_from_row)
+                    .transpose()?;
+                    anyhow::ensure!(
+                        runtime_config_override_revision(current.as_ref())
+                            == replacement.expected_revision,
+                        "runtime_config_override_review_stale"
+                    );
+                }
+                for replacement in &replacements {
+                    if let Some(toml) = replacement.toml.as_deref() {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO client_runtime_config_overrides (
+                                client_id, toml, reason, updated_by, updated_at
+                            )
+                            VALUES ($1, $2, $3, $4, now())
+                            ON CONFLICT (client_id)
+                            DO UPDATE SET
+                                toml = EXCLUDED.toml,
+                                reason = EXCLUDED.reason,
+                                updated_by = EXCLUDED.updated_by,
+                                updated_at = now()
+                            "#,
+                        )
+                        .bind(&replacement.client_id)
+                        .bind(toml)
+                        .bind(reason)
+                        .bind(operator.operator.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    } else {
+                        sqlx::query(
+                            "DELETE FROM client_runtime_config_overrides WHERE client_id = $1",
+                        )
+                        .bind(&replacement.client_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
                     sqlx::query(
                         r#"
                         INSERT INTO audit_logs (id, actor_id, action, target, metadata)
-                        VALUES ($1, $2, 'runtime_config.client_patch_upserted', $3, $4)
+                        VALUES ($1, $2, $3, $4, $5)
                         "#,
                     )
                     .bind(Uuid::new_v4())
                     .bind(operator.operator.id)
-                    .bind(format!("client:{client_id}"))
+                    .bind(if replacement.toml.is_some() {
+                        "runtime_config.client_override_replaced"
+                    } else {
+                        "runtime_config.client_override_reset"
+                    })
+                    .bind(format!("client:{}", replacement.client_id))
                     .bind(runtime_config_override_audit_metadata(
-                        client_id, reason, operator,
+                        &replacement.client_id,
+                        reason,
+                        operator,
                     ))
                     .execute(&mut *tx)
                     .await?;
                 }
+                let selected = sqlx::query(
+                    r#"
+                    SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
+                    FROM client_runtime_config_overrides
+                    WHERE client_id = ANY($1::text[])
+                    ORDER BY client_id
+                    "#,
+                )
+                .bind(&client_ids)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(runtime_config_override_from_row)
+                .collect::<Result<Vec<_>>>()?;
                 tx.commit().await?;
-                self.list_runtime_config_overrides(None)
-                    .await
-                    .map(|records| {
-                        records
-                            .into_iter()
-                            .filter(|record| client_ids.contains(&record.client_id))
-                            .collect()
-                    })
+                Ok(selected)
             }
         }
     }
+}
+
+fn runtime_config_override_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<RuntimeConfigOverrideView> {
+    Ok(RuntimeConfigOverrideView {
+        client_id: row.try_get("client_id")?,
+        toml: row.try_get("toml")?,
+        reason: row.try_get("reason")?,
+        updated_at: row.try_get("updated_at")?,
+        updated_by: row.try_get("updated_by")?,
+    })
 }
 
 fn runtime_config_override_audit_metadata(

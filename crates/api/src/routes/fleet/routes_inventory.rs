@@ -16,14 +16,14 @@ use crate::{
         DeleteRuntimeConfigPatchGeneratorRequest, DeleteTagRequest, FleetSummary,
         GatewaySessionView, HistoryQuery, RenderRuntimeConfigPatchGeneratorRequest,
         RuntimeConfigApplyStateView, RuntimeConfigPatchGeneratorRenderView,
-        RuntimeConfigPatchGeneratorView, RuntimeConfigPatchRequest, RuntimeConfigPatchResponse,
-        TagMutationResponse, TagOrderState, TagView, TelemetryNetworkRateQuery,
-        TelemetryNetworkRateView, TelemetryRollupQuery, TelemetryRollupView, TelemetrySampleQuery,
-        TelemetrySampleView, TelemetryTunnelQuery, TelemetryTunnelView, UpdateAgentAliasRequest,
-        UpdateTagOrderRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        RuntimeConfigPatchGeneratorView, TagMutationResponse, TagOrderState, TagView,
+        TelemetryNetworkRateQuery, TelemetryNetworkRateView, TelemetryRollupQuery,
+        TelemetryRollupView, TelemetrySampleQuery, TelemetrySampleView, TelemetryTunnelQuery,
+        TelemetryTunnelView, UpdateAgentAliasRequest, UpdateTagOrderRequest,
+        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     privilege::{verify_privilege_intent, DbPrivilegeIntent},
-    runtime_config::{dispatch_runtime_config_for_clients, validate_runtime_config_patch_toml},
+    runtime_config::dispatch_runtime_config_for_clients,
     security::{
         operator_has_scope, require_vps_rule_selector_scope, SCOPE_CONFIG_READ, SCOPE_FLEET_READ,
     },
@@ -31,7 +31,7 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
-use vpsman_common::{payload_hash, MAX_RUNTIME_CONFIG_FIELD_BYTES};
+use vpsman_common::MAX_RUNTIME_CONFIG_FIELD_BYTES;
 
 const MAX_PATCH_GENERATOR_BODY_BYTES: usize = 16 * 1024;
 const TELEMETRY_NETWORK_RATE_LIMIT_MAX: i64 = 5_000;
@@ -445,93 +445,6 @@ pub(crate) async fn list_runtime_config_apply_states(
     ))
 }
 
-pub(crate) async fn create_server_runtime_config_patch_request(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(mut request): Json<RuntimeConfigPatchRequest>,
-) -> Result<Json<RuntimeConfigPatchResponse>, ApiError> {
-    let operator = state
-        .require_operator_role_and_scope(&headers, "operator", "config:write")
-        .await?;
-    validate_server_runtime_config_patch_request(&request)?;
-    let target_client_ids = if request.selector_expression.trim().is_empty() {
-        verified_fixed_target_ids(
-            &state,
-            &request.target_client_ids,
-            "runtime_config_patch_targets_not_found",
-        )
-        .await?
-    } else {
-        let expression = parse_selector_expression(&request.selector_expression)
-            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
-            .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
-        require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
-        state
-            .repo
-            .resolve_bulk_targets(&BulkResolveRequest {
-                selector_expression: request.selector_expression.trim().to_string(),
-            })
-            .await
-            .map_err(ApiError::internal_mapper(
-                "runtime_config_patch_targets_resolve_failed",
-                "Runtime-config patch targets could not be resolved.",
-            ))?
-            .targets
-            .into_iter()
-            .map(|agent| agent.id)
-            .collect::<Vec<_>>()
-    };
-    if target_client_ids.is_empty() {
-        return Err(ApiError::bad_request(
-            "runtime_config_patch_targets_required",
-        ));
-    }
-    request.target_client_ids = target_client_ids;
-    let patch_hash = payload_hash(request.toml.as_bytes());
-    let selector_expression = request.selector_expression.trim().to_string();
-    let selector_for_intent =
-        (!selector_expression.is_empty()).then_some(selector_expression.as_str());
-    let intent = DbPrivilegeIntent::new(
-        "runtime_config.patch",
-        "runtime_config",
-        selector_for_intent,
-        &request.target_client_ids,
-        true,
-        Some(&patch_hash),
-    );
-    verify_privilege_intent(&state, &intent, request.privilege_assertion.clone()).await?;
-    let reason = request
-        .reason
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("operator_bulk_runtime_config_patch")
-        .to_string();
-    let overrides = state
-        .repo
-        .upsert_runtime_config_overrides(
-            &request.target_client_ids,
-            &request.toml,
-            &reason,
-            &operator,
-        )
-        .await
-        .map_err(runtime_config_override_error)?;
-    let sync = dispatch_runtime_config_for_clients(
-        &state,
-        &operator,
-        request.target_client_ids.clone(),
-        &reason,
-    )
-    .await;
-    Ok(Json(RuntimeConfigPatchResponse {
-        target_count: request.target_client_ids.len(),
-        overrides,
-        sync_job_ids: sync.iter().filter_map(|outcome| outcome.job_id).collect(),
-        sync,
-    }))
-}
-
 fn validate_client_id(client_id: &str) -> Result<(), ApiError> {
     if client_id.is_empty() || client_id.len() > 128 {
         return Err(ApiError::bad_request("invalid_client_id"));
@@ -752,74 +665,6 @@ fn validate_short_required_value(value: &str, error: &'static str) -> Result<(),
         return Err(ApiError::bad_request(error));
     }
     Ok(())
-}
-
-fn validate_server_runtime_config_patch_request(
-    request: &RuntimeConfigPatchRequest,
-) -> Result<(), ApiError> {
-    if !request.confirmed {
-        return Err(ApiError::conflict(
-            "runtime_config_patch_confirmation_required",
-        ));
-    }
-    if request.selector_expression.trim().is_empty() && request.target_client_ids.is_empty() {
-        return Err(ApiError::bad_request(
-            "runtime_config_patch_targets_required",
-        ));
-    }
-    if !request.selector_expression.trim().is_empty() {
-        parse_selector_expression(&request.selector_expression)
-            .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
-    }
-    if request.toml.trim().is_empty()
-        || request.toml.len() > vpsman_common::MAX_RUNTIME_CONFIG_PATCH_BYTES
-    {
-        return Err(ApiError::bad_request("runtime_config_patch_toml_invalid"));
-    }
-    validate_runtime_config_patch_toml(&request.toml)
-        .map_err(runtime_config_patch_validation_error)?;
-    if let Some(reason) = request.reason.as_deref() {
-        if reason.len() > vpsman_common::MAX_RUNTIME_CONFIG_REASON_BYTES
-            || reason.chars().any(char::is_control)
-        {
-            return Err(ApiError::bad_request("runtime_config_patch_reason_invalid"));
-        }
-    }
-    Ok(())
-}
-
-fn runtime_config_patch_validation_error(error: anyhow::Error) -> ApiError {
-    let message = error.to_string();
-    if message.contains("runtime_config_patch_bootstrap_field_forbidden") {
-        ApiError::bad_request("runtime_config_patch_bootstrap_field_forbidden")
-    } else if message.contains("runtime_config_patch_configuration_preset_field_forbidden") {
-        ApiError::bad_request("runtime_config_patch_configuration_preset_field_forbidden")
-    } else if message.contains("runtime_config_patch_managed_tunnel_plans_forbidden") {
-        ApiError::bad_request("runtime_config_patch_managed_tunnel_plans_forbidden")
-    } else if message.contains("runtime_config_patch_managed_port_forwarding_forbidden") {
-        ApiError::bad_request("runtime_config_patch_managed_port_forwarding_forbidden")
-    } else if message.contains("runtime_config_patch_toml_invalid")
-        || message.contains("failed to parse runtime config patch TOML")
-    {
-        ApiError::bad_request("runtime_config_patch_toml_invalid")
-    } else {
-        ApiError::bad_request("runtime_config_patch_invalid")
-    }
-}
-
-fn runtime_config_override_error(error: anyhow::Error) -> ApiError {
-    if error
-        .to_string()
-        .contains("runtime_config_target_no_longer_available")
-    {
-        ApiError::conflict("runtime_config_target_no_longer_available")
-    } else {
-        ApiError::internal(
-            "runtime_config_override_mutation_failed",
-            "The runtime configuration override could not be completed.",
-            error,
-        )
-    }
 }
 
 async fn verified_fixed_target_ids(

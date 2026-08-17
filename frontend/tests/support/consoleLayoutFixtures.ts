@@ -3580,6 +3580,11 @@ export async function installConsoleApiMock(
     fleetSnapshotAfterDeleteDelayMs?: number;
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
+    runtimeConfigBulkPreviewStateDrift?: boolean;
+    runtimeConfigBulkNoOpClientIds?: string[];
+    runtimeConfigBulkStorageOnlyClientIds?: string[];
+    runtimeConfigShadowedOverrideClientIds?: string[];
+    runtimeConfigWorkspaceRefreshFailureAfterApply?: boolean;
     hostServiceInventoryOverride?: ReturnType<typeof hostServiceInventory>;
     hostStorageInventoryOverride?: ReturnType<typeof hostStorageInventory>;
     hostPackageUpdatePlansOverride?: ReturnType<typeof hostPackageUpdatePlans>;
@@ -3663,6 +3668,11 @@ export async function installConsoleApiMock(
       networkAdapterDefinitionsFixture,
       runtimeConfigApplyStatesFixture,
       runtimeConfigApplyFailureFixture,
+      runtimeConfigBulkPreviewStateDriftFixture,
+      runtimeConfigBulkNoOpClientIdsFixture,
+      runtimeConfigBulkStorageOnlyClientIdsFixture,
+      runtimeConfigShadowedOverrideClientIdsFixture,
+      runtimeConfigWorkspaceRefreshFailureAfterApplyFixture,
       runtimeConfigPatchGeneratorsFixture,
       jobCommandTypeByOperationTypeFixture,
       commandTemplatesFixture,
@@ -3929,6 +3939,8 @@ export async function installConsoleApiMock(
       );
       let nextTagOrderGetGate: Promise<void> | null = null;
       let releaseNextTagOrderGet: (() => void) | null = null;
+      let nextRuntimeConfigApplyGate: Promise<void> | null = null;
+      let releaseNextRuntimeConfigApply: (() => void) | null = null;
       Object.defineProperty(window, "__vpsmanSetTagOrderState", {
         configurable: true,
         value: (state: typeof currentTagOrderState) => {
@@ -3948,6 +3960,21 @@ export async function installConsoleApiMock(
         value: () => {
           releaseNextTagOrderGet?.();
           releaseNextTagOrderGet = null;
+        },
+      });
+      Object.defineProperty(window, "__vpsmanGateNextRuntimeConfigApply", {
+        configurable: true,
+        value: () => {
+          nextRuntimeConfigApplyGate = new Promise<void>((resolve) => {
+            releaseNextRuntimeConfigApply = resolve;
+          });
+        },
+      });
+      Object.defineProperty(window, "__vpsmanReleaseRuntimeConfigApply", {
+        configurable: true,
+        value: () => {
+          releaseNextRuntimeConfigApply?.();
+          releaseNextRuntimeConfigApply = null;
         },
       });
       const visibleTunnelPlans = () =>
@@ -4044,6 +4071,387 @@ export async function installConsoleApiMock(
         configurable: true,
         value: requests,
       });
+      const runtimeInheritedConfig = {
+        execution: {
+          environment_set: { RUST_LOG: "info" },
+          process_inventory_source: "linux_procfs",
+        },
+        network: {
+          runtime_ip_argv: ["/sbin/ip"],
+        },
+        telemetry: { source: "linux_procfs" },
+        telemetry_interval_secs: 30,
+        update: {
+          unmanaged_activate: true,
+          unmanaged_enabled: false,
+          unmanaged_interval_secs: 86400,
+        },
+      };
+      const runtimeOverridesByClient = new Map<string, Record<string, unknown>>(
+        [
+          [
+            "agent-sfo-01",
+            {
+              network: { runtime_ip_argv: [] },
+              telemetry_interval_secs: 45,
+            },
+          ],
+        ],
+      );
+      const runtimeOverrideTomlByClient = new Map<string, string>([
+        [
+          "agent-sfo-01",
+          "telemetry_interval_secs = 45\n\n[network]\nruntime_ip_argv = []\n",
+        ],
+      ]);
+      for (const clientId of runtimeConfigShadowedOverrideClientIdsFixture) {
+        runtimeOverridesByClient.set(clientId, {
+          ...(runtimeOverridesByClient.get(clientId) ?? {}),
+          telemetry: { source: "custom_command" },
+        });
+        runtimeOverrideTomlByClient.set(
+          clientId,
+          `${runtimeOverrideTomlByClient.get(clientId) ?? ""}\n[telemetry]\nsource = "custom_command"\n`,
+        );
+      }
+      const runtimeOverrideRevisionByClient = new Map<string, string>([
+        ["agent-sfo-01", "4"],
+      ]);
+      const runtimeWorkspaceRefreshFailures = new Set<string>();
+      const mergeRuntimeFixture = (
+        inherited: Record<string, unknown>,
+        override: Record<string, unknown>,
+      ): Record<string, unknown> => {
+        const merged = structuredClone(inherited);
+        for (const [key, value] of Object.entries(override)) {
+          const inheritedValue = merged[key];
+          merged[key] =
+            value &&
+            typeof value === "object" &&
+            !Array.isArray(value) &&
+            inheritedValue &&
+            typeof inheritedValue === "object" &&
+            !Array.isArray(inheritedValue)
+              ? mergeRuntimeFixture(
+                  inheritedValue as Record<string, unknown>,
+                  value as Record<string, unknown>,
+                )
+              : structuredClone(value);
+        }
+        return merged;
+      };
+      const runtimeFixtureChanges = (
+        before: unknown,
+        after: unknown,
+        path = "",
+      ): Array<{
+        after: unknown;
+        before: unknown;
+        kind: string;
+        path: string;
+        pointer: string;
+      }> => {
+        if (JSON.stringify(before) === JSON.stringify(after)) return [];
+        if (
+          before &&
+          after &&
+          typeof before === "object" &&
+          typeof after === "object" &&
+          !Array.isArray(before) &&
+          !Array.isArray(after)
+        ) {
+          const keys = new Set([
+            ...Object.keys(before as Record<string, unknown>),
+            ...Object.keys(after as Record<string, unknown>),
+          ]);
+          return [...keys].flatMap((key) =>
+            runtimeFixtureChanges(
+              (before as Record<string, unknown>)[key],
+              (after as Record<string, unknown>)[key],
+              path ? `${path}.${key}` : key,
+            ),
+          );
+        }
+        return [
+          {
+            after: after ?? null,
+            before: before ?? null,
+            kind:
+              before === undefined
+                ? "added"
+                : after === undefined
+                  ? "removed"
+                  : "changed",
+            path,
+            pointer: `/${path.replace(/\./g, "/")}`,
+          },
+        ];
+      };
+      const runtimeOverrideHasPath = (
+        value: Record<string, unknown>,
+        path: string,
+      ) => {
+        let current: unknown = value;
+        for (const segment of path.split(".")) {
+          if (
+            !current ||
+            typeof current !== "object" ||
+            Array.isArray(current) ||
+            !Object.prototype.hasOwnProperty.call(current, segment)
+          ) {
+            return false;
+          }
+          current = (current as Record<string, unknown>)[segment];
+        }
+        return true;
+      };
+      const runtimeFieldSchema = [
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "section",
+          editable: false,
+          enum_values: [],
+          label: "Execution",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "execution",
+          pointer: "/execution",
+          unit: null,
+          value_type: "object",
+        },
+        {
+          allowed_operations: [],
+          collection: true,
+          control: "map",
+          editable: false,
+          enum_values: [],
+          label: "Environment set",
+          owner: "configuration_preset",
+          owner_link: "/config/presets",
+          path: "execution.environment_set",
+          pointer: "/execution/environment_set",
+          unit: null,
+          value_type: "object",
+        },
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "text",
+          editable: false,
+          enum_values: ["linux_procfs", "custom_command"],
+          label: "Process inventory source",
+          owner: "configuration_preset",
+          owner_link: "/config/presets",
+          path: "execution.process_inventory_source",
+          pointer: "/execution/process_inventory_source",
+          unit: null,
+          value_type: "string",
+        },
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "section",
+          editable: false,
+          enum_values: [],
+          label: "Network",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "network",
+          pointer: "/network",
+          unit: null,
+          value_type: "object",
+        },
+        {
+          allowed_operations: [
+            "set",
+            "inherit",
+            "append",
+            "remove_item",
+            "reorder",
+          ],
+          collection: true,
+          control: "text_list",
+          editable: true,
+          enum_values: [],
+          label: "Runtime IP arguments",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "network.runtime_ip_argv",
+          pointer: "/network/runtime_ip_argv",
+          unit: null,
+          value_type: "array",
+        },
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "section",
+          editable: false,
+          enum_values: [],
+          label: "Telemetry",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "telemetry",
+          pointer: "/telemetry",
+          unit: null,
+          value_type: "object",
+        },
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "text",
+          editable: false,
+          enum_values: [
+            "linux_procfs",
+            "custom_command",
+            "linux_procfs_and_custom_command",
+          ],
+          label: "Source",
+          owner: "configuration_preset",
+          owner_link: "/config/presets",
+          path: "telemetry.source",
+          pointer: "/telemetry/source",
+          unit: null,
+          value_type: "string",
+        },
+        {
+          allowed_operations: ["set", "inherit"],
+          collection: false,
+          control: "number",
+          editable: true,
+          enum_values: [],
+          label: "Telemetry interval",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "telemetry_interval_secs",
+          pointer: "/telemetry_interval_secs",
+          unit: "seconds",
+          value_type: "integer",
+        },
+        {
+          allowed_operations: [],
+          collection: false,
+          control: "section",
+          editable: false,
+          enum_values: [],
+          label: "Agent update",
+          owner: "runtime_override",
+          owner_link: null,
+          path: "update",
+          pointer: "/update",
+          unit: null,
+          value_type: "object",
+        },
+        ...[
+          ["unmanaged_activate", "Activate update", "boolean", "toggle"],
+          ["unmanaged_enabled", "Unmanaged updates", "boolean", "toggle"],
+          ["unmanaged_interval_secs", "Update interval", "integer", "number"],
+        ].map(([key, label, valueType, control]) => ({
+          allowed_operations: ["set", "inherit"],
+          collection: false,
+          control,
+          editable: true,
+          enum_values: [],
+          label,
+          owner: "runtime_override",
+          owner_link: null,
+          path: `update.${key}`,
+          pointer: `/update/${key}`,
+          unit: key.endsWith("_secs") ? "seconds" : null,
+          value_type: valueType,
+        })),
+      ];
+      const runtimeWorkspaceFixture = (clientId: string) => {
+        const savedOverride = runtimeOverridesByClient.get(clientId) ?? {};
+        const effectiveSavedOverride = structuredClone(savedOverride);
+        if (runtimeConfigShadowedOverrideClientIdsFixture.includes(clientId)) {
+          const telemetry =
+            (effectiveSavedOverride.telemetry as
+              | Record<string, unknown>
+              | undefined) ?? null;
+          if (telemetry) {
+            delete telemetry.source;
+            if (Object.keys(telemetry).length === 0) {
+              delete effectiveSavedOverride.telemetry;
+            }
+          }
+        }
+        const desired = mergeRuntimeFixture(
+          runtimeInheritedConfig,
+          effectiveSavedOverride,
+        );
+        const applyState =
+          runtimeConfigApplyStatesFixture.find(
+            (state) => state.client_id === clientId,
+          ) ?? null;
+        const desiredNetwork = desired.network as {
+          runtime_ip_argv: string[];
+        };
+        return {
+          apply_state: applyState,
+          client_id: clientId,
+          desired,
+          desired_content_hash:
+            applyState?.pending_content_hash ??
+            applyState?.applied_content_hash ??
+            "c".repeat(64),
+          desired_hash: "d".repeat(64),
+          desired_toml:
+            `telemetry_interval_secs = ${String(desired.telemetry_interval_secs)}\n\n` +
+            '[execution]\nprocess_inventory_source = "linux_procfs"\n\n' +
+            '[execution.environment_set]\nRUST_LOG = "info"\n\n' +
+            `[network]\nruntime_ip_argv = ${JSON.stringify(desiredNetwork.runtime_ip_argv)}\n\n` +
+            '[telemetry]\nsource = "linux_procfs"\n\n' +
+            "[update]\nunmanaged_enabled = false\nunmanaged_interval_secs = 86400\nunmanaged_activate = true\n",
+          field_schema: runtimeFieldSchema,
+          generated_at: "2026-06-02T10:07:00Z",
+          inherited: runtimeInheritedConfig,
+          override_revision:
+            runtimeOverrideRevisionByClient.get(clientId) ?? "0",
+          provenance: runtimeFieldSchema.map((field) => {
+            const overridden = runtimeOverrideHasPath(
+              savedOverride,
+              field.path,
+            );
+            const presetOwned = field.owner === "configuration_preset";
+            const shadowedOverride = overridden && presetOwned;
+            return {
+              locked: field.owner !== "runtime_override",
+              owner: field.owner,
+              owner_link: field.owner_link,
+              path: field.path,
+              pointer: field.pointer,
+              shadowed_override: shadowedOverride,
+              source:
+                overridden && !shadowedOverride
+                  ? "VPS override"
+                  : presetOwned
+                    ? "Preset: fixture-baseline"
+                    : "Default",
+              source_chain: [
+                "Default",
+                ...(presetOwned ? ["Preset: fixture-baseline"] : []),
+                ...(overridden ? ["VPS override"] : []),
+              ],
+            };
+          }),
+          saved_override: {
+            diagnostic: null,
+            exists: runtimeOverridesByClient.has(clientId),
+            parsed: savedOverride,
+            reason: runtimeOverridesByClient.has(clientId)
+              ? "Lower-latency monitoring"
+              : null,
+            toml: runtimeOverrideTomlByClient.get(clientId) ?? "",
+            updated_at: runtimeOverridesByClient.has(clientId)
+              ? "2026-06-02T10:06:00Z"
+              : null,
+            updated_by: runtimeOverridesByClient.has(clientId)
+              ? "fixture-admin"
+              : null,
+          },
+        };
+      };
       const fixtureTotpSecret = "JBSWY3DPEHPK3PXP";
       const decodeFixtureBase32 = (value: string) => {
         const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
@@ -7193,6 +7601,142 @@ export async function installConsoleApiMock(
             })),
           });
         }
+        const runtimeWorkspaceMatch = pathname.match(
+          /^\/api\/v1\/runtime-config\/clients\/([^/]+)\/workspace$/,
+        );
+        if (runtimeWorkspaceMatch && method === "GET") {
+          const clientId = decodeURIComponent(runtimeWorkspaceMatch[1]);
+          if (runtimeWorkspaceRefreshFailures.delete(clientId)) {
+            return jsonResponse(
+              { error: "runtime_config_workspace_refresh_unavailable" },
+              503,
+            );
+          }
+          return jsonResponse(runtimeWorkspaceFixture(clientId));
+        }
+        const runtimeOverrideMatch = pathname.match(
+          /^\/api\/v1\/runtime-config\/clients\/([^/]+)\/override\/(preview|apply)$/,
+        );
+        if (runtimeOverrideMatch && method === "POST") {
+          const clientId = decodeURIComponent(runtimeOverrideMatch[1]);
+          const action = runtimeOverrideMatch[2];
+          const body = (await readJsonBody(input, init)) as {
+            candidate?: {
+              toml?: string;
+              type?: string;
+              value?: Record<string, unknown>;
+            };
+            reason?: string | null;
+          };
+          requests.runtimeConfigPatches.push({ ...body, body, pathname });
+          if (action === "apply") {
+            const gate = nextRuntimeConfigApplyGate;
+            nextRuntimeConfigApplyGate = null;
+            if (gate) await gate;
+          }
+          const beforeWorkspace = runtimeWorkspaceFixture(clientId);
+          const candidate = body.candidate ?? { type: "structured", value: {} };
+          let candidateOverride: Record<string, unknown>;
+          let canonicalToml = "";
+          if (candidate.type === "reset") {
+            candidateOverride = {};
+          } else if (candidate.type === "toml") {
+            canonicalToml = candidate.toml ?? "";
+            if (/invalid\s*=\s*\[/u.test(canonicalToml)) {
+              return jsonResponse(
+                { error: "runtime_config_override_toml_invalid" },
+                422,
+              );
+            }
+            candidateOverride = /=/u.test(canonicalToml)
+              ? structuredClone(runtimeOverridesByClient.get(clientId) ?? {})
+              : {};
+            const interval = canonicalToml.match(
+              /^\s*telemetry_interval_secs\s*=\s*(\d+)/mu,
+            )?.[1];
+            if (interval) {
+              candidateOverride.telemetry_interval_secs = Number(interval);
+            }
+            if (/runtime_ip_argv\s*=\s*\[\s*\]/u.test(canonicalToml)) {
+              const network =
+                (candidateOverride.network as Record<string, unknown>) ?? {};
+              candidateOverride.network = {
+                ...network,
+                runtime_ip_argv: [],
+              };
+            }
+          } else {
+            candidateOverride = structuredClone(candidate.value ?? {});
+            canonicalToml = JSON.stringify(candidateOverride, null, 2);
+          }
+          const deletesOverride = Object.keys(candidateOverride).length === 0;
+          const canonicalOverrideToml = deletesOverride ? null : canonicalToml;
+          const desired = mergeRuntimeFixture(
+            runtimeInheritedConfig,
+            candidateOverride,
+          );
+          const changes = runtimeFixtureChanges(
+            beforeWorkspace.desired,
+            desired,
+          );
+          const preview = {
+            candidate_override: candidateOverride,
+            canonical_toml: canonicalOverrideToml,
+            changes,
+            client_id: clientId,
+            desired,
+            desired_hash: beforeWorkspace.desired_hash,
+            desired_toml: beforeWorkspace.desired_toml,
+            override_revision: beforeWorkspace.override_revision,
+            preview_hash: "e".repeat(64),
+            provenance: beforeWorkspace.provenance,
+            storage_only:
+              changes.length === 0 &&
+              canonicalOverrideToml !==
+                (beforeWorkspace.saved_override.exists
+                  ? beforeWorkspace.saved_override.toml
+                  : null),
+            recovery_sync_required: false,
+          };
+          if (action === "preview") return jsonResponse(preview);
+          if (deletesOverride) {
+            runtimeOverridesByClient.delete(clientId);
+            runtimeOverrideTomlByClient.delete(clientId);
+          } else {
+            runtimeOverridesByClient.set(clientId, candidateOverride);
+            runtimeOverrideTomlByClient.set(clientId, canonicalToml);
+          }
+          runtimeOverrideRevisionByClient.set(
+            clientId,
+            String(Number(beforeWorkspace.override_revision) + 1),
+          );
+          if (runtimeConfigWorkspaceRefreshFailureAfterApplyFixture) {
+            runtimeWorkspaceRefreshFailures.add(clientId);
+          }
+          return jsonResponse({
+            override_record: deletesOverride
+              ? null
+              : {
+                  client_id: clientId,
+                  reason: body.reason ?? "Fixture override",
+                  toml: canonicalToml,
+                  updated_at: "2026-06-02T10:10:00Z",
+                  updated_by: "fixture-admin",
+                },
+            preview,
+            sync:
+              changes.length > 0
+                ? [
+                    {
+                      client_id: clientId,
+                      error: null,
+                      job_id: "98989898-9898-4989-8989-989898989898",
+                      status: "queued",
+                    },
+                  ]
+                : [],
+          });
+        }
         if (pathname === "/api/v1/effective-agent-config" && method === "GET") {
           const clientId =
             new URL(url, window.location.href).searchParams.get("client_id") ??
@@ -9255,26 +9799,93 @@ export async function installConsoleApiMock(
             targets,
           });
         }
-        if (pathname === "/api/v1/runtime-config/patch" && method === "POST") {
-          const body = await readJsonBody(input, init);
-          requests.runtimeConfigPatches.push(body);
-          const targets = resolveBulkTargets(body);
-          return jsonResponse({
-            target_count: targets.length,
-            overrides: targets.map((agent) => ({
+        if (
+          (pathname === "/api/v1/runtime-config/overrides/bulk/preview" ||
+            pathname === "/api/v1/runtime-config/overrides/bulk/apply") &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            patch?: string;
+            reason?: string | null;
+            selector_expression?: string;
+            target_client_ids?: string[];
+          };
+          requests.runtimeConfigPatches.push({ ...body, body, pathname });
+          const targetIds = body.target_client_ids?.length
+            ? body.target_client_ids
+            : resolveBulkTargets(body).map((agent) => agent.id);
+          const targets = agentsFixture.filter((agent) =>
+            targetIds.includes(agent.id),
+          );
+          const noOpClientIds = new Set(runtimeConfigBulkNoOpClientIdsFixture);
+          const storageOnlyClientIds = new Set(
+            runtimeConfigBulkStorageOnlyClientIdsFixture,
+          );
+          const changedTargets = targets.filter(
+            (agent) => !noOpClientIds.has(agent.id),
+          );
+          const syncedTargets = changedTargets.filter(
+            (agent) => !storageOnlyClientIds.has(agent.id),
+          );
+          const previewStateDrifted =
+            runtimeConfigBulkPreviewStateDriftFixture &&
+            pathname.endsWith("/preview") &&
+            Boolean(body.target_client_ids?.length);
+          const preview = {
+            changed_target_count: changedTargets.length,
+            operations: (body.patch ?? "")
+              .split(/\r?\n/u)
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("-"))
+              .map((line) => ({
+                operation: line.startsWith("-[")
+                  ? "delete_table"
+                  : "delete_field",
+                path: line.replace(/^-\[?/u, "").replace(/\]$/u, ""),
+              })),
+            preview_hash: (previewStateDrifted ? "e" : "f").repeat(64),
+            selector_expression: body.selector_expression ?? "",
+            target_client_ids: targetIds,
+            targets: targets.map((agent) => ({
+              candidate_override_hash: "a".repeat(64),
+              changes: noOpClientIds.has(agent.id)
+                ? []
+                : storageOnlyClientIds.has(agent.id)
+                  ? []
+                  : [
+                      {
+                        after: null,
+                        before: 45,
+                        kind: (body.patch ?? "").includes("-")
+                          ? "removed"
+                          : "changed",
+                        path: "telemetry_interval_secs",
+                        pointer: "/telemetry_interval_secs",
+                      },
+                    ],
               client_id: agent.id,
-              reason:
-                (body as { reason?: string | null }).reason ??
-                "Runtime config patch",
-              toml: (body as { toml?: string }).toml ?? "",
+              desired_hash: (previewStateDrifted ? "c" : "d").repeat(64),
+              no_op: noOpClientIds.has(agent.id),
+              override_revision:
+                runtimeOverrideRevisionByClient.get(agent.id) ?? "0",
+              storage_only: storageOnlyClientIds.has(agent.id),
+            })),
+          };
+          if (pathname.endsWith("/preview")) return jsonResponse(preview);
+          return jsonResponse({
+            overrides: changedTargets.map((agent) => ({
+              client_id: agent.id,
+              reason: body.reason ?? "VPS override patch",
+              toml: body.patch ?? "",
               updated_at: "2026-06-02T10:08:00Z",
               updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
             })),
-            sync_job_ids: targets.map(
+            preview,
+            sync_job_ids: syncedTargets.map(
               (_, index) =>
                 `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
             ),
-            sync: targets.map((agent, index) => ({
+            sync: syncedTargets.map((agent, index) => ({
               client_id: agent.id,
               error: null,
               job_id: `99999999-9999-4999-8999-${String(index + 1).padStart(12, "0")}`,
@@ -9533,11 +10144,12 @@ export async function installConsoleApiMock(
                 created_at: "2026-05-31T10:09:00Z",
                 data_base64: btoa(
                   JSON.stringify({
-                    config_sha256_hex: "b".repeat(64),
-                    toml:
-                      'client_id = "' +
-                      target.client_id +
-                      '"\n\n[update]\nunmanaged_enabled = false\nunmanaged_version_url = "https://github.com/mnihyc/vpsman/releases/latest/download/version.json"\nunmanaged_interval_secs = 86400\nunmanaged_jitter_secs = 86400\nunmanaged_activate = true\nunmanaged_restart_agent = true\n',
+                    runtime_config: mergeRuntimeFixture(
+                      runtimeInheritedConfig,
+                      runtimeOverridesByClient.get(target.client_id) ?? {},
+                    ),
+                    scope: "effective_runtime_config",
+                    status: "read",
                     type: "config_read",
                   }),
                 ),
@@ -9952,6 +10564,16 @@ export async function installConsoleApiMock(
       runtimeConfigApplyStatesFixture: runtimeConfigApplyStates,
       runtimeConfigApplyFailureFixture:
         options.runtimeConfigApplyFailure ?? false,
+      runtimeConfigBulkPreviewStateDriftFixture:
+        options.runtimeConfigBulkPreviewStateDrift ?? false,
+      runtimeConfigBulkNoOpClientIdsFixture:
+        options.runtimeConfigBulkNoOpClientIds ?? [],
+      runtimeConfigBulkStorageOnlyClientIdsFixture:
+        options.runtimeConfigBulkStorageOnlyClientIds ?? [],
+      runtimeConfigShadowedOverrideClientIdsFixture:
+        options.runtimeConfigShadowedOverrideClientIds ?? [],
+      runtimeConfigWorkspaceRefreshFailureAfterApplyFixture:
+        options.runtimeConfigWorkspaceRefreshFailureAfterApply ?? false,
       runtimeConfigPatchGeneratorsFixture: runtimeConfigPatchGenerators,
       jobCommandTypeByOperationTypeFixture: JOB_COMMAND_TYPE_BY_OPERATION_TYPE,
       commandTemplatesFixture: commandTemplates,

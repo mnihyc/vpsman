@@ -214,15 +214,35 @@ Every update must keep these boundaries explicit:
 - Keep configuration presets limited to supported agent behaviors. Workflow
   status, backup storage, update artifacts, and tunnel adapters are separate
   product objects, not synthetic presets.
+- Keep server inventory identity out of runtime configuration. VPS display
+  names and tags belong to `AgentView`/inventory and selectors; agents receive
+  neither field, and command arguments must not depend on the removed
+  `{display_name}` or `{tags_csv}` placeholders.
 - System presets are immutable. A VPS with no explicit override inherits the
   system default; do not materialize a fake assignment row or timestamp.
+- Treat a single-VPS override as one complete sparse replacement document.
+  Removing a leaf means inherit, an explicitly empty array remains an override,
+  and an empty document deletes the row. Advanced TOML edits the same document;
+  preserve invalid raw text until review reports the error instead of silently
+  replacing or stripping it.
+- Treat bulk override input as a distinct incremental language. Assignments set
+  leaves or whole arrays; `-field.path` and `-[section.path]` remove existing
+  overrides. Resolve and freeze targets at preview, then apply exactly those IDs
+  atomically. Never infer replacement versus incremental semantics from target
+  count or reuse one request shape for both.
+- Keep the Rust field-policy registry authoritative for tree metadata, ownership,
+  supported operations, and patch validation. Locked preset- or server-managed
+  fields stay visible with provenance; do not duplicate an incomplete schema in
+  TypeScript.
 - Selector/tag targeting is resolved for each preview/apply operation and is
   not a live assignment rule. Sign the exact backend-preview target IDs, and
   reject apply when the preview hash no longer matches. Headless confirmation
   must consume the hash shown in the separately human-reviewed preview; an
   internal replacement preview must never become implicit authorization.
-- Preserve desired selection, effective composed config, runtime apply state,
-  and readiness evidence as separate facts.
+- Preserve inherited config, the saved sparse override, final desired config,
+  staged changes, runtime apply state, and optional live evidence as separate
+  facts. Preview hashes and override/desired revisions are concurrency guards,
+  not decorative review labels.
 - Runtime-tunnel adapter definitions and optional per-plan OSPF command
   overrides belong to Tunnel plans. A referenced definition is replaced
   through a reviewed plan change, not mutated behind the plan.

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 use vpsman_common::{AgentRuntimeConfig, PrivilegeAssertion};
 
@@ -69,25 +70,191 @@ impl RuntimeConfigApplyStateRecord {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct RuntimeConfigPatchRequest {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum RuntimeConfigOverrideCandidate {
+    Toml { toml: String },
+    Structured { value: Value },
+    Reset,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeConfigOverridePreviewRequest {
+    pub(crate) candidate: RuntimeConfigOverrideCandidate,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeConfigOverrideApplyRequest {
+    pub(crate) candidate: RuntimeConfigOverrideCandidate,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    pub(crate) expected_override_revision: String,
+    pub(crate) expected_desired_hash: String,
+    pub(crate) preview_hash: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
+    pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeConfigBulkPreviewRequest {
     #[serde(default)]
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
-    pub(crate) toml: String,
+    pub(crate) patch: String,
     #[serde(default)]
     pub(crate) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeConfigBulkApplyRequest {
+    #[serde(default)]
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) patch: String,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
+    pub(crate) preview_hash: String,
     #[serde(default)]
     pub(crate) confirmed: bool,
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct RuntimeConfigPatchResponse {
-    pub(crate) target_count: usize,
+pub(crate) struct RuntimeConfigSavedOverrideView {
+    pub(crate) exists: bool,
+    pub(crate) toml: String,
+    pub(crate) parsed: Option<Value>,
+    pub(crate) diagnostic: Option<String>,
+    pub(crate) reason: Option<String>,
+    pub(crate) updated_at: Option<String>,
+    pub(crate) updated_by: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigFieldPolicyView {
+    pub(crate) pointer: String,
+    pub(crate) path: String,
+    pub(crate) label: String,
+    pub(crate) value_type: String,
+    pub(crate) control: String,
+    pub(crate) editable: bool,
+    pub(crate) collection: bool,
+    pub(crate) owner: String,
+    pub(crate) owner_link: Option<String>,
+    pub(crate) allowed_operations: Vec<String>,
+    pub(crate) enum_values: Vec<String>,
+    pub(crate) unit: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigProvenanceView {
+    pub(crate) pointer: String,
+    pub(crate) path: String,
+    pub(crate) source: String,
+    pub(crate) source_chain: Vec<String>,
+    pub(crate) locked: bool,
+    pub(crate) owner: String,
+    pub(crate) owner_link: Option<String>,
+    pub(crate) shadowed_override: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigWorkspaceView {
+    pub(crate) client_id: String,
+    pub(crate) inherited: Value,
+    pub(crate) desired: Value,
+    pub(crate) desired_toml: String,
+    pub(crate) saved_override: RuntimeConfigSavedOverrideView,
+    pub(crate) apply_state: Option<RuntimeConfigApplyStateView>,
+    pub(crate) override_revision: String,
+    pub(crate) desired_content_hash: String,
+    pub(crate) desired_hash: String,
+    pub(crate) provenance: Vec<RuntimeConfigProvenanceView>,
+    pub(crate) field_schema: Vec<RuntimeConfigFieldPolicyView>,
+    pub(crate) generated_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigPathChangeView {
+    pub(crate) pointer: String,
+    pub(crate) path: String,
+    pub(crate) before: Option<Value>,
+    pub(crate) after: Option<Value>,
+    pub(crate) kind: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigOverridePreviewView {
+    pub(crate) client_id: String,
+    pub(crate) canonical_toml: Option<String>,
+    pub(crate) candidate_override: Value,
+    pub(crate) desired: Value,
+    pub(crate) desired_toml: String,
+    pub(crate) provenance: Vec<RuntimeConfigProvenanceView>,
+    pub(crate) changes: Vec<RuntimeConfigPathChangeView>,
+    pub(crate) storage_only: bool,
+    pub(crate) recovery_sync_required: bool,
+    pub(crate) override_revision: String,
+    pub(crate) desired_hash: String,
+    pub(crate) preview_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigOverrideApplyResponse {
+    pub(crate) preview: RuntimeConfigOverridePreviewView,
+    pub(crate) override_record: Option<RuntimeConfigOverrideView>,
+    pub(crate) sync: Vec<RuntimeConfigDispatchView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigPatchOperationView {
+    pub(crate) operation: String,
+    pub(crate) path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) value: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigBulkTargetPreviewView {
+    pub(crate) client_id: String,
+    pub(crate) candidate_override_hash: String,
+    pub(crate) override_revision: String,
+    pub(crate) desired_hash: String,
+    pub(crate) changes: Vec<RuntimeConfigPathChangeView>,
+    pub(crate) no_op: bool,
+    pub(crate) storage_only: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigBulkPreviewView {
+    pub(crate) selector_expression: String,
+    pub(crate) target_client_ids: Vec<String>,
+    pub(crate) operations: Vec<RuntimeConfigPatchOperationView>,
+    pub(crate) targets: Vec<RuntimeConfigBulkTargetPreviewView>,
+    pub(crate) changed_target_count: usize,
+    pub(crate) preview_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RuntimeConfigBulkApplyResponse {
+    pub(crate) preview: RuntimeConfigBulkPreviewView,
     pub(crate) overrides: Vec<RuntimeConfigOverrideView>,
     pub(crate) sync_job_ids: Vec<Uuid>,
     pub(crate) sync: Vec<RuntimeConfigDispatchView>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeConfigOverrideReplacement {
+    pub(crate) client_id: String,
+    pub(crate) expected_revision: String,
+    pub(crate) toml: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

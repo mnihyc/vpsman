@@ -10,12 +10,8 @@ use crate::{
     TunnelEndpointSide, TunnelKind, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS, MAX_TELEMETRY_TUNNELS,
 };
 
-pub const INCREMENTAL_CONFIG_PATCH_SECTIONS: &[&str] =
-    &["update", "telemetry", "execution", "network"];
-
 pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     validate_identifier(&config.client_id, "client_id", 128)?;
-    validate_display_name(&config.display_name)?;
     validate_endpoints(&config.tcp_endpoints)?;
     validate_noise_config(&config.noise)?;
     validate_auth_config(&config.auth)?;
@@ -25,7 +21,6 @@ pub fn validate_agent_config_shape(config: &AgentConfig) -> Result<(), String> {
     validate_telemetry_config(&config.telemetry)?;
     validate_network_config(&config.network)?;
     validate_telemetry_interval(config.telemetry_interval_secs, "telemetry_interval_secs")?;
-    validate_tags(&config.tags)?;
     Ok(())
 }
 
@@ -40,14 +35,6 @@ pub fn validate_agent_bootstrap_config_shape(config: &AgentConfig) -> Result<(),
     Ok(())
 }
 
-pub fn validate_incremental_config_patch_section(section: &str) -> Result<(), String> {
-    if INCREMENTAL_CONFIG_PATCH_SECTIONS.contains(&section) {
-        Ok(())
-    } else {
-        Err(format!("config_patch_section_not_allowed:{section}"))
-    }
-}
-
 fn validate_identifier(value: &str, field: &str, max_len: usize) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("{field}_required"));
@@ -60,16 +47,6 @@ fn validate_identifier(value: &str, field: &str, max_len: usize) -> Result<(), S
         .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
     {
         return Err(format!("{field}_contains_invalid_characters"));
-    }
-    Ok(())
-}
-
-fn validate_display_name(value: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
-        return Ok(());
-    }
-    if value.len() > 256 || value.as_bytes().contains(&0) {
-        return Err("display_name_invalid".to_string());
     }
     Ok(())
 }
@@ -238,6 +215,10 @@ fn validate_execution_config(config: &AgentExecutionConfig) -> Result<(), String
                 return Err("execution_process_inventory_command_required".to_string());
             };
             validate_network_hook_argv(&command.argv, "execution_process_inventory_argv")?;
+            validate_removed_identity_placeholders(
+                &command.argv,
+                "execution_process_inventory_argv",
+            )?;
             validate_runtime_command_budget(command, "execution_process_inventory_command")?;
         }
     }
@@ -282,6 +263,7 @@ fn validate_telemetry_config(config: &AgentTelemetryConfig) -> Result<(), String
                 return Err("telemetry_custom_metrics_command_required".to_string());
             };
             validate_network_hook_argv(&command.argv, "telemetry_custom_metrics_argv")?;
+            validate_removed_identity_placeholders(&command.argv, "telemetry_custom_metrics_argv")?;
             validate_runtime_command_budget(command, "telemetry_custom_metrics_command")?;
         }
     }
@@ -651,19 +633,23 @@ fn validate_network_hook_argv(argv: &[String], field: &str) -> Result<(), String
     Ok(())
 }
 
-fn validate_telemetry_interval(value: u64, field: &str) -> Result<(), String> {
-    if !(5..=3600).contains(&value) {
-        return Err(format!("{field}_out_of_range"));
+fn validate_removed_identity_placeholders(argv: &[String], field: &str) -> Result<(), String> {
+    for part in argv {
+        for placeholder in ["{display_name}", "{tags_csv}"] {
+            if part.contains(placeholder) {
+                return Err(format!(
+                    "{field}_unsupported_placeholder:{}",
+                    &placeholder[1..placeholder.len() - 1]
+                ));
+            }
+        }
     }
     Ok(())
 }
 
-fn validate_tags(tags: &[String]) -> Result<(), String> {
-    if tags.len() > 64 {
-        return Err("tags_too_many".to_string());
-    }
-    for tag in tags {
-        validate_identifier(tag, "tag", 64)?;
+fn validate_telemetry_interval(value: u64, field: &str) -> Result<(), String> {
+    if !(5..=3600).contains(&value) {
+        return Err(format!("{field}_out_of_range"));
     }
     Ok(())
 }

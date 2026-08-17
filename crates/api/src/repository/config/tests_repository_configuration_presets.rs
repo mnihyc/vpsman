@@ -65,6 +65,37 @@ fn preset_definitions_reject_missing_discriminators_and_unknown_fields() {
 }
 
 #[test]
+fn runtime_command_presets_reject_removed_inventory_placeholders() {
+    for placeholder in ["{display_name}", "{tags_csv}"] {
+        let command = serde_json::json!({
+            "argv": ["/bin/echo", placeholder],
+            "max_timeout_secs": 10,
+            "max_output_bytes": 16_384
+        });
+        for (behavior, definition) in [
+            (
+                "host_metrics",
+                serde_json::json!({
+                    "source": "custom_command",
+                    "custom_metrics_command": command.clone()
+                }),
+            ),
+            (
+                "process_inventory",
+                serde_json::json!({
+                    "source": "custom_command",
+                    "process_inventory_command": command.clone()
+                }),
+            ),
+        ] {
+            let error =
+                validate_configuration_preset_definition(behavior, &definition).unwrap_err();
+            assert!(error.to_string().contains("removed_inventory_placeholder"));
+        }
+    }
+}
+
+#[test]
 fn ospf_updater_presets_are_explicitly_unconfigured_or_fully_paired() {
     let default = system_configuration_presets()
         .into_iter()

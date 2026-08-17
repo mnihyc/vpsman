@@ -54,7 +54,7 @@ UIs. `vpsman` targets a different operating model:
 | Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, host and managed processes, native services, read-only storage inventory, and schedules. |
 | Host maintenance | Explicit APT/DNF/YUM/Pacman update plans, stale-plan rejection, per-VPS apply evidence, and durable canary/batch job rollouts. |
 | Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
-| Runtime config | Immutable system presets, reusable custom presets, explicit per-VPS override/reset, effective-config inspection, and visible runtime sync state. |
+| Runtime config | Immutable system presets, reusable custom presets, a typed per-VPS desired-config tree with explicit inherit/reset controls, reviewed bulk incremental patches, and visible runtime sync state. |
 | Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
 | Observability | Clickable Home posture, an all-VPS visual grid with Comfortable and Compact densities, canonical per-VPS resource/network/Ping history, reusable Ping targets, managed read-only shared views, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
 | Access and audit | Operator roles/scopes, searchable and revocable bearer sessions, QR-assisted TOTP enrollment, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
@@ -395,10 +395,23 @@ does not delete PostgreSQL or object-store data.
 ### Desired state and runtime evidence
 
 Host-managed configuration separates durable desired state, per-VPS dispatch,
-matching applied evidence, and current runtime observation. Saving a tunnel,
-port-forward rule, configuration-preset override, or config patch never implies that every
-target has applied it. The console reports partial queue failures by VPS and
-keeps runtime removal visible as pending until the agent confirms cleanup.
+matching applied evidence, and current runtime observation. The single-VPS
+configuration workspace edits one complete sparse override: adding a field
+overrides its inherited value, while removing it restores inheritance; resetting
+the last field deletes the override. Its Advanced TOML view is the same sparse
+document, not an incremental command. Bulk changes instead use an explicit
+incremental patch language and freeze the exact previewed VPS IDs before apply.
+Both paths revalidate their preview and desired-state revisions before writing.
+For headless bulk changes, `vpsctl config-patch` first prints the server preview;
+the confirmed invocation must receive that separately reviewed value through
+`--preview-hash`.
+
+An explicit agent config read is optional live evidence and never becomes the
+editable base. VPS display names and tags remain server-owned inventory and are
+not copied into agent runtime configuration. Saving a tunnel, port-forward rule,
+configuration-preset override, or config patch never implies that every target
+has applied it. The console reports partial queue failures by VPS and keeps
+runtime removal visible as pending until the agent confirms cleanup.
 Deleting a tunnel plan retires its desired-state declaration immediately and
 returns per-endpoint removal queue outcomes; offline agents remove it when they
 next reconcile current desired state. Agents continue using their last accepted

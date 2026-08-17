@@ -146,12 +146,14 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "services",
       label: "Services",
-      description: "Host service inventory, lifecycle actions, and provider logs",
+      description:
+        "Host service inventory, lifecycle actions, and provider logs",
     },
     {
       id: "storage",
       label: "Storage",
-      description: "Read-only block devices, mounts, capacity, and usage evidence",
+      description:
+        "Read-only block devices, mounts, capacity, and usage evidence",
     },
     {
       id: "bulk_files",
@@ -190,7 +192,8 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "rollouts",
       label: "Rollouts",
-      description: "Durable canaries, staged batches, safety pauses, and evidence",
+      description:
+        "Durable canaries, staged batches, safety pauses, and evidence",
     },
     {
       id: "schedules",
@@ -231,13 +234,13 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "per_vps",
       label: "Per-VPS",
-      description: "One-VPS runtime config read and guarded override",
+      description: "One-VPS desired runtime hierarchy and replacement override",
     },
     {
       id: "bulk_patch",
-      label: "Bulk patch",
+      label: "VPS override patch",
       description:
-        "Temporary incremental patches and reusable patch generators",
+        "Advanced bulk override patching with explicit deletion directives",
     },
     {
       id: "rules",
@@ -307,7 +310,8 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "artifacts",
       label: "Artifacts",
-      description: "Upload retained backup artifacts and create transfer packages",
+      description:
+        "Upload retained backup artifacts and create transfer packages",
     },
     {
       id: "restore",
@@ -340,7 +344,8 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "shared_views",
       label: "Shared views",
-      description: "Create, update targets, copy links, extend, revoke, and inspect public monitoring views",
+      description:
+        "Create, update targets, copy links, extend, revoke, and inspect public monitoring views",
     },
     {
       id: "alerts",
@@ -509,7 +514,10 @@ export function formatBoundedCount(value: number, truncated = false): string {
   return `${value}${truncated ? "+" : ""}`;
 }
 
-export function formatLowerBoundCount(value: number, truncated = false): string {
+export function formatLowerBoundCount(
+  value: number,
+  truncated = false,
+): string {
   return truncated && value > 0 ? `≥${value}` : String(value);
 }
 

@@ -1,8 +1,7 @@
 use super::{
-    peer_client_ids_for_deleted_agent, runtime_config_patch_validation_error,
-    telemetry_network_rate_limit_or_default, validate_legacy_tag_name_for_cleanup,
-    validate_persisted_tag_name, validate_telemetry_network_rate_query,
-    validate_telemetry_rollup_query,
+    peer_client_ids_for_deleted_agent, telemetry_network_rate_limit_or_default,
+    validate_legacy_tag_name_for_cleanup, validate_persisted_tag_name,
+    validate_telemetry_network_rate_query, validate_telemetry_rollup_query,
 };
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -20,18 +19,6 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 #[test]
-fn runtime_config_patch_reports_server_managed_port_forwarding() {
-    let error = runtime_config_patch_validation_error(anyhow::anyhow!(
-        "runtime_config_patch_managed_port_forwarding_forbidden"
-    ));
-    assert_eq!(error.status, StatusCode::BAD_REQUEST);
-    assert_eq!(
-        error.code,
-        "runtime_config_patch_managed_port_forwarding_forbidden"
-    );
-}
-
-#[test]
 fn persisted_tags_reject_inner_selector_prefixes() {
     validate_persisted_tag_name("provider:alpha").unwrap();
     validate_persisted_tag_name("country:US").unwrap();
@@ -45,6 +32,23 @@ fn persisted_tags_reject_inner_selector_prefixes() {
     validate_legacy_tag_name_for_cleanup("provider:").unwrap();
     validate_legacy_tag_name_for_cleanup(":alpha").unwrap();
     validate_legacy_tag_name_for_cleanup("role::edge").unwrap();
+}
+
+#[tokio::test]
+async fn legacy_runtime_config_patch_route_is_removed() {
+    let (state, _) = tag_order_route_test_state();
+    let response = crate::routes::build_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/runtime-config/patch")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[test]

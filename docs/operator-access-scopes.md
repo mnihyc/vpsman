@@ -37,10 +37,11 @@ role receives the scopes needed for normal daily operation. The default
 - `templates:read`: built-in and user-defined command templates and their operation payloads.
 - `schedules:read`: saved schedule definitions, target snapshots, timing, and
   recurring operation payloads.
-- `config:read`: configuration preset definitions, effective per-VPS sources,
-  preset and override previews, readiness and runtime-sync state, rendered
-  effective runtime config, runtime config patch generators, rendered
-  incremental config patches, per-VPS rule values, rule-aware VPS selector
+- `config:read`: configuration preset definitions, the typed per-VPS desired
+  configuration workspace and provenance, saved sparse overrides, override and
+  bulk previews, readiness and runtime-sync state, optional redacted live-agent
+  runtime evidence, runtime config patch generators, rendered incremental
+  config patches, per-VPS rule values, rule-aware VPS selector
   evaluation and suggestions, Config > Rules dry-runs, and private agent-update
   release metadata. Any live selector using `vps.rules` requires this scope in
   addition to the operation's normal scope; unavailable rule evidence is an
@@ -69,6 +70,11 @@ for listing management records and target evidence.
 
 Config > Rules writes require `config:write`. Alert policy group and notification
 channel writes require `integrations:write`.
+
+Per-VPS override replacement/reset and reviewed bulk incremental runtime-config
+apply require `config:write`. Reading live agent evidence additionally dispatches
+an explicit ConfigRead job under the existing job-dispatch authority; the page
+does not poll it or use it as the saved override base.
 
 Tunnel-plan mutations and the reviewed, plan-scoped **Clear evidence** action
 require `network:write`. Clearing evidence does not grant access to job or audit

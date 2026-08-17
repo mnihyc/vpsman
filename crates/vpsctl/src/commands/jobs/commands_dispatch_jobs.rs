@@ -573,6 +573,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
             password_env,
             super_salt_hex,
             privilege_ttl_secs,
+            preview_hash,
             confirmed,
         } => {
             commands_config::config_patch(
@@ -584,6 +585,7 @@ pub(crate) fn dispatch(ctx: &CommandContext, command: Command) -> Result<Option<
                 password_env,
                 super_salt_hex,
                 privilege_ttl_secs,
+                preview_hash,
                 confirmed,
             )?;
             Ok(None)

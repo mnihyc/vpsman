@@ -2323,6 +2323,10 @@
   list-style: none;
 }
 
+.configHistoryDisclosure {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .configHistoryDisclosure > summary::-webkit-details-marker {
   display: none;
 }
@@ -2363,6 +2367,10 @@
   .configCurrentStateRow .compactAction,
   .configCurrentStateAction {
     justify-self: stretch;
+  }
+
+  .configHistoryDisclosure > summary {
+    flex-wrap: wrap;
   }
 }
 
@@ -3096,6 +3104,696 @@
   overflow-wrap: anywhere;
 }
 
+.singleConfigWorkspace {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 18px;
+}
+
+.singleConfigToolbar,
+.singleConfigStickyReview,
+.singleConfigEditorHeader,
+.singleConfigAdvancedNotice,
+.singleConfigPreview > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.singleConfigToolbar {
+  align-items: end;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 12px;
+}
+
+.singleConfigTargetControl {
+  display: grid;
+  flex: 1 1 420px;
+  gap: 5px;
+  min-width: min(100%, 300px);
+}
+
+.singleConfigTargetControl > label,
+.singleConfigReason label > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.singleConfigTargetControl > span,
+.singleConfigReason small,
+.singleConfigEditorHeader > div > span,
+.singleConfigAdvancedNotice span,
+.singleConfigPreview > header span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.singleConfigToolbarActions,
+.singleConfigAdvancedFooter {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.singleConfigWorkspaceFeedback.localActionFeedback {
+  margin: 0;
+  max-width: 100%;
+}
+
+.singleConfigWelcome,
+.singleConfigTreePaused {
+  align-items: flex-start;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--canvas);
+  color: var(--muted);
+  padding: 18px;
+}
+
+.singleConfigWelcome > div,
+.singleConfigTreePaused > span {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+}
+
+.singleConfigWelcome strong,
+.singleConfigTreePaused strong {
+  color: var(--text);
+}
+
+.singleConfigWelcome span,
+.singleConfigTreePaused span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.singleConfigSummary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.singleConfigSummary > span {
+  align-content: center;
+  display: grid;
+  gap: 5px;
+  min-height: 58px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 8px 10px;
+}
+
+.singleConfigSummary small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.singleConfigLiveEvidence {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.singleConfigLiveEvidence > summary {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+  cursor: pointer;
+  padding: 10px 12px;
+}
+
+.singleConfigLiveEvidence > summary::after {
+  color: var(--text-secondary);
+  content: "›";
+  flex: 0 0 auto;
+  font-size: 20px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.singleConfigLiveEvidence[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.singleConfigLiveEvidence > summary > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.singleConfigLiveEvidence small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.singleConfigLiveEvidence > pre,
+.singleConfigPreview pre {
+  max-height: 420px;
+  margin: 0;
+  overflow: auto;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--canvas);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 12px;
+}
+
+.singleConfigStickyReview {
+  position: static;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  box-shadow: var(--shadow-raised);
+  padding: 10px 12px;
+  backdrop-filter: blur(8px);
+}
+
+.singleConfigStickyReview.dirty {
+  border-color: color-mix(in srgb, var(--warning) 58%, var(--border));
+}
+
+.singleConfigStickyReview > div:first-child {
+  display: grid;
+  flex: 1 1 360px;
+  gap: 3px;
+  min-width: 0;
+}
+
+.singleConfigStickyReview > div:first-child > span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.singleConfigEditorShell,
+.singleConfigPreview,
+.singleConfigReason {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.singleConfigEditorHeader {
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 11px 12px;
+}
+
+.singleConfigEditorHeader > div:first-child,
+.singleConfigAdvancedNotice > div,
+.singleConfigPreview > header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.singleConfigEditorHeader > div:first-child > strong {
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.singleConfigModeTabs {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--canvas);
+}
+
+.singleConfigModeTabs button {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  min-height: 32px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 10px;
+}
+
+.singleConfigModeTabs button:last-child {
+  border-right: 0;
+}
+
+.singleConfigModeTabs button.active {
+  background: var(--primary-selected);
+  color: var(--primary-text);
+}
+
+.singleConfigModeTabs button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.singleConfigTreeMode,
+.singleConfigAdvancedMode {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.singleConfigTreeTools {
+  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 8px;
+  min-width: 0;
+}
+
+.singleConfigTreeTools > label {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--muted);
+  padding: 0 9px;
+}
+
+.singleConfigTreeTools input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  outline: 0;
+}
+
+.singleConfigExpandToggle,
+.singleConfigDisclosure {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.singleConfigExpandToggle {
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.singleConfigExpandToggle:hover,
+.singleConfigExpandToggle:focus-visible,
+.singleConfigDisclosure:hover,
+.singleConfigDisclosure:focus-visible {
+  background: var(--primary-selected);
+  color: var(--primary-text);
+  outline: none;
+}
+
+.singleConfigTree {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.singleConfigBranch {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+}
+
+.singleConfigBranch.changed,
+.singleConfigField.changed {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning) 5%, var(--canvas));
+}
+
+.singleConfigBranchHeader {
+  align-items: center;
+  display: grid;
+  grid-template-columns: 30px minmax(180px, 1fr) auto;
+  gap: 6px 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 6px 8px 6px 6px;
+}
+
+.singleConfigBranchCount {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.singleConfigBranchBody {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 6px 6px 6px 36px;
+}
+
+.singleConfigBranchBody .singleConfigBranch {
+  background: var(--surface);
+}
+
+.singleConfigField {
+  align-items: center;
+  display: grid;
+  grid-template-columns: fit-content(360px) minmax(240px, 1fr);
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 6px 8px;
+}
+
+.singleConfigField.locked {
+  background: var(--surface-neutral);
+}
+
+.singleConfigFieldIdentity {
+  display: grid;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.singleConfigFieldIdentity > span:first-child {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.singleConfigFieldIdentity strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.singleConfigFieldIdentity em {
+  align-items: center;
+  display: inline-flex;
+  gap: 3px;
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning-text);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+  padding: 1px 5px;
+}
+
+.singleConfigFieldIdentity em.locked {
+  background: var(--surface-neutral);
+  color: var(--text-secondary);
+}
+
+.singleConfigFieldDetails {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.singleConfigFieldDetails > small {
+  color: var(--muted);
+  font-family:
+    ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.singleConfigFieldMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
+.singleConfigFieldMeta > span,
+.singleConfigFieldMeta > a {
+  align-items: center;
+  display: inline-flex;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+  text-decoration: none;
+}
+
+.singleConfigFieldMeta > a:hover {
+  color: var(--primary-text);
+}
+
+.singleConfigFieldEditor {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.singleConfigFieldEditor > input,
+.singleConfigFieldEditor > select {
+  flex: 1 1 180px;
+  min-height: 30px;
+  min-width: 120px;
+  font-size: 13px;
+}
+
+.singleConfigToggle {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.singleConfigFieldActions,
+.singleConfigArrayActions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.singleConfigWorkspace .singleConfigFieldActions .compactAction,
+.singleConfigWorkspace .singleConfigArrayActions .compactAction {
+  height: 28px;
+  min-height: 28px;
+  min-width: 0;
+  gap: 5px;
+  border-radius: 6px;
+  font-size: 11px;
+  padding: 0 7px;
+}
+
+.singleConfigBranchHeader > .singleConfigFieldActions {
+  justify-content: flex-end;
+}
+
+.singleConfigArrayEditor {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.singleConfigArrayItem {
+  align-items: start;
+  display: grid;
+  grid-template-columns: 26px minmax(180px, 1fr) auto;
+  gap: 7px;
+  min-width: 0;
+}
+
+.singleConfigArrayItem > input,
+.singleConfigArrayItem > textarea {
+  width: 100%;
+  min-width: 0;
+  font-family:
+    ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+}
+
+.singleConfigArrayIndex {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 30px;
+  border-radius: 6px;
+  background: var(--surface-neutral);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.singleConfigArrayAdd,
+.singleConfigAddField {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.singleConfigArrayAdd > input,
+.singleConfigAddField > input {
+  flex: 1 1 180px;
+  min-width: min(100%, 150px);
+}
+
+.singleConfigAddField > small,
+.singleConfigEmptyArray {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.singleConfigAdvancedNotice {
+  align-items: start;
+}
+
+.singleConfigAdvancedMode > textarea {
+  width: 100%;
+  min-width: 0;
+  font-family:
+    ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.singleConfigAdvancedMode > textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.singleConfigAdvancedFooter {
+  justify-content: space-between;
+}
+
+.singleConfigReason {
+  padding: 10px 12px;
+}
+
+.singleConfigReason label {
+  display: grid;
+  gap: 6px;
+}
+
+.singleConfigReason input {
+  width: 100%;
+  min-width: 0;
+}
+
+.singleConfigPreview {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+}
+
+.singleConfigPreview > header {
+  padding: 11px 12px;
+}
+
+.singleConfigChangeList {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.singleConfigChangeList > div {
+  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(120px, 1fr) 18px minmax(
+      120px,
+      1fr
+    );
+  gap: 8px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 12px;
+}
+
+.singleConfigChangeList > div > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.singleConfigChangeList small {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.singleConfigChangeList code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.singleConfigPreview > details > summary {
+  cursor: pointer;
+  color: var(--primary-text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 9px 12px;
+}
+
+.singleConfigTreeEmpty {
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 18px;
+  text-align: center;
+}
+
 .tagScheduleImpactBlock {
   display: grid;
   gap: 8px;
@@ -3214,6 +3912,101 @@
 }
 
 @media (max-width: 760px) {
+  .singleConfigWorkspace {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .singleConfigToolbar,
+  .singleConfigStickyReview,
+  .singleConfigEditorHeader,
+  .singleConfigAdvancedNotice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .singleConfigToolbarActions,
+  .singleConfigModeTabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .singleConfigToolbarActions > button {
+    width: 100%;
+  }
+
+  .singleConfigTargetControl {
+    flex: 0 0 auto;
+    width: 100%;
+  }
+
+  .singleConfigStickyReview .buttonCluster {
+    display: flex;
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .singleConfigStickyReview .buttonCluster > button {
+    flex: 1 1 min(100%, 140px);
+  }
+
+  .singleConfigSummary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .singleConfigStickyReview {
+    top: var(--console-sticky-offset, 80px);
+    bottom: auto;
+  }
+
+  .singleConfigStickyReview > div:first-child {
+    flex: 0 1 auto;
+  }
+
+  .singleConfigBranchHeader {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 5px;
+    padding-left: 4px;
+  }
+
+  .singleConfigBranchHeader > .singleConfigFieldActions {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+  }
+
+  .singleConfigBranchBody {
+    padding-left: 5px;
+  }
+
+  .singleConfigField {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .singleConfigFieldEditor {
+    justify-content: flex-start;
+  }
+
+  .singleConfigFieldActions {
+    width: auto;
+  }
+
+  .singleConfigArrayItem {
+    grid-template-columns: 26px minmax(0, 1fr);
+  }
+
+  .singleConfigArrayActions {
+    grid-column: 2;
+  }
+
+  .singleConfigChangeList > div {
+    grid-template-columns: minmax(0, 1fr) 18px minmax(0, 1fr);
+  }
+
+  .singleConfigChangeList > div > span {
+    grid-column: 1 / -1;
+  }
+
   .singleConfigViewTabs {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3256,6 +4049,25 @@
     margin: 0;
     padding: 0;
     background: transparent;
+  }
+}
+
+@media (max-width: 640px) {
+  .singleConfigToolbarActions {
+    display: flex;
+    justify-content: stretch;
+    width: 100%;
+  }
+
+  .singleConfigToolbarActions > button {
+    flex: 1 1 min(100%, 140px);
+    width: auto;
+  }
+
+  .singleConfigStickyReview {
+    position: static;
+    top: auto;
+    bottom: auto;
   }
 }
 

@@ -468,6 +468,8 @@ pub(crate) enum Command {
         super_salt_hex: Option<String>,
         #[arg(long, default_value_t = 300)]
         privilege_ttl_secs: u64,
+        #[arg(long)]
+        preview_hash: Option<String>,
         #[arg(long, default_value_t = false)]
         confirmed: bool,
     },

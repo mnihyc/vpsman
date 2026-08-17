@@ -34,7 +34,7 @@ const legacyTopLevel = ["Dashboard", "Tags", "Schedules", "Topology"];
 const releaseAccessibilityRoutes: Array<{ view: ActiveView; subpage: string }> =
   [
     { view: "Jobs", subpage: "Scheduled runs" },
-    { view: "Config", subpage: "Bulk patch" },
+    { view: "Config", subpage: "VPS override patch" },
     { view: "Config", subpage: "Per-VPS" },
     { view: "Config", subpage: "Rules" },
     { view: "Observability", subpage: "Alerts" },
@@ -3474,7 +3474,7 @@ test("fleet instance config detail separates source readiness, drift, apply stat
 
   await actions.getByRole("button", { name: "Compare" }).click();
   await expect(
-    page.getByRole("heading", { name: "Per-VPS config" }),
+    page.getByRole("heading", { name: "Per-VPS desired config" }),
   ).toBeVisible();
   await expect(
     page.getByRole("combobox", { name: "VPS config target" }),
@@ -3804,11 +3804,10 @@ test("generic data grids keep mobile actions in the shared header", async ({
 test("advanced release labels provide inline expert help", async ({ page }) => {
   await gotoConsoleHome(page);
 
-  await openConsoleSubpage(page, "Config", "Bulk patch");
-  await expect(page.getByLabel("Incremental patch help")).toHaveAttribute(
-    "title",
-    /Incremental TOML patches/,
-  );
+  await openConsoleSubpage(page, "Config", "VPS override patch");
+  await expect(
+    page.getByLabel("Advanced · VPS override patch help"),
+  ).toHaveAttribute("title", /Use -field\.path or -\[section\.path\]/);
   await expect(page.getByLabel("Targets help")).toHaveAttribute(
     "title",
     /Selector expressions freeze/,
@@ -3821,22 +3820,22 @@ test("advanced release labels provide inline expert help", async ({ page }) => {
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Config", "Per-VPS");
-  await expect(page.getByLabel("Redacted runtime TOML help")).toHaveAttribute(
-    "title",
-    /secret material removed/,
+  const target = page.getByRole("combobox", { name: "VPS config target" });
+  await target.fill("edge-sfo");
+  const targetOption = page
+    .locator(".vpsComboboxMenu")
+    .getByRole("option", { name: /edge-sfo-01.*agent-sfo-01/ });
+  await expect(targetOption).toBeVisible();
+  await targetOption.click();
+  await expect(page.getByText("Desired runtime hierarchy")).toBeVisible();
+  await expect(page.getByLabel("Saved desired runtime TOML")).toContainText(
+    "this is not the VPS override editor",
   );
+  await page.getByRole("tab", { name: "Advanced" }).click();
   await expect(
-    page.getByLabel("Guarded one-VPS override help"),
-  ).toHaveAttribute("title", /base hash/);
-  await expect(
-    page.locator('strong[title*="Hash of the redacted config read"]'),
+    page.getByText("Complete VPS override replacement TOML"),
   ).toBeVisible();
-  await expect(
-    page.locator('strong[title*="Top-level TOML sections"]'),
-  ).toBeVisible();
-  await expect(
-    page.locator('strong[title*="Hash of the exact override payload"]'),
-  ).toBeVisible();
+  await expect(page.getByLabel("VPS replacement override TOML")).toBeVisible();
 
   await openConsoleSubpage(page, "Config", "Rules");
   await expect(page.getByLabel("Bulk rule editor help")).toHaveAttribute(
@@ -4213,18 +4212,20 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await expect(page.getByLabel("VPS config target")).toHaveCount(0);
   await expect(page.getByLabel("Patch generators data grid")).toHaveCount(0);
   await expect(
-    page.getByRole("button", { exact: true, name: "Apply patch" }),
+    page.getByRole("button", { exact: true, name: "Apply override patch" }),
   ).toHaveCount(0);
 
   const links = page.getByLabel("Config overview workflow links");
-  for (const label of ["Per-VPS", "Bulk patch", "Sources", "Rules"]) {
+  for (const label of ["Per-VPS", "VPS override patch", "Sources", "Rules"]) {
     await expect(
       links.getByRole("button", { name: new RegExp(label) }),
     ).toBeVisible();
   }
 
   await activate(currentState.getByRole("button", { name: "Retry" }).first());
-  await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "VPS override patch" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("combobox", { name: "Bulk patch target expression" }),
   ).toHaveValue("id:agent-fra-02");
@@ -4232,15 +4233,17 @@ test("config overview focuses on drift risk and routes to config workflows", asy
   await openConsoleSubpage(page, "Config", "Overview");
   await links.getByRole("button", { name: /Per-VPS/ }).click();
   await expect(
-    page.getByRole("heading", { name: "Per-VPS config" }),
+    page.getByRole("heading", { name: "Per-VPS desired config" }),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "Config", "Overview");
   await page
     .getByLabel("Config overview workflow links")
-    .getByRole("button", { name: /Bulk patch/ })
+    .getByRole("button", { name: /VPS override patch/ })
     .click();
-  await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "VPS override patch" }),
+  ).toBeVisible();
 
   await openConsoleSubpage(page, "Config", "Overview");
   await page
@@ -4925,7 +4928,7 @@ test("raw editors do not echo drafts while API evidence remains available in too
   };
 
   await gotoConsoleHome(page);
-  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
   const jsonEditor = page.getByLabel("Patch generator values JSON");
   await jsonEditor.fill(`{"probe":"${rawJsonSentinel}"}`);
   await expectControlDoesNotEcho(jsonEditor, rawJsonSentinel);
@@ -5005,9 +5008,11 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
   await page.evaluate(() =>
     localStorage.removeItem("vpsman.config.bulk.selectorExpression"),
   );
-  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
 
-  await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "VPS override patch" }),
+  ).toBeVisible();
   const bulk = page.locator(".configApplyGrid:visible");
   await expect(
     bulk.getByRole("combobox", { name: "Bulk patch target expression" }),
@@ -5016,14 +5021,14 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
     bulk.getByRole("button", { name: "Preview changes" }),
   ).toBeDisabled();
   await expect(
-    bulk.getByRole("button", { exact: true, name: "Apply patch" }),
+    bulk.getByRole("button", { exact: true, name: "Apply override patch" }),
   ).toBeDisabled();
   await expect(bulk.locator(".privilegeManager")).toHaveCount(0);
   await expect(bulk).not.toContainText("Clear local vault");
   await expect(bulk).not.toContainText("Clear local session");
 
   await unlockPrivilegeFromTop(page);
-  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
   const unlockedBulk = page.locator(".configApplyGrid:visible");
   await unlockedBulk
     .getByRole("combobox", { name: "Bulk patch target expression" })
@@ -5034,19 +5039,25 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
     unlockedBulk.getByLabel("Bulk patch change summary"),
   ).toContainText("edge-sfo-01");
   await expect(
-    unlockedBulk.getByRole("button", { exact: true, name: "Apply patch" }),
+    unlockedBulk.getByRole("button", {
+      exact: true,
+      name: "Apply override patch",
+    }),
   ).toBeEnabled();
 
   await activate(
-    unlockedBulk.getByRole("button", { exact: true, name: "Apply patch" }),
+    unlockedBulk.getByRole("button", {
+      exact: true,
+      name: "Apply override patch",
+    }),
   );
-  const confirmation = page.getByLabel("Confirm bulk patch");
+  const confirmation = page.getByLabel("Confirm VPS override patch");
   await expect(confirmation).toBeVisible();
   await expect(confirmation).toContainText("id:agent-sfo-01");
   await expect(confirmation).toContainText("Targets");
   await expect(confirmation).toContainText("Payload");
   await activate(
-    confirmation.getByRole("button", { name: "Apply runtime config patch" }),
+    confirmation.getByRole("button", { name: "Apply VPS override patch" }),
   );
 
   const request = await page.evaluate(() => {
@@ -5066,12 +5077,12 @@ test("config bulk patch requires reviewed scope and privilege before apply", asy
   });
 });
 
-test("config per-vps preserves guarded one-vps override workflow", async ({
+test("config per-vps preserves reviewed one-vps replacement workflow", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "one-VPS config override is a dense desktop workflow covered by desktop release tests",
+    "one-VPS config replacement is a dense desktop workflow covered by desktop release tests",
   );
   await gotoConsoleHome(page);
   await page.evaluate(() =>
@@ -5080,24 +5091,16 @@ test("config per-vps preserves guarded one-vps override workflow", async ({
   await openConsoleSubpage(page, "Config", "Per-VPS");
 
   await expect(
-    page.getByRole("heading", { name: "Per-VPS config" }),
+    page.getByRole("heading", { name: "Per-VPS desired config" }),
   ).toBeVisible();
-  const panel = page.locator(".configApplyGrid");
+  const panel = page.locator(".singleConfigWorkspace");
   await expect(
     panel.getByRole("combobox", { name: "VPS config target" }),
   ).toBeVisible();
-  await expect(
-    panel.getByLabel("One-VPS runtime config override TOML"),
-  ).toHaveCount(0);
-  await expect(
-    panel.getByLabel("VPS redacted runtime config TOML"),
-  ).toHaveCount(0);
   await expect(panel.getByLabel("Per-VPS config start")).toContainText(
-    "Select one VPS",
+    "One desired configuration, edited in place",
   );
-  await expect(
-    panel.getByRole("button", { name: "Read current config" }),
-  ).toBeDisabled();
+  await expect(panel.getByRole("tab", { name: "Advanced" })).toHaveCount(0);
   await expect(panel.getByLabel("Bulk patch target expression")).toHaveCount(0);
   await expect(page.getByLabel("Patch generators data grid")).toHaveCount(0);
 
@@ -5107,79 +5110,65 @@ test("config per-vps preserves guarded one-vps override workflow", async ({
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await activate(panel.getByRole("button", { name: "Read current config" }));
-  await expect(
-    panel.getByLabel("VPS redacted runtime config TOML"),
-  ).toHaveValue(/client_id = "agent-fra-02"/);
-  await expect(panel.getByLabel("One-VPS config override guard")).toContainText(
-    "Current base",
+  const interval = panel.getByLabel("Telemetry interval", { exact: true });
+  await expect(interval).toHaveValue("30");
+  await interval.fill("60");
+  await activate(panel.getByRole("button", { name: "Review changes" }));
+  await expect(panel.getByLabel("Reviewed VPS config changes")).toContainText(
+    "telemetry_interval_secs",
   );
-
-  await panel
-    .getByLabel("One-VPS runtime config override TOML")
-    .fill("[telemetry]\ninterval_secs = 60\n");
-  await expect(panel.getByLabel("One-VPS config override guard")).toContainText(
-    "telemetry",
-  );
-  await expect(
-    panel.getByRole("button", { name: "Apply patch" }),
-  ).toBeEnabled();
   await expect(panel.locator(".privilegeManager")).toHaveCount(0);
   await expect(panel).not.toContainText("Clear local vault");
   await expect(panel).not.toContainText("Clear local session");
-  await activate(panel.getByRole("button", { name: "Apply patch" }));
+  await activate(panel.getByRole("button", { name: "Unlock to apply" }));
   await expect(
     page.getByRole("dialog", { name: "Unlock privilege" }),
   ).toBeVisible();
   await activate(page.getByRole("button", { name: "Close privilege unlock" }));
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Config", "Per-VPS");
-  const unlockedPanel = page.locator(".configApplyGrid");
-  await activate(
-    unlockedPanel.getByRole("button", { name: "Read current config" }),
-  );
-  await unlockedPanel
-    .getByLabel("One-VPS runtime config override TOML")
-    .fill("[telemetry]\ninterval_secs = 60\n");
+  const unlockedPanel = page.locator(".singleConfigWorkspace");
+  const unlockedInterval = unlockedPanel.getByLabel("Telemetry interval", {
+    exact: true,
+  });
+  await expect(unlockedInterval).toHaveValue("60");
   await expect(
-    unlockedPanel.getByLabel("One-VPS config change summary"),
-  ).toContainText("2 changed lines");
-  await expect(
-    unlockedPanel.getByLabel("One-VPS config change summary"),
-  ).toContainText("0 errors");
-  await expect(
-    unlockedPanel.getByRole("button", { name: "Apply patch" }),
-  ).toBeEnabled();
-  await activate(unlockedPanel.getByRole("button", { name: "Apply patch" }));
+    unlockedPanel.getByLabel("Reviewed VPS config changes"),
+  ).toBeVisible();
+  await activate(unlockedPanel.getByRole("button", { name: "Apply reviewed" }));
 
-  const confirmation = page.getByLabel(
-    "Confirm one-VPS runtime config override",
-  );
+  const confirmation = page.getByLabel("Confirm VPS runtime override");
   await expect(confirmation).toBeVisible();
-  await expect(confirmation).toContainText("agent-fra-02");
-  await expect(confirmation).toContainText("Base hash");
-  await expect(confirmation).toContainText("Payload");
-  await expect(confirmation).toContainText("telemetry");
+  await expect(confirmation).toContainText("core-fra-02");
+  await expect(confirmation).toContainText("runtime changes");
   await activate(
-    confirmation.getByRole("button", { name: "Apply one-VPS override" }),
+    confirmation.getByRole("button", { name: "Apply VPS override" }),
   );
 
   const request = await page.evaluate(() => {
     const requests = (
       window as unknown as {
         __vpsmanTestRequests: {
-          runtimeConfigPatches: Array<Record<string, unknown>>;
+          runtimeConfigPatches: Array<{
+            body: Record<string, unknown>;
+            pathname: string;
+          }>;
         };
       }
     ).__vpsmanTestRequests;
     return requests.runtimeConfigPatches.at(-1);
   });
-  expect(request).toMatchObject({
+  expect(request?.pathname).toBe(
+    "/api/v1/runtime-config/clients/agent-fra-02/override/apply",
+  );
+  expect(request?.body).toMatchObject({
+    candidate: {
+      type: "structured",
+      value: { telemetry_interval_secs: 60 },
+    },
     confirmed: true,
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
+    expected_override_revision: "0",
   });
-  expect(request?.toml).toContain("interval_secs = 60");
   expect(JSON.stringify(request)).not.toContain("local-super-password");
 });
 
@@ -8327,12 +8316,8 @@ test("system suite config owns control-plane config and excludes per-VPS editors
   await expect(page.getByLabel("API DB pool")).toHaveValue("32");
 
   await expect(page.getByLabel("VPS config target")).toHaveCount(0);
-  await expect(page.getByLabel("VPS redacted runtime config TOML")).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByLabel("One-VPS runtime config override TOML"),
-  ).toHaveCount(0);
+  await expect(page.getByLabel("Saved desired runtime TOML")).toHaveCount(0);
+  await expect(page.getByLabel("VPS replacement override TOML")).toHaveCount(0);
   await expect(page.getByLabel("Bulk patch target expression")).toHaveCount(0);
   await expect(
     page.getByLabel("Rendered bulk runtime config patch TOML"),
@@ -8343,15 +8328,17 @@ test("system suite config owns control-plane config and excludes per-VPS editors
 
   await boundary.getByRole("button", { name: "Open Config / Per-VPS" }).click();
   await expect(
-    page.getByRole("heading", { name: "Per-VPS config" }),
+    page.getByRole("heading", { name: "Per-VPS desired config" }),
   ).toBeVisible();
 
   await openConsoleSubpage(page, "System", "Suite config");
   await page
     .getByLabel("Suite config ownership boundary")
-    .getByRole("button", { name: "Open Config / Bulk patch" })
+    .getByRole("button", { name: "Open Config / VPS override patch" })
     .click();
-  await expect(page.getByRole("heading", { name: "Bulk patch" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "VPS override patch" }),
+  ).toBeVisible();
 });
 
 test("system maintenance owns artifact cleanup and maintenance job records", async ({

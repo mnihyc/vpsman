@@ -197,7 +197,7 @@ PY
   printf '%s\n' "$read_job_id"
 }
 
-config_read_toml() {
+config_read_runtime_config() {
   local id="$1"
   local read_job_id outputs_json
   read_job_id="$(submit_config_read "$id")"
@@ -209,11 +209,11 @@ config_read_toml() {
     printf '%s\n' "$read_job_id" >"$SMOKE_TMPDIR/config-read-right.job"
   fi
   outputs_json="$(api_get "/api/v1/jobs/$read_job_id/outputs")"
-  jq -r '
+  jq -c '
     .items[] | select(.stream == "status" and .done == true and .exit_code == 0)
     | (.data_base64 | @base64d | fromjson)
     | select(.type == "config_read")
-    | .toml
+    | .runtime_config
   ' <<<"$outputs_json"
 }
 
@@ -221,20 +221,27 @@ wait_config_contains_plan() {
   local id="$1"
   local expected_bandwidth_mbps="$2"
   local deadline=$((SECONDS + 45))
-  local toml_text=""
+  local runtime_config_json=""
   while (( SECONDS < deadline )); do
-    toml_text="$(config_read_toml "$id")"
-    if grep -F "plan_id = \"$plan_id\"" <<<"$toml_text" >/dev/null \
-      && grep -F "interface_name = \"$interface_name\"" <<<"$toml_text" >/dev/null \
-      && grep -F "bandwidth_mbps = $expected_bandwidth_mbps" <<<"$toml_text" >/dev/null \
-      && grep -F 'manager = "external_observed"' <<<"$toml_text" >/dev/null \
-      && ! grep -F "recommended_ospf_cost" <<<"$toml_text" >/dev/null; then
+    runtime_config_json="$(config_read_runtime_config "$id")"
+    if jq -e \
+      --arg plan_id "$plan_id" \
+      --arg interface_name "$interface_name" \
+      --argjson bandwidth_mbps "$expected_bandwidth_mbps" '
+        .network.runtime_status_telemetry_plans
+        | any(.[];
+            .plan_id == $plan_id
+            and .plan.interface_name == $interface_name
+            and .plan.bandwidth_mbps == $bandwidth_mbps
+            and .plan.runtime_control.manager == "external_observed"
+            and (.plan | has("recommended_ospf_cost") | not))
+      ' <<<"$runtime_config_json" >/dev/null; then
       return
     fi
     sleep 1
   done
   echo "runtime tunnel plan $plan_id did not become visible for $id" >&2
-  printf '%s\n' "$toml_text" >&2
+  printf '%s\n' "$runtime_config_json" >&2
   echo "--- recent jobs ---" >&2
   api_get "/api/v1/jobs?limit=200" >&2 || true
   echo "--- runtime config sync outputs ---" >&2
@@ -251,16 +258,19 @@ wait_config_contains_plan() {
 wait_config_omits_plan() {
   local id="$1"
   local deadline=$((SECONDS + 45))
-  local toml_text=""
+  local runtime_config_json=""
   while (( SECONDS < deadline )); do
-    toml_text="$(config_read_toml "$id")"
-    if ! grep -F "plan_id = \"$plan_id\"" <<<"$toml_text" >/dev/null; then
+    runtime_config_json="$(config_read_runtime_config "$id")"
+    if jq -e --arg plan_id "$plan_id" '
+      [.network.runtime_status_telemetry_plans[]? | select(.plan_id == $plan_id)]
+      | length == 0
+    ' <<<"$runtime_config_json" >/dev/null; then
       return
     fi
     sleep 1
   done
   echo "disabled runtime tunnel plan $plan_id remained visible for $id" >&2
-  printf '%s\n' "$toml_text" >&2
+  printf '%s\n' "$runtime_config_json" >&2
   exit 1
 }
 

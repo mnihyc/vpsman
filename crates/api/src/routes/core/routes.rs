@@ -66,9 +66,9 @@ use crate::{
         verify_agent_update_artifact,
     },
     routes_inventory::{
-        assign_agent_tag, bulk_mutate_tags, create_server_runtime_config_patch_request, create_tag,
-        delete_agent, delete_runtime_config_patch_generator, delete_tag, fleet_summary,
-        get_tag_order, list_agents, list_gateway_sessions, list_runtime_config_apply_states,
+        assign_agent_tag, bulk_mutate_tags, create_tag, delete_agent,
+        delete_runtime_config_patch_generator, delete_tag, fleet_summary, get_tag_order,
+        list_agents, list_gateway_sessions, list_runtime_config_apply_states,
         list_runtime_config_patch_generators, list_tags, list_telemetry_network_rates,
         list_telemetry_rollups, list_telemetry_samples, list_telemetry_tunnels,
         render_runtime_config_patch_generator, resolve_bulk_targets, update_agent_alias,
@@ -115,6 +115,11 @@ use crate::{
         update_port_forward_rule,
     },
     routes_restores::{create_restore_plan, list_restore_plans},
+    routes_runtime_config_workspace::{
+        apply_bulk_runtime_config_overrides, apply_single_runtime_config_override,
+        get_runtime_config_workspace, preview_bulk_runtime_config_overrides,
+        preview_single_runtime_config_override,
+    },
     routes_schedules::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
         enable_schedule, get_schedule, list_schedules, update_schedule, update_schedule_targets,
@@ -437,8 +442,27 @@ pub(crate) fn build_router(state: AppState) -> Router {
             put(update_network_adapter_definition).delete(delete_network_adapter_definition),
         )
         .route(
-            "/api/v1/runtime-config/patch",
-            post(create_server_runtime_config_patch_request)
+            "/api/v1/runtime-config/clients/{client_id}/workspace",
+            get(get_runtime_config_workspace),
+        )
+        .route(
+            "/api/v1/runtime-config/clients/{client_id}/override/preview",
+            post(preview_single_runtime_config_override)
+                .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/runtime-config/clients/{client_id}/override/apply",
+            post(apply_single_runtime_config_override)
+                .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/runtime-config/overrides/bulk/preview",
+            post(preview_bulk_runtime_config_overrides)
+                .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/runtime-config/overrides/bulk/apply",
+            post(apply_bulk_runtime_config_overrides)
                 .layer(DefaultBodyLimit::max(MAX_RUNTIME_CONFIG_PATCH_BODY_BYTES)),
         )
         .route(

@@ -1202,14 +1202,14 @@ async function verifyDesktopSubpages(page: Page, projectName: string) {
     },
     {
       view: "Config",
-      subpage: "Bulk patch",
-      marker: "Bulk patch",
+      subpage: "VPS override patch",
+      marker: "VPS override patch",
       screenshot: "page-config-bulk-apply",
     },
     {
       view: "Config",
       subpage: "Per-VPS",
-      marker: "Per-VPS config",
+      marker: "Per-VPS desired config",
       screenshot: "page-config-single-vps",
     },
     {

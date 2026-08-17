@@ -222,13 +222,18 @@ fn render_process_inventory_argv(
     if !command.argv[0].starts_with('/') {
         anyhow::bail!("process inventory executable must be absolute");
     }
+    if command
+        .argv
+        .iter()
+        .any(|part| part.contains("{display_name}") || part.contains("{tags_csv}"))
+    {
+        anyhow::bail!("process inventory argv contains removed server identity placeholder");
+    }
     Ok(command
         .argv
         .iter()
         .map(|part| {
             part.replace("{client_id}", &config.client_id)
-                .replace("{display_name}", &config.display_name)
-                .replace("{tags_csv}", &config.tags.join(","))
                 .replace("{limit}", &limit.to_string())
         })
         .collect())
@@ -286,4 +291,40 @@ fn chunked_output(job_id: uuid::Uuid, stream: OutputStream, data: &[u8]) -> Vec<
             done: false,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn process_inventory_renders_runtime_placeholders_and_rejects_server_identity() {
+        let config = AgentConfig {
+            client_id: "edge-a".to_string(),
+            ..AgentConfig::default()
+        };
+        let command = RuntimeTunnelCommand {
+            argv: vec![
+                "/bin/echo".to_string(),
+                "{client_id}".to_string(),
+                "{limit}".to_string(),
+            ],
+            ..RuntimeTunnelCommand::default()
+        };
+        assert_eq!(
+            render_process_inventory_argv(&config, &command, 25).unwrap(),
+            ["/bin/echo", "edge-a", "25"]
+        );
+
+        for placeholder in ["{display_name}", "{tags_csv}"] {
+            let command = RuntimeTunnelCommand {
+                argv: vec!["/bin/echo".to_string(), placeholder.to_string()],
+                ..RuntimeTunnelCommand::default()
+            };
+            assert!(render_process_inventory_argv(&config, &command, 25)
+                .unwrap_err()
+                .to_string()
+                .contains("removed server identity placeholder"));
+        }
+    }
 }

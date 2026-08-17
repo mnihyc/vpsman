@@ -311,8 +311,8 @@ test("bulk config review uses the current backend-resolved selector instead of a
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Bulk patch");
-  await unlockPrivilegeFor(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
+  await unlockPrivilegeFor(page, "Config", "VPS override patch");
 
   const panel = page.locator(".configApplyGrid");
   await panel
@@ -324,13 +324,13 @@ test("bulk config review uses the current backend-resolved selector instead of a
     .getByRole("combobox", { name: "Bulk patch target expression" })
     .fill("id:agent-fra-02");
   await expect(
-    panel.getByRole("button", { name: "Apply patch" }),
+    panel.getByRole("button", { name: "Apply override patch" }),
   ).toBeDisabled();
   await activate(panel.getByRole("button", { name: "Preview changes" }));
-  await activate(panel.getByRole("button", { name: "Apply patch" }));
-  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Apply override patch" }));
+  await expect(page.getByText("Confirm VPS override patch")).toBeVisible();
   await activate(
-    page.getByRole("button", { name: "Apply runtime config patch" }),
+    page.getByRole("button", { name: "Apply VPS override patch" }),
   );
 
   const request = await page.evaluate(() => {
@@ -896,8 +896,8 @@ test("bulk config async review preparation ignores stale selector edits", async 
   );
   await installConsoleApiMock(page);
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Bulk patch");
-  await unlockPrivilegeFor(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
+  await unlockPrivilegeFor(page, "Config", "VPS override patch");
 
   const panel = page.locator(".configApplyGrid");
   const selector = panel.getByRole("combobox", {
@@ -915,13 +915,13 @@ test("bulk config async review preparation ignores stale selector edits", async 
   await expect(
     panel.locator(".configReviewFeedback.actionFeedbackProgress"),
   ).toHaveCount(0);
-  await expect(page.getByText("Confirm bulk patch")).toBeHidden();
+  await expect(page.getByText("Confirm VPS override patch")).toBeHidden();
 
   await activate(panel.getByRole("button", { name: "Preview changes" }));
-  await activate(panel.getByRole("button", { name: "Apply patch" }));
-  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
+  await activate(panel.getByRole("button", { name: "Apply override patch" }));
+  await expect(page.getByText("Confirm VPS override patch")).toBeVisible();
   await activate(
-    page.getByRole("button", { name: "Apply runtime config patch" }),
+    page.getByRole("button", { name: "Apply VPS override patch" }),
   );
 
   const request = await page.evaluate(() => {
@@ -1551,37 +1551,30 @@ test("single config applies one-VPS override from a frozen exact target", async 
   await openConsoleSubpage(page, "Config", "Per-VPS");
   await unlockPrivilegeFor(page, "Config", "Per-VPS");
 
-  const panel = page.locator(".configApplyGrid");
+  const panel = page.locator(".singleConfigWorkspace");
   await chooseVpsBySearch(
     panel,
     "VPS config target",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await activate(panel.getByRole("button", { name: "Read current config" }));
-  const editor = panel.getByLabel("VPS redacted runtime config TOML");
-  await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
-  await expect(editor).toHaveAttribute("readonly", "");
-
-  await panel
-    .getByLabel("One-VPS runtime config override TOML")
-    .fill("[update]\nunmanaged_enabled = true\n");
-  await activate(panel.getByRole("button", { name: "Apply patch" }));
-  await expect(
-    page.getByLabel("Confirm one-VPS runtime config override"),
-  ).toBeVisible();
+  await expect(panel.getByLabel("Unmanaged updates")).not.toBeChecked();
+  await activate(panel.getByRole("button", { name: "Refresh live" }));
+  await expect(panel).toContainText("matches saved desired");
+  await panel.getByLabel("Unmanaged updates").check();
+  await activate(panel.getByRole("button", { name: "Review changes" }));
+  await activate(panel.getByRole("button", { name: "Apply reviewed" }));
+  await expect(page.getByLabel("Confirm VPS runtime override")).toBeVisible();
   await chooseVpsBySearch(
     panel,
     "VPS config target",
     "sfo",
     /edge-sfo-01.*agent-sfo-01/,
   );
+  await expect(page.getByLabel("Confirm VPS runtime override")).toBeHidden();
   await expect(
-    page.getByLabel("Confirm one-VPS runtime config override"),
-  ).toBeHidden();
-  await expect(panel.getByRole("button", { name: "Apply patch" })).toHaveCount(
-    0,
-  );
+    panel.getByRole("button", { name: "Apply reviewed" }),
+  ).toHaveCount(0);
 
   await chooseVpsBySearch(
     panel,
@@ -1589,22 +1582,14 @@ test("single config applies one-VPS override from a frozen exact target", async 
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
-  await expect(panel.locator(".configTargetMeta")).toContainText("core-fra-02");
-  await activate(panel.getByRole("button", { name: "Read current config" }));
-  await expect(editor).toHaveValue(/client_id = "agent-fra-02"/);
-  await expect(panel.getByLabel("One-VPS config override guard")).toContainText(
-    "Current base",
-  );
-  await panel
-    .getByLabel("One-VPS runtime config override TOML")
-    .fill("[update]\nunmanaged_enabled = true\n");
-  await activate(panel.getByRole("button", { name: "Apply patch" }));
-  const confirmation = page.getByLabel(
-    "Confirm one-VPS runtime config override",
-  );
+  await expect(panel.getByLabel("Unmanaged updates")).not.toBeChecked();
+  await panel.getByLabel("Unmanaged updates").check();
+  await activate(panel.getByRole("button", { name: "Review changes" }));
+  await activate(panel.getByRole("button", { name: "Apply reviewed" }));
+  const confirmation = page.getByLabel("Confirm VPS runtime override");
   await expect(confirmation).toBeVisible();
   await activate(
-    confirmation.getByRole("button", { name: "Apply one-VPS override" }),
+    confirmation.getByRole("button", { name: "Apply VPS override" }),
   );
 
   const readRequest = await page.evaluate(() => {
@@ -1630,18 +1615,25 @@ test("single config applies one-VPS override from a frozen exact target", async 
     const requests = (
       window as unknown as {
         __vpsmanTestRequests: {
-          runtimeConfigPatches: Array<Record<string, unknown>>;
+          runtimeConfigPatches: Array<{
+            body: Record<string, unknown>;
+            pathname: string;
+          }>;
         };
       }
     ).__vpsmanTestRequests;
     return requests.runtimeConfigPatches.at(-1);
   });
-  expect(patchRequest).toMatchObject({
+  expect(patchRequest?.pathname).toBe(
+    "/api/v1/runtime-config/clients/agent-fra-02/override/apply",
+  );
+  expect(patchRequest?.body).toMatchObject({
+    candidate: {
+      type: "structured",
+      value: { update: { unmanaged_enabled: true } },
+    },
     confirmed: true,
-    selector_expression: "id:agent-fra-02",
-    target_client_ids: ["agent-fra-02"],
   });
-  expect(patchRequest?.toml).toContain("unmanaged_enabled = true");
 });
 
 test("backup restore confirmations close on edit and submit fresh snapshots", async ({

@@ -1051,7 +1051,7 @@ function ConfigTab({
         <button
           className="secondaryAction compactAction"
           onClick={onOpenConfig}
-          title="Open Config / Per-VPS with this VPS selected to compare the current redacted config before applying changes."
+          title="Open Config / Per-VPS with this VPS selected to edit server-desired runtime values and optionally read live agent evidence."
           type="button"
         >
           <Boxes size={14} />
@@ -1060,7 +1060,7 @@ function ConfigTab({
         <button
           className="secondaryAction compactAction"
           onClick={onOpenConfig}
-          title="Open Config / Per-VPS to review and apply a runtime config patch with privilege confirmation."
+          title="Open Config / Per-VPS to review and apply a sparse VPS override with privilege confirmation."
           type="button"
         >
           <Activity size={14} />
@@ -2136,7 +2136,7 @@ function configDriftDetail(
     return `${sourceIssueCount} source readiness issue${sourceIssueCount === 1 ? "" : "s"}`;
   if (state?.applied_content_hash)
     return `Applied hash ${shortId(state.applied_content_hash)}`;
-  return "Open Config / Per-VPS to compare current redacted config";
+  return "Open Config / Per-VPS to review desired runtime config";
 }
 
 function configDriftTone(

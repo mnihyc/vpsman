@@ -260,6 +260,7 @@ impl Repository {
 
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
                 ensure_memory_port_forward_client_active(memory, &candidate.client_id).await?;
                 {
@@ -324,6 +325,7 @@ impl Repository {
         let target_hostname = normalized_target_hostname_update(&request.target_hostname)?;
         let persisted = match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
                 let client_id = memory
                     .port_forward_rules
@@ -499,6 +501,7 @@ impl Repository {
         let reason = normalize_reason(reason);
         let persisted = match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
                 let client_id = memory
                     .port_forward_rules
@@ -689,6 +692,7 @@ impl Repository {
         let reason = normalize_reason(reason).context("port_forward_forget_reason_required")?;
         let persisted = match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
                 let client_id = memory
                     .port_forward_rules
@@ -832,6 +836,7 @@ impl Repository {
 
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
                 let selected =
                     validate_bulk_snapshots(memory.port_forward_rules.read().await.clone(), items)?;

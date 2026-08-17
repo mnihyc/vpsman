@@ -17,7 +17,8 @@ use crate::{
     model::*,
     repository::Repository,
     repository_key_lifecycle::{
-        require_visible_memory_clients, require_visible_postgres_clients_in_tx,
+        lock_postgres_agent_identity_lifecycle, require_visible_memory_clients,
+        require_visible_postgres_clients_in_tx,
     },
     repository_network_observations::deactivate_postgres_automatic_observation_series_for_plan,
     repository_tunnel_credentials::{
@@ -964,6 +965,7 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let now = unix_now().to_string();
                 let updated = {
                     let mut plans = memory.tunnel_plans.write().await;
@@ -1102,6 +1104,7 @@ impl Repository {
 
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let now = unix_now().to_string();
                 let rotated = {
                     let mut plans = memory.tunnel_plans.write().await;
@@ -1281,6 +1284,7 @@ impl Repository {
         let was_enabled = existing.enabled;
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let now = unix_now().to_string();
                 let deleted = {
                     let mut plans = memory.tunnel_plans.write().await;
@@ -1930,6 +1934,10 @@ async fn validate_postgres_tunnel_plan_resource_conflicts(
 async fn lock_postgres_tunnel_plan_write(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<()> {
+    // Keep the global lifecycle -> desired-source table order used by runtime
+    // config commits. Endpoint validation below takes this same advisory lock,
+    // so taking it first prevents a guard/writer table-lock cycle.
+    lock_postgres_agent_identity_lifecycle(tx).await?;
     // Serialize only plan create/update conflict scans. Other tunnel status writes keep
     // normal row-level concurrency.
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")

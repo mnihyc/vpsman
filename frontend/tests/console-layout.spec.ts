@@ -3827,7 +3827,7 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   ).toBeVisible();
   await expect(
     suiteConfigBoundary.getByRole("button", {
-      name: "Open Config / Bulk patch",
+      name: "Open Config / VPS override patch",
     }),
   ).toBeVisible();
   await expect(page.getByLabel("API suite config fields")).toContainText(
@@ -3916,12 +3916,8 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByLabel(/super password/i)).toHaveCount(0);
   await expect(page.getByLabel(/super salt/i)).toHaveCount(0);
   await expect(page.getByLabel("VPS config target")).toHaveCount(0);
-  await expect(page.getByLabel("VPS redacted runtime config TOML")).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByLabel("One-VPS runtime config override TOML"),
-  ).toHaveCount(0);
+  await expect(page.getByLabel("Saved desired runtime TOML")).toHaveCount(0);
+  await expect(page.getByLabel("VPS replacement override TOML")).toHaveCount(0);
   await expect(page.getByLabel("Bulk patch target expression")).toHaveCount(0);
   await expect(
     page.getByLabel("Rendered bulk runtime config patch TOML"),
@@ -5984,7 +5980,7 @@ test("renders patch generators and submits explicit runtime config patch modes",
 
   await page.goto("/");
   await page.goto("/");
-  await openConsoleSubpage(page, "Config", "Bulk patch");
+  await openConsoleSubpage(page, "Config", "VPS override patch");
   await expect(page.getByLabel("Patch generators data grid")).toHaveCount(0);
   await activate(page.getByRole("button", { name: "Manage generators" }));
   const templateGrid = page.getByLabel("Patch generators data grid");
@@ -6004,7 +6000,7 @@ test("renders patch generators and submits explicit runtime config patch modes",
       .filter({ hasText: "Autonomous updater disabled" }),
   ).toBeVisible();
 
-  await unlockPrivilegeFor(page, "Config", "Bulk patch");
+  await unlockPrivilegeFor(page, "Config", "VPS override patch");
   const bulk = page.locator(".configApplyGrid");
   await bulk
     .getByLabel("Patch generator", { exact: true })
@@ -6058,10 +6054,12 @@ test("renders patch generators and submits explicit runtime config patch modes",
     "edge-sfo-01",
   );
   await page.keyboard.press("Escape");
-  await expect(bulk.getByRole("button", { name: "Apply patch" })).toBeEnabled();
-  await activate(bulk.getByRole("button", { name: "Apply patch" }));
-  await expect(page.getByText("Confirm bulk patch")).toBeVisible();
-  await confirmVisiblePrompt(page, "Apply runtime config patch");
+  await expect(
+    bulk.getByRole("button", { name: "Apply override patch" }),
+  ).toBeEnabled();
+  await activate(bulk.getByRole("button", { name: "Apply override patch" }));
+  await expect(page.getByText("Confirm VPS override patch")).toBeVisible();
+  await confirmVisiblePrompt(page, "Apply VPS override patch");
 
   const request = await page.evaluate(() => {
     const requests = (
@@ -6076,14 +6074,14 @@ test("renders patch generators and submits explicit runtime config patch modes",
     selector_expression: "id:agent-sfo-01",
     target_client_ids: ["agent-sfo-01"],
   });
-  expect((request as { toml: string }).toml).toContain("[update]");
-  expect((request as { toml: string }).toml).toContain(
+  expect((request as { patch: string }).patch).toContain("[update]");
+  expect((request as { patch: string }).patch).toContain(
     "unmanaged_enabled = false",
   );
   expect(JSON.stringify(request)).not.toContain("local-super-password");
 });
 
-test("uses an exact VPS combobox for single config jobs", async ({
+test("uses an exact VPS combobox for the desired-config workspace", async ({
   page,
 }, testInfo) => {
   test.skip(
@@ -6104,13 +6102,13 @@ test("uses an exact VPS combobox for single config jobs", async ({
   await targetPicker.blur();
   await expect(targetPicker).toHaveValue("");
   await chooseVpsBySearch(
-    page.locator(".configApplyGrid"),
+    page.locator(".singleConfigWorkspace"),
     "VPS config target",
     "fra",
     /core-fra-02.*agent-fra-02/,
   );
   await expect(targetPicker).toHaveValue("core-fra-02 (ra02)");
-  await activate(page.getByRole("button", { name: "Read current config" }));
+  await activate(page.getByRole("button", { name: "Refresh live" }));
 
   await expect
     .poll(async () =>
@@ -6136,43 +6134,28 @@ test("uses an exact VPS combobox for single config jobs", async ({
     target_client_ids: ["agent-fra-02"],
   });
 
-  const configEditor = page.getByLabel("VPS redacted runtime config TOML");
-  await expect(configEditor).toHaveValue(/client_id = "agent-fra-02"/);
-  await expect(configEditor).toHaveValue(
-    /unmanaged_version_url = "https:\/\/github\.com\/mnihyc\/vpsman\/releases\/latest\/download\/version\.json"/,
-  );
-  await expect(configEditor).not.toHaveAttribute(
-    "title",
-    /client_id = "agent-fra-02"/,
-  );
-  await expect(
-    page.getByText(
-      "This immutable redacted base is the guard for the one-VPS patch.",
-    ),
-  ).toBeVisible();
-  await expect(page.getByLabel("One-VPS config override guard")).toContainText(
-    "Current base",
-  );
-  const overrideEditor = page.getByLabel(
-    "One-VPS runtime config override TOML",
-  );
+  const liveConfig = page.locator("details.singleConfigLiveEvidence", {
+    hasText: "Live ConfigRead",
+  });
+  await expect(liveConfig).toContainText("matches saved desired");
+  await liveConfig.locator("summary").click();
+  await expect(liveConfig).toContainText('"telemetry_interval_secs": 30');
+  await expect(liveConfig).not.toContainText("agent-fra-02");
+
+  await page.getByRole("tab", { name: "Advanced" }).click();
+  const overrideEditor = page.getByLabel("VPS replacement override TOML");
   await overrideEditor.fill("[update]\nunmanaged_enabled = true\n");
+  await overrideEditor.blur();
   await expect(overrideEditor).not.toHaveAttribute(
     "title",
     "[update]\nunmanaged_enabled = true\n",
   );
-  await expect(page.getByLabel("One-VPS config override guard")).toContainText(
-    "update",
+  await expect(page.getByLabel("VPS config sticky review")).toContainText(
+    "Draft will change saved desired",
   );
   await expect(
-    page.locator(".configReviewFeedback.actionFeedbackSuccess"),
-  ).toContainText("Patch preview ready");
-  await expect(
-    page.locator(".singleConfigPatchPane .formHint", {
-      hasText: "Patch preview ready",
-    }),
-  ).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Apply patch" })).toBeEnabled();
+    page.getByRole("button", { name: "Review changes" }),
+  ).toBeEnabled();
 });
 
 test("creates a cron schedule from a command template with target preview", async ({

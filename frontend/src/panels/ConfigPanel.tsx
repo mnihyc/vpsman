@@ -64,11 +64,14 @@ import {
   MAX_CONFIGURABLE_JOB_TIMEOUT_SECS,
 } from "./jobDispatchModel";
 import { LocalTargetPreview } from "./TargetImpactPreview";
+import { SingleVpsConfigWorkspace } from "./config/SingleVpsConfigWorkspace";
 import type {
   AgentView,
+  ApplyRuntimeConfigBulkOverrideRequest,
+  ApplyRuntimeConfigBulkOverrideResponse,
+  ApplyRuntimeConfigOverrideRequest,
+  ApplyRuntimeConfigOverrideResponse,
   BulkResolveResponse,
-  RuntimeConfigPatchRequest,
-  RuntimeConfigPatchResponse,
   CreateJobRequest,
   CreateJobResponse,
   FleetAlertPolicyRecord,
@@ -91,6 +94,11 @@ import type {
   JobTargetRecord,
   JsonValue,
   PrivilegeAssertion,
+  PreviewRuntimeConfigBulkOverrideRequest,
+  PreviewRuntimeConfigOverrideRequest,
+  RuntimeConfigBulkOverridePreview,
+  RuntimeConfigClientWorkspace,
+  RuntimeConfigOverridePreview,
   UpsertRuntimeConfigPatchGeneratorRequest,
 } from "../types";
 import {
@@ -113,30 +121,18 @@ import {
 
 const CONFIG_BULK_SELECTOR_STORAGE_KEY =
   "vpsman.config.bulk.selectorExpression";
-const CONFIG_SINGLE_SELECTOR_STORAGE_KEY =
-  "vpsman.config.single.selectorExpression";
 const CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY = "vpsman.config.single.clientId";
 const CONFIG_VPS_RULES_SELECTOR_STORAGE_KEY =
   "vpsman.config.vpsRules.selectorExpression";
 const CONFIG_HELP = {
   incrementalPatch:
-    "Incremental TOML patches modify only reviewed runtime keys; bootstrap and server-managed keys stay immutable.",
+    "Advanced VPS override patches modify reviewed runtime keys only. Use -field.path or -[section.path] to delete saved override values; inherited and locked values remain server-owned.",
   patchGenerator:
     "Saved generators render incremental TOML from reviewed JSON variables before any VPS target is touched.",
   targetSelector:
     "Selector expressions freeze the exact VPS set for preview and review so later fleet changes cannot silently expand scope.",
   maxTimeout:
     "Per-target command timeout enforced by the control plane so slow agents cannot hold config work indefinitely.",
-  redactedRuntimeToml:
-    "Runtime config returned by the agent with secret material removed; the base hash is used to detect stale overrides.",
-  guardedOverride:
-    "One-VPS override requires a current base hash, validated TOML sections, payload hash, and privilege assertion before apply.",
-  currentBase:
-    "Hash of the redacted config read used to prove the override was reviewed against the current runtime state.",
-  sections:
-    "Top-level TOML sections touched by the override; validate before review so the operator sees the blast radius.",
-  payload:
-    "Hash of the exact override payload that the confirmation prompt will bind to the privileged request.",
   vpsRules:
     "Per-VPS traffic and optional billing values feed card display, accounting, and alert policies; dry-run previews changed rows before write.",
   ruleSelector:
@@ -162,6 +158,7 @@ type BulkConfigApplySnapshot = {
   maxTimeoutSecs: number;
   privilegeAssertion: PrivilegeAssertion;
   payloadHashHex: string;
+  previewHash: string;
 };
 
 type PatchGeneratorEditorState = {
@@ -174,18 +171,6 @@ type PatchGeneratorEditorState = {
   fieldSchemaText: string;
   rawGeneratorBody: string;
   docsMetadataText: string;
-};
-
-type SingleVpsConfigApplySnapshot = {
-  clientId: string;
-  selectorExpression: string;
-  target: AgentView;
-  toml: string;
-  baseHash: string;
-  patchSections: string[];
-  maxTimeoutSecs: number;
-  privilegeAssertion: PrivilegeAssertion;
-  payloadHashHex: string;
 };
 
 type EvidenceState = "available" | "loading" | "unavailable";
@@ -208,11 +193,13 @@ export function ConfigPanel({
   fleetAlertPolicies,
   jobs,
   loading,
-  onSubmitRuntimeConfigPatch,
+  onApplyRuntimeConfigBulkOverride,
+  onApplyRuntimeConfigOverride,
   onCreateJob,
   onLoadJobOutputs,
   onLoadJobTargets,
   onLoadConfigurationInventory,
+  onLoadRuntimeConfigClientWorkspace,
   onDeleteRuntimeConfigPatchGenerator,
   onOpenJobDetails,
   onOpenJobHistory,
@@ -224,7 +211,8 @@ export function ConfigPanel({
   onDryRunVpsRules,
   onLoadEffectiveVpsRules,
   onRenderRuntimeConfigPatchGenerator,
-  onResolveBulk,
+  onPreviewRuntimeConfigBulkOverride,
+  onPreviewRuntimeConfigOverride,
   onSelectSubpage,
   onUpsertRuntimeConfigPatchGenerator,
   privilegeMaterial,
@@ -251,13 +239,20 @@ export function ConfigPanel({
     created_at: string;
   }>;
   loading: boolean;
-  onSubmitRuntimeConfigPatch: (
-    request: RuntimeConfigPatchRequest,
-  ) => Promise<RuntimeConfigPatchResponse>;
+  onApplyRuntimeConfigBulkOverride: (
+    request: ApplyRuntimeConfigBulkOverrideRequest,
+  ) => Promise<ApplyRuntimeConfigBulkOverrideResponse>;
+  onApplyRuntimeConfigOverride: (
+    clientId: string,
+    request: ApplyRuntimeConfigOverrideRequest,
+  ) => Promise<ApplyRuntimeConfigOverrideResponse>;
   onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
   onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
   onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
   onLoadConfigurationInventory: () => Promise<void>;
+  onLoadRuntimeConfigClientWorkspace: (
+    clientId: string,
+  ) => Promise<RuntimeConfigClientWorkspace>;
   onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: DeleteRuntimeConfigPatchGeneratorRequest,
@@ -281,7 +276,13 @@ export function ConfigPanel({
     generatorId: string,
     request: { values: JsonValue },
   ) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
-  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  onPreviewRuntimeConfigBulkOverride: (
+    request: PreviewRuntimeConfigBulkOverrideRequest,
+  ) => Promise<RuntimeConfigBulkOverridePreview>;
+  onPreviewRuntimeConfigOverride: (
+    clientId: string,
+    request: PreviewRuntimeConfigOverrideRequest,
+  ) => Promise<RuntimeConfigOverridePreview>;
   onSelectSubpage: (subpage: string) => void;
   onUpsertRuntimeConfigPatchGenerator: (
     request: UpsertRuntimeConfigPatchGeneratorRequest,
@@ -400,7 +401,7 @@ export function ConfigPanel({
             actionError={actionError}
             agents={agents}
             runtimeConfigPatchGenerators={runtimeConfigPatchGenerators}
-            onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
+            onApplyRuntimeConfigBulkOverride={onApplyRuntimeConfigBulkOverride}
             onDeleteRuntimeConfigPatchGenerator={
               onDeleteRuntimeConfigPatchGenerator
             }
@@ -413,7 +414,9 @@ export function ConfigPanel({
             onRenderRuntimeConfigPatchGenerator={
               onRenderRuntimeConfigPatchGenerator
             }
-            onResolveBulk={onResolveBulk}
+            onPreviewRuntimeConfigBulkOverride={
+              onPreviewRuntimeConfigBulkOverride
+            }
             onUpsertRuntimeConfigPatchGenerator={
               onUpsertRuntimeConfigPatchGenerator
             }
@@ -425,17 +428,17 @@ export function ConfigPanel({
           />
         )}
         {subpage === "single" && (
-          <SingleVpsConfig
+          <SingleVpsConfigWorkspace
             actionError={actionError}
             agents={agents}
-            runtimeConfigApplyStates={runtimeConfigApplyStates}
-            runtimeConfigEvidenceState={runtimeConfigEvidenceState}
+            onApplyOverride={onApplyRuntimeConfigOverride}
             onCreateJob={onCreateJob}
             onLoadJobOutputs={onLoadJobOutputs}
             onLoadJobTargets={onLoadJobTargets}
+            onLoadWorkspace={onLoadRuntimeConfigClientWorkspace}
             onOpenJobDetails={onOpenJobDetails}
             onOpenPrivilegeUnlock={onOpenPrivilegeUnlock}
-            onSubmitRuntimeConfigPatch={onSubmitRuntimeConfigPatch}
+            onPreviewOverride={onPreviewRuntimeConfigOverride}
             pending={pending}
             privilegeMaterial={privilegeMaterial}
             runAction={(action) =>
@@ -646,16 +649,17 @@ function ConfigOverview({
   const workflowLinks = [
     {
       action: "Open Per-VPS",
-      detail: "Read one VPS redacted config and inspect apply-state evidence.",
+      detail:
+        "Edit one server-desired runtime hierarchy and compare live evidence.",
       subpage: "per_vps",
       title: "Per-VPS",
     },
     {
-      action: "Open Bulk patch",
+      action: "Open VPS override patch",
       detail:
-        "Resolve target scope, render a patch, unlock privilege, and review apply.",
+        "Use the Advanced-only patch flow with aggregate and per-VPS review.",
       subpage: "bulk_patch",
-      title: "Bulk patch",
+      title: "VPS override patch",
     },
     {
       action: "Open Sources",
@@ -1519,7 +1523,7 @@ function BulkConfigApply({
   actionError,
   agents,
   runtimeConfigPatchGenerators,
-  onSubmitRuntimeConfigPatch,
+  onApplyRuntimeConfigBulkOverride,
   onDeleteRuntimeConfigPatchGenerator,
   onCreateJob,
   onLoadJobOutputs,
@@ -1528,7 +1532,7 @@ function BulkConfigApply({
   onOpenJobHistory,
   onOpenPrivilegeUnlock,
   onRenderRuntimeConfigPatchGenerator,
-  onResolveBulk,
+  onPreviewRuntimeConfigBulkOverride,
   onUpsertRuntimeConfigPatchGenerator,
   pending,
   privilegeMaterial,
@@ -1537,9 +1541,9 @@ function BulkConfigApply({
   actionError: string | null;
   agents: AgentView[];
   runtimeConfigPatchGenerators: RuntimeConfigPatchGeneratorRecord[];
-  onSubmitRuntimeConfigPatch: (
-    request: RuntimeConfigPatchRequest,
-  ) => Promise<RuntimeConfigPatchResponse>;
+  onApplyRuntimeConfigBulkOverride: (
+    request: ApplyRuntimeConfigBulkOverrideRequest,
+  ) => Promise<ApplyRuntimeConfigBulkOverrideResponse>;
   onDeleteRuntimeConfigPatchGenerator: (
     generatorId: string,
     request: DeleteRuntimeConfigPatchGeneratorRequest,
@@ -1554,7 +1558,9 @@ function BulkConfigApply({
     generatorId: string,
     request: { values: JsonValue },
   ) => Promise<RuntimeConfigPatchGeneratorRenderResponse>;
-  onResolveBulk: (selectorExpression: string) => Promise<BulkResolveResponse>;
+  onPreviewRuntimeConfigBulkOverride: (
+    request: PreviewRuntimeConfigBulkOverrideRequest,
+  ) => Promise<RuntimeConfigBulkOverridePreview>;
   onUpsertRuntimeConfigPatchGenerator: (
     request: UpsertRuntimeConfigPatchGeneratorRequest,
   ) => Promise<RuntimeConfigPatchGeneratorRecord>;
@@ -1573,6 +1579,8 @@ function BulkConfigApply({
   const [valuesText, setValuesText] = useState("");
   const [temporaryToml, setTemporaryToml] = useState("");
   const [preview, setPreview] = useState<BulkResolveResponse | null>(null);
+  const [changePreview, setChangePreview] =
+    useState<RuntimeConfigBulkOverridePreview | null>(null);
   const [rendered, setRendered] =
     useState<RuntimeConfigPatchGeneratorRenderResponse | null>(null);
   const [applySnapshot, setApplySnapshot] =
@@ -1593,11 +1601,15 @@ function BulkConfigApply({
   );
   const [progress, setProgress] = useState<BulkJobProgress | null>(null);
   const [reviewStatus, setReviewStatus] = useState<string | null>(null);
-  const reviewFeedbackTone: ActionFeedbackTone = reviewStatus?.startsWith(
-    "Desired",
+  const reviewFeedbackTone: ActionFeedbackTone = reviewStatus?.includes(
+    "Review runtime apply state",
   )
     ? "warning"
-    : "progress";
+    : reviewStatus?.startsWith("VPS override patch saved")
+      ? "success"
+      : reviewStatus?.startsWith("Desired")
+        ? "warning"
+        : "progress";
   const {
     captureReviewGeneration,
     invalidateReviewGeneration,
@@ -1606,6 +1618,21 @@ function BulkConfigApply({
   const selectedGenerator = runtimeConfigPatchGenerators.find(
     (generator) =>
       generator.id === (generatorId || runtimeConfigPatchGenerators[0]?.id),
+  );
+  const reviewedTargets = useCallback(
+    (targetClientIds: string[]): BulkResolveResponse => {
+      const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+      const targets = targetClientIds
+        .map((targetClientId) => agentsById.get(targetClientId))
+        .filter((agent): agent is AgentView => Boolean(agent));
+      if (targets.length !== targetClientIds.length) {
+        throw new Error(
+          "Reviewed VPS targets changed outside the loaded fleet inventory; refresh and preview again",
+        );
+      }
+      return { target_count: targetClientIds.length, targets };
+    },
+    [agents],
   );
   const patchGeneratorDraftError = patchGeneratorEditor
     ? validatePatchGeneratorEditor(patchGeneratorEditor)
@@ -1646,6 +1673,7 @@ function BulkConfigApply({
   );
   const ready = Boolean(
     preview &&
+    changePreview &&
     preview.target_count > 0 &&
     previewToml &&
     selectorExpression.trim() &&
@@ -1785,6 +1813,7 @@ function BulkConfigApply({
   function clearBulkConfigReview() {
     invalidateReviewGeneration();
     setApplySnapshot(null);
+    setChangePreview(null);
     setConfirmOpen(false);
     setReviewStatus(null);
   }
@@ -1944,6 +1973,8 @@ function BulkConfigApply({
         if (frozenPatchMode === "temporary" && !frozenTemporaryToml.trim()) {
           throw new Error("Paste a temporary TOML patch");
         }
+        let toml = frozenTemporaryToml.trim();
+        let patchName = "Temporary patch";
         if (frozenPatchMode === "generator") {
           const frozenValues = parseJsonObject(frozenValuesText);
           const nextRendered = await onRenderRuntimeConfigPatchGenerator(
@@ -1954,12 +1985,23 @@ function BulkConfigApply({
             return;
           }
           setRendered(nextRendered);
+          toml = nextRendered.toml;
+          patchName = frozenGenerator!.name;
         }
-        const nextPreview = await onResolveBulk(frozenSelector);
+        const nextChangePreview = await onPreviewRuntimeConfigBulkOverride({
+          selector_expression: frozenSelector,
+          target_client_ids: [],
+          patch: toml,
+          reason: patchName,
+        });
         if (!isReviewGenerationCurrent(reviewGeneration)) {
           return;
         }
+        const nextPreview = reviewedTargets(
+          nextChangePreview.target_client_ids,
+        );
         setPreview(nextPreview);
+        setChangePreview(nextChangePreview);
         setApplySnapshot(null);
       });
     } finally {
@@ -1970,6 +2012,8 @@ function BulkConfigApply({
   }
 
   async function reviewApply() {
+    const firstPreviewClientIds = [...(changePreview?.target_client_ids ?? [])];
+    const firstPreviewHash = changePreview?.preview_hash ?? "";
     clearBulkConfigReview();
     const reviewGeneration = captureReviewGeneration();
     const frozenGenerator = selectedGenerator;
@@ -1995,16 +2039,11 @@ function BulkConfigApply({
         if (!frozenSelector) {
           throw new Error("Add at least one target selector");
         }
+        if (!firstPreviewClientIds.length || !firstPreviewHash) {
+          throw new Error("Preview changes before applying this bulk patch");
+        }
         if (frozenPatchMode === "temporary" && !frozenTemporaryToml.trim()) {
           throw new Error("Paste a temporary TOML patch");
-        }
-        const nextPreview = await onResolveBulk(frozenSelector);
-        if (!isReviewGenerationCurrent(reviewGeneration)) {
-          return;
-        }
-        const clientIds = nextPreview.targets.map((target) => target.id);
-        if (!clientIds.length) {
-          throw new Error("Bulk patch confirmation resolved no VPSs");
         }
         let toml = frozenTemporaryToml.trim();
         let patchName = "Temporary patch";
@@ -2026,14 +2065,38 @@ function BulkConfigApply({
         const patchPayloadHashHex = await sha256Hex(
           new TextEncoder().encode(toml),
         );
+        const nextChangePreview = await onPreviewRuntimeConfigBulkOverride({
+          selector_expression: frozenSelector,
+          target_client_ids: firstPreviewClientIds,
+          patch: toml,
+          reason: patchName,
+        });
+        if (!isReviewGenerationCurrent(reviewGeneration)) {
+          return;
+        }
+        const clientIds = nextChangePreview.target_client_ids;
+        if (!sameStringArray(clientIds, firstPreviewClientIds)) {
+          throw new Error(
+            "The server did not preserve the reviewed VPS target set; preview changes again",
+          );
+        }
+        if (nextChangePreview.preview_hash !== firstPreviewHash) {
+          throw new Error(
+            "Desired or override state changed since the displayed preview; preview changes again",
+          );
+        }
+        if (!clientIds.length) {
+          throw new Error("Bulk patch confirmation resolved no VPSs");
+        }
+        const nextPreview = reviewedTargets(clientIds);
         const privilegeAssertion = await buildPrivilegeAssertion({
           intent: canonicalDbPrivilegeIntent({
-            action: "runtime_config.patch",
+            action: "runtime_config.override.bulk_apply",
             target: "runtime_config",
             selectorExpression: frozenSelector,
             resolvedTargets: clientIds,
             confirmed: true,
-            payloadHash: patchPayloadHashHex,
+            payloadHash: nextChangePreview.preview_hash,
           }),
           privilegeMaterial: frozenPrivilegeMaterial,
         });
@@ -2041,6 +2104,7 @@ function BulkConfigApply({
           return;
         }
         setPreview(nextPreview);
+        setChangePreview(nextChangePreview);
         setApplySnapshot({
           clientIds,
           jobId: crypto.randomUUID(),
@@ -2049,6 +2113,7 @@ function BulkConfigApply({
           patchSections,
           patchSource: frozenPatchMode,
           payloadHashHex: patchPayloadHashHex,
+          previewHash: nextChangePreview.preview_hash,
           privilegeAssertion,
           selectorExpression: frozenSelector,
           targets: nextPreview.targets,
@@ -2072,17 +2137,21 @@ function BulkConfigApply({
           "Bulk patch confirmation snapshot is missing; review the apply again",
         );
       }
-      const response = await onSubmitRuntimeConfigPatch({
+      const response = await onApplyRuntimeConfigBulkOverride({
         confirmed: true,
         reason: snapshot.patchName,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.clientIds,
-        toml: snapshot.toml,
+        patch: snapshot.toml,
+        preview_hash: snapshot.previewHash,
         privilege_assertion: snapshot.privilegeAssertion,
       });
       const dispatchWarning = runtimeConfigDispatchWarning(
         response.sync,
-        "Desired patch saved",
+        "VPS override patch saved",
+        response.preview.targets.filter(
+          (target) => !target.no_op && !target.storage_only,
+        ).length,
       );
       if (dispatchWarning) {
         setReviewStatus(dispatchWarning);
@@ -2091,22 +2160,33 @@ function BulkConfigApply({
       }
       const jobIds = response.sync_job_ids;
       if (jobIds.length === 0) {
-        throw new Error("Runtime config patch created no sync jobs");
+        setReviewStatus(
+          "VPS override patch saved; no runtime sync was required",
+        );
+        setApplySnapshot(null);
+        return;
       }
+      const queuedClientIds = new Set(
+        response.sync.map((outcome) => outcome.client_id),
+      );
+      const queuedTargets = snapshot.targets.filter((target) =>
+        queuedClientIds.has(target.id),
+      );
+      const targetCount = queuedTargets.length;
       const initial = buildBulkJobProgress({
-        targetCount: response.target_count,
+        targetCount,
         jobId: snapshot.jobId,
         jobIds,
         targetRecords: [],
-        targets: snapshot.targets,
+        targets: queuedTargets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
       });
       setProgress(initial);
       const waited = await waitForBulkJobSet(jobIds, onLoadJobTargets, {
         operationId: snapshot.jobId,
-        targetCount: response.target_count,
+        targetCount,
         onProgress: setProgress,
-        targets: snapshot.targets,
+        targets: queuedTargets,
         maxTimeoutSecs: snapshot.maxTimeoutSecs,
         onLoadOutputs: onLoadJobOutputs,
       });
@@ -2128,7 +2208,7 @@ function BulkConfigApply({
         <div className="bulkPatchHeader">
           <ConfigHelpLabel
             help={CONFIG_HELP.incrementalPatch}
-            label="Incremental patch"
+            label="Advanced · VPS override patch"
             strong
           />
           <button
@@ -2168,6 +2248,12 @@ function BulkConfigApply({
             Temporary patch
           </button>
         </div>
+        <small className="formHint">
+          Bulk editing intentionally stays text-based. Delete one saved value
+          with <code>-field.path</code> or a saved section with{" "}
+          <code>-[section.path]</code>; preview shows every resulting VPS
+          override before apply.
+        </small>
         {patchMode === "generator" ? (
           <>
             <small className="formHint" id="bulk-patch-generator-help">
@@ -2225,7 +2311,9 @@ function BulkConfigApply({
               setTemporaryToml(event.target.value);
               clearBulkConfigReview();
             }}
-            placeholder="[telemetry]\n# paste one incremental TOML patch"
+            placeholder={
+              "# set a value\ntelemetry_interval_secs = 30\n\n# delete a saved field\n-telemetry_interval_secs\n\n# delete a saved section\n-[update]"
+            }
             rows={14}
             value={temporaryToml}
           />
@@ -2279,7 +2367,7 @@ function BulkConfigApply({
           </strong>
           <span>
             {preview
-              ? "The final Apply confirmation will freeze this selector and re-resolve it before submission."
+              ? "These server-verified VPS IDs are frozen into this review. Apply submits exactly this set without re-resolving the selector."
               : selectorExpression.trim()
                 ? "The matching VPSs update immediately below. Preview changes verifies them on the server and builds the per-VPS patch summary."
                 : "Add a selector; an empty selector is never treated as all VPSs."}
@@ -2309,6 +2397,7 @@ function BulkConfigApply({
           tone={reviewFeedbackTone}
         />
         <BulkPatchChangeSummary
+          changePreview={changePreview}
           patchMode={patchMode}
           patchName={
             patchMode === "temporary"
@@ -2372,7 +2461,7 @@ function BulkConfigApply({
             type="button"
           >
             <FileSliders size={16} />
-            Apply patch
+            Apply override patch
           </button>
         </div>
       </section>
@@ -2617,8 +2706,8 @@ function BulkConfigApply({
         />
       )}
       <ConfirmationPrompt
-        confirmLabel="Apply runtime config patch"
-        detail={`Apply one generated incremental patch to ${bulkVpsCountLabel(applySnapshot?.clientIds.length ?? 0)}.`}
+        confirmLabel="Apply VPS override patch"
+        detail={`Apply one reviewed override patch to ${bulkVpsCountLabel(applySnapshot?.clientIds.length ?? 0)}.`}
         error={actionError}
         expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
         items={[
@@ -2671,7 +2760,7 @@ function BulkConfigApply({
         onConfirm={() => void applyPatch()}
         open={confirmOpen}
         pending={pending}
-        title="Confirm bulk patch"
+        title="Confirm VPS override patch"
       />
       <ConfirmationPrompt
         confirmLabel="Delete patch generator"
@@ -2704,8 +2793,10 @@ function detailField(label: string, value: string, pre = false) {
 function runtimeConfigDispatchWarning(
   sync: RuntimeConfigDispatchRecord[],
   savedMessage: string,
+  requiredSyncTargetCount: number,
 ): string | null {
   const failures = sync.filter((outcome) => outcome.status !== "queued");
+  if (requiredSyncTargetCount === 0 && sync.length === 0) return null;
   if (failures.length === 0 && sync.length > 0) return null;
   const queued = sync.length - failures.length;
   const failedTargets = failures
@@ -2718,12 +2809,14 @@ function runtimeConfigDispatchWarning(
 }
 
 function BulkPatchChangeSummary({
+  changePreview,
   patchMode,
   patchName,
   preview,
   sections,
   toml,
 }: {
+  changePreview: RuntimeConfigBulkOverridePreview | null;
   patchMode: "generator" | "temporary";
   patchName: string;
   preview: BulkResolveResponse | null;
@@ -2737,6 +2830,16 @@ function BulkPatchChangeSummary({
       : inferTomlSections(toml).join(", ");
   const sourceLabel =
     patchMode === "generator" ? "Saved generator" : "Temporary patch";
+  const storageOnlyTargetCount =
+    changePreview?.targets.filter((target) => target.storage_only).length ?? 0;
+  const runtimeChangeTargetCount = Math.max(
+    0,
+    (changePreview?.changed_target_count ?? 0) - storageOnlyTargetCount,
+  );
+  const noOpTargetCount = Math.max(
+    0,
+    (preview?.target_count ?? 0) - (changePreview?.changed_target_count ?? 0),
+  );
 
   return (
     <div
@@ -2746,8 +2849,10 @@ function BulkPatchChangeSummary({
       <div>
         <strong>Preview changes</strong>
         <span>
-          {preview
-            ? `${bulkVpsCountLabel(preview.target_count)} will receive ${patchName}.`
+          {preview && changePreview
+            ? storageOnlyTargetCount > 0
+              ? `${bulkVpsCountLabel(runtimeChangeTargetCount)} runtime change; ${bulkVpsCountLabel(storageOnlyTargetCount)} stored TOML only; ${bulkVpsCountLabel(noOpTargetCount)} no-op.`
+              : `${bulkVpsCountLabel(changePreview.changed_target_count)} change; ${bulkVpsCountLabel(noOpTargetCount)} no-op.`
             : "Preview changes renders the patch and resolves exact VPS targets."}
         </span>
       </div>
@@ -2758,12 +2863,25 @@ function BulkPatchChangeSummary({
       </div>
       {visibleTargets.length > 0 ? (
         <div className="bulkPatchTargetRows">
-          {visibleTargets.map((target) => (
-            <span key={target.id} title={target.id}>
-              <strong>{target.display_name}</strong>
-              <small>{sectionSummary || "runtime config patch"}</small>
-            </span>
-          ))}
+          {visibleTargets.map((target) => {
+            const targetPreview = changePreview?.targets.find(
+              (candidate) => candidate.client_id === target.id,
+            );
+            return (
+              <span key={target.id} title={target.id}>
+                <strong>{target.display_name}</strong>
+                <small>
+                  {targetPreview
+                    ? targetPreview.no_op
+                      ? "No change"
+                      : targetPreview.storage_only
+                        ? "Stored TOML only"
+                        : `${targetPreview.changes.length} ${targetPreview.changes.length === 1 ? "change" : "changes"}`
+                    : sectionSummary || "VPS override patch"}
+                </small>
+              </span>
+            );
+          })}
           {preview && preview.target_count > visibleTargets.length && (
             <span className="mutedChip">
               +{preview.target_count - visibleTargets.length} more VPSs
@@ -2779,724 +2897,10 @@ function bulkVpsCountLabel(count: number): string {
   return `${count} VPS${count === 1 ? "" : "s"}`;
 }
 
-function SingleVpsConfig({
-  actionError,
-  agents,
-  runtimeConfigApplyStates,
-  runtimeConfigEvidenceState,
-  onCreateJob,
-  onLoadJobOutputs,
-  onLoadJobTargets,
-  onOpenJobDetails,
-  onOpenPrivilegeUnlock,
-  onSubmitRuntimeConfigPatch,
-  pending,
-  privilegeMaterial,
-  runAction,
-}: {
-  actionError: string | null;
-  agents: AgentView[];
-  runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
-  runtimeConfigEvidenceState: EvidenceState;
-  onCreateJob: (request: CreateJobRequest) => Promise<CreateJobResponse>;
-  onLoadJobOutputs: (jobId: string) => Promise<JobOutputRecord[]>;
-  onLoadJobTargets: (jobId: string) => Promise<JobTargetRecord[]>;
-  onOpenJobDetails: (jobId: string) => void;
-  onOpenPrivilegeUnlock: () => void;
-  onSubmitRuntimeConfigPatch: (
-    request: RuntimeConfigPatchRequest,
-  ) => Promise<RuntimeConfigPatchResponse>;
-  pending: boolean;
-  privilegeMaterial: PrivilegeMaterial | null;
-  runAction: (action: () => Promise<void>) => Promise<void>;
-}) {
-  const { vpsNameDisplayMode } = usePanelDisplaySettings();
-  const [clientId, setClientId] = useState(() => readSingleConfigClientId());
-  const clientIdRef = useRef(clientId);
-  const [redactedToml, setRedactedToml] = useState("");
-  const [baseHash, setBaseHash] = useState("");
-  const [overrideToml, setOverrideToml] = useState("");
-  const [overrideValidation, setOverrideValidation] = useState<{
-    sections: string[];
-    payloadHashHex: string;
-  } | null>(null);
-  const [overrideValidationGeneration, setOverrideValidationGeneration] =
-    useState(0);
-  const [applySnapshot, setApplySnapshot] =
-    useState<SingleVpsConfigApplySnapshot | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [lastJobId, setLastJobId] = useState<string | null>(null);
-  const [maxTimeoutSecs, setMaxTimeoutSecs] = useState(
-    DEFAULT_MAX_JOB_TIMEOUT_SECS,
-  );
-  const [progress, setProgress] = useState<BulkJobProgress | null>(null);
-  const [reviewStatus, setReviewStatus] = useState<string | null>(null);
-  const [editorView, setEditorView] = useState<"current" | "patch">("patch");
-  const {
-    captureReviewGeneration,
-    invalidateReviewGeneration,
-    isReviewGenerationCurrent,
-  } = useReviewGenerationGuard();
-  const singleTarget = useMemo(
-    () => agents.find((agent) => agent.id === clientId) ?? null,
-    [agents, clientId],
-  );
-  const runtimeApplyState = useMemo(
-    () =>
-      runtimeConfigEvidenceState === "available"
-        ? (runtimeConfigApplyStates.find(
-            (state) => state.client_id === clientId,
-          ) ?? null)
-        : null,
-    [clientId, runtimeConfigApplyStates, runtimeConfigEvidenceState],
-  );
-  const overrideLineCount = useMemo(
-    () => countConfigPatchLines(overrideToml),
-    [overrideToml],
-  );
-  const overrideReady = Boolean(
-    singleTarget && baseHash && overrideToml.trim(),
-  );
-  const reviewFeedbackTone = reviewStatus?.startsWith("Patch preview ready")
-    ? "success"
-    : reviewStatus?.startsWith("Desired")
-      ? "warning"
-      : "progress";
-
-  useEffect(() => {
-    clientIdRef.current = clientId;
-    writeLocalString(CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY, clientId);
-  }, [clientId]);
-
-  useEffect(() => {
-    let active = true;
-    const frozenToml = overrideToml.trim();
-    const frozenBaseHash = baseHash;
-    const frozenTargetId = singleTarget?.id ?? "";
-    if (!frozenTargetId || !frozenBaseHash || !frozenToml) {
-      setOverrideValidation(null);
-      return () => {
-        active = false;
-      };
-    }
-    const sections = inferTomlSections(frozenToml);
-    void sha256Hex(new TextEncoder().encode(frozenToml)).then(
-      (payloadHashHex) => {
-        if (
-          active &&
-          clientIdRef.current === frozenTargetId &&
-          baseHash === frozenBaseHash
-        ) {
-          setOverrideValidation({ sections, payloadHashHex });
-          setReviewStatus(
-            `Patch preview ready: ${sections.join(", ")} against base ${shortId(frozenBaseHash)}`,
-          );
-        }
-      },
-    );
-    return () => {
-      active = false;
-    };
-  }, [baseHash, overrideToml, overrideValidationGeneration, singleTarget?.id]);
-
-  function clearSingleConfigReview() {
-    invalidateReviewGeneration();
-    setApplySnapshot(null);
-    setConfirmOpen(false);
-    setOverrideValidation(null);
-    setReviewStatus(null);
-  }
-
-  function selectClientId(value: string) {
-    if (value === clientIdRef.current) {
-      return;
-    }
-    clientIdRef.current = value;
-    clearSingleConfigReview();
-    setClientId(value);
-    setRedactedToml("");
-    setBaseHash("");
-    setProgress(null);
-    setEditorView("patch");
-  }
-
-  async function reviewOverrideApply() {
-    const reviewGeneration = captureReviewGeneration();
-    const frozenTarget = singleTarget;
-    const frozenPrivilegeMaterial = privilegeMaterial;
-    const frozenToml = overrideToml.trim();
-    const frozenBaseHash = baseHash;
-    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-    setApplySnapshot(null);
-    setConfirmOpen(false);
-    setReviewStatus("Preparing one-VPS override review");
-    await runAction(async () => {
-      await waitForReviewRender();
-      if (!frozenTarget || !frozenPrivilegeMaterial) {
-        throw new Error("Select one VPS and unlock privilege");
-      }
-      if (!frozenBaseHash) {
-        throw new Error(
-          "Read the current VPS config before applying an override",
-        );
-      }
-      if (!frozenToml) {
-        throw new Error("Paste a one-VPS runtime config override");
-      }
-      const selectorExpression = selectorExpressionForClientIds([
-        frozenTarget.id,
-      ]);
-      const patchSections = inferTomlSections(frozenToml);
-      const payloadHashHex = await sha256Hex(
-        new TextEncoder().encode(frozenToml),
-      );
-      const privilegeAssertion = await buildPrivilegeAssertion({
-        intent: canonicalDbPrivilegeIntent({
-          action: "runtime_config.patch",
-          target: "runtime_config",
-          selectorExpression,
-          resolvedTargets: [frozenTarget.id],
-          confirmed: true,
-          payloadHash: payloadHashHex,
-        }),
-        privilegeMaterial: frozenPrivilegeMaterial,
-      });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setOverrideValidation({ sections: patchSections, payloadHashHex });
-      setApplySnapshot({
-        clientId: frozenTarget.id,
-        selectorExpression,
-        target: frozenTarget,
-        toml: frozenToml,
-        baseHash: frozenBaseHash,
-        patchSections,
-        maxTimeoutSecs: boundedMaxTimeoutSecs,
-        privilegeAssertion,
-        payloadHashHex,
-      });
-      setConfirmOpen(true);
-      setReviewStatus(null);
-    });
-  }
-
-  async function applyOverride() {
-    setConfirmOpen(false);
-    await runAction(async () => {
-      const snapshot = applySnapshot;
-      if (!snapshot) {
-        throw new Error(
-          "One-VPS override snapshot is missing; review the apply again",
-        );
-      }
-      const response = await onSubmitRuntimeConfigPatch({
-        confirmed: true,
-        reason: `One-VPS override for ${snapshot.target.display_name}`,
-        selector_expression: snapshot.selectorExpression,
-        target_client_ids: [snapshot.clientId],
-        toml: snapshot.toml,
-        privilege_assertion: snapshot.privilegeAssertion,
-      });
-      const dispatchWarning = runtimeConfigDispatchWarning(
-        response.sync,
-        "Desired one-VPS override saved",
-      );
-      if (dispatchWarning) {
-        setReviewStatus(dispatchWarning);
-        setApplySnapshot(null);
-        return;
-      }
-      const firstJobId = response.sync_job_ids[0];
-      if (!firstJobId) {
-        throw new Error("One-VPS override created no sync job");
-      }
-      setLastJobId(firstJobId);
-      const initial = buildBulkJobProgress({
-        targetCount: response.target_count,
-        jobId: firstJobId,
-        targetRecords: [],
-        targets: [snapshot.target],
-        maxTimeoutSecs: snapshot.maxTimeoutSecs,
-      });
-      setProgress(initial);
-      const waited = await waitForBulkJobTargets(firstJobId, onLoadJobTargets, {
-        targetCount: 1,
-        onProgress: setProgress,
-        targets: [snapshot.target],
-        maxTimeoutSecs: snapshot.maxTimeoutSecs,
-      });
-      let outputs: JobOutputRecord[] = [];
-      let outputLoadWarning: string | null = null;
-      try {
-        outputs = await onLoadJobOutputs(firstJobId);
-      } catch (error) {
-        outputLoadWarning = `Final job output could not be loaded: ${
-          error instanceof Error
-            ? error.message
-            : "the browser returned no failure detail."
-        } Open job ${firstJobId} before retrying the override.`;
-      }
-      const finalProgress = buildBulkJobProgress({
-        targetCount: response.target_count,
-        jobId: firstJobId,
-        outputs,
-        targetRecords: waited.targets,
-        targets: [snapshot.target],
-        maxTimeoutSecs: snapshot.maxTimeoutSecs,
-      });
-      setProgress(finalProgress);
-      setApplySnapshot(null);
-      if (
-        finalProgress.total > 0 &&
-        finalProgress.successful === finalProgress.total
-      ) {
-        setRedactedToml("");
-        setBaseHash("");
-        setOverrideToml("");
-        setOverrideValidation(null);
-        setReviewStatus(
-          outputLoadWarning
-            ? `Desired one-VPS override saved and the target completed, but ${outputLoadWarning}`
-            : "Override applied. Read current config before drafting another change.",
-        );
-        setEditorView("current");
-      } else if (outputLoadWarning) {
-        setReviewStatus(
-          `Desired one-VPS override saved, but ${outputLoadWarning}`,
-        );
-      }
-    });
-  }
-
-  async function readConfig() {
-    clearSingleConfigReview();
-    const reviewGeneration = captureReviewGeneration();
-    const frozenTarget = singleTarget;
-    const boundedMaxTimeoutSecs = clampJobMaxTimeoutSecs(maxTimeoutSecs);
-    await runAction(async () => {
-      if (!frozenTarget) {
-        throw new Error("Select one VPS before reading runtime config");
-      }
-      const operation: JobOperation = { type: "config_read" };
-      const selectorExpressionForTarget = selectorExpressionForClientIds([
-        frozenTarget.id,
-      ]);
-      const response = await onCreateJob({
-        argv: [],
-        command: "config_read",
-        confirmed: false,
-        destructive: false,
-        force_unprivileged: true,
-        job_id: crypto.randomUUID(),
-        operation,
-        privileged: false,
-        selector_expression: selectorExpressionForTarget,
-        target_client_ids: [frozenTarget.id],
-        max_timeout_secs: boundedMaxTimeoutSecs,
-      });
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setLastJobId(response.job_id);
-      const waited = await waitForBulkJobTargets(
-        response.job_id,
-        onLoadJobTargets,
-        {
-          targetCount: createJobTargetCount(response),
-          onProgress: setProgress,
-          targets: [frozenTarget],
-          maxTimeoutSecs: boundedMaxTimeoutSecs,
-        },
-      );
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      const outputs = await onLoadJobOutputs(response.job_id);
-      setProgress(
-        buildBulkJobProgress({
-          targetCount: createJobTargetCount(response),
-          jobId: response.job_id,
-          outputs,
-          targetRecords: waited.targets,
-          targets: [frozenTarget],
-          maxTimeoutSecs: boundedMaxTimeoutSecs,
-        }),
-      );
-      const config = extractConfigRead(outputs);
-      if (!isReviewGenerationCurrent(reviewGeneration)) {
-        return;
-      }
-      setRedactedToml(config.toml);
-      setBaseHash(config.baseHash);
-      setOverrideValidationGeneration((current) => current + 1);
-      setEditorView("patch");
-    });
-  }
-
+function sameStringArray(left: string[], right: string[]): boolean {
   return (
-    <div className="configApplyGrid singleConfigFlow">
-      <section
-        className="compactForm singleConfigTargetPanel"
-        aria-label="Per-VPS config target and load"
-      >
-        <ConfigHelpLabel
-          help={CONFIG_HELP.targetSelector}
-          label="VPS target"
-          strong
-        />
-        <VpsCombobox
-          agents={agents}
-          ariaLabel="VPS config target"
-          className="configTargetCombobox"
-          onChange={selectClientId}
-          placeholder="Search VPS config"
-          value={clientId}
-        />
-        <div className="configTargetMeta">
-          <span className="configTargetName">
-            {singleTarget
-              ? formatVpsName(singleTarget, vpsNameDisplayMode)
-              : clientId
-                ? "Select a listed VPS"
-                : "no target selected"}
-          </span>
-          <span
-            title={
-              runtimeConfigEvidenceState === "available"
-                ? runtimeConfigApplyStateSummary(runtimeApplyState, false)
-                : undefined
-            }
-          >
-            {runtimeConfigEvidenceState === "loading"
-              ? "Checking apply-state evidence"
-              : runtimeConfigEvidenceState === "unavailable"
-                ? "Apply-state evidence unavailable"
-                : runtimeConfigApplyStateSummary(runtimeApplyState)}
-          </span>
-        </div>
-        <button
-          className="secondaryAction"
-          disabled={pending || !singleTarget}
-          onClick={readConfig}
-          title={
-            pending
-              ? "Wait for the current config operation to finish before reading runtime config."
-              : !singleTarget
-                ? "Select one VPS before reading runtime config."
-                : "Read redacted runtime config from the selected VPS. No privilege unlock is required for this read-only inspection."
-          }
-          type="button"
-        >
-          <ServerCog size={16} />
-          Read current config
-        </button>
-        {lastJobId && (
-          <button
-            className="secondaryAction"
-            onClick={() => onOpenJobDetails(lastJobId)}
-            title={lastJobId}
-            type="button"
-          >
-            Open job {shortId(lastJobId)}
-          </button>
-        )}
-        <details className="singleConfigAdvanced">
-          <summary>Advanced read/apply options</summary>
-          <label>
-            <ConfigHelpLabel
-              help={CONFIG_HELP.maxTimeout}
-              label="Max timeout seconds"
-            />
-            <input
-              aria-label="VPS config max timeout seconds"
-              max={MAX_CONFIGURABLE_JOB_TIMEOUT_SECS}
-              min={1}
-              onChange={(event) => {
-                clearSingleConfigReview();
-                setMaxTimeoutSecs(Number(event.target.value));
-              }}
-              type="number"
-              value={maxTimeoutSecs}
-            />
-          </label>
-        </details>
-      </section>
-
-      {!singleTarget && (
-        <section
-          className="compactForm singleConfigEmpty"
-          aria-label="Per-VPS config start"
-        >
-          <strong>Select one VPS</strong>
-          <span>
-            Choose a visible VPS to load its redacted current config, then draft
-            one guarded TOML patch for that exact target.
-          </span>
-          <div
-            className="singleConfigHelpGrid"
-            aria-label="Per-VPS config safeguards"
-          >
-            <ConfigHelpLabel
-              help={CONFIG_HELP.redactedRuntimeToml}
-              label="Redacted runtime TOML"
-            />
-            <ConfigHelpLabel
-              help={CONFIG_HELP.guardedOverride}
-              label="Guarded one-VPS override"
-            />
-          </div>
-          <SingleConfigGuardAnchors
-            baseLabel="Read current config"
-            payloadLabel="Patch hash before apply"
-            sectionsLabel="Validated TOML sections"
-          />
-        </section>
-      )}
-
-      {singleTarget && !baseHash && (
-        <section
-          className="compactForm singleConfigLoadPanel"
-          aria-label="Per-VPS config load current"
-        >
-          <strong>Load current config</strong>
-          <span>
-            Redacted config reads are inspection-only and do not require
-            privilege unlock. The patch editor opens after the base hash is
-            loaded.
-          </span>
-          <div
-            className="singleConfigHelpGrid"
-            aria-label="Per-VPS config safeguards"
-          >
-            <ConfigHelpLabel
-              help={CONFIG_HELP.redactedRuntimeToml}
-              label="Redacted runtime TOML"
-            />
-            <ConfigHelpLabel
-              help={CONFIG_HELP.guardedOverride}
-              label="Guarded one-VPS override"
-            />
-          </div>
-          <SingleConfigGuardAnchors
-            baseLabel="Read current config"
-            payloadLabel="Patch hash before apply"
-            sectionsLabel="Validated TOML sections"
-          />
-        </section>
-      )}
-
-      {singleTarget && baseHash && (
-        <>
-          <div
-            className="singleConfigViewTabs"
-            aria-label="Per-VPS config views"
-          >
-            <button
-              className={editorView === "current" ? "active" : ""}
-              onClick={() => setEditorView("current")}
-              type="button"
-            >
-              Current base
-            </button>
-            <button
-              className={editorView === "patch" ? "active" : ""}
-              onClick={() => setEditorView("patch")}
-              type="button"
-            >
-              Desired patch
-            </button>
-          </div>
-          <section
-            className={`compactForm configTomlEditor singleConfigPane singleConfigCurrentPane ${
-              editorView === "current" ? "active" : ""
-            }`}
-            aria-label="Per-VPS current config"
-          >
-            <ConfigHelpLabel
-              help={CONFIG_HELP.redactedRuntimeToml}
-              label="Redacted runtime TOML"
-              strong
-            />
-            <span title={baseHash}>
-              base {shortId(baseHash)} / redacted runtime config for{" "}
-              {formatVpsName(singleTarget, vpsNameDisplayMode)}
-            </span>
-            <textarea
-              aria-label="VPS redacted runtime config TOML"
-              readOnly
-              rows={18}
-              value={redactedToml}
-            />
-            <span className="formHint">
-              This immutable redacted base is the guard for the one-VPS patch.
-            </span>
-          </section>
-          <section
-            className={`compactForm configTomlEditor configOverrideEditor singleConfigPane singleConfigPatchPane ${
-              editorView === "patch" ? "active" : ""
-            }`}
-            aria-label="Per-VPS desired config patch"
-          >
-            <ConfigHelpLabel
-              help={CONFIG_HELP.guardedOverride}
-              label="Guarded one-VPS override"
-              strong
-            />
-            <span>
-              Draft one incremental TOML patch for this VPS. Sections and
-              payload hash update while you type; Apply opens the final
-              confirmation.
-            </span>
-            <SingleConfigGuardAnchors
-              baseLabel={shortId(baseHash)}
-              baseTitle={baseHash}
-              exactTargetLabel={formatVpsName(singleTarget, vpsNameDisplayMode)}
-              payloadLabel={
-                overrideValidation?.payloadHashHex
-                  ? shortId(overrideValidation.payloadHashHex)
-                  : "Not ready"
-              }
-              payloadTitle={overrideValidation?.payloadHashHex}
-              sectionsLabel={
-                overrideValidation?.sections.join(", ") || "Type patch"
-              }
-            />
-            <textarea
-              aria-label="One-VPS runtime config override TOML"
-              onChange={(event) => {
-                clearSingleConfigReview();
-                setOverrideToml(event.target.value);
-              }}
-              placeholder="[update]\n# one incremental override for this VPS"
-              rows={14}
-              value={overrideToml}
-            />
-            <ActionFeedback
-              className="localActionFeedback configReviewFeedback"
-              message={reviewStatus}
-              tone={reviewFeedbackTone}
-            />
-            <div className="configOverrideActions singleConfigStickyActions">
-              <span
-                aria-label="One-VPS config change summary"
-                className="singleConfigApplySummary"
-              >
-                <strong>
-                  {overrideLineCount} changed{" "}
-                  {overrideLineCount === 1 ? "line" : "lines"}
-                </strong>
-                <small>
-                  {overrideValidation
-                    ? `${overrideValidation.sections.length} ${overrideValidation.sections.length === 1 ? "section" : "sections"} - 0 errors`
-                    : overrideToml.trim()
-                      ? "Validating sections and payload hash"
-                      : privilegeMaterial
-                        ? "Type a patch before apply"
-                        : "Unlock only when ready to apply"}
-                </small>
-              </span>
-              <button
-                className="primaryAction"
-                disabled={pending || !overrideReady}
-                onClick={() => {
-                  if (!privilegeMaterial) {
-                    setReviewStatus(
-                      "Unlock privilege to apply this one-VPS patch",
-                    );
-                    onOpenPrivilegeUnlock();
-                    return;
-                  }
-                  void reviewOverrideApply();
-                }}
-                title={
-                  pending
-                    ? "Wait for the current config operation to finish before applying."
-                    : !baseHash
-                      ? "Read the selected VPS runtime config before applying a patch."
-                      : !overrideToml.trim()
-                        ? "Enter one incremental TOML patch before applying."
-                        : !privilegeMaterial
-                          ? "Unlock privilege material before applying the patch."
-                          : "Open the final one-VPS config apply confirmation."
-                }
-                type="button"
-              >
-                <FileSliders size={16} />
-                Apply patch
-              </button>
-            </div>
-          </section>
-        </>
-      )}
-      {progress && (
-        <ExecutionResultPanel
-          loading={pending}
-          onClearResults={() => setProgress(null)}
-          onOpenJobDetails={onOpenJobDetails}
-          progress={progress}
-        />
-      )}
-      <ConfirmationPrompt
-        confirmLabel="Apply one-VPS override"
-        detail={`Apply one reviewed runtime config override to ${applySnapshot?.target.display_name ?? "one VPS"}.`}
-        error={actionError}
-        expiresAtUnix={applySnapshot?.privilegeAssertion.expires_unix}
-        items={[
-          {
-            label: "VPS",
-            value: applySnapshot?.target.display_name ?? "-",
-            title:
-              applySnapshot?.target.display_name ??
-              "No VPS is available because the one-VPS review is not open",
-          },
-          {
-            label: "Selector",
-            value: applySnapshot?.selectorExpression ?? "-",
-            title:
-              applySnapshot?.selectorExpression ??
-              "No frozen one-VPS selector is available because the review is not open",
-          },
-          {
-            label: "Base hash",
-            value: applySnapshot?.baseHash
-              ? shortId(applySnapshot.baseHash)
-              : "-",
-            title:
-              applySnapshot?.baseHash ??
-              "No base hash is available; read the selected VPS runtime configuration first",
-          },
-          {
-            label: "Sections",
-            value: applySnapshot?.patchSections.join(", ") ?? "-",
-            title:
-              applySnapshot?.patchSections.join(", ") ||
-              "No validated configuration sections are available",
-          },
-          {
-            label: "Payload",
-            value: applySnapshot?.payloadHashHex
-              ? shortId(applySnapshot.payloadHashHex)
-              : "-",
-            title:
-              applySnapshot?.payloadHashHex ??
-              "No frozen payload hash is available because the one-VPS review is not open",
-          },
-          {
-            label: "Timeout",
-            value: `${applySnapshot?.maxTimeoutSecs ?? maxTimeoutSecs}s`,
-          },
-        ]}
-        onCancel={() => {
-          setConfirmOpen(false);
-          setApplySnapshot(null);
-        }}
-        onConfirm={() => void applyOverride()}
-        open={confirmOpen}
-        pending={pending}
-        title="Confirm one-VPS runtime config override"
-      />
-    </div>
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }
 
@@ -5054,54 +4458,6 @@ function ConfigHelpLabel({
   );
 }
 
-function SingleConfigGuardAnchors({
-  baseLabel,
-  baseTitle,
-  exactTargetLabel,
-  payloadLabel,
-  payloadTitle,
-  sectionsLabel,
-}: {
-  baseLabel: string;
-  baseTitle?: string;
-  exactTargetLabel?: string;
-  payloadLabel: string;
-  payloadTitle?: string;
-  sectionsLabel: string;
-}) {
-  return (
-    <div
-      className="configOverrideSummary"
-      aria-label="One-VPS config override guard"
-    >
-      {exactTargetLabel && (
-        <span>
-          <strong>Exact target</strong>
-          <small>{exactTargetLabel}</small>
-        </span>
-      )}
-      <span>
-        <strong title={CONFIG_HELP.currentBase}>Current base</strong>
-        <small title={baseTitle}>{baseLabel}</small>
-      </span>
-      <span>
-        <strong title={CONFIG_HELP.sections}>Patch sections</strong>
-        <small>{sectionsLabel}</small>
-      </span>
-      <span>
-        <strong title={CONFIG_HELP.payload}>Payload</strong>
-        <small title={payloadTitle}>{payloadLabel}</small>
-      </span>
-    </div>
-  );
-}
-
-function countConfigPatchLines(toml: string): number {
-  return toml
-    .split(/\r?\n/)
-    .filter((line) => line.trim() && !line.trim().startsWith("#")).length;
-}
-
 function VpsRulesPreviewTable({
   columns,
   onRequestApply,
@@ -5275,9 +4631,9 @@ function jsonSummary(value: JsonValue): string {
 function configTitle(subpage: string): string {
   switch (subpage) {
     case "bulk":
-      return "Bulk patch";
+      return "VPS override patch";
     case "single":
-      return "Per-VPS config";
+      return "Per-VPS desired config";
     case "rules":
       return "VPS Rules";
     default:
@@ -5290,9 +4646,9 @@ function configSubtitle(subpage: string): string {
     case "rules":
       return "Per-VPS traffic rule values used by traffic accounting and alert policies.";
     case "bulk":
-      return "Reviewed runtime config patch workflow";
+      return "Advanced-only bulk editing with explicit deletion directives and per-VPS review";
     case "single":
-      return "Read and compare one VPS runtime config";
+      return "Edit inherited and overridden runtime values in one server-owned hierarchy";
     default:
       return "Runtime config workflows";
   }
@@ -5356,7 +4712,11 @@ function inferTomlSections(toml: string): string[] {
       toml
         .split(/\r?\n/)
         .map((line) => line.trim())
-        .map((line) => /^\[([^[\]]+)\]$/.exec(line)?.[1]?.trim())
+        .map(
+          (line) =>
+            /^-?\[([^[\]]+)\]$/.exec(line)?.[1]?.trim() ??
+            /^-([A-Za-z0-9_-]+)(?:\.|$)/.exec(line)?.[1],
+        )
         .filter((section): section is string => Boolean(section)),
     ),
   );
@@ -5431,26 +4791,6 @@ function formatJsonObject(value: JsonValue): string {
   return JSON.stringify(asRecord(value) ?? {}, null, 2);
 }
 
-function extractConfigRead(outputs: JobOutputRecord[]): {
-  toml: string;
-  baseHash: string;
-} {
-  for (const output of outputs) {
-    if (output.stream !== "status") {
-      continue;
-    }
-    const value = JSON.parse(base64ToText(output.data_base64)) as {
-      type?: string;
-      toml?: string;
-      config_sha256_hex?: string;
-    };
-    if (value.type === "config_read" && value.toml && value.config_sha256_hex) {
-      return { toml: value.toml, baseHash: value.config_sha256_hex };
-    }
-  }
-  throw new Error("Config read output was not available yet");
-}
-
 function runtimeConfigApplyStateSummary(
   state: RuntimeConfigApplyStateRecord | null,
   shortenIdentifiers = true,
@@ -5490,43 +4830,12 @@ function runtimeConfigApplyStateSummary(
   return "No server-applied runtime sync recorded";
 }
 
-function base64ToText(value: string): string {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return new TextDecoder().decode(bytes);
-}
-
 function readLocalString(key: string): string {
   try {
     return window.localStorage.getItem(key) ?? "";
   } catch {
     return "";
   }
-}
-
-function readSingleConfigClientId(): string {
-  const storedClientId = readLocalString(
-    CONFIG_SINGLE_CLIENT_ID_STORAGE_KEY,
-  ).trim();
-  if (storedClientId) {
-    return storedClientId;
-  }
-  return clientIdFromLegacySelector(
-    readLocalString(CONFIG_SINGLE_SELECTOR_STORAGE_KEY),
-  );
-}
-
-function clientIdFromLegacySelector(value: string): string {
-  const match = value
-    .trim()
-    .match(/^id:(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|([^\s()&|]+))$/i);
-  if (!match) {
-    return "";
-  }
-  return (match[1] ?? match[2] ?? match[3] ?? "").replace(/\\(["'\\])/g, "$1");
 }
 
 function writeLocalString(key: string, value: string) {

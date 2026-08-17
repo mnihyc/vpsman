@@ -23,8 +23,6 @@ pub const MAX_RUNTIME_CONFIG_REASON_BYTES: usize = MAX_RUNTIME_CONFIG_FIELD_BYTE
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub client_id: String,
-    #[serde(default)]
-    pub display_name: String,
     pub tcp_endpoints: Vec<ServerEndpoint>,
     #[serde(default)]
     pub noise: AgentNoiseConfig,
@@ -42,15 +40,11 @@ pub struct AgentConfig {
     pub network: AgentNetworkConfig,
     #[serde(default = "default_telemetry_interval_secs")]
     pub telemetry_interval_secs: u64,
-    #[serde(default)]
-    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct AgentRuntimeConfig {
     pub version: u64,
-    #[serde(default)]
-    pub display_name: String,
     #[serde(default)]
     pub backup: AgentBackupConfig,
     #[serde(default)]
@@ -63,36 +57,28 @@ pub struct AgentRuntimeConfig {
     pub network: AgentNetworkConfig,
     #[serde(default = "default_telemetry_interval_secs")]
     pub telemetry_interval_secs: u64,
-    #[serde(default)]
-    pub tags: Vec<String>,
 }
 
 impl AgentRuntimeConfig {
     pub fn from_agent_config(version: u64, config: &AgentConfig) -> Self {
         Self {
             version,
-            display_name: config.display_name.clone(),
             backup: config.backup.clone(),
             update: config.update.clone(),
             execution: config.execution.clone(),
             telemetry: config.telemetry.clone(),
             network: config.network.clone(),
             telemetry_interval_secs: config.telemetry_interval_secs,
-            tags: config.tags.clone(),
         }
     }
 
     pub fn apply_to_agent_config(&self, config: &mut AgentConfig) {
-        if !self.display_name.is_empty() {
-            config.display_name = self.display_name.clone();
-        }
         config.backup = self.backup.clone();
         config.update = self.update.clone();
         config.execution = self.execution.clone();
         config.telemetry = self.telemetry.clone();
         config.network = self.network.clone();
         config.telemetry_interval_secs = self.telemetry_interval_secs;
-        config.tags = self.tags.clone();
     }
 }
 
@@ -107,14 +93,12 @@ impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
             version: 0,
-            display_name: String::new(),
             backup: AgentBackupConfig::default(),
             update: AgentUpdateConfig::default(),
             execution: AgentExecutionConfig::default(),
             telemetry: AgentTelemetryConfig::default(),
             network: AgentNetworkConfig::default(),
             telemetry_interval_secs: default_telemetry_interval_secs(),
-            tags: Vec::new(),
         }
     }
 }
@@ -595,7 +579,6 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             client_id: "unregistered".to_string(),
-            display_name: "unregistered".to_string(),
             tcp_endpoints: vec![ServerEndpoint {
                 label: "local".to_string(),
                 tcp_addr: "127.0.0.1:9443".to_string(),
@@ -609,7 +592,6 @@ impl Default for AgentConfig {
             telemetry: AgentTelemetryConfig::default(),
             network: AgentNetworkConfig::default(),
             telemetry_interval_secs: 15,
-            tags: Vec::new(),
         }
     }
 }

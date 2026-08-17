@@ -164,6 +164,20 @@ require_contains "$update_help" "--artifact-url" "agent-update help"
 require_contains "$update_help" "--sha256-hex" "agent-update help"
 config_patch_help="$("$bin" config-patch --help)"
 require_contains "$config_patch_help" "--config-file" "config-patch help"
+require_contains "$config_patch_help" "--preview-hash" "config-patch reviewed preview help"
+
+printf 'telemetry_interval_secs = 20\n' >"$tmp_dir/config-patch.toml"
+if "$bin" config-patch \
+  --config-file "$tmp_dir/config-patch.toml" \
+  --clients edge-a \
+  --confirmed \
+  >"$tmp_dir/config-patch.out" 2>"$tmp_dir/config-patch.err"; then
+  fail "config-patch accepted --confirmed without a separately reviewed preview hash"
+fi
+require_contains \
+  "$(cat "$tmp_dir/config-patch.err")" \
+  "--confirmed requires --preview-hash from a separately reviewed preview" \
+  "config-patch reviewed preview"
 
 if "$bin" config-source-set \
   --behavior host_metrics \
@@ -192,16 +206,6 @@ require_contains \
   "--confirmed requires --preview-hash" \
   "configuration preset reviewed preview"
 
-printf '[auth]\nmax_job_timeout_secs = 10\n' >"$tmp_dir/bad-config-patch.toml"
-if "$bin" config-patch \
-  --config-file "$tmp_dir/bad-config-patch.toml" \
-  --clients edge-a \
-  --confirmed \
-  >"$tmp_dir/bad-config-patch.out" 2>"$tmp_dir/bad-config-patch.err"; then
-  fail "config-patch accepted a disallowed section"
-fi
-require_contains "$(cat "$tmp_dir/bad-config-patch.err")" "config_patch_section_not_allowed:auth" "bad config patch"
-
 if "$bin" tunnel-probe \
   --plan-id 00000000-0000-0000-0000-000000000001 \
   --side left \
@@ -228,7 +232,7 @@ printf '    "local_tunnel_plan_all_kinds",\n'
 printf '    "noise_keygen_shape",\n'
 printf '    "compose_secret_generation",\n'
 printf '    "agent_update_external_url_shape",\n'
-printf '    "config_patch_bounds_rejected",\n'
+printf '    "config_patch_review_hash_required",\n'
 printf '    "network_probe_bounds_rejected",\n'
 printf '    "network_speed_bounds_rejected"\n'
 printf '  ]\n'

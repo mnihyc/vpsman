@@ -905,7 +905,13 @@ export function useDashboardData(activeView: ActiveView) {
     setDashboardOverviewWindow: dashboardOverview.setDashboardOverviewWindow,
     updateDashboardPreferences: dashboardOverview.updateDashboardPreferences,
     loadEffectiveAgentConfig: inventory.loadEffectiveAgentConfig,
-    submitRuntimeConfigPatch: inventory.submitRuntimeConfigPatch,
+    loadRuntimeConfigClientWorkspace:
+      inventory.loadRuntimeConfigClientWorkspace,
+    previewRuntimeConfigOverride: inventory.previewRuntimeConfigOverride,
+    applyRuntimeConfigOverride: inventory.applyRuntimeConfigOverride,
+    previewRuntimeConfigBulkOverride:
+      inventory.previewRuntimeConfigBulkOverride,
+    applyRuntimeConfigBulkOverride: inventory.applyRuntimeConfigBulkOverride,
     previewConfigurationPreset: inventory.previewConfigurationPreset,
     previewConfigurationSourceOverride:
       inventory.previewConfigurationSourceOverride,

@@ -574,32 +574,43 @@ const allViews: ScreenshotEntry[] = [
   {
     view: "Config",
     subpage: "Per-VPS",
-    heading: "Per-VPS config",
+    heading: "Per-VPS desired config",
     id: "36-config-per-vps",
-    requiredText: ["Select one VPS", "Read current config"],
+    requiredText: [
+      "Select one VPS",
+      "One desired configuration, edited in place",
+    ],
   },
   {
     view: "Config",
     subpage: "Per-VPS",
-    heading: "Per-VPS config",
+    heading: "Per-VPS desired config",
     id: "36b-config-per-vps-loaded",
     prepare: "config-per-vps-loaded",
-    requiredText: ["Current base", "Desired patch", "Apply patch"],
+    requiredText: [
+      "Desired runtime hierarchy",
+      "Saved desired TOML",
+      "Draft will change saved desired",
+    ],
   },
   {
     view: "Config",
-    subpage: "Bulk patch",
-    heading: "Bulk patch",
+    subpage: "VPS override patch",
+    heading: "VPS override patch",
     id: "37-config-bulk-patch",
-    requiredText: ["Incremental patch", "Targets", "Preview changes"],
+    requiredText: [
+      "Advanced · VPS override patch",
+      "Targets",
+      "Preview changes",
+    ],
   },
   {
     view: "Config",
-    subpage: "Bulk patch",
-    heading: "Bulk patch",
+    subpage: "VPS override patch",
+    heading: "VPS override patch",
     id: "37b-config-bulk-patch-preview",
     prepare: "config-bulk-patch-preview",
-    requiredText: ["1 VPS verified", "edge-sfo-01", "Apply patch"],
+    requiredText: ["1 VPS verified", "edge-sfo-01", "Apply override patch"],
   },
   {
     view: "Config",
@@ -1573,16 +1584,13 @@ async function navigateAndScreenshot(
         .getByRole("option", { name: /core-fra-02.*agent-fra-02/ }),
     ).toBeVisible({ timeout: 5_000 });
     await page.keyboard.press("Enter");
-    await page.getByRole("button", { name: "Read current config" }).click();
-    await expect(
-      page.getByLabel("VPS redacted runtime config TOML"),
-    ).toHaveValue(/client_id = "agent-fra-02"/, { timeout: 5_000 });
-    await page
-      .getByLabel("One-VPS runtime config override TOML")
-      .fill("[telemetry]\ninterval_secs = 60\n");
-    await expect(
-      page.getByLabel("One-VPS config override guard"),
-    ).toContainText("telemetry", { timeout: 5_000 });
+    const interval = page.getByLabel("Telemetry interval", { exact: true });
+    await expect(interval).toHaveValue("30", { timeout: 5_000 });
+    await interval.fill("60");
+    await expect(page.getByLabel("VPS config sticky review")).toContainText(
+      "Draft will change saved desired",
+      { timeout: 5_000 },
+    );
   }
 
   if (entry.prepare === "config-bulk-patch-preview") {

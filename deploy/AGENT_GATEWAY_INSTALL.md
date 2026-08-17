@@ -113,10 +113,11 @@ refused without replacing files or changing service registration; normalize
 the service to a supported state and retry.
 It does not call `/api`, `/.well-known`, or any panel-side lookup endpoint. The
 local file contains only the client id, gateway endpoints and priority, Noise
-key material, server trust, and gateway retry/connect timing. Display names,
-tags, update policy, execution policy, telemetry, backup limits, and tunnel
-settings are server runtime config. Configure them through the API/frontend/CLI
-after registering the identity; runtime changes are pushed as visible
+key material, server trust, and gateway retry/connect timing. Display names
+and tags are server inventory metadata; update policy, execution policy,
+telemetry, backup limits, and tunnel settings are server runtime config.
+Configure them through the API/frontend/CLI after registering the identity;
+runtime changes are pushed as visible
 `runtime_config_sync` jobs after the agent connects, and the server marks the
 per-agent applied runtime config only after that agent's sync target succeeds.
 

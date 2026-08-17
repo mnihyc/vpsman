@@ -3755,24 +3755,165 @@ export type EffectiveAgentConfigResponse = {
   generated_at: string;
 };
 
-export type RuntimeConfigPatchRequest = {
-  selector_expression: string;
-  target_client_ids: string[];
+export type RuntimeConfigOverrideCandidate =
+  | { type: "toml"; toml: string }
+  | { type: "structured"; value: JsonValue }
+  | { type: "reset" };
+
+export type RuntimeConfigOverrideRecord = {
+  client_id: string;
   toml: string;
-  reason?: string | null;
-  confirmed: boolean;
-  privilege_assertion?: PrivilegeAssertion | null;
+  reason: string;
+  updated_at: string;
+  updated_by: string | null;
 };
 
-export type RuntimeConfigPatchResponse = {
-  target_count: number;
-  overrides: Array<{
-    client_id: string;
-    toml: string;
-    reason: string;
-    updated_at: string;
-    updated_by: string | null;
-  }>;
+export type RuntimeConfigSavedOverride = {
+  exists: boolean;
+  toml: string;
+  parsed: JsonValue | null;
+  diagnostic: string | null;
+  reason: string | null;
+  updated_at: string | null;
+  updated_by: string | null;
+};
+
+export type RuntimeConfigProvenanceRecord = {
+  pointer: string;
+  path: string;
+  source: string;
+  source_chain: string[];
+  locked: boolean;
+  owner: string | null;
+  owner_link: string | null;
+  shadowed_override: boolean;
+};
+
+export type RuntimeConfigFieldSchemaRecord = {
+  pointer: string;
+  path: string;
+  label: string;
+  value_type:
+    | "object"
+    | "array"
+    | "string"
+    | "boolean"
+    | "integer"
+    | "number"
+    | "null"
+    | string;
+  control:
+    | "section"
+    | "toggle"
+    | "number"
+    | "text"
+    | "text_list"
+    | "object_list"
+    | "map"
+    | string;
+  editable: boolean;
+  collection: boolean;
+  owner: string;
+  owner_link: string | null;
+  allowed_operations: string[];
+  enum_values: string[];
+  unit: string | null;
+};
+
+export type RuntimeConfigClientWorkspace = {
+  client_id: string;
+  inherited: JsonValue;
+  desired: JsonValue;
+  desired_toml: string;
+  saved_override: RuntimeConfigSavedOverride;
+  apply_state: RuntimeConfigApplyStateRecord | null;
+  override_revision: string;
+  desired_content_hash: string;
+  desired_hash: string;
+  provenance: RuntimeConfigProvenanceRecord[];
+  field_schema: RuntimeConfigFieldSchemaRecord[];
+  generated_at: string;
+};
+
+export type RuntimeConfigChangeRecord = {
+  pointer: string;
+  path: string;
+  before: JsonValue | null;
+  after: JsonValue | null;
+  kind: string;
+};
+
+export type PreviewRuntimeConfigOverrideRequest = {
+  candidate: RuntimeConfigOverrideCandidate;
+  reason?: string | null;
+};
+
+export type RuntimeConfigOverridePreview = {
+  client_id: string;
+  canonical_toml: string | null;
+  candidate_override: JsonValue;
+  desired: JsonValue;
+  desired_toml: string;
+  provenance: RuntimeConfigProvenanceRecord[];
+  changes: RuntimeConfigChangeRecord[];
+  storage_only: boolean;
+  recovery_sync_required: boolean;
+  override_revision: string;
+  desired_hash: string;
+  preview_hash: string;
+};
+
+export type ApplyRuntimeConfigOverrideRequest =
+  PreviewRuntimeConfigOverrideRequest & {
+    expected_override_revision: string;
+    expected_desired_hash: string;
+    preview_hash: string;
+    confirmed: boolean;
+    privilege_assertion: PrivilegeAssertion;
+  };
+
+export type ApplyRuntimeConfigOverrideResponse = {
+  preview: RuntimeConfigOverridePreview;
+  override_record: RuntimeConfigOverrideRecord | null;
+  sync: RuntimeConfigDispatchRecord[];
+};
+
+export type RuntimeConfigBulkOverrideTargetPreview = {
+  client_id: string;
+  candidate_override_hash: string;
+  override_revision: string;
+  desired_hash: string;
+  changes: RuntimeConfigChangeRecord[];
+  no_op: boolean;
+  storage_only: boolean;
+};
+
+export type PreviewRuntimeConfigBulkOverrideRequest = {
+  selector_expression: string;
+  target_client_ids: string[];
+  patch: string;
+  reason?: string | null;
+};
+
+export type RuntimeConfigBulkOverridePreview = {
+  selector_expression: string;
+  target_client_ids: string[];
+  operations: JsonValue;
+  targets: RuntimeConfigBulkOverrideTargetPreview[];
+  changed_target_count: number;
+  preview_hash: string;
+};
+
+export type ApplyRuntimeConfigBulkOverrideRequest =
+  PreviewRuntimeConfigBulkOverrideRequest & {
+    preview_hash: string;
+    confirmed: boolean;
+    privilege_assertion: PrivilegeAssertion;
+  };
+
+export type ApplyRuntimeConfigBulkOverrideResponse = {
+  preview: RuntimeConfigBulkOverridePreview;
+  overrides: RuntimeConfigOverrideRecord[];
   sync_job_ids: string[];
   sync: RuntimeConfigDispatchRecord[];
 };

@@ -208,21 +208,30 @@ fn agent_lifecycle_commands_use_the_new_exclusive_confirmed_protocol() {
 }
 
 #[test]
-fn unchanged_read_commands_keep_the_legacy_dispatch_protocol() {
-    for command in [JobCommand::ConfigRead, JobCommand::NetworkInterfaces] {
-        assert_eq!(
-            super::job_command_dispatch_protocol_version(&command),
-            super::MIN_COMMAND_PROTOCOL_VERSION
-        );
-        assert!(
-            super::job_command_protocol_version(&command)
-                > super::job_command_dispatch_protocol_version(&command)
-        );
-    }
+fn unchanged_network_interfaces_read_keeps_the_legacy_dispatch_protocol() {
+    let command = JobCommand::NetworkInterfaces;
+    assert_eq!(
+        super::job_command_dispatch_protocol_version(&command),
+        super::MIN_COMMAND_PROTOCOL_VERSION
+    );
+    assert!(
+        super::job_command_protocol_version(&command)
+            > super::job_command_dispatch_protocol_version(&command)
+    );
 }
 
 #[test]
-fn runtime_config_sync_keeps_the_current_dispatch_protocol() {
+fn runtime_config_commands_require_the_current_dispatch_protocol() {
+    let config_read = JobCommand::ConfigRead;
+    assert_eq!(
+        super::job_command_dispatch_protocol_version(&config_read),
+        super::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
+    assert_eq!(
+        super::job_command_min_supported_protocol_version(&config_read),
+        super::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
+
     let command = JobCommand::RuntimeConfigSync {
         desired_version: 2,
         reason: "protocol-dispatch-test".to_string(),
@@ -232,6 +241,11 @@ fn runtime_config_sync_keeps_the_current_dispatch_protocol() {
     assert_eq!(
         super::job_command_dispatch_protocol_version(&command),
         super::CONFIG_COMMAND_PROTOCOL_VERSION
+    );
+    assert_eq!(super::CONFIG_COMMAND_PROTOCOL_VERSION, 3);
+    assert_eq!(
+        super::job_command_min_supported_protocol_version(&command),
+        3
     );
 }
 

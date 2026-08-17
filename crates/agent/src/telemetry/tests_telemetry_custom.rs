@@ -4,19 +4,12 @@ use super::*;
 fn renders_custom_metrics_placeholders() {
     let config = AgentConfig {
         client_id: "edge-a".to_string(),
-        display_name: "Edge A".to_string(),
-        tags: vec!["bgp".to_string(), "lax".to_string()],
         ..AgentConfig::default()
     };
     let argv = render_custom_metrics_argv(
         &config,
         &RuntimeTunnelCommand {
-            argv: vec![
-                "/opt/vpsman/metrics".to_string(),
-                "{client_id}".to_string(),
-                "{display_name}".to_string(),
-                "{tags_csv}".to_string(),
-            ],
+            argv: vec!["/opt/vpsman/metrics".to_string(), "{client_id}".to_string()],
             ..RuntimeTunnelCommand::default()
         },
     )
@@ -24,13 +17,25 @@ fn renders_custom_metrics_placeholders() {
 
     assert_eq!(
         argv,
-        vec![
-            "/opt/vpsman/metrics".to_string(),
-            "edge-a".to_string(),
-            "Edge A".to_string(),
-            "bgp,lax".to_string()
-        ]
+        vec!["/opt/vpsman/metrics".to_string(), "edge-a".to_string(),]
     );
+}
+
+#[test]
+fn rejects_removed_custom_metrics_identity_placeholders() {
+    for placeholder in ["{display_name}", "{tags_csv}"] {
+        let error = render_custom_metrics_argv(
+            &AgentConfig::default(),
+            &RuntimeTunnelCommand {
+                argv: vec!["/opt/vpsman/metrics".to_string(), placeholder.to_string()],
+                ..RuntimeTunnelCommand::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("removed server identity placeholder"));
+    }
 }
 
 #[test]

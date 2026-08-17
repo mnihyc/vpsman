@@ -2094,11 +2094,17 @@ export function App() {
           dashboard.configurationSourcesLoading ||
           dashboard.runtimeConfigApplyLoading
         }
-        onSubmitRuntimeConfigPatch={dashboard.submitRuntimeConfigPatch}
+        onApplyRuntimeConfigBulkOverride={
+          dashboard.applyRuntimeConfigBulkOverride
+        }
+        onApplyRuntimeConfigOverride={dashboard.applyRuntimeConfigOverride}
         onCreateJob={dashboard.createJob}
         onLoadJobOutputs={dashboard.loadJobOutputs}
         onLoadJobTargets={dashboard.loadJobTargets}
         onLoadConfigurationInventory={dashboard.loadConfigurationInventory}
+        onLoadRuntimeConfigClientWorkspace={
+          dashboard.loadRuntimeConfigClientWorkspace
+        }
         onDeleteRuntimeConfigPatchGenerator={
           dashboard.deleteRuntimeConfigPatchGenerator
         }
@@ -2119,7 +2125,10 @@ export function App() {
         onRenderRuntimeConfigPatchGenerator={
           dashboard.renderRuntimeConfigPatchGenerator
         }
-        onResolveBulk={dashboard.resolveBulkPreview}
+        onPreviewRuntimeConfigBulkOverride={
+          dashboard.previewRuntimeConfigBulkOverride
+        }
+        onPreviewRuntimeConfigOverride={dashboard.previewRuntimeConfigOverride}
         onSelectSubpage={(subpage) =>
           selectReleaseDestination("Config", subpage)
         }

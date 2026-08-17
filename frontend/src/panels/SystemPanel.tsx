@@ -5883,7 +5883,7 @@ function SystemConfigPanel({
                 onClick={() => onSelectView("Config", "bulk_patch")}
                 type="button"
               >
-                Open Config / Bulk patch
+                Open Config / VPS override patch
               </button>
             </div>
           </div>

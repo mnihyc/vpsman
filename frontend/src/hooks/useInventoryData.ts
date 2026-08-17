@@ -10,10 +10,12 @@ import {
 import type {
   ApplyConfigurationSourceOverrideRequest,
   ApplyConfigurationSourceOverrideResponse,
+  ApplyRuntimeConfigBulkOverrideRequest,
+  ApplyRuntimeConfigBulkOverrideResponse,
+  ApplyRuntimeConfigOverrideRequest,
+  ApplyRuntimeConfigOverrideResponse,
   BulkTagMutationRequest,
   BulkResolveResponse,
-  RuntimeConfigPatchRequest,
-  RuntimeConfigPatchResponse,
   CloneConfigurationPresetRequest,
   ConfigurationPresetPreview,
   ConfigurationPresetRecord,
@@ -22,9 +24,14 @@ import type {
   ConfigurationSourceView,
   CreateConfigurationPresetRequest,
   EffectiveAgentConfigResponse,
+  PreviewRuntimeConfigBulkOverrideRequest,
+  PreviewRuntimeConfigOverrideRequest,
   PreviewConfigurationPresetRequest,
   DeleteRuntimeConfigPatchGeneratorRequest,
   RuntimeConfigApplyStateRecord,
+  RuntimeConfigBulkOverridePreview,
+  RuntimeConfigClientWorkspace,
+  RuntimeConfigOverridePreview,
   RuntimeConfigPatchGeneratorRecord,
   RuntimeConfigPatchGeneratorRenderRequest,
   RuntimeConfigPatchGeneratorRenderResponse,
@@ -702,6 +709,65 @@ export function useInventoryData(
     [apiToken],
   );
 
+  const loadRuntimeConfigClientWorkspace = useCallback(
+    async (clientId: string) =>
+      apiGet<RuntimeConfigClientWorkspace>(
+        `/api/v1/runtime-config/clients/${encodeURIComponent(clientId)}/workspace`,
+        apiToken,
+      ),
+    [apiToken],
+  );
+
+  const previewRuntimeConfigOverride = useCallback(
+    async (clientId: string, request: PreviewRuntimeConfigOverrideRequest) =>
+      apiPostPreview<RuntimeConfigOverridePreview>(
+        `/api/v1/runtime-config/clients/${encodeURIComponent(clientId)}/override/preview`,
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const applyRuntimeConfigOverride = useCallback(
+    async (clientId: string, request: ApplyRuntimeConfigOverrideRequest) => {
+      const response = await apiPost<ApplyRuntimeConfigOverrideResponse>(
+        `/api/v1/runtime-config/clients/${encodeURIComponent(clientId)}/override/apply`,
+        apiToken,
+        request,
+      );
+      if (currentApiToken.current === apiToken) {
+        await retainMutationSuccessAfterRefresh(loadRuntimeConfigApplyStates);
+      }
+      return response;
+    },
+    [apiToken, loadRuntimeConfigApplyStates],
+  );
+
+  const previewRuntimeConfigBulkOverride = useCallback(
+    async (request: PreviewRuntimeConfigBulkOverrideRequest) =>
+      apiPostPreview<RuntimeConfigBulkOverridePreview>(
+        "/api/v1/runtime-config/overrides/bulk/preview",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
+  const applyRuntimeConfigBulkOverride = useCallback(
+    async (request: ApplyRuntimeConfigBulkOverrideRequest) => {
+      const response = await apiPost<ApplyRuntimeConfigBulkOverrideResponse>(
+        "/api/v1/runtime-config/overrides/bulk/apply",
+        apiToken,
+        request,
+      );
+      if (currentApiToken.current === apiToken) {
+        await retainMutationSuccessAfterRefresh(loadRuntimeConfigApplyStates);
+      }
+      return response;
+    },
+    [apiToken, loadRuntimeConfigApplyStates],
+  );
+
   const upsertRuntimeConfigPatchGenerator = useCallback(
     async (request: UpsertRuntimeConfigPatchGeneratorRequest) => {
       const response = await apiPost<RuntimeConfigPatchGeneratorRecord>(
@@ -729,22 +795,6 @@ export function useInventoryData(
         request,
       ),
     [apiToken],
-  );
-
-  const submitRuntimeConfigPatch = useCallback(
-    async (request: RuntimeConfigPatchRequest) => {
-      const response = await apiPost<RuntimeConfigPatchResponse>(
-        "/api/v1/runtime-config/patch",
-        apiToken,
-        request,
-      );
-      if (currentApiToken.current !== apiToken) {
-        return response;
-      }
-      await loadRuntimeConfigApplyStates();
-      return response;
-    },
-    [apiToken, loadRuntimeConfigApplyStates],
   );
 
   const deleteRuntimeConfigPatchGenerator = useCallback(
@@ -816,10 +866,11 @@ export function useInventoryData(
 
   return {
     applyConfigurationSourceOverride,
+    applyRuntimeConfigBulkOverride,
+    applyRuntimeConfigOverride,
     assignTag,
     bulkMutateTags,
     clearInventory,
-    submitRuntimeConfigPatch,
     cloneConfigurationPreset,
     configurationPresets,
     configurationPresetsEvidenceAvailable,
@@ -835,6 +886,7 @@ export function useInventoryData(
     deleteRuntimeConfigPatchGenerator,
     deleteTag,
     loadEffectiveAgentConfig,
+    loadRuntimeConfigClientWorkspace,
     loadTagInventory,
     loadConfigurationInventory,
     loadConfigurationSources,
@@ -847,6 +899,8 @@ export function useInventoryData(
     runtimeConfigPatchGenerators,
     previewConfigurationPreset,
     previewConfigurationSourceOverride,
+    previewRuntimeConfigBulkOverride,
+    previewRuntimeConfigOverride,
     renderRuntimeConfigPatchGenerator,
     resolveBulkPreview,
     resolveJobTargets,

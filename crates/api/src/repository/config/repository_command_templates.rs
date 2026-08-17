@@ -896,7 +896,11 @@ pub(crate) fn validate_command_template_request(
         request.operation.is_object(),
         "command template operation must be a JSON object"
     );
-    let _ = parsed_template_operation(request)?;
+    let command = parsed_template_operation(request)?;
+    ensure!(
+        !matches!(command, JobCommand::RuntimeConfigSync { .. }),
+        "runtime_config_sync templates are server-issued"
+    );
     ensure!(
         request.defaults.is_null() || request.defaults.is_object(),
         "command template defaults must be a JSON object"

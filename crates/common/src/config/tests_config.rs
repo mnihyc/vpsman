@@ -173,6 +173,7 @@ fn runtime_config_ignores_additive_future_fields() {
     let config: AgentRuntimeConfig = serde_json::from_value(serde_json::json!({
         "version": 42,
         "display_name": "edge-a",
+        "tags": ["prod"],
         "future_runtime_section": { "enabled": true },
         "backup": {
             "max_uncompressed_bytes": 1024,
@@ -183,8 +184,66 @@ fn runtime_config_ignores_additive_future_fields() {
     .unwrap();
 
     assert_eq!(config.version, 42);
-    assert_eq!(config.display_name, "edge-a");
     assert_eq!(config.backup.max_archive_bytes, 4096);
+    let serialized = serde_json::to_value(config).unwrap();
+    assert!(serialized.get("display_name").is_none());
+    assert!(serialized.get("tags").is_none());
+}
+
+#[test]
+fn bootstrap_config_rejects_removed_server_inventory_fields() {
+    let mut value = serde_json::to_value(AgentConfig::default()).unwrap();
+    value["display_name"] = serde_json::json!("edge-a");
+    assert!(serde_json::from_value::<AgentConfig>(value.clone()).is_err());
+
+    value.as_object_mut().unwrap().remove("display_name");
+    value["tags"] = serde_json::json!(["prod"]);
+    assert!(serde_json::from_value::<AgentConfig>(value).is_err());
+
+    let canonical_toml = toml::to_string(&AgentConfig::default()).unwrap();
+    for removed_field in ["display_name = \"edge-a\"", "tags = [\"prod\"]"] {
+        assert!(
+            toml::from_str::<AgentConfig>(&format!("{removed_field}\n{canonical_toml}")).is_err()
+        );
+    }
+}
+
+#[test]
+fn removed_identity_placeholders_are_rejected_but_runtime_placeholders_remain_valid() {
+    for (placeholder, expected) in [
+        ("{display_name}", "display_name"),
+        ("{tags_csv}", "tags_csv"),
+    ] {
+        let mut config = AgentConfig::default();
+        config.execution.process_inventory_source =
+            crate::AgentProcessInventorySource::CustomCommand;
+        config.execution.process_inventory_command = Some(RuntimeTunnelCommand {
+            argv: vec!["/bin/echo".to_string(), placeholder.to_string()],
+            ..RuntimeTunnelCommand::default()
+        });
+        let error = validate_agent_config_shape(&config).unwrap_err();
+        assert!(error.contains("unsupported_placeholder"));
+        assert!(error.ends_with(expected));
+    }
+
+    let mut config = AgentConfig::default();
+    config.execution.process_inventory_source = crate::AgentProcessInventorySource::CustomCommand;
+    config.execution.process_inventory_command = Some(RuntimeTunnelCommand {
+        argv: vec![
+            "/bin/echo".to_string(),
+            "{client_id}".to_string(),
+            "{limit}".to_string(),
+        ],
+        ..RuntimeTunnelCommand::default()
+    });
+    validate_agent_config_shape(&config).unwrap();
+
+    config.telemetry.source = crate::AgentTelemetrySource::CustomCommand;
+    config.telemetry.custom_metrics_command = Some(RuntimeTunnelCommand {
+        argv: vec!["/bin/echo".to_string(), "{client_id}".to_string()],
+        ..RuntimeTunnelCommand::default()
+    });
+    validate_agent_config_shape(&config).unwrap();
 }
 
 #[test]

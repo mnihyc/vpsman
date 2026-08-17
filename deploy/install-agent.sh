@@ -376,6 +376,13 @@ reject_runtime_config_env() {
   done
 }
 
+reject_server_inventory_env() {
+  local name
+  for name in "$@"; do
+    [[ -z "${!name:-}" ]] || die "$name is server inventory metadata; manage it through the control plane, not bootstrap agent install"
+  done
+}
+
 cleanup_paths=()
 rollback_paths=()
 created_directories=()
@@ -655,8 +662,8 @@ require_env VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
 require_env VPSMAN_GATEWAY_ENDPOINTS
 require_hex32 VPSMAN_AGENT_NOISE_PRIVATE_KEY_HEX
 require_hex32 VPSMAN_GATEWAY_SERVER_PUBLIC_KEY_HEX
+reject_server_inventory_env VPSMAN_AGENT_DISPLAY_NAME
 reject_runtime_config_env \
-  VPSMAN_AGENT_DISPLAY_NAME \
   VPSMAN_TELEMETRY_LIGHT_SECS \
   VPSMAN_TELEMETRY_FULL_SECS \
   VPSMAN_MAX_JOB_TIMEOUT_SECS \

@@ -290,6 +290,44 @@ fn command_protocol_rejects_future_update_commands() {
 }
 
 #[test]
+fn runtime_config_sync_requires_v3_while_update_remains_a_v1_escape_hatch() {
+    let runtime_sync = JobCommand::RuntimeConfigSync {
+        desired_version: 1,
+        reason: "protocol-boundary-test".to_string(),
+        config: Box::default(),
+    };
+    assert_eq!(job_command_protocol_version(&runtime_sync), 3);
+    assert_eq!(job_command_min_supported_protocol_version(&runtime_sync), 3);
+    assert!(!command_supports_requested_protocol(&runtime_sync, 2));
+    assert!(command_supports_requested_protocol(&runtime_sync, 3));
+
+    let update = JobCommand::UpdateAgent {
+        artifact_url: "https://updates.example/vpsman-agent".to_string(),
+        sha256_hex: "ab".repeat(32),
+    };
+    assert_eq!(
+        vpsman_common::job_command_dispatch_protocol_version(&update),
+        1
+    );
+    assert!(command_supports_requested_protocol(&update, 1));
+}
+
+#[test]
+fn legacy_identity_cache_forces_authoritative_reconnect_without_discarding_its_version() {
+    assert!(startup_requires_authoritative_runtime_config_sync(
+        Some(41),
+        true
+    ));
+    assert!(!startup_requires_authoritative_runtime_config_sync(
+        Some(41),
+        false
+    ));
+    assert!(startup_requires_authoritative_runtime_config_sync(
+        None, false
+    ));
+}
+
+#[test]
 fn new_host_commands_require_their_exact_protocol_generation() {
     let command = JobCommand::StorageInventory {
         include_pseudo_mounts: false,
@@ -343,6 +381,154 @@ fn command_field_drift_becomes_a_terminal_rejection() {
     let output = unsupported_command_shape_output(&request).unwrap();
     assert_eq!(output.exit_code, Some(78));
     assert!(output.done);
+}
+
+#[test]
+fn config_read_projects_only_structured_runtime_values() {
+    let mut config = AgentConfig {
+        client_id: "bootstrap-client-secret".to_string(),
+        ..AgentConfig::default()
+    };
+    config.tcp_endpoints[0].tcp_addr = "secret-endpoint.invalid:9443".to_string();
+    config.noise.client_private_key_hex = Some("bootstrap-private-secret".to_string());
+    config.noise.server_public_key_hex = Some("bootstrap-server-secret".to_string());
+    config.auth.max_job_timeout_secs = 98_765;
+    config.backup.max_uncompressed_bytes = 1_234_567;
+    config.update.unmanaged_enabled = true;
+    config.execution.working_directory = Some("/srv/runtime-work".to_string());
+    config.telemetry.proc_root = "/runtime/proc".to_string();
+    config.network.apply_enabled = true;
+    config.network.root_dir = "/runtime-root".to_string();
+    config.telemetry_interval_secs = 47;
+
+    let outputs = read_redacted_config(uuid::Uuid::new_v4(), &config).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&outputs[0].data).unwrap();
+    assert_eq!(body["type"], "config_read");
+    assert_eq!(body["status"], "read");
+    assert_eq!(body["scope"], "effective_runtime_config");
+    assert_eq!(body.as_object().unwrap().len(), 4);
+
+    let runtime = body["runtime_config"].as_object().unwrap();
+    assert_eq!(runtime.len(), 6);
+    for bootstrap_key in [
+        "version",
+        "client_id",
+        "tcp_endpoints",
+        "noise",
+        "auth",
+        "display_name",
+        "tags",
+    ] {
+        assert!(
+            !runtime.contains_key(bootstrap_key),
+            "unexpected bootstrap or identity field {bootstrap_key}"
+        );
+    }
+    assert!(body.get("bootstrap_config_path").is_none());
+    assert!(body.get("toml").is_none());
+    assert!(body.get("config_sha256_hex").is_none());
+
+    assert_eq!(
+        body.pointer("/runtime_config/backup/max_uncompressed_bytes"),
+        Some(&serde_json::json!(1_234_567))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/update/unmanaged_enabled"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/execution/working_directory"),
+        Some(&serde_json::json!("/srv/runtime-work"))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/telemetry/proc_root"),
+        Some(&serde_json::json!("/runtime/proc"))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/network/apply_enabled"),
+        Some(&serde_json::json!(true))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/network/root_dir"),
+        Some(&serde_json::json!("/runtime-root"))
+    );
+    assert_eq!(
+        body.pointer("/runtime_config/telemetry_interval_secs"),
+        Some(&serde_json::json!(47))
+    );
+
+    let rendered = serde_json::to_string(&body).unwrap();
+    for secret in [
+        "bootstrap-client-secret",
+        "secret-endpoint.invalid",
+        "bootstrap-private-secret",
+        "bootstrap-server-secret",
+        "98765",
+    ] {
+        assert!(
+            !rendered.contains(secret),
+            "leaked bootstrap value {secret}"
+        );
+    }
+}
+
+#[test]
+fn config_read_removes_every_runtime_tunnel_credential_variant() {
+    let plan = runtime_sync_test_plan("203.0.113.20", "10.255.0.0", "10.255.0.1");
+    let mut wireguard = runtime_sync_test_telemetry_plan(plan.clone());
+    wireguard.plan_id = Some("wireguard-plan".to_string());
+    wireguard.builtin_credentials =
+        Some(vpsman_common::TunnelEndpointBuiltinCredentials::Wireguard {
+            generation: 7,
+            local_private_key_base64: "wireguard-private-secret".to_string(),
+            local_public_key_base64: "wireguard-local-public".to_string(),
+            peer_public_key_base64: "wireguard-peer-public".to_string(),
+        });
+    let mut openvpn = runtime_sync_test_telemetry_plan(plan);
+    openvpn.plan_id = Some("openvpn-plan".to_string());
+    openvpn.builtin_credentials = Some(vpsman_common::TunnelEndpointBuiltinCredentials::Openvpn {
+        generation: 8,
+        local_private_key_pem: "openvpn-private-secret".to_string(),
+        local_certificate_pem: "openvpn-local-certificate".to_string(),
+        peer_issuer_certificate_pem: "openvpn-peer-certificate".to_string(),
+        peer_certificate_sha256_fingerprint: "openvpn-peer-fingerprint".to_string(),
+    });
+    let config = AgentConfig {
+        network: vpsman_common::AgentNetworkConfig {
+            runtime_status_telemetry_plans: vec![wireguard, openvpn],
+            ..Default::default()
+        },
+        ..AgentConfig::default()
+    };
+
+    let outputs = read_redacted_config(uuid::Uuid::new_v4(), &config).unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&outputs[0].data).unwrap();
+    let plans = body
+        .pointer("/runtime_config/network/runtime_status_telemetry_plans")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans[0]["plan_id"], "wireguard-plan");
+    assert_eq!(plans[1]["plan_id"], "openvpn-plan");
+    assert!(plans
+        .iter()
+        .all(|plan| plan.get("builtin_credentials").is_none()));
+
+    let rendered = serde_json::to_string(&body).unwrap();
+    for credential_value in [
+        "wireguard-private-secret",
+        "wireguard-local-public",
+        "wireguard-peer-public",
+        "openvpn-private-secret",
+        "openvpn-local-certificate",
+        "openvpn-peer-certificate",
+        "openvpn-peer-fingerprint",
+    ] {
+        assert!(
+            !rendered.contains(credential_value),
+            "leaked runtime tunnel credential {credential_value}"
+        );
+    }
 }
 
 #[test]
@@ -450,13 +636,11 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
 async fn runtime_config_sync_returns_applied_candidate_without_mutating_source() {
     let base = AgentConfig {
         client_id: "client-a".to_string(),
-        display_name: "old-name".to_string(),
         telemetry_interval_secs: 15,
         ..AgentConfig::default()
     };
     let desired = AgentRuntimeConfig {
         version: 9,
-        display_name: "new-name".to_string(),
         telemetry_interval_secs: 30,
         ..AgentRuntimeConfig::default()
     };
@@ -472,10 +656,9 @@ async fn runtime_config_sync_returns_applied_candidate_without_mutating_source()
     .await
     .unwrap();
 
-    assert_eq!(base.display_name, "old-name");
+    assert_eq!(base.telemetry_interval_secs, 15);
     assert_eq!(result.outputs[0].exit_code, Some(0));
     let applied = result.applied_config.expect("sync should apply");
-    assert_eq!(applied.display_name, "new-name");
     assert_eq!(applied.telemetry_interval_secs, 30);
     assert_eq!(
         result
@@ -489,13 +672,13 @@ async fn runtime_config_sync_returns_applied_candidate_without_mutating_source()
 #[test]
 fn runtime_config_generation_is_monotonic_and_exact_replays_are_content_bound() {
     let current = AgentConfig {
-        display_name: "current".to_string(),
+        telemetry_interval_secs: 15,
         ..AgentConfig::default()
     };
     let same = AgentRuntimeConfig::from_agent_config(9, &current);
     let different = AgentRuntimeConfig {
         version: 9,
-        display_name: "obsolete".to_string(),
+        telemetry_interval_secs: 30,
         ..AgentRuntimeConfig::from_agent_config(9, &current)
     };
 
@@ -631,7 +814,7 @@ async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
     ));
     let base = AgentConfig {
         client_id: "left-a".to_string(),
-        display_name: "before".to_string(),
+        telemetry_interval_secs: 15,
         network: vpsman_common::AgentNetworkConfig {
             apply_enabled: true,
             runtime_reconcile_enabled: true,
@@ -643,7 +826,7 @@ async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
         ..AgentConfig::default()
     };
     let mut desired = AgentRuntimeConfig::from_agent_config(10, &base);
-    desired.display_name = "after".to_string();
+    desired.telemetry_interval_secs = 30;
 
     let result = apply_runtime_config_sync(
         uuid::Uuid::new_v4(),
@@ -664,8 +847,8 @@ async fn runtime_config_sync_skips_unchanged_tunnel_commands() {
         result
             .applied_config
             .expect("config should apply")
-            .display_name,
-        "after"
+            .telemetry_interval_secs,
+        30
     );
 }
 
@@ -1087,7 +1270,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
     .unwrap();
     let base = AgentConfig {
         client_id: "client-a".to_string(),
-        display_name: "old-name".to_string(),
+        telemetry_interval_secs: 15,
         network: vpsman_common::AgentNetworkConfig {
             root_dir: root.to_string_lossy().to_string(),
             runtime_ip_argv: vec!["/bin/false".to_string()],
@@ -1101,7 +1284,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
     };
     let mut desired = AgentRuntimeConfig {
         version: 10,
-        display_name: "new-name".to_string(),
+        telemetry_interval_secs: 30,
         ..AgentRuntimeConfig::from_agent_config(10, &base)
     };
     desired.network.apply_enabled = true;
@@ -1129,7 +1312,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
     .await
     .unwrap();
 
-    assert_eq!(base.display_name, "old-name");
+    assert_eq!(base.telemetry_interval_secs, 15);
     assert_eq!(result.outputs[0].exit_code, Some(1));
     assert!(result.applied_config.is_none());
 }

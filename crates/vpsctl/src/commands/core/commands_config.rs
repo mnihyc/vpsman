@@ -2,11 +2,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
-use vpsman_common::{
-    payload_hash, validate_incremental_config_patch_section, JobCommand,
-    MAX_RUNTIME_CONFIG_PATCH_BYTES,
-};
+use vpsman_common::JobCommand;
 
+use crate::commands_inventory::{
+    require_matching_reviewed_preview_hash, required_preview_hash, reviewed_preview_hash_arg,
+};
 use crate::commands_schedules::selector_expression_from_targets;
 use crate::http::{http_get, http_post_json};
 use crate::jobs::{resolve_target_ids, submit_privileged_operation, PrivilegedOperationRequest};
@@ -66,29 +66,54 @@ pub(crate) fn config_patch(
     password_env: String,
     super_salt_hex: Option<String>,
     privilege_ttl_secs: u64,
+    submitted_preview_hash: Option<String>,
     confirmed: bool,
 ) -> Result<()> {
-    anyhow::ensure!(
-        confirmed,
-        "config-patch requires --confirmed because it changes server-managed runtime config"
-    );
+    let reviewed_preview_hash =
+        reviewed_preview_hash_arg(confirmed, submitted_preview_hash.as_deref(), "config-patch")?;
     let toml_document = std::fs::read_to_string(&config_file)
         .with_context(|| format!("failed to read config patch {}", config_file.display()))?;
-    validate_incremental_config_patch(&toml_document)
-        .with_context(|| format!("invalid config patch {}", config_file.display()))?;
     let selector_expression = selector_expression_from_targets(&clients, &tags);
-    let target_ids = resolve_target_ids(api_url, token, &clients, &tags)?;
+    let preview_raw = http_post_json(
+        api_url,
+        "/api/v1/runtime-config/overrides/bulk/preview",
+        token,
+        &serde_json::json!({
+            "selector_expression": &selector_expression,
+            "target_client_ids": [],
+            "patch": &toml_document,
+            "reason": "CLI config patch",
+        }),
+    )?;
+    let preview: serde_json::Value = serde_json::from_str(&preview_raw)
+        .context("runtime config preview returned malformed JSON")?;
+    let current_preview_hash = required_preview_hash(&preview, "config-patch")?;
+    if !confirmed {
+        println!("{preview_raw}");
+        return Ok(());
+    }
+    let preview_hash = require_matching_reviewed_preview_hash(
+        reviewed_preview_hash.as_deref(),
+        &current_preview_hash,
+        "config-patch",
+    )?;
+    let target_ids: Vec<String> = serde_json::from_value(
+        preview
+            .get("target_client_ids")
+            .cloned()
+            .context("runtime config preview response missing target_client_ids")?,
+    )
+    .context("runtime config preview returned invalid target_client_ids")?;
     let password = load_super_password(&password_env)?;
     let salt_hex = load_super_salt_hex(super_salt_hex.as_deref())?;
-    let patch_hash = payload_hash(toml_document.as_bytes());
     let privilege_assertion = build_privilege_for_db(
         DbPrivilegeRequest {
-            action: "runtime_config.patch",
+            action: "runtime_config.override.bulk_apply",
             target: "runtime_config",
             selector_expression: Some(&selector_expression),
             resolved_targets: &target_ids,
             confirmed: true,
-            payload_hash: Some(&patch_hash),
+            payload_hash: Some(&preview_hash),
         },
         &password,
         &salt_hex,
@@ -98,13 +123,14 @@ pub(crate) fn config_patch(
         "{}",
         http_post_json(
             api_url,
-            "/api/v1/runtime-config/patch",
+            "/api/v1/runtime-config/overrides/bulk/apply",
             token,
             &serde_json::json!({
-                "selector_expression": selector_expression,
-                "target_client_ids": target_ids,
-                "toml": toml_document,
+                "selector_expression": &selector_expression,
+                "target_client_ids": &target_ids,
+                "patch": &toml_document,
                 "reason": "CLI config patch",
+                "preview_hash": preview_hash,
                 "confirmed": true,
                 "privilege_assertion": privilege_assertion,
             }),
@@ -426,32 +452,6 @@ pub(crate) fn validate_update_input(artifact_url: &str, sha256_hex: &str) -> Res
         sha256_hex.len() == 64 && sha256_hex.as_bytes().iter().all(u8::is_ascii_hexdigit),
         "agent update --sha256-hex must be 64 hex characters"
     );
-    Ok(())
-}
-
-fn validate_incremental_config_patch(toml_document: &str) -> Result<()> {
-    anyhow::ensure!(
-        !toml_document.is_empty(),
-        "incremental config patch is empty"
-    );
-    anyhow::ensure!(
-        toml_document.len() <= MAX_RUNTIME_CONFIG_PATCH_BYTES,
-        "incremental config patch exceeds {} bytes",
-        MAX_RUNTIME_CONFIG_PATCH_BYTES
-    );
-    let value: toml::Value =
-        toml::from_str(toml_document).context("incremental config patch is invalid TOML")?;
-    let table = value
-        .as_table()
-        .context("incremental config patch must be a TOML table")?;
-    anyhow::ensure!(
-        !table.is_empty(),
-        "incremental config patch has no sections"
-    );
-    for section in table.keys() {
-        validate_incremental_config_patch_section(section)
-            .map_err(|message| anyhow::anyhow!(message))?;
-    }
     Ok(())
 }
 

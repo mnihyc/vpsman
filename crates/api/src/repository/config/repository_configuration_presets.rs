@@ -1552,6 +1552,7 @@ impl Repository {
         let now = unix_now().to_string();
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let mut definitions = memory.network_adapter_definitions.write().await;
                 anyhow::ensure!(
                     !definitions.iter().any(|definition| {
@@ -1624,6 +1625,7 @@ impl Repository {
         validate_network_adapter_definition(request)?;
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let plans = memory.tunnel_plans.read().await;
                 anyhow::ensure!(
                     !plans
@@ -1728,6 +1730,7 @@ impl Repository {
     ) -> Result<()> {
         match self {
             Self::Memory(memory) => {
+                let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let plans = memory.tunnel_plans.read().await;
                 anyhow::ensure!(
                     !plans
@@ -2128,7 +2131,10 @@ fn render_host_metrics(definition: &Value) -> Result<Value> {
         HostMetricsDefinition::CustomCommand {
             custom_metrics_command,
         } => {
-            validate_preset_command(&custom_metrics_command, "custom_metrics_command")?;
+            validate_inventory_free_preset_command(
+                &custom_metrics_command,
+                "custom_metrics_command",
+            )?;
             serde_json::json!({
                 "source": "custom_command",
                 "custom_metrics_command": command_value(custom_metrics_command)
@@ -2145,7 +2151,10 @@ fn render_host_metrics(definition: &Value) -> Result<Value> {
             validate_absolute_path(&sys_class_net_dir, "sys_class_net_dir")?;
             validate_absolute_path(&hostname_file, "hostname_file")?;
             validate_absolute_path(&os_release_file, "os_release_file")?;
-            validate_preset_command(&custom_metrics_command, "custom_metrics_command")?;
+            validate_inventory_free_preset_command(
+                &custom_metrics_command,
+                "custom_metrics_command",
+            )?;
             serde_json::json!({
                 "source": "linux_procfs_and_custom_command",
                 "proc_root": proc_root,
@@ -2231,7 +2240,10 @@ fn render_process_inventory(definition: &Value) -> Result<Value> {
         ProcessInventoryDefinition::CustomCommand {
             process_inventory_command,
         } => {
-            validate_preset_command(&process_inventory_command, "process_inventory_command")?;
+            validate_inventory_free_preset_command(
+                &process_inventory_command,
+                "process_inventory_command",
+            )?;
             serde_json::json!({
                 "process_inventory_source": "custom_command",
                 "process_inventory_command": command_value(process_inventory_command)
@@ -2344,6 +2356,17 @@ fn validate_preset_command(command: &PresetCommand, field: &str) -> Result<()> {
         (1..=120).contains(&command.max_timeout_secs)
             && (1024..=64 * 1024).contains(&command.max_output_bytes),
         "{field}_budget_invalid"
+    );
+    Ok(())
+}
+
+fn validate_inventory_free_preset_command(command: &PresetCommand, field: &str) -> Result<()> {
+    validate_preset_command(command, field)?;
+    anyhow::ensure!(
+        command.argv.iter().all(|argument| {
+            !argument.contains("{display_name}") && !argument.contains("{tags_csv}")
+        }),
+        "{field}_removed_inventory_placeholder"
     );
     Ok(())
 }

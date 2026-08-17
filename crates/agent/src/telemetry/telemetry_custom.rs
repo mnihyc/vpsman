@@ -109,14 +109,17 @@ fn render_custom_metrics_argv(
     if !command.argv[0].starts_with('/') {
         anyhow::bail!("custom telemetry executable must be absolute");
     }
+    if command
+        .argv
+        .iter()
+        .any(|part| part.contains("{display_name}") || part.contains("{tags_csv}"))
+    {
+        anyhow::bail!("custom telemetry argv contains removed server identity placeholder");
+    }
     Ok(command
         .argv
         .iter()
-        .map(|part| {
-            part.replace("{client_id}", &config.client_id)
-                .replace("{display_name}", &config.display_name)
-                .replace("{tags_csv}", &config.tags.join(","))
-        })
+        .map(|part| part.replace("{client_id}", &config.client_id))
         .collect())
 }
 

@@ -19,6 +19,12 @@ pub(crate) struct RuntimeConfigCache {
     root: PathBuf,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct LoadedRuntimeConfig {
+    pub(crate) config: AgentRuntimeConfig,
+    pub(crate) requires_authoritative_runtime_config_sync: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct RuntimeConfigCacheRecord {
     schema_version: u16,
@@ -38,7 +44,7 @@ impl RuntimeConfigCache {
         Ok(Self { root })
     }
 
-    pub(crate) async fn load(&self) -> Result<Option<AgentRuntimeConfig>> {
+    pub(crate) async fn load(&self) -> Result<Option<LoadedRuntimeConfig>> {
         let path = self.cache_path();
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
@@ -61,10 +67,21 @@ impl RuntimeConfigCache {
             observed_hash == record.content_hash,
             "runtime config cache hash mismatch"
         );
-        let config = serde_json::from_str(&record.config_json).with_context(|| {
+        let raw_config: serde_json::Value = serde_json::from_str(&record.config_json)
+            .with_context(|| {
+                format!("failed to decode cached runtime config {}", path.display())
+            })?;
+        let requires_authoritative_runtime_config_sync =
+            raw_config.as_object().is_some_and(|object| {
+                object.contains_key("display_name") || object.contains_key("tags")
+            });
+        let config = serde_json::from_value(raw_config).with_context(|| {
             format!("failed to decode cached runtime config {}", path.display())
         })?;
-        Ok(Some(config))
+        Ok(Some(LoadedRuntimeConfig {
+            config,
+            requires_authoritative_runtime_config_sync,
+        }))
     }
 
     pub(crate) async fn store(&self, config: &AgentRuntimeConfig) -> Result<()> {

@@ -215,6 +215,8 @@ mod routes_network;
 mod routes_port_forwarding;
 #[path = "routes/backup/routes_restores.rs"]
 mod routes_restores;
+#[path = "routes/config/routes_runtime_config_workspace.rs"]
+mod routes_runtime_config_workspace;
 #[path = "routes/jobs/routes_schedules.rs"]
 mod routes_schedules;
 #[path = "routes/jobs/routes_server_jobs.rs"]
@@ -233,6 +235,8 @@ mod routes_webhook_rules;
 mod routes_ws;
 #[path = "runtime/runtime_config.rs"]
 mod runtime_config;
+#[path = "runtime/runtime_config_workspace.rs"]
+mod runtime_config_workspace;
 #[path = "auth/security.rs"]
 mod security;
 #[path = "monitoring/selector_expression.rs"]

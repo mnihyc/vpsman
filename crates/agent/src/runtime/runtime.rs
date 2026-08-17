@@ -91,8 +91,10 @@ pub(crate) async fn run_agent(
     let command_ledger = CommandLedger::open_default().await?;
     let runtime_config_cache = RuntimeConfigCache::open_default().await?;
     let mut loaded_cached_runtime_config_version = None;
+    let mut cached_runtime_config_requires_authoritative_sync = false;
     match runtime_config_cache.load().await {
-        Ok(Some(runtime_config)) => {
+        Ok(Some(loaded)) => {
+            let runtime_config = loaded.config;
             let mut candidate = config.clone();
             runtime_config.apply_to_agent_config(&mut candidate);
             match validate_agent_config_shape(&candidate) {
@@ -103,6 +105,13 @@ pub(crate) async fn run_agent(
                     );
                     config = candidate;
                     loaded_cached_runtime_config_version = Some(runtime_config.version);
+                    cached_runtime_config_requires_authoritative_sync =
+                        loaded.requires_authoritative_runtime_config_sync;
+                    if cached_runtime_config_requires_authoritative_sync {
+                        info!(
+                            "legacy server identity fields were detected in the verified runtime config cache; requesting one authoritative v3 sync"
+                        );
+                    }
                 }
                 Err(error) => {
                     warn!(%error, "ignored invalid last accepted runtime config");
@@ -117,7 +126,10 @@ pub(crate) async fn run_agent(
         runtime_config_cache,
         loaded_cached_runtime_config_version,
     );
-    let startup_runtime_config_requires_sync = loaded_cached_runtime_config_version.is_none();
+    let startup_runtime_config_requires_sync = startup_requires_authoritative_runtime_config_sync(
+        loaded_cached_runtime_config_version,
+        cached_runtime_config_requires_authoritative_sync,
+    );
     let mut startup_reconcile_resources = BTreeSet::new();
     let process_incarnation_id = uuid::Uuid::new_v4();
     match reconcile_supervised_processes_on_start().await {
@@ -227,6 +239,13 @@ fn effective_telemetry_interval_secs(configured_secs: u64, network: &AgentNetwor
         }
     }
     interval_secs
+}
+
+fn startup_requires_authoritative_runtime_config_sync(
+    loaded_cached_runtime_config_version: Option<u64>,
+    cached_runtime_config_contains_legacy_identity: bool,
+) -> bool {
+    loaded_cached_runtime_config_version.is_none() || cached_runtime_config_contains_legacy_identity
 }
 
 async fn connect_and_stream(
@@ -2096,7 +2115,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         .clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
 
     if let JobCommand::ConfigRead = &request.command {
-        let result = read_redacted_config(request.job_id, config, config_path);
+        let result = read_redacted_config(request.job_id, config);
         let outputs =
             command_result_outputs(request.job_id, "config_read", max_timeout_secs, result);
         remember_completed_command_outputs(

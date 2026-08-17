@@ -7,7 +7,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
     PgPool, Row,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 use vpsman_common::{
     pair_port_expressions, payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello,
@@ -34,9 +34,9 @@ use crate::{
         CreateBackupRequest, CreateConfigurationPresetRequest, CreateScheduleRequest,
         FleetAlertQuery, JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest,
         NewServerArtifact, PingTargetRecord, PreviewConfigurationPresetRequest,
-        PreviewConfigurationSourceOverrideRequest, SchedulePrivilegeMutationRequest,
-        UpdateTagOrderRequest, UpsertAgentIdentityRequest,
-        UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
+        PreviewConfigurationSourceOverrideRequest, RuntimeConfigOverrideCandidate,
+        RuntimeConfigOverrideReplacement, SchedulePrivilegeMutationRequest, UpdateTagOrderRequest,
+        UpsertAgentIdentityRequest, UpsertRuntimeConfigPatchGeneratorRequest, WsEvent,
     },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, FleetAlertNotificationCandidate,
@@ -62,6 +62,7 @@ use crate::{
     repository_network_observations::NetworkObservationFilter,
     repository_network_traffic_import::load_postgres_import_boundary_samples,
     repository_terminal_sessions::upsert_postgres_terminal_session,
+    runtime_config_workspace::{preview_runtime_config_override, runtime_config_override_revision},
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
 
@@ -231,6 +232,269 @@ struct PgReliabilityTestDb {
     pool: PgPool,
     admin_pool: PgPool,
     db_name: String,
+}
+
+#[tokio::test]
+async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["runtime-cas-a", "runtime-cas-b"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    let operator = postgres_network_operator(&db.repo).await;
+    let absent_revision = runtime_config_override_revision(None);
+    db.repo
+        .replace_runtime_config_overrides_cas(
+            &[
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-a".to_string(),
+                    expected_revision: absent_revision.clone(),
+                    toml: Some("telemetry_interval_secs = 41\n".to_string()),
+                },
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-b".to_string(),
+                    expected_revision: absent_revision.clone(),
+                    toml: Some("telemetry_interval_secs = 42\n".to_string()),
+                },
+            ],
+            "postgres-cas-seed",
+            &operator,
+        )
+        .await
+        .unwrap();
+    let current = db.repo.list_runtime_config_overrides(None).await.unwrap();
+    let current_a = current
+        .iter()
+        .find(|record| record.client_id == "runtime-cas-a")
+        .unwrap();
+    let current_b = current
+        .iter()
+        .find(|record| record.client_id == "runtime-cas-b")
+        .unwrap();
+    let revision_a = runtime_config_override_revision(Some(current_a));
+    let revision_b = runtime_config_override_revision(Some(current_b));
+
+    let stale = db
+        .repo
+        .replace_runtime_config_overrides_cas(
+            &[
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-a".to_string(),
+                    expected_revision: revision_a.clone(),
+                    toml: Some("telemetry_interval_secs = 51\n".to_string()),
+                },
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-b".to_string(),
+                    expected_revision: absent_revision,
+                    toml: Some("telemetry_interval_secs = 52\n".to_string()),
+                },
+            ],
+            "postgres-cas-stale",
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("review_stale"));
+    let unchanged = db.repo.list_runtime_config_overrides(None).await.unwrap();
+    assert_eq!(
+        unchanged
+            .iter()
+            .find(|record| record.client_id == "runtime-cas-a")
+            .unwrap()
+            .toml,
+        "telemetry_interval_secs = 41\n"
+    );
+
+    db.repo
+        .replace_runtime_config_overrides_cas(
+            &[
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-a".to_string(),
+                    expected_revision: revision_a,
+                    toml: None,
+                },
+                RuntimeConfigOverrideReplacement {
+                    client_id: "runtime-cas-b".to_string(),
+                    expected_revision: revision_b,
+                    toml: None,
+                },
+            ],
+            "postgres-cas-reset",
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .repo
+        .list_runtime_config_overrides(None)
+        .await
+        .unwrap()
+        .is_empty());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_config_guard_keeps_tunnel_source_stable_through_repreview_and_commit() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    for client_id in ["runtime-guard-pg-left", "runtime-guard-pg-right"] {
+        insert_client(&db.pool, client_id, None).await;
+    }
+    db.repo
+        .initialize_system_configuration_presets()
+        .await
+        .unwrap();
+    let operator = postgres_network_operator(&db.repo).await;
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "runtime-guard-pg".to_string();
+    input.interface_name = "guardpg0".to_string();
+    input.runtime_control = Default::default();
+    input.left_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.right_mtu = vpsman_common::default_tunnel_mtu(TunnelKind::Gre);
+    input.left_client_id = "runtime-guard-pg-left".to_string();
+    input.right_client_id = "runtime-guard-pg-right".to_string();
+    input.address_pool_cidr = "10.92.0.0/30".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.92.0.0".to_string(),
+        right: "10.92.0.1".to_string(),
+        prefix_len: 31,
+    });
+    let planned = plan_tunnel(&input).unwrap();
+    let persisted = db
+        .repo
+        .record_tunnel_plan(&input, &planned, true, &operator)
+        .await
+        .unwrap();
+    let state = postgres_app_state(&db);
+    let candidate = RuntimeConfigOverrideCandidate::Structured {
+        value: serde_json::json!({"telemetry_interval_secs": 49}),
+    };
+    let reviewed = preview_runtime_config_override(&state, "runtime-guard-pg-left", &candidate)
+        .await
+        .unwrap();
+
+    let guard = db.repo.lock_runtime_config_desired_state().await.unwrap();
+    let writer_repo = db.repo.clone();
+    let writer_input = input.clone();
+    let writer_plan = planned.clone();
+    let writer_operator = operator.clone();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (finished_tx, mut finished_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let _ = started_tx.send(());
+        let result = writer_repo
+            .update_tunnel_plan(
+                persisted.id,
+                persisted.revision,
+                &writer_input,
+                &writer_plan,
+                false,
+                &writer_operator,
+            )
+            .await;
+        let _ = finished_tx.send(result);
+    });
+    started_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut finished_rx)
+            .await
+            .is_err()
+    );
+
+    let locked_preview =
+        preview_runtime_config_override(&state, "runtime-guard-pg-left", &candidate)
+            .await
+            .unwrap();
+    assert_eq!(locked_preview.preview_hash, reviewed.preview_hash);
+    db.repo
+        .replace_runtime_config_overrides_cas_locked(
+            guard,
+            &[RuntimeConfigOverrideReplacement {
+                client_id: "runtime-guard-pg-left".to_string(),
+                expected_revision: locked_preview.override_revision,
+                toml: locked_preview.canonical_toml,
+            }],
+            "postgres-guard-commit",
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let updated = tokio::time::timeout(Duration::from_secs(2), finished_rx)
+        .await
+        .expect("tunnel writer should resume after override commit")
+        .expect("tunnel writer result channel should stay open")
+        .expect("tunnel writer should succeed");
+    assert!(!updated.enabled);
+    assert_eq!(
+        db.repo
+            .list_runtime_config_overrides(Some("runtime-guard-pg-left"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_config_guard_rejects_single_connection_pool_without_waiting() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let single_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let single_repo = Repository::Postgres(single_pool.clone());
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        single_repo.lock_runtime_config_desired_state(),
+    )
+    .await
+    .expect("single-connection capacity rejection must not wait");
+    let error = match result {
+        Ok(_) => panic!("single-connection guard unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("runtime_config_desired_state_pool_capacity_too_small"));
+
+    drop(single_repo);
+    single_pool.close().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_runtime_config_guard_rejects_concurrent_waiter_without_hoarding_pool() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let first = db.repo.lock_runtime_config_desired_state().await.unwrap();
+    let rejected = tokio::time::timeout(
+        Duration::from_millis(250),
+        db.repo.lock_runtime_config_desired_state(),
+    )
+    .await
+    .expect("concurrent desired-state guard must fail without waiting");
+    let rejected = match rejected {
+        Ok(_) => panic!("concurrent desired-state guard unexpectedly queued"),
+        Err(error) => error,
+    };
+    assert!(rejected
+        .to_string()
+        .contains("runtime_config_desired_state_busy"));
+
+    drop(first);
+    db.repo
+        .lock_runtime_config_desired_state()
+        .await
+        .expect("guard must be immediately reusable after the holder exits");
+    db.cleanup().await;
 }
 
 #[tokio::test]

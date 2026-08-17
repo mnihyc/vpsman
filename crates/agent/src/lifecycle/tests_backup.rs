@@ -16,7 +16,7 @@ async fn creates_plain_backup_tar_artifact() {
     tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
         .await
         .unwrap();
-    let mut config = AgentConfig {
+    let config = AgentConfig {
         client_id: "client-a".to_string(),
         backup: AgentBackupConfig {
             max_uncompressed_bytes: 8192,
@@ -24,7 +24,6 @@ async fn creates_plain_backup_tar_artifact() {
         },
         ..AgentConfig::default()
     };
-    config.display_name = "client-a".to_string();
 
     let paths = vec![selected_path.to_string_lossy().to_string()];
     let outputs = execute_backup_command(BackupCommandInput {
@@ -241,7 +240,7 @@ async fn streams_backup_artifact_through_payload_sink() {
     tokio::fs::write(&config_path, b"noise_client_private_key_hex = \"secret\"")
         .await
         .unwrap();
-    let mut config = AgentConfig {
+    let config = AgentConfig {
         client_id: "client-stream".to_string(),
         backup: AgentBackupConfig {
             max_uncompressed_bytes: 64 * 1024,
@@ -249,7 +248,6 @@ async fn streams_backup_artifact_through_payload_sink() {
         },
         ..AgentConfig::default()
     };
-    config.display_name = "client-stream".to_string();
     let (tx, mut rx) = mpsc::channel(64);
 
     let paths = vec![selected_path.to_string_lossy().to_string()];

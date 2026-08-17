@@ -40,7 +40,7 @@ pub const SHELL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const SHELL_SCRIPT_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const TERMINAL_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const FILE_COMMAND_PROTOCOL_VERSION: u16 = 1;
-pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 2;
+pub const CONFIG_COMMAND_PROTOCOL_VERSION: u16 = 3;
 pub const AGENT_UPDATE_COMMAND_PROTOCOL_VERSION: u16 = 1;
 pub const AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION: u16 = 5;
 pub const USER_SESSIONS_COMMAND_PROTOCOL_VERSION: u16 = 1;
@@ -3166,9 +3166,9 @@ pub fn job_command_dispatch_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
         | JobCommand::AgentUpdateCheck { .. } => MIN_COMMAND_PROTOCOL_VERSION,
-        // These read-only v1 wire shapes did not change when their command
-        // families gained v2 operations. Keep them usable during rolling updates.
-        JobCommand::ConfigRead | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
+        // This read-only v1 wire shape did not change when its command family
+        // gained v2 operations. Keep it usable during rolling updates.
+        JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
         _ => job_command_protocol_version(command),
     }
 }
@@ -3178,7 +3178,6 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         JobCommand::Shell { .. }
         | JobCommand::ShellScript { .. }
         | JobCommand::TerminalOpen { .. }
-        | JobCommand::ConfigRead
         | JobCommand::UpdateAgent { .. }
         | JobCommand::AgentUpdateActivate { .. }
         | JobCommand::AgentUpdateRollback { .. }
@@ -3215,7 +3214,9 @@ pub fn job_command_min_supported_protocol_version(command: &JobCommand) -> u16 {
         | JobCommand::Restore { .. }
         | JobCommand::RestoreRollback { .. }
         | JobCommand::NetworkInterfaces => MIN_COMMAND_PROTOCOL_VERSION,
-        JobCommand::RuntimeConfigSync { .. } => CONFIG_COMMAND_PROTOCOL_VERSION,
+        JobCommand::ConfigRead | JobCommand::RuntimeConfigSync { .. } => {
+            CONFIG_COMMAND_PROTOCOL_VERSION
+        }
         JobCommand::AgentStop | JobCommand::AgentRestart => {
             AGENT_LIFECYCLE_COMMAND_PROTOCOL_VERSION
         }
