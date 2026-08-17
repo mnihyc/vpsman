@@ -3406,23 +3406,35 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     let resource_rollup = sqlx::query(
         r#"
         SELECT
-            cpu_cores_max,
-            memory_total_bytes_max,
-            memory_available_bytes_avg,
-            memory_available_bytes_min,
-            memory_used_ratio_avg,
-            memory_used_ratio_max,
-            swap_sample_count,
-            swap_total_bytes_max,
-            swap_available_bytes_avg,
-            swap_available_bytes_min,
-            swap_used_ratio_avg,
-            swap_used_ratio_max,
-            disk_total_bytes_max,
-            disk_available_bytes_avg,
-            disk_available_bytes_min,
-            disk_used_ratio_avg,
-            disk_used_ratio_max
+            max(cpu_cores_max) AS cpu_cores_max,
+            max(memory_total_bytes_max) AS memory_total_bytes_max,
+            round(
+                sum(memory_available_bytes_sum) / sum(sample_count)::numeric
+            )::bigint AS memory_available_bytes_avg,
+            min(memory_available_bytes_min) AS memory_available_bytes_min,
+            sum(memory_used_ratio_sum)
+                / sum(sample_count)::double precision AS memory_used_ratio_avg,
+            max(memory_used_ratio_max) AS memory_used_ratio_max,
+            sum(swap_sample_count)::integer AS swap_sample_count,
+            max(swap_total_bytes_max) AS swap_total_bytes_max,
+            round(
+                sum(swap_available_bytes_sum)
+                    / nullif(sum(swap_sample_count), 0)::numeric
+            )::bigint AS swap_available_bytes_avg,
+            min(swap_available_bytes_min)
+                FILTER (WHERE swap_sample_count > 0) AS swap_available_bytes_min,
+            sum(swap_used_ratio_sum)
+                / nullif(sum(swap_sample_count), 0)::double precision
+                AS swap_used_ratio_avg,
+            max(swap_used_ratio_max) AS swap_used_ratio_max,
+            max(disk_total_bytes_max) AS disk_total_bytes_max,
+            round(
+                sum(disk_available_bytes_sum) / sum(sample_count)::numeric
+            )::bigint AS disk_available_bytes_avg,
+            min(disk_available_bytes_min) AS disk_available_bytes_min,
+            sum(disk_used_ratio_sum)
+                / sum(sample_count)::double precision AS disk_used_ratio_avg,
+            max(disk_used_ratio_max) AS disk_used_ratio_max
         FROM telemetry_rollups
         WHERE client_id = $1
         "#,
