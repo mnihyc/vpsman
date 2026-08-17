@@ -50,7 +50,6 @@ import type {
   JobTargetSelection,
   ScheduleRecord,
   UpsertCommandTemplateRequest,
-  WsJobOutputEvent,
 } from "../types";
 import type { FileTransferSourceArtifactRecord } from "../typesFileTransfer";
 import {
@@ -255,7 +254,7 @@ export function JobsPanel({
   commandTemplates,
   commandTemplatesTruncated,
   dispatchPreset,
-  lastJobOutputEvent,
+  jobRefreshBatch,
   loading,
   onApproveJobApproval,
   onCreateJob,
@@ -296,7 +295,7 @@ export function JobsPanel({
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
-  lastJobOutputEvent: WsJobOutputEvent | null;
+  jobRefreshBatch: string[];
   loading: boolean;
   onApproveJobApproval: (
     approvalId: string,
@@ -1312,10 +1311,10 @@ export function JobsPanel({
   }
 
   useEffect(() => {
-    if (lastJobOutputEvent && selectedJobId === lastJobOutputEvent.job_id) {
-      void openTargets(lastJobOutputEvent.job_id);
+    if (selectedJobId && jobRefreshBatch.includes(selectedJobId)) {
+      void openTargets(selectedJobId);
     }
-  }, [lastJobOutputEvent, openTargets, selectedJobId]);
+  }, [jobRefreshBatch, openTargets, selectedJobId]);
 
   async function downloadOutputStreamForClient(
     clientId: string,

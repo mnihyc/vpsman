@@ -84,6 +84,45 @@ async function gotoConsoleHome(page: Page) {
   await waitForConsoleShell(page);
 }
 
+async function websocketRefreshCounts(page: Page): Promise<{
+  auditRefreshes: number;
+  backupRefreshes: number;
+  fleetSnapshots: number;
+  fleetSnapshotModes: string[];
+  inventoryRefreshes: number;
+  jobDetailRefreshes: number;
+  jobRefreshes: number;
+}> {
+  return page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    const urls = (trackedWindow.__vpsmanFetchRequests ?? [])
+      .filter((request) => request.method === "GET")
+      .map((request) => new URL(request.url, window.location.href));
+    const paths = urls.map((url) => url.pathname);
+    const fleetSnapshots = urls.filter(
+      (url) => url.pathname === "/api/v1/fleet/snapshot",
+    );
+    return {
+      auditRefreshes: paths.filter((path) => path === "/api/v1/audit").length,
+      backupRefreshes: paths.filter((path) => path === "/api/v1/backups")
+        .length,
+      fleetSnapshots: fleetSnapshots.length,
+      fleetSnapshotModes: fleetSnapshots.map(
+        (url) => url.searchParams.get("mode") ?? "",
+      ),
+      inventoryRefreshes: paths.filter((path) => path === "/api/v1/tags/order")
+        .length,
+      jobDetailRefreshes: paths.filter(
+        (path) =>
+          path === "/api/v1/jobs/55555555-aaaa-4bbb-8ccc-dddddddddddd/targets",
+      ).length,
+      jobRefreshes: paths.filter((path) => path === "/api/v1/jobs").length,
+    };
+  });
+}
+
 async function selectEvidenceGridRecord(grid: Locator, label: string) {
   const mobileCardAction = grid
     .locator(".gridMobileCard", { hasText: label })
@@ -2640,6 +2679,134 @@ test("steady-state fleet polling uses one live snapshot without reloading operat
   ]) {
     expect(urls.some((url) => url.includes(operationalPath))).toBe(false);
   }
+});
+
+test("batches a sustained WebSocket update wave into 15-second refreshes", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the refresh batching contract is viewport independent",
+  );
+  await page.clock.install({ time: new Date("2026-06-02T10:02:00Z") });
+  await page.goto("/#/jobs/history/55555555-aaaa-4bbb-8ccc-dddddddddddd");
+  await waitForConsoleShell(page);
+  await expect(
+    page.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+  const clockTime = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(clockTime + 1_000);
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    trackedWindow.__vpsmanFetchRequests = [];
+  });
+  await page.clock.fastForward(15_000);
+  await expect
+    .poll(() => websocketRefreshCounts(page))
+    .toMatchObject({ fleetSnapshots: 1 });
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+    };
+    trackedWindow.__vpsmanFetchRequests = [];
+  });
+
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanTestWebSockets: Array<EventTarget>;
+      __vpsmanUpdateWaveCount?: number;
+      __vpsmanUpdateWaveTimer?: number;
+    };
+    const socket = trackedWindow.__vpsmanTestWebSockets.at(-1);
+    let sequence = 0;
+    trackedWindow.__vpsmanUpdateWaveCount = 0;
+    trackedWindow.__vpsmanUpdateWaveTimer = window.setInterval(() => {
+      sequence += 1;
+      trackedWindow.__vpsmanUpdateWaveCount = sequence;
+      const clientId = `stress-vps-${String(sequence % 100).padStart(3, "0")}`;
+      for (const event of [
+        {
+          client_id: clientId,
+          gateway_id: "gateway-stress",
+          observed_unix: 1_780_393_320 + sequence,
+          type: "telemetry_updated",
+        },
+        {
+          client_id: clientId,
+          gateway_id: "gateway-stress",
+          type: "agent_updated",
+        },
+        {
+          client_id: clientId,
+          done: false,
+          job_id: "55555555-aaaa-4bbb-8ccc-dddddddddddd",
+          seq: sequence,
+          type: "job_output_recorded",
+        },
+        {
+          client_id: clientId,
+          done: false,
+          job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          seq: sequence,
+          type: "job_output_recorded",
+        },
+        {
+          job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          status: "running",
+          type: "job_finished",
+        },
+        {
+          artifact_id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+          backup_request_id: "11111111-2222-4333-8444-555555555555",
+          client_id: clientId,
+          type: "backup_artifact_recorded",
+        },
+      ]) {
+        socket?.dispatchEvent(
+          new MessageEvent("message", { data: JSON.stringify(event) }),
+        );
+      }
+    }, 200);
+  });
+
+  await page.clock.runFor(14_999);
+  await expect
+    .poll(() => websocketRefreshCounts(page))
+    .toEqual({
+      auditRefreshes: 0,
+      backupRefreshes: 0,
+      fleetSnapshots: 0,
+      fleetSnapshotModes: [],
+      inventoryRefreshes: 0,
+      jobDetailRefreshes: 0,
+      jobRefreshes: 0,
+    });
+
+  await page.clock.runFor(46_001);
+  const updateWaveCount = await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanUpdateWaveCount?: number;
+      __vpsmanUpdateWaveTimer?: number;
+    };
+    if (trackedWindow.__vpsmanUpdateWaveTimer !== undefined) {
+      window.clearInterval(trackedWindow.__vpsmanUpdateWaveTimer);
+    }
+    return trackedWindow.__vpsmanUpdateWaveCount ?? 0;
+  });
+  expect(updateWaveCount).toBe(305);
+  await expect
+    .poll(() => websocketRefreshCounts(page))
+    .toEqual({
+      auditRefreshes: 4,
+      backupRefreshes: 4,
+      fleetSnapshots: 4,
+      fleetSnapshotModes: ["full", "full", "full", "full"],
+      inventoryRefreshes: 4,
+      jobDetailRefreshes: 4,
+      jobRefreshes: 4,
+    });
 });
 
 test("fleet telemetry refresh keeps successful domains current when one domain fails", async ({
