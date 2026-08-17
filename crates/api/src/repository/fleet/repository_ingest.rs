@@ -34,6 +34,14 @@ use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TelemetryRecordOutcome {
+    Recorded,
+    AcceptedDuplicate,
+    AcceptedStale,
+    GatewaySessionNotActive,
+}
+
 fn terminal_outcome(
     status: &str,
     message: impl Into<String>,
@@ -873,7 +881,10 @@ impl Repository {
         Ok(accepted_hello)
     }
 
-    pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
+    pub(crate) async fn record_telemetry_outcome(
+        &self,
+        event: &GatewayTelemetryIngest,
+    ) -> Result<TelemetryRecordOutcome> {
         let mut received_metrics = event.telemetry.metrics.clone();
         let reported_observed_unix = received_metrics.observed_unix;
         let received_unix = crate::unix_now();
@@ -894,7 +905,7 @@ impl Repository {
         }
         received_metrics.observed_unix = received_unix;
         let swap = validated_swap_sample(&received_metrics)?;
-        let record_result: Result<bool> = match self {
+        let record_result: Result<TelemetryRecordOutcome> = match self {
             Self::Memory(memory) => {
                 let _key_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 if memory
@@ -903,7 +914,7 @@ impl Repository {
                     .await
                     .contains(&event.telemetry.client_id)
                 {
-                    return Ok(false);
+                    return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
                 }
                 let active_identity = memory.agents.read().await.iter().any(|agent| {
                     agent.id == event.telemetry.client_id
@@ -917,7 +928,7 @@ impl Repository {
                         && session.status == "active"
                 });
                 if !active_identity || !active_session {
-                    return Ok(false);
+                    return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
                 }
                 match claim_memory_telemetry_sequence(
                     &memory.telemetry_ingest_watermarks,
@@ -942,9 +953,11 @@ impl Repository {
                         )
                         .await?;
                         self.record_telemetry_webhook_event(event).await?;
-                        return Ok(false);
+                        return Ok(TelemetryRecordOutcome::AcceptedDuplicate);
                     }
-                    TelemetrySequenceClaim::Stale => return Ok(false),
+                    TelemetrySequenceClaim::Stale => {
+                        return Ok(TelemetryRecordOutcome::AcceptedStale)
+                    }
                 }
                 touch_memory_agent_from_telemetry(
                     &memory.agents,
@@ -1004,26 +1017,24 @@ impl Repository {
                         tunnel,
                     )
                 }));
-                Ok(true)
+                Ok(TelemetryRecordOutcome::Recorded)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let visible_client = sqlx::query_scalar::<_, String>(
                     r#"
                     SELECT client.id
-                    FROM visible_clients client
+                    FROM clients client
+                    JOIN gateway_sessions session
+                      ON session.client_id = client.id
                     WHERE client.id = $1
+                      AND client.hidden_at IS NULL
                       AND client.status <> 'revoked'
                       AND client.process_incarnation_id = $2
-                      AND EXISTS (
-                          SELECT 1
-                          FROM gateway_sessions session
-                          WHERE session.gateway_id = $3
-                            AND session.client_id = client.id
-                            AND session.id = $4
-                            AND session.status = 'active'
-                      )
-                    FOR UPDATE
+                      AND session.gateway_id = $3
+                      AND session.id = $4
+                      AND session.status = 'active'
+                    FOR UPDATE OF client, session
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
@@ -1034,7 +1045,7 @@ impl Repository {
                 .await?;
                 if visible_client.is_none() {
                     tx.commit().await?;
-                    return Ok(false);
+                    return Ok(TelemetryRecordOutcome::GatewaySessionNotActive);
                 }
                 match claim_postgres_telemetry_sequence(&mut tx, event).await? {
                     TelemetrySequenceClaim::Accepted => {}
@@ -1051,11 +1062,11 @@ impl Repository {
                         )
                         .await?;
                         self.record_telemetry_webhook_event(event).await?;
-                        return Ok(false);
+                        return Ok(TelemetryRecordOutcome::AcceptedDuplicate);
                     }
                     TelemetrySequenceClaim::Stale => {
                         tx.commit().await?;
-                        return Ok(false);
+                        return Ok(TelemetryRecordOutcome::AcceptedStale);
                     }
                 }
                 let (accepted_ping_results, accepted_ping_source_checked_unix) =
@@ -1139,12 +1150,12 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(true)
+                Ok(TelemetryRecordOutcome::Recorded)
             }
         };
-        let recorded = record_result?;
-        if !recorded {
-            return Ok(false);
+        let outcome = record_result?;
+        if outcome != TelemetryRecordOutcome::Recorded {
+            return Ok(outcome);
         }
         self.record_automatic_tunnel_reachability(
             &event.telemetry.client_id,
@@ -1157,7 +1168,12 @@ impl Repository {
         )
         .await?;
         self.record_telemetry_webhook_event(event).await?;
-        Ok(true)
+        Ok(TelemetryRecordOutcome::Recorded)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
+        Ok(self.record_telemetry_outcome(event).await? == TelemetryRecordOutcome::Recorded)
     }
 
     async fn record_port_forward_runtime_from_telemetry(

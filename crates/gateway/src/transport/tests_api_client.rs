@@ -14,6 +14,7 @@ fn test_event(path: &str, body: &[u8]) -> GatewayForwardEvent {
         kind,
         critical: gateway_event_critical(kind, body),
         command_output: None,
+        gateway_session_id: None,
         created_at: time::Instant::now(),
         created_unix: unix_now(),
         enqueue_seq: TEST_ENQUEUE_SEQ.fetch_add(1, Ordering::Relaxed),
@@ -55,11 +56,139 @@ fn terminal_output_event(
     }
 }
 
+async fn single_response_server(status: &str, body: &str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 4096];
+        let _ = socket.read(&mut request).await;
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
+async fn forward_once(
+    event: &GatewayForwardEvent,
+    session_rejection_handler: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
+) -> GatewayForwardOutcome {
+    let metrics = GatewayForwardMetrics::default();
+    let critical_failure_handler = StdRwLock::new(None);
+    let telemetry_pending = Mutex::new(HashMap::new());
+    let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
+    let runtime_config = GatewayForwardRuntimeConfig::default();
+    let timeouts = StdRwLock::new(GatewayHttpTimeouts {
+        connect: Duration::from_secs(1),
+        write: Duration::from_secs(1),
+        read: Duration::from_secs(1),
+        event_post: Duration::from_secs(1),
+    });
+    post_json_retry_until_expired(
+        event,
+        "client-a",
+        &metrics,
+        &critical_failure_handler,
+        session_rejection_handler,
+        &telemetry_pending,
+        &spool,
+        &runtime_config,
+        &timeouts,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn exact_inactive_session_conflict_notifies_the_queued_session_fence_once() {
+    let session_id = uuid::Uuid::new_v4();
+    let mut event = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    event.api_url =
+        single_response_server("409 Conflict", r#"{"error":"gateway_session_not_active"}"#).await;
+    event.gateway_session_id = Some(session_id);
+    let rejections = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = rejections.clone();
+    let handler: GatewaySessionRejectionHandler =
+        Arc::new(move |client_id, rejected_session_id| {
+            recorded
+                .lock()
+                .unwrap()
+                .push((client_id, rejected_session_id));
+        });
+    let handler = StdRwLock::new(Some(handler));
+
+    assert_eq!(
+        forward_once(&event, &handler).await,
+        GatewayForwardOutcome::NotDelivered
+    );
+    assert_eq!(
+        rejections.lock().unwrap().as_slice(),
+        &[("client-a".to_string(), session_id)]
+    );
+}
+
+#[tokio::test]
+async fn successful_or_unrelated_responses_do_not_reject_the_session_fence() {
+    let rejections = Arc::new(StdMutex::new(Vec::new()));
+    let recorded = rejections.clone();
+    let handler: GatewaySessionRejectionHandler =
+        Arc::new(move |client_id, rejected_session_id| {
+            recorded
+                .lock()
+                .unwrap()
+                .push((client_id, rejected_session_id));
+        });
+    let handler = StdRwLock::new(Some(handler));
+
+    let mut delivered = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    delivered.api_url = single_response_server("200 OK", r#"{"accepted":true}"#).await;
+    delivered.gateway_session_id = Some(uuid::Uuid::new_v4());
+    assert_eq!(
+        forward_once(&delivered, &handler).await,
+        GatewayForwardOutcome::Delivered
+    );
+
+    let mut unrelated_conflict = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    unrelated_conflict.api_url =
+        single_response_server("409 Conflict", r#"{"error":"other_conflict"}"#).await;
+    unrelated_conflict.gateway_session_id = Some(uuid::Uuid::new_v4());
+    unrelated_conflict.created_at = time::Instant::now() - TELEMETRY_EVENT_TTL;
+    assert_eq!(
+        forward_once(&unrelated_conflict, &handler).await,
+        GatewayForwardOutcome::NotDelivered
+    );
+
+    let mut server_error = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    server_error.api_url = single_response_server(
+        "500 Internal Server Error",
+        r#"{"error":"gateway_session_not_active"}"#,
+    )
+    .await;
+    server_error.gateway_session_id = Some(uuid::Uuid::new_v4());
+    server_error.created_at = time::Instant::now() - TELEMETRY_EVENT_TTL;
+    assert_eq!(
+        forward_once(&server_error, &handler).await,
+        GatewayForwardOutcome::NotDelivered
+    );
+
+    let mut transport_failure = test_event("/internal/v1/gateway/telemetry", br#"{}"#);
+    transport_failure.gateway_session_id = Some(uuid::Uuid::new_v4());
+    transport_failure.created_at = time::Instant::now() - TELEMETRY_EVENT_TTL;
+    assert_eq!(
+        forward_once(&transport_failure, &handler).await,
+        GatewayForwardOutcome::NotDelivered
+    );
+    assert!(rejections.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn shutdown_defers_non_command_events_to_spool() {
     let event = test_event("/internal/v1/gateway/agent-hello", br#"{}"#);
     let metrics = GatewayForwardMetrics::default();
     let critical_failure_handler = StdRwLock::new(None);
+    let session_rejection_handler = StdRwLock::new(None);
     let telemetry_pending = Mutex::new(HashMap::new());
     let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
     let runtime_config = GatewayForwardRuntimeConfig::default();
@@ -71,6 +200,7 @@ async fn shutdown_defers_non_command_events_to_spool() {
         "client-a",
         &metrics,
         &critical_failure_handler,
+        &session_rejection_handler,
         &telemetry_pending,
         &spool,
         &runtime_config,
@@ -99,6 +229,7 @@ async fn shutdown_interrupts_blocked_api_forward_post() {
     event.api_url = format!("http://{addr}");
     let metrics = GatewayForwardMetrics::default();
     let critical_failure_handler = StdRwLock::new(None);
+    let session_rejection_handler = StdRwLock::new(None);
     let telemetry_pending = Mutex::new(HashMap::new());
     let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
     let runtime_config = GatewayForwardRuntimeConfig::default();
@@ -113,6 +244,7 @@ async fn shutdown_interrupts_blocked_api_forward_post() {
         "client-a",
         &metrics,
         &critical_failure_handler,
+        &session_rejection_handler,
         &telemetry_pending,
         &spool,
         &runtime_config,

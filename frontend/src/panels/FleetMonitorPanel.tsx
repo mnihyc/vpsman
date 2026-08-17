@@ -8,6 +8,10 @@ import { apiGet } from "../api";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { CountryFlag } from "../components/CountryFlag";
 import {
+  snapshotSourceAvailable,
+  type SnapshotSource,
+} from "../homeSnapshot";
+import {
   formatLowerBoundCount,
   isActionableFleetAlertState,
   MONITORING_REFRESH_INTERVAL_MS,
@@ -69,6 +73,7 @@ type FleetMonitorPanelProps = {
   fileTransfers?: FileTransferSessionRecord[];
   fleetAlerts?: FleetAlertRecord[];
   jobs?: JobHistoryRecord[];
+  initialMonitoringCards?: SnapshotSource<MonitoringCardView[]> | null;
   maxCards?: number;
   recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
@@ -119,6 +124,7 @@ export function FleetMonitorPanel({
   fileTransfers = [],
   fleetAlerts = [],
   jobs = [],
+  initialMonitoringCards,
   maxCards,
   recordBounds,
   runningJobCount,
@@ -192,6 +198,7 @@ export function FleetMonitorPanel({
     let inFlight = false;
     setMonitoringCards([]);
     setMonitoringError(null);
+    setMonitoringSettledToken(null);
     const loadCards = async () => {
       if (inFlight) return;
       inFlight = true;
@@ -256,7 +263,24 @@ export function FleetMonitorPanel({
         if (active) setMonitoringSettledToken(apiToken);
       }
     };
-    void loadCards();
+    if (initialMonitoringCards === null) {
+      return () => {
+        active = false;
+      };
+    }
+    if (initialMonitoringCards !== undefined) {
+      if (snapshotSourceAvailable(initialMonitoringCards)) {
+        setMonitoringCards(initialMonitoringCards.data);
+        setMonitoringError(null);
+      } else {
+        setMonitoringError(
+          `Monitoring cards: ${initialMonitoringCards.error ?? "snapshot source unavailable"}`,
+        );
+      }
+      setMonitoringSettledToken(apiToken);
+    } else {
+      void loadCards();
+    }
     const refreshTimer = window.setInterval(
       () => void loadCards(),
       MONITORING_REFRESH_INTERVAL_MS,
@@ -265,7 +289,7 @@ export function FleetMonitorPanel({
       active = false;
       window.clearInterval(refreshTimer);
     };
-  }, [apiToken]);
+  }, [apiToken, initialMonitoringCards]);
   useEffect(() => {
     if (embedded) return;
     leavingForDetailRef.current = false;

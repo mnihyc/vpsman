@@ -3,7 +3,11 @@ import {
   ACCESS_TOKEN_STORAGE_KEY,
   REFRESH_TOKEN_STORAGE_KEY,
 } from "../constants";
-import { apiPost, isApiUnauthorized } from "../api";
+import { apiGet, apiPost, isApiUnauthorized } from "../api";
+import {
+  type HomeSnapshotRecord,
+  unavailableSnapshotSource,
+} from "../homeSnapshot";
 import type {
   ActiveView,
   AuthResponse,
@@ -14,7 +18,10 @@ import { parseWsEvent } from "../utils";
 import { useAccessData } from "./useAccessData";
 import { useAuditData } from "./useAuditData";
 import { useBackupsData } from "./useBackupsData";
-import { useDashboardOverviewData } from "./useDashboardOverviewData";
+import {
+  dashboardPreferencesToParams,
+  useDashboardOverviewData,
+} from "./useDashboardOverviewData";
 import { useFleetData } from "./useFleetData";
 import { useInventoryData } from "./useInventoryData";
 import { useJobsData } from "./useJobsData";
@@ -76,8 +83,43 @@ export function useDashboardData(activeView: ActiveView) {
   const refreshAuthRef = useRef<Promise<void> | null>(null);
   const authGenerationRef = useRef(0);
   const jobDetailsInvalidationGenerationRef = useRef(0);
+  const homeSnapshotGenerationRef = useRef(0);
+  const homeSnapshotStartedTokenRef = useRef("");
+  const initialViewForTokenRef = useRef<{
+    token: string;
+    view: ActiveView;
+    left: boolean;
+  } | null>(null);
+  const [homeSnapshotSettledToken, setHomeSnapshotSettledToken] = useState("");
+  const [homeMonitoringCards, setHomeMonitoringCards] = useState<
+    HomeSnapshotRecord["monitoring_cards"] | null
+  >(null);
   const clearDashboardDataRef = useRef<() => void>(() => undefined);
   const activeViewRef = useRef(activeView);
+
+  if (
+    apiToken &&
+    initialViewForTokenRef.current?.token !== apiToken
+  ) {
+    initialViewForTokenRef.current = {
+      token: apiToken,
+      view: activeView,
+      left: false,
+    };
+  } else if (
+    apiToken &&
+    initialViewForTokenRef.current?.token === apiToken &&
+    activeView !== initialViewForTokenRef.current.view
+  ) {
+    initialViewForTokenRef.current.left = true;
+  }
+  const isInitialHomeVisit = Boolean(
+    apiToken &&
+      initialViewForTokenRef.current?.token === apiToken &&
+      initialViewForTokenRef.current.view === "Home" &&
+      !initialViewForTokenRef.current.left &&
+      activeView === "Home",
+  );
 
   useEffect(() => {
     activeViewRef.current = activeView;
@@ -176,6 +218,11 @@ export function useDashboardData(activeView: ActiveView) {
   );
   const backups = useBackupsData(apiToken, requireAuth, audit.loadAudits);
   const clearDashboardData = useCallback(() => {
+    homeSnapshotGenerationRef.current += 1;
+    homeSnapshotStartedTokenRef.current = "";
+    initialViewForTokenRef.current = null;
+    setHomeSnapshotSettledToken("");
+    setHomeMonitoringCards(null);
     for (const timer of [
       dashboardOverviewReloadTimer,
       fleetReloadTimer,
@@ -311,18 +358,168 @@ export function useDashboardData(activeView: ActiveView) {
   }, [apiToken, refreshStoredAuth]);
 
   useEffect(() => {
-    if (!apiToken) {
+    if (
+      !apiToken ||
+      !isInitialHomeVisit ||
+      homeSnapshotStartedTokenRef.current === apiToken
+    ) {
+      return;
+    }
+    homeSnapshotStartedTokenRef.current = apiToken;
+    const generation = homeSnapshotGenerationRef.current + 1;
+    homeSnapshotGenerationRef.current = generation;
+    setHomeMonitoringCards(null);
+    const hydrationFences = {
+      access: access.beginHomeOperatorHydration(),
+      audit: audit.beginHomeAuditHydration(),
+      backups: backups.beginHomeBackupsHydration(),
+      dashboardOverview:
+        dashboardOverview.beginHomeDashboardOverviewHydration(),
+      fleet: fleet.beginHomeFleetHydration(),
+      jobs: jobs.beginHomeJobsHydration(),
+      schedules: schedules.beginHomeSchedulesHydration(),
+      system: system.beginHomeSystemDashboardHydration(),
+    };
+    const requestIsCurrent = () => {
+      const initialView = initialViewForTokenRef.current;
+      return (
+        generation === homeSnapshotGenerationRef.current &&
+        readStoredAccessToken() === apiToken &&
+        activeViewRef.current === "Home" &&
+        initialView?.token === apiToken &&
+        initialView.view === "Home" &&
+        !initialView.left
+      );
+    };
+    const params = dashboardPreferencesToParams(
+      dashboardOverview.dashboardPreferences,
+    );
+    void apiGet<HomeSnapshotRecord>(
+      `/api/v1/home/snapshot?${params.toString()}`,
+      apiToken,
+    )
+      .then((snapshot) => {
+        if (!requestIsCurrent()) {
+          return;
+        }
+        setHomeMonitoringCards(snapshot.monitoring_cards);
+        access.hydrateHomeOperator(
+          hydrationFences.access,
+          snapshot.operator,
+        );
+        fleet.hydrateHomeFleet(hydrationFences.fleet, snapshot);
+        jobs.hydrateHomeJobs(
+          hydrationFences.jobs,
+          snapshot.jobs,
+          snapshot.file_transfers,
+          snapshot.terminal_sessions,
+        );
+        backups.hydrateHomeBackups(
+          hydrationFences.backups,
+          snapshot.backups,
+          snapshot.backup_artifacts,
+        );
+        audit.hydrateHomeAudit(hydrationFences.audit, snapshot.audit);
+        schedules.hydrateHomeSchedules(
+          hydrationFences.schedules,
+          snapshot.schedules,
+        );
+        system.hydrateHomeSystemDashboard(
+          hydrationFences.system,
+          snapshot.system_dashboard,
+        );
+        dashboardOverview.hydrateHomeDashboardOverview(
+          hydrationFences.dashboardOverview,
+          snapshot.dashboard_overview,
+        );
+        setHomeSnapshotSettledToken(apiToken);
+      })
+      .catch((error) => {
+        if (!requestIsCurrent()) {
+          return;
+        }
+        if (isApiUnauthorized(error)) {
+          requireAuth();
+          return;
+        }
+        const message =
+          error instanceof Error
+            ? `Home snapshot: ${error.message}`
+            : "Home snapshot unavailable";
+        setHomeMonitoringCards(unavailableSnapshotSource(message));
+        access.hydrateHomeOperator(hydrationFences.access, null, message);
+        fleet.hydrateHomeFleet(hydrationFences.fleet, {
+          summary: unavailableSnapshotSource(message),
+          agents: unavailableSnapshotSource(message),
+          telemetry_rollups: unavailableSnapshotSource(message),
+          telemetry_network_rates: unavailableSnapshotSource(message),
+          fleet_alerts: unavailableSnapshotSource(message),
+        });
+        jobs.hydrateHomeJobs(
+          hydrationFences.jobs,
+          unavailableSnapshotSource(message),
+          unavailableSnapshotSource(message),
+          unavailableSnapshotSource(message),
+        );
+        backups.hydrateHomeBackups(
+          hydrationFences.backups,
+          unavailableSnapshotSource(message),
+          unavailableSnapshotSource(message),
+        );
+        audit.hydrateHomeAudit(
+          hydrationFences.audit,
+          unavailableSnapshotSource(message),
+        );
+        schedules.hydrateHomeSchedules(
+          hydrationFences.schedules,
+          unavailableSnapshotSource(message),
+        );
+        system.hydrateHomeSystemDashboard(
+          hydrationFences.system,
+          unavailableSnapshotSource(message),
+        );
+        dashboardOverview.hydrateHomeDashboardOverview(
+          hydrationFences.dashboardOverview,
+          unavailableSnapshotSource(message),
+        );
+        setHomeSnapshotSettledToken(apiToken);
+      });
+  }, [
+    access.beginHomeOperatorHydration,
+    access.hydrateHomeOperator,
+    apiToken,
+    audit.beginHomeAuditHydration,
+    audit.hydrateHomeAudit,
+    backups.beginHomeBackupsHydration,
+    backups.hydrateHomeBackups,
+    dashboardOverview.beginHomeDashboardOverviewHydration,
+    dashboardOverview.dashboardPreferences,
+    dashboardOverview.hydrateHomeDashboardOverview,
+    fleet.beginHomeFleetHydration,
+    fleet.hydrateHomeFleet,
+    isInitialHomeVisit,
+    jobs.beginHomeJobsHydration,
+    jobs.hydrateHomeJobs,
+    requireAuth,
+    schedules.beginHomeSchedulesHydration,
+    schedules.hydrateHomeSchedules,
+    system.beginHomeSystemDashboardHydration,
+    system.hydrateHomeSystemDashboard,
+  ]);
+
+  useEffect(() => {
+    if (!apiToken || isInitialHomeVisit) {
       return;
     }
     void access.loadCurrentOperatorProfile();
-  }, [access.loadCurrentOperatorProfile, apiToken]);
+  }, [access.loadCurrentOperatorProfile, apiToken, isInitialHomeVisit]);
 
   useEffect(() => {
-    if (!apiToken) {
+    if (!apiToken || isInitialHomeVisit) {
       return;
     }
     void fleet.loadFleet();
-  }, [apiToken, fleet.loadFleet]);
+  }, [apiToken, fleet.loadFleet, isInitialHomeVisit]);
 
   useEffect(() => {
     if (!apiToken || wsState !== "connected") {
@@ -393,7 +590,19 @@ export function useDashboardData(activeView: ActiveView) {
       );
     }
 
-    void loadAndSchedule();
+    if (isInitialHomeVisit) {
+      if (homeSnapshotSettledToken !== apiToken) {
+        return;
+      }
+      timer = window.setTimeout(
+        loadAndSchedule,
+        dashboardRefreshIntervalMs(
+          dashboardOverview.dashboardPreferences.refreshIntervalSecs,
+        ),
+      );
+    } else {
+      void loadAndSchedule();
+    }
     return () => {
       disposed = true;
       if (timer !== null) {
@@ -405,6 +614,8 @@ export function useDashboardData(activeView: ActiveView) {
     apiToken,
     dashboardOverview.dashboardPreferences.refreshIntervalSecs,
     dashboardOverview.loadDashboardOverview,
+    homeSnapshotSettledToken,
+    isInitialHomeVisit,
   ]);
 
   useEffect(() => {
@@ -412,11 +623,13 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     if (activeView === "Home") {
-      void jobs.loadJobs();
-      void backups.loadBackups();
-      void audit.loadAudits();
-      void schedules.loadSchedules();
-      void system.loadSystemDashboard();
+      if (!isInitialHomeVisit) {
+        void jobs.loadJobs();
+        void backups.loadBackups();
+        void audit.loadAudits();
+        void schedules.loadSchedules();
+        void system.loadSystemDashboard();
+      }
     } else if (activeView === "Fleet") {
       void inventory.loadTagInventory();
     } else if (activeView === "Config") {
@@ -433,9 +646,6 @@ export function useDashboardData(activeView: ActiveView) {
       void schedules.loadSchedules();
       void jobs.loadJobs();
       void inventory.loadTagInventory();
-      if (access.operator?.role === "admin") {
-        void system.loadSuiteConfig();
-      }
     } else if (activeView === "Network") {
       void inventory.loadRuntimeConfigApplyStates();
       void portForwarding.loadPortForwardRules();
@@ -469,13 +679,9 @@ export function useDashboardData(activeView: ActiveView) {
       void access.loadCurrentOperator();
       void inventory.loadTagInventory();
       void system.loadSystemDashboard();
-      if (access.operator?.role === "admin") {
-        void system.loadSuiteConfig();
-      }
     }
   }, [
     access.loadCurrentOperator,
-    access.operator?.role,
     activeView,
     apiToken,
     audit.loadAudits,
@@ -484,8 +690,8 @@ export function useDashboardData(activeView: ActiveView) {
     inventory.loadRuntimeConfigApplyStates,
     jobs.loadJobs,
     schedules.loadSchedules,
-    system.loadSuiteConfig,
     system.loadSystemDashboard,
+    isInitialHomeVisit,
     topology.loadNetworkObservations,
     topology.loadNetworkAdapterDefinitions,
     topology.loadNetworkTrends,
@@ -494,6 +700,22 @@ export function useDashboardData(activeView: ActiveView) {
     topology.loadTopologyGraph,
     topology.loadTunnelPlans,
     portForwarding.loadPortForwardRules,
+  ]);
+
+  useEffect(() => {
+    if (
+      !apiToken ||
+      access.operator?.role !== "admin" ||
+      (activeView !== "Automation" && activeView !== "System")
+    ) {
+      return;
+    }
+    void system.loadSuiteConfig();
+  }, [
+    access.operator?.role,
+    activeView,
+    apiToken,
+    system.loadSuiteConfig,
   ]);
 
   useEffect(() => {
@@ -780,6 +1002,9 @@ export function useDashboardData(activeView: ActiveView) {
     rotateTunnelPlanCredentials: topology.rotateTunnelPlanCredentials,
     disableTotp: access.disableTotp,
     handleAuth,
+    initialHomeMonitoringCards: isInitialHomeVisit
+      ? homeMonitoringCards
+      : undefined,
     jobs: jobs.jobs,
     jobsTruncated: jobs.jobsTruncated,
     jobApprovals: jobs.jobApprovals,

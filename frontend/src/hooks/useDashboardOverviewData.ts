@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { apiGet, isApiUnauthorized } from "../api";
 import { DEFAULT_MONITORING_REFRESH_INTERVAL_SECS } from "../constants";
 import { dashboardWindowOptions } from "../dashboardQuery";
+import type { SnapshotSource } from "../homeSnapshot";
 import type {
   DashboardGroupBy,
   DashboardNetworkViewMode,
@@ -125,6 +126,39 @@ export function useDashboardOverviewData(
     [dashboardPreferences, loadDashboardOverview],
   );
 
+  const beginHomeDashboardOverviewHydration = useCallback(
+    () => {
+      setDashboardOverviewLoading(true);
+      return ++loadSequence.current;
+    },
+    [],
+  );
+
+  const hydrateHomeDashboardOverview = useCallback(
+    (
+      sequence: number,
+      source: SnapshotSource<DashboardOverviewRecord>,
+    ) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (loadSequence.current !== sequence) {
+        return;
+      }
+      if (source.data !== null && source.error === null) {
+        dashboardOverviewRef.current = source.data;
+        setDashboardOverview(source.data);
+        setDashboardOverviewError(null);
+      } else {
+        setDashboardOverviewError(
+          `Dashboard overview: ${source.error ?? "snapshot source unavailable"}`,
+        );
+      }
+      setDashboardOverviewLoading(false);
+    },
+    [apiToken],
+  );
+
   const updateDashboardPreferences = useCallback(
     (patch: Partial<DashboardPreferences>) => {
       const currentPreferences = dashboardPreferencesRef.current;
@@ -156,18 +190,20 @@ export function useDashboardOverviewData(
 
   return {
     clearDashboardOverview,
+    beginHomeDashboardOverviewHydration,
     dashboardOverview,
     dashboardOverviewError,
     dashboardOverviewLoading,
     dashboardOverviewWindow: dashboardPreferences.window,
     dashboardPreferences,
+    hydrateHomeDashboardOverview,
     loadDashboardOverview,
     setDashboardOverviewWindow,
     updateDashboardPreferences,
   };
 }
 
-function dashboardPreferencesToParams(
+export function dashboardPreferencesToParams(
   preferences: DashboardPreferences,
 ): URLSearchParams {
   const scoped =

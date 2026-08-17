@@ -17,6 +17,7 @@ import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { presentAudit } from "../auditPresentation";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
+import type { SnapshotSource } from "../homeSnapshot";
 import { agentDisplayState } from "../agentDisplayState";
 import {
   formatLowerBoundCount,
@@ -35,6 +36,7 @@ import type {
   FleetAlertRecord,
   FleetSummary,
   JobHistoryRecord,
+  MonitoringCardView,
   SystemDashboardRecord,
   ScheduleRecord,
   TelemetryNetworkRateRecord,
@@ -67,6 +69,7 @@ type HomePanelProps = {
   fleetCoreEvidenceAvailable: boolean;
   homeEvidenceComplete: boolean;
   homeError: string | null;
+  initialMonitoringCards?: SnapshotSource<MonitoringCardView[]> | null;
   jobs: JobHistoryRecord[];
   jobsEvidenceAvailable: boolean;
   recordBounds: {
@@ -147,6 +150,7 @@ export function HomePanel({
   fleetCoreEvidenceAvailable,
   homeEvidenceComplete,
   homeError,
+  initialMonitoringCards,
   jobs,
   jobsEvidenceAvailable,
   recordBounds,
@@ -691,6 +695,7 @@ export function HomePanel({
           fileTransfers={fileTransfers}
           fleetAlerts={fleetAlerts}
           jobs={jobs}
+          initialMonitoringCards={initialMonitoringCards}
           maxCards={8}
           recordBounds={{
             backups: recordBounds.backups,

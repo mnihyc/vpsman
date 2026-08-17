@@ -11,14 +11,14 @@ use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 use vpsman_common::{
     pair_port_expressions, payload_hash, plan_tunnel, AgentCapabilitySnapshot, AgentHello,
-    AgentMetrics, AgentUpdateHeartbeat, CommandOutput, CpuStat, DiskStat, GatewayAgentHelloIngest,
-    GatewayTelemetryIngest, JobCommand, LoadAverage, MemoryStat, NetworkStat,
-    NetworkTrafficImportBucket, NetworkTrafficImportResult, NetworkTrafficImportSource,
-    OspfControlMode, OspfCostPolicy, OutputStream, PingTargetResult, PortForwardProtocol,
-    PortForwardRuntimeSnapshot, PortForwardRuntimeStatus, RuntimeTunnelControl,
-    RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope, TunnelAddressFamily,
-    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
-    TunnelReachabilityObservation, TunnelReachabilitySource,
+    AgentMetrics, AgentRuntimeConfigReloadRequest, AgentUpdateHeartbeat, CommandOutput, CpuStat,
+    DiskStat, GatewayAgentHelloIngest, GatewayRuntimeConfigReloadRequest, GatewayTelemetryIngest,
+    JobCommand, LoadAverage, MemoryStat, NetworkStat, NetworkTrafficImportBucket,
+    NetworkTrafficImportResult, NetworkTrafficImportSource, OspfControlMode, OspfCostPolicy,
+    OutputStream, PingTargetResult, PortForwardProtocol, PortForwardRuntimeSnapshot,
+    PortForwardRuntimeStatus, RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat,
+    TelemetryEnvelope, TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind,
+    TunnelOspfConfig, TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 use vpsman_server_core::{
     JOB_STATUS_CANCELED, JOB_STATUS_COMPLETED, JOB_STATUS_CONTROL_TIMEOUT, JOB_STATUS_FAILED,
@@ -3139,6 +3139,113 @@ async fn postgres_fleet_summary_accounts_for_disconnected_and_missing_contact_st
 }
 
 #[tokio::test]
+async fn postgres_inactive_session_rejects_async_ingest_without_mutation() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "inactive-async-ingest-client";
+    let gateway_id = "gateway-a";
+    let process_incarnation_id = Uuid::new_v4();
+    let gateway_session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(process_incarnation_id)).await;
+    start_test_gateway_session(&db.repo, gateway_id, client_id, gateway_session_id).await;
+    let telemetry_event = GatewayTelemetryIngest {
+        gateway_id: gateway_id.to_string(),
+        gateway_session_id,
+        process_incarnation_id,
+        telemetry_seq: 1,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: client_id.to_string(),
+            metrics: AgentMetrics {
+                observed_unix: crate::unix_now().max(1),
+                hostname: client_id.to_string(),
+                ..Default::default()
+            },
+        },
+    };
+    let mut expiry_tx = db.pool.begin().await.unwrap();
+    sqlx::query(
+        r#"
+        UPDATE gateway_sessions
+        SET status = 'expired', ended_at = now(), end_reason = 'agent_offline_timeout'
+        WHERE id = $1
+        "#,
+    )
+    .bind(gateway_session_id)
+    .execute(&mut *expiry_tx)
+    .await
+    .unwrap();
+    let record_repo = db.repo.clone();
+    let record_event = telemetry_event.clone();
+    let mut record_task =
+        tokio::spawn(async move { record_repo.record_telemetry_outcome(&record_event).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut record_task)
+            .await
+            .is_err()
+    );
+    expiry_tx.commit().await.unwrap();
+    assert_eq!(
+        record_task.await.unwrap().unwrap(),
+        crate::repository_ingest::TelemetryRecordOutcome::GatewaySessionNotActive
+    );
+
+    let state = postgres_app_state(&db);
+    let headers = internal_gateway_headers();
+    let telemetry_error = crate::routes_ingest::ingest_telemetry(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(telemetry_event),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(telemetry_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(telemetry_error.code, "gateway_session_not_active");
+
+    let reload_error = crate::routes_ingest::request_runtime_config_reload(
+        axum::extract::State(state),
+        headers,
+        axum::Json(GatewayRuntimeConfigReloadRequest {
+            gateway_id: gateway_id.to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            remote_ip: None,
+            request: AgentRuntimeConfigReloadRequest {
+                client_id: client_id.to_string(),
+                current_content_hash: "a".repeat(64),
+                reason: "agent_reconnect_authoritative_sync".to_string(),
+                requires_authoritative_sync: true,
+                reconcile_resources: Vec::new(),
+                requires_port_forwarding_sync: false,
+            },
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(reload_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(reload_error.code, "gateway_session_not_active");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)::bigint FROM telemetry_samples WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*)::bigint FROM jobs")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -4262,6 +4369,170 @@ async fn postgres_retained_system_history_returns_whole_overlapping_coarse_bucke
     assert_eq!(rows[0].avg_value, 3.0);
     assert_eq!(rows[0].max_value, 5.0);
     assert_eq!(rows[0].latest_value, 4.0);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_system_rollup_fast_path_preserves_mixed_tier_selection() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let performance_start = ((crate::unix_now() / 60) * 60).saturating_sub(150_000);
+    sqlx::query(
+        r#"
+        INSERT INTO system_metric_rollups (
+            metric, bucket_start, bucket_secs, sample_count, value_sum,
+            avg_value, max_value, latest_value, latest_observed_at
+        )
+        SELECT
+            metric,
+            to_timestamp($1::double precision) + point * interval '1 minute',
+            60,
+            1,
+            (point % 100 + 1)::double precision,
+            (point % 100 + 1)::double precision,
+            (point % 100 + 1)::double precision,
+            (point % 100 + 1)::double precision,
+            to_timestamp($1::double precision) + point * interval '1 minute'
+        FROM unnest(ARRAY[
+            'test.rollup.fast.cpu',
+            'test.rollup.fast.memory',
+            'test.rollup.fast.disk',
+            'test.rollup.fast.network'
+        ]::text[]) AS metrics(metric)
+        CROSS JOIN generate_series(0, 2399) AS points(point)
+        "#,
+    )
+    .bind(performance_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::query("ANALYZE system_metric_rollups")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let explain_sql = format!(
+        "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+        crate::repository_system_dashboard::SYSTEM_METRIC_ROLLUP_AT_STEP_SQL
+    );
+    let plan: Value = sqlx::query_scalar(&explain_sql)
+        .bind(performance_start as f64)
+        .bind((performance_start + 2_400 * 60 - 1) as f64)
+        .bind(60_i32)
+        .bind(20_000_i64)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let plan = plan.to_string();
+    assert!(plan.contains("\"Node Type\":\"WindowAgg\""), "{plan}");
+    assert!(plan.contains("\"Join Type\":\"Left\""), "{plan}");
+    assert!(plan.contains("\"Actual Loops\":0"), "{plan}");
+    assert!(!plan.contains("\"Join Type\":\"Anti\""), "{plan}");
+
+    let mixed_start = performance_start - 600;
+    sqlx::query(
+        r#"
+        INSERT INTO system_metric_rollups (
+            metric, bucket_start, bucket_secs, sample_count, value_sum,
+            avg_value, max_value, latest_value, latest_observed_at
+        ) VALUES
+            ('test.rollup.mixed', to_timestamp($1::double precision),
+                300, 5, 50, 10, 10, 10, to_timestamp(($1 + 299)::double precision)),
+            ('test.rollup.mixed', to_timestamp(($1 + 60)::double precision),
+                60, 1, 99, 99, 99, 99, to_timestamp(($1 + 60)::double precision)),
+            ('test.rollup.mixed', to_timestamp(($1 + 300)::double precision),
+                60, 1, 7, 7, 7, 7, to_timestamp(($1 + 300)::double precision))
+        "#,
+    )
+    .bind(mixed_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let selection_delta: i64 = sqlx::query_scalar(
+        r#"
+        WITH legacy AS (
+            SELECT row.metric, row.bucket_start, row.bucket_secs
+            FROM system_metric_rollups row
+            WHERE row.metric = 'test.rollup.mixed'
+              AND row.bucket_start <= to_timestamp($2::double precision)
+              AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                    > to_timestamp($1::double precision)
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM system_metric_rollups coarser
+                    WHERE coarser.metric = row.metric
+                      AND coarser.bucket_secs > row.bucket_secs
+                      AND coarser.bucket_start <= to_timestamp($2::double precision)
+                      AND coarser.bucket_start
+                            + make_interval(secs => coarser.bucket_secs)
+                            > to_timestamp($1::double precision)
+                      AND coarser.bucket_start
+                            < row.bucket_start + make_interval(secs => row.bucket_secs)
+                      AND coarser.bucket_start
+                            + make_interval(secs => coarser.bucket_secs)
+                            > row.bucket_start
+                )
+        ),
+        candidates AS (
+            SELECT
+                row.*,
+                max(row.bucket_secs) OVER (PARTITION BY row.metric) AS max_bucket_secs
+            FROM system_metric_rollups row
+            WHERE row.metric = 'test.rollup.mixed'
+              AND row.bucket_start <= to_timestamp($2::double precision)
+              AND row.bucket_start + make_interval(secs => row.bucket_secs)
+                    > to_timestamp($1::double precision)
+        ),
+        optimized AS (
+            SELECT row.metric, row.bucket_start, row.bucket_secs
+            FROM candidates row
+            LEFT JOIN LATERAL (
+                SELECT TRUE AS overlaps
+                FROM system_metric_rollups coarser
+                WHERE row.bucket_secs < row.max_bucket_secs
+                  AND coarser.metric = row.metric
+                  AND coarser.bucket_secs > row.bucket_secs
+                  AND coarser.bucket_start <= to_timestamp($2::double precision)
+                  AND coarser.bucket_start
+                        + make_interval(secs => coarser.bucket_secs)
+                        > to_timestamp($1::double precision)
+                  AND coarser.bucket_start
+                        < row.bucket_start + make_interval(secs => row.bucket_secs)
+                  AND coarser.bucket_start
+                        + make_interval(secs => coarser.bucket_secs)
+                        > row.bucket_start
+                LIMIT 1
+            ) coarser_overlap ON TRUE
+            WHERE coarser_overlap.overlaps IS NULL
+        ),
+        delta AS (
+            (SELECT * FROM legacy EXCEPT ALL SELECT * FROM optimized)
+            UNION ALL
+            (SELECT * FROM optimized EXCEPT ALL SELECT * FROM legacy)
+        )
+        SELECT count(*)::bigint FROM delta
+        "#,
+    )
+    .bind(mixed_start as f64)
+    .bind((mixed_start + 359) as f64)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(selection_delta, 0);
+
+    let mixed_rows = db
+        .repo
+        .list_system_metric_rollups_at_step(mixed_start, mixed_start + 359, 10, 60)
+        .await
+        .unwrap();
+    assert_eq!(mixed_rows.len(), 2);
+    assert_eq!(mixed_rows[0].bucket_secs, 300);
+    assert_eq!(mixed_rows[0].sample_count, 5);
+    assert_eq!(mixed_rows[1].bucket_secs, 60);
+    assert_eq!(mixed_rows[1].sample_count, 1);
+    assert_eq!(mixed_rows[1].latest_value, 7.0);
     db.cleanup().await;
 }
 

@@ -57,7 +57,7 @@ const customMockTests = new Set([
   "fleet monitor cards remain readable for 20 generated VPS fixtures",
   "fleet monitor cards remain readable for 100 generated VPS fixtures",
   "fleet monitor cards remain readable for 1000 generated VPS fixtures",
-  "startup WebSocket core preserves the in-flight HTTP telemetry snapshot",
+  "startup WebSocket core preserves the in-flight Home telemetry snapshot",
   "fleet telemetry refresh keeps successful domains current when one domain fails",
   "fleet metrics freshness uses exact sample time instead of the coarse chart bucket",
   "system maintenance presents an empty cleanup preview as a neutral no-op",
@@ -2595,18 +2595,18 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
     .toBeLessThanOrEqual(40);
 });
 
-test("startup WebSocket core preserves the in-flight HTTP telemetry snapshot", async ({
+test("startup WebSocket core preserves the in-flight Home telemetry snapshot", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "the startup snapshot ordering contract is viewport independent",
   );
-  await installConsoleApiMock(page, { holdInitialFleetSnapshots: true });
+  await installConsoleApiMock(page, { holdInitialHomeSnapshot: true });
   await page.goto("/");
   await waitForConsoleShell(page);
 
-  const fleetSnapshotModes = () =>
+  const homeSnapshotCount = () =>
     page.evaluate(
       () =>
         (
@@ -2618,16 +2618,11 @@ test("startup WebSocket core preserves the in-flight HTTP telemetry snapshot", a
             (request) =>
               request.method === "GET" &&
               new URL(request.url, window.location.href).pathname ===
-                "/api/v1/fleet/snapshot",
+                "/api/v1/home/snapshot",
           )
-          .map(
-            (request) =>
-              new URL(request.url, window.location.href).searchParams.get(
-                "mode",
-              ) ?? "",
-          ) ?? [],
+          .length ?? 0,
     );
-  await expect.poll(fleetSnapshotModes).toContain("full");
+  await expect.poll(homeSnapshotCount).toBe(1);
   await expect
     .poll(() =>
       page.evaluate(
@@ -2671,21 +2666,36 @@ test("startup WebSocket core preserves the in-flight HTTP telemetry snapshot", a
   await page.evaluate(() => {
     (
       window as typeof window & {
-        __vpsmanReleaseFleetSnapshots?: () => void;
+        __vpsmanReleaseHomeSnapshot?: () => void;
       }
-    ).__vpsmanReleaseFleetSnapshots?.();
+    ).__vpsmanReleaseHomeSnapshot?.();
   });
-  await openConsoleSubpage(page, "Fleet", "Monitor");
   const startupCard = page
-    .getByLabel("VPS monitor cards")
+    .getByLabel("Home fleet scan")
     .locator(".vpsMonitorCard", { hasText: "WS startup core" });
   await expect(startupCard).toBeVisible();
   await expect(
-    startupCard.locator('[data-fact-kind="uptime"] strong'),
-  ).toHaveText("8d 3h");
-  expect((await fleetSnapshotModes()).every((mode) => mode === "full")).toBe(
-    true,
-  );
+    startupCard
+      .getByLabel("Current network activity for WS startup core")
+      .locator("strong")
+      .first(),
+  ).toHaveText(/[0-9.]+ [kM]?B\/s/);
+  expect(await homeSnapshotCount()).toBe(1);
+  expect(
+    await page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+          }
+        ).__vpsmanFetchRequests?.some(
+          (request) =>
+            ["/api/v1/fleet/snapshot", "/api/v1/monitoring/cards"].includes(
+              new URL(request.url, window.location.href).pathname,
+            ),
+        ) ?? false,
+    ),
+  ).toBe(false);
 });
 
 test("connected fleet consumes one aggregate telemetry invalidation without live polling", async ({

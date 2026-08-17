@@ -2,6 +2,11 @@ import { useCallback, useRef, useState } from "react";
 import { apiGet, apiGetBlob, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
 import { bytesToBase64, readFileSlice, sha256FileHex } from "../fileTransfer";
 import { FLEET_DETAIL_LIMIT, HISTORY_DETAIL_LIMIT } from "../constants";
+import {
+  snapshotSourceAvailable,
+  snapshotSourceError,
+  type SnapshotSource,
+} from "../homeSnapshot";
 import type {
   BackupArtifactRecord,
   BackupArtifactHandoffRecord,
@@ -163,6 +168,52 @@ export function useBackupsData(
       }
     }
   }, [apiToken, onUnauthorized]);
+
+  const beginHomeBackupsHydration = useCallback(
+    () => {
+      setBackupsLoading(true);
+      return ++backupsLoadGeneration.current;
+    },
+    [],
+  );
+
+  const hydrateHomeBackups = useCallback(
+    (
+      generation: number,
+      backupSource: SnapshotSource<BackupRequestRecord[]>,
+      artifactSource: SnapshotSource<BackupArtifactRecord[]>,
+    ) => {
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
+      if (backupsLoadGeneration.current !== generation) {
+        return;
+      }
+      if (snapshotSourceAvailable(backupSource)) {
+        setBackups(backupSource.data);
+        setBackupsTruncated(
+          backupSource.data.length >= HISTORY_DETAIL_LIMIT,
+        );
+      }
+      if (snapshotSourceAvailable(artifactSource)) {
+        setBackupArtifacts(artifactSource.data);
+        setBackupArtifactsTruncated(
+          artifactSource.data.length >= HISTORY_DETAIL_LIMIT,
+        );
+      }
+      setBackupsEvidenceAvailable(
+        snapshotSourceAvailable(backupSource) &&
+          snapshotSourceAvailable(artifactSource),
+      );
+      const failures = [
+        snapshotSourceError("Backup requests", backupSource),
+        snapshotSourceError("Backup artifacts", artifactSource),
+      ].filter((message): message is string => message !== null);
+      setBackupsError(failures.length > 0 ? failures.join("; ") : null);
+      setBackupsLoading(false);
+    },
+    [apiToken],
+  );
 
   const createBackupRequest = useCallback(
     async (request: CreateBackupRequest) => {
@@ -371,6 +422,7 @@ export function useBackupsData(
 
   return {
     backups,
+    beginHomeBackupsHydration,
     backupsTruncated,
     backupPolicies,
     backupPoliciesTruncated,
@@ -381,6 +433,7 @@ export function useBackupsData(
     backupsError,
     backupsEvidenceAvailable,
     backupsLoading,
+    hydrateHomeBackups,
     createBackupRequest,
     createBackupPolicy,
     updateBackupPolicy,

@@ -7,6 +7,7 @@ import {
   isApiUnauthorized,
 } from "../api";
 import { emptySummary } from "../constants";
+import type { SnapshotSource } from "../homeSnapshot";
 import type {
   AgentView,
   FleetAlertPolicyRecord,
@@ -50,9 +51,20 @@ import type {
 const FLEET_ERROR_SOURCE_ORDER = ["core", "detail", "telemetry"] as const;
 type FleetErrorSource = (typeof FLEET_ERROR_SOURCE_ORDER)[number];
 
-type FleetSnapshotSource<T> = {
-  data: T | null;
-  error: string | null;
+type FleetSnapshotSource<T> = SnapshotSource<T>;
+
+type HomeFleetSnapshotRecord = {
+  summary: SnapshotSource<FleetSummary>;
+  agents: SnapshotSource<AgentView[]>;
+  telemetry_rollups: SnapshotSource<TelemetryRollupRecord[]>;
+  telemetry_network_rates: SnapshotSource<TelemetryNetworkRateRecord[]>;
+  fleet_alerts: SnapshotSource<FleetAlertRecord[]>;
+};
+
+type HomeFleetHydrationFence = {
+  core: number;
+  detail: number;
+  telemetry: number;
 };
 
 type FleetSnapshotRecord = {
@@ -344,6 +356,100 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       );
     },
     [publishFleetError],
+  );
+
+  const beginHomeFleetHydration = useCallback(
+    (): HomeFleetHydrationFence => ({
+      core: ++fleetCoreGeneration.current,
+      detail: ++fleetFullGeneration.current,
+      telemetry: ++fleetTelemetryGeneration.current,
+    }),
+    [],
+  );
+
+  const hydrateHomeFleet = useCallback(
+    (fence: HomeFleetHydrationFence, snapshot: HomeFleetSnapshotRecord) => {
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
+      if (fence.core === fleetCoreGeneration.current) {
+        const nextAgents = snapshot.agents.data;
+        const staleDeletedIds = nextAgents
+          ? deletedIdsInAgentSnapshot(nextAgents, deletedClientIds.current)
+          : [];
+        const coreError = snapshotSourceErrorSummary(
+          "Core fleet sources are unavailable",
+          [
+            ["fleet summary", snapshot.summary],
+            ["agents", snapshot.agents],
+          ],
+        );
+        setFleetCoreEvidenceAvailable(
+          coreError === null && staleDeletedIds.length === 0,
+        );
+        if (snapshot.summary.data && staleDeletedIds.length === 0) {
+          setSummary(snapshot.summary.data);
+        }
+        if (nextAgents) {
+          setAgents(withoutDeletedAgents(nextAgents, deletedClientIds.current));
+        }
+        publishFleetError(
+          "core",
+          staleDeletedIds.length > 0
+            ? staleFleetSnapshotMessage(staleDeletedIds)
+            : coreError,
+        );
+      }
+
+      if (fence.telemetry === fleetTelemetryGeneration.current) {
+        if (snapshot.telemetry_rollups.data) {
+          setTelemetryRollups(
+            withoutDeletedClients(
+              snapshot.telemetry_rollups.data,
+              deletedClientIds.current,
+            ),
+          );
+        }
+        if (snapshot.telemetry_network_rates.data) {
+          setTelemetryNetworkRates(
+            withoutDeletedClients(
+              snapshot.telemetry_network_rates.data,
+              deletedClientIds.current,
+            ),
+          );
+        }
+        publishFleetError(
+          "telemetry",
+          snapshotSourceErrorSummary(
+            "Some live fleet sources are unavailable",
+            [
+              ["telemetry rollups", snapshot.telemetry_rollups],
+              ["network rates", snapshot.telemetry_network_rates],
+            ],
+          ),
+        );
+      }
+
+      if (fence.detail === fleetFullGeneration.current) {
+        setFleetAlertsEvidenceAvailable(sourceAvailable(snapshot.fleet_alerts));
+        if (snapshot.fleet_alerts.data) {
+          setFleetAlerts(
+            withoutDeletedClients(
+              snapshot.fleet_alerts.data,
+              deletedClientIds.current,
+            ),
+          );
+        }
+        publishFleetError(
+          "detail",
+          snapshotSourceErrorSummary(
+            "Some fleet detail sources are unavailable",
+            [["fleet alerts", snapshot.fleet_alerts]],
+          ),
+        );
+      }
+    },
+    [apiToken, publishFleetError],
   );
 
   const loadFleet = useCallback(async () => {
@@ -1031,11 +1137,13 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   return {
     agents,
     apiError,
+    beginHomeFleetHydration,
     clearFleet,
     configPolicyEvidenceAvailable,
     vpsRuleEvidenceAvailable,
     fleetAlertsEvidenceAvailable,
     fleetAlerts,
+    hydrateHomeFleet,
     fleetAlertStates,
     fleetAlertPolicies,
     vpsRuleValues,

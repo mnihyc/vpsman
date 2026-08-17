@@ -1,5 +1,5 @@
 use super::*;
-use crate::state::{GatewaySession, SESSION_COMMAND_QUEUE_CAPACITY};
+use crate::state::{GatewaySession, GatewaySessionCloseRequest, SESSION_COMMAND_QUEUE_CAPACITY};
 use vpsman_common::{JobCommand, JobRequest};
 
 #[test]
@@ -38,7 +38,7 @@ async fn full_session_command_queue_returns_busy_error() {
             })))
             .unwrap();
     }
-    let (close_tx, _close_rx) = tokio::sync::watch::channel(None::<String>);
+    let (close_tx, _close_rx) = tokio::sync::watch::channel(None::<GatewaySessionCloseRequest>);
     state.sessions.write().await.insert(
         "client-a".to_string(),
         GatewaySession {
@@ -85,7 +85,7 @@ async fn disconnect_bypasses_full_session_command_queue() {
             })))
             .unwrap();
     }
-    let (close_tx, mut close_rx) = tokio::sync::watch::channel(None::<String>);
+    let (close_tx, mut close_rx) = tokio::sync::watch::channel(None::<GatewaySessionCloseRequest>);
     state.sessions.write().await.insert(
         "client-a".to_string(),
         GatewaySession {
@@ -110,7 +110,12 @@ async fn disconnect_bypasses_full_session_command_queue() {
     assert!(result.disconnected);
     assert!(!state.sessions.read().await.contains_key("client-a"));
     close_rx.changed().await.unwrap();
-    assert_eq!(close_rx.borrow().as_deref(), Some("client_key_revoked"));
+    assert_eq!(
+        close_rx.borrow().as_ref(),
+        Some(&GatewaySessionCloseRequest::Graceful(
+            "client_key_revoked".to_string()
+        ))
+    );
 }
 
 fn test_job_request() -> JobRequest {

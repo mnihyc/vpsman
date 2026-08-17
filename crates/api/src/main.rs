@@ -60,6 +60,8 @@ mod model_file_transfer;
 mod model_fleet_snapshot;
 #[path = "model/model_history.rs"]
 mod model_history;
+#[path = "model/model_home_snapshot.rs"]
+mod model_home_snapshot;
 #[path = "model/model_host_management.rs"]
 mod model_host_management;
 #[path = "model/model_monitoring.rs"]
@@ -191,6 +193,8 @@ mod routes_file_transfers;
 mod routes_fleet_snapshot;
 #[path = "routes/fleet/routes_history.rs"]
 mod routes_history;
+#[path = "routes/fleet/routes_home_snapshot.rs"]
+mod routes_home_snapshot;
 #[path = "routes/operations/routes_host_management.rs"]
 mod routes_host_management;
 #[path = "routes/fleet/routes_ingest.rs"]

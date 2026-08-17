@@ -21,8 +21,8 @@ use vpsman_common::{
 
 use crate::{
     state::{
-        GatewayCancelCommand, GatewayCommand, GatewaySessionMessage, GatewayState,
-        GatewayTerminalControlCommand,
+        GatewayCancelCommand, GatewayCommand, GatewaySessionCloseRequest, GatewaySessionMessage,
+        GatewayState, GatewayTerminalControlCommand,
     },
     Args,
 };
@@ -433,7 +433,11 @@ async fn disconnect_gateway_session(
             message: "agent_not_online".to_string(),
         });
     };
-    let _ = session.close_tx.send(Some(disconnect.reason));
+    let _ = session
+        .close_tx
+        .send(Some(GatewaySessionCloseRequest::Graceful(
+            disconnect.reason,
+        )));
     Ok(GatewaySessionDisconnectResult {
         client_id: disconnect.client_id,
         accepted: true,

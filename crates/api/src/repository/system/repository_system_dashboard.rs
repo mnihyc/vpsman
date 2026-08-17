@@ -9,6 +9,67 @@ use crate::{
     repository::Repository,
 };
 
+pub(crate) const SYSTEM_METRIC_ROLLUP_AT_STEP_SQL: &str = r#"
+WITH candidates AS (
+    SELECT
+        row.*,
+        max(row.bucket_secs) OVER (PARTITION BY row.metric) AS max_bucket_secs
+    FROM system_metric_rollups row
+    WHERE
+        row.bucket_start <= to_timestamp($2::double precision)
+        AND row.bucket_start + make_interval(secs => row.bucket_secs)
+            > to_timestamp($1::double precision)
+),
+selected AS (
+    SELECT
+        row.metric,
+        to_timestamp(
+            floor(
+                extract(epoch FROM row.bucket_start) / $3::double precision
+            ) * $3::double precision
+        ) AS chart_bucket_start,
+        GREATEST(row.bucket_secs, $3)::integer AS chart_bucket_secs,
+        row.sample_count,
+        row.value_sum,
+        row.max_value,
+        row.latest_value,
+        row.latest_observed_at
+    FROM candidates row
+    LEFT JOIN LATERAL (
+        SELECT TRUE AS overlaps
+        FROM system_metric_rollups coarser
+        WHERE row.bucket_secs < row.max_bucket_secs
+          AND coarser.metric = row.metric
+          AND coarser.bucket_secs > row.bucket_secs
+          AND coarser.bucket_start <= to_timestamp($2::double precision)
+          AND coarser.bucket_start + make_interval(secs => coarser.bucket_secs)
+                > to_timestamp($1::double precision)
+          AND coarser.bucket_start
+                < row.bucket_start + make_interval(secs => row.bucket_secs)
+          AND coarser.bucket_start + make_interval(secs => coarser.bucket_secs)
+                > row.bucket_start
+        LIMIT 1
+    ) coarser_overlap ON TRUE
+    WHERE coarser_overlap.overlaps IS NULL
+)
+SELECT
+    metric,
+    chart_bucket_start::text AS bucket_start,
+    chart_bucket_secs AS bucket_secs,
+    LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
+    COALESCE(
+        sum(value_sum) / NULLIF(sum(sample_count)::double precision, 0),
+        0
+    ) AS avg_value,
+    max(max_value)::double precision AS max_value,
+    (array_agg(latest_value ORDER BY latest_observed_at DESC))[1]
+        AS latest_value
+FROM selected
+GROUP BY metric, chart_bucket_start, chart_bucket_secs
+ORDER BY chart_bucket_start ASC, metric ASC
+LIMIT $4
+"#;
+
 const SYSTEM_METRIC_BUCKET_SECS: i32 = 60;
 
 #[derive(Clone, Debug)]
@@ -430,69 +491,13 @@ impl Repository {
                 Ok(rows)
             }
             Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    WITH selected AS (
-                        SELECT
-                            metric,
-                            to_timestamp(
-                                floor(
-                                    extract(epoch FROM bucket_start) / $3::double precision
-                                ) * $3::double precision
-                            ) AS chart_bucket_start,
-                            GREATEST(bucket_secs, $3)::integer AS chart_bucket_secs,
-                            sample_count,
-                            value_sum,
-                            max_value,
-                            latest_value,
-                            latest_observed_at
-                        FROM system_metric_rollups row
-                        WHERE
-                            row.bucket_start <= to_timestamp($2::double precision)
-                            AND row.bucket_start + make_interval(secs => row.bucket_secs)
-                                > to_timestamp($1::double precision)
-                            AND NOT EXISTS (
-                                SELECT 1
-                                FROM system_metric_rollups coarser
-                                WHERE coarser.metric = row.metric
-                                  AND coarser.bucket_secs > row.bucket_secs
-                                  AND coarser.bucket_start <= to_timestamp($2::double precision)
-                                  AND coarser.bucket_start
-                                        + make_interval(secs => coarser.bucket_secs)
-                                        > to_timestamp($1::double precision)
-                                  AND coarser.bucket_start
-                                        < row.bucket_start
-                                            + make_interval(secs => row.bucket_secs)
-                                  AND coarser.bucket_start
-                                        + make_interval(secs => coarser.bucket_secs)
-                                        > row.bucket_start
-                            )
-                    )
-                    SELECT
-                        metric,
-                        chart_bucket_start::text AS bucket_start,
-                        chart_bucket_secs AS bucket_secs,
-                        LEAST(sum(sample_count)::bigint, 2147483647)::integer AS sample_count,
-                        COALESCE(
-                            sum(value_sum)
-                                / NULLIF(sum(sample_count)::double precision, 0),
-                            0
-                        ) AS avg_value,
-                        max(max_value)::double precision AS max_value,
-                        (array_agg(latest_value ORDER BY latest_observed_at DESC))[1]
-                            AS latest_value
-                    FROM selected
-                    GROUP BY metric, chart_bucket_start, chart_bucket_secs
-                    ORDER BY chart_bucket_start ASC, metric ASC
-                    LIMIT $4
-                    "#,
-                )
-                .bind(start_unix as f64)
-                .bind(end_unix as f64)
-                .bind(step_secs)
-                .bind(chart_points.clamp(1, 1440) * 64)
-                .fetch_all(pool)
-                .await?;
+                let rows = sqlx::query(SYSTEM_METRIC_ROLLUP_AT_STEP_SQL)
+                    .bind(start_unix as f64)
+                    .bind(end_unix as f64)
+                    .bind(step_secs)
+                    .bind(chart_points.clamp(1, 1440) * 64)
+                    .fetch_all(pool)
+                    .await?;
 
                 rows.into_iter()
                     .map(|row| {

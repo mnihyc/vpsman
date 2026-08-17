@@ -318,26 +318,34 @@ pub(crate) async fn dashboard_overview(
     headers: HeaderMap,
     Query(query): Query<DashboardOverviewQuery>,
 ) -> Result<Json<DashboardOverviewView>, ApiError> {
+    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(
+        load_dashboard_overview(&state, &query, &operator.operator.preferences).await?,
+    ))
+}
+
+pub(crate) async fn load_dashboard_overview(
+    state: &AppState,
+    query: &DashboardOverviewQuery,
+    preferences: &OperatorPreferences,
+) -> Result<DashboardOverviewView, ApiError> {
     let now = unix_now();
-    let range = validate_dashboard_range(&query, now)?;
+    let range = validate_dashboard_range(query, now)?;
     let group_by = validate_dashboard_group_by(query.group_by.as_deref())?;
     let resource_metric = validate_dashboard_resource_metric(query.resource_metric.as_deref())?;
-    let scope = validate_dashboard_scope(&query)?;
-    let operator = state.require_operator_scope(&headers, "fleet:read").await?;
+    let scope = validate_dashboard_scope(query)?;
     let chart_points = validate_dashboard_chart_points(query.chart_points)?;
-    Ok(Json(
-        build_dashboard_overview(
-            &state,
-            range,
-            scope,
-            group_by,
-            resource_metric,
-            chart_points,
-            now,
-            &operator.operator.preferences,
-        )
-        .await?,
-    ))
+    build_dashboard_overview(
+        state,
+        range,
+        scope,
+        group_by,
+        resource_metric,
+        chart_points,
+        now,
+        preferences,
+    )
+    .await
 }
 
 async fn build_dashboard_overview(

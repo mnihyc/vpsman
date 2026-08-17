@@ -128,6 +128,35 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     }
   }, [apiToken, onUnauthorized, setAuthenticatedOperator]);
 
+  const beginHomeOperatorHydration = useCallback(
+    () => {
+      setAccessLoading(true);
+      return ++accessLoadGeneration.current;
+    },
+    [],
+  );
+
+  const hydrateHomeOperator = useCallback(
+    (
+      generation: number,
+      nextOperator: OperatorView | null,
+      error: string | null = null,
+    ) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (accessLoadGeneration.current !== generation) {
+        return;
+      }
+      if (nextOperator) {
+        setAuthenticatedOperator(nextOperator);
+      }
+      setAccessError(error);
+      setAccessLoading(false);
+    },
+    [apiToken, setAuthenticatedOperator],
+  );
+
   const loadCurrentOperator = useCallback(async () => {
     if (currentApiToken.current !== apiToken) {
       return;
@@ -775,6 +804,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
   return {
     accessError,
     accessLoading,
+    beginHomeOperatorHydration,
     clearAccess: clearOperator,
     clearOperator,
     clientKeyRevocations,
@@ -784,6 +814,7 @@ export function useAccessData(apiToken: string, onUnauthorized: () => void) {
     confirmTotp,
     disableTotp,
     gatewaySessions,
+    hydrateHomeOperator,
     keyLifecycleReport,
     loadCurrentOperatorProfile,
     loadCurrentOperator,

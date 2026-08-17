@@ -1050,7 +1050,7 @@ fn sort_monitoring_agents(agents: &mut [AgentView]) {
     });
 }
 
-async fn monitoring_cards_for_agents(
+pub(crate) async fn monitoring_cards_for_agents(
     state: &AppState,
     agents: Vec<AgentView>,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {

@@ -1802,6 +1802,7 @@ export function App() {
           dashboard.schedulesError,
           dashboard.systemDashboardError,
         )}
+        initialMonitoringCards={dashboard.initialHomeMonitoringCards}
         dashboardOverview={dashboard.dashboardOverview}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}

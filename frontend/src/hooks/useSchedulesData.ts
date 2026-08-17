@@ -1,6 +1,11 @@
 import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
 import { HISTORY_DETAIL_LIMIT } from "../constants";
+import {
+  snapshotSourceAvailable,
+  snapshotSourceError,
+  type SnapshotSource,
+} from "../homeSnapshot";
 import type {
   CreateJobResponse,
   CreateScheduleRequest,
@@ -74,6 +79,33 @@ export function useSchedulesData(
       }
     }
   }, [apiToken, onUnauthorized]);
+
+  const beginHomeSchedulesHydration = useCallback(
+    () => {
+      setSchedulesLoading(true);
+      return ++schedulesLoadGeneration.current;
+    },
+    [],
+  );
+
+  const hydrateHomeSchedules = useCallback(
+    (generation: number, source: SnapshotSource<ScheduleRecord[]>) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (schedulesLoadGeneration.current !== generation) {
+        return;
+      }
+      if (snapshotSourceAvailable(source)) {
+        setSchedules(source.data);
+        setSchedulesTruncated(source.data.length >= HISTORY_DETAIL_LIMIT);
+      }
+      setSchedulesEvidenceAvailable(snapshotSourceAvailable(source));
+      setSchedulesError(snapshotSourceError("Schedules", source));
+      setSchedulesLoading(false);
+    },
+    [apiToken],
+  );
 
   const createSchedule = useCallback(
     async (request: CreateScheduleRequest) => {
@@ -180,6 +212,7 @@ export function useSchedulesData(
 
   return {
     createSchedule,
+    beginHomeSchedulesHydration,
     clearSchedules,
     updateSchedule,
     updateScheduleTargets,
@@ -189,6 +222,7 @@ export function useSchedulesData(
     applyScheduleNow,
     deleteSchedule,
     loadSchedules,
+    hydrateHomeSchedules,
     schedules,
     schedulesTruncated,
     schedulesError,

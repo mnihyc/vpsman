@@ -56,6 +56,7 @@ use crate::{
         export_history, list_history_retention_policies, prune_history_retention,
         upsert_history_retention_policy,
     },
+    routes_home_snapshot::home_snapshot,
     routes_host_management::{
         get_host_package_update_plan, get_host_process_inventory, get_host_service_inventory,
         get_host_storage_inventory, list_host_package_update_plans,
@@ -231,6 +232,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
             post(validate_suite_config),
         )
         .route("/api/v1/dashboard/overview", get(dashboard_overview))
+        .route("/api/v1/home/snapshot", get(home_snapshot))
         .route("/api/v1/system/dashboard", get(system_dashboard))
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet/snapshot", get(fleet_snapshot))

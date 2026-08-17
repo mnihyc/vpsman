@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -28,6 +28,7 @@ use vpsman_common::{
 };
 
 type CriticalForwardingFailureHandler = Arc<dyn Fn(String, &'static str) + Send + Sync + 'static>;
+type GatewaySessionRejectionHandler = Arc<dyn Fn(String, uuid::Uuid) + Send + Sync + 'static>;
 const SPOOL_MAGIC: &[u8] = b"VPSMAN_GATEWAY_SPOOL_V2\n";
 const SPOOL_SCHEMA_VERSION: u16 = 2;
 const COMMAND_OUTPUT_PATH: &str = "/internal/v1/gateway/command-output";
@@ -98,6 +99,15 @@ impl GatewayControlClient {
         }
     }
 
+    pub(crate) fn set_session_rejection_handler<F>(&self, handler: F)
+    where
+        F: Fn(String, uuid::Uuid) + Send + Sync + 'static,
+    {
+        if let Ok(mut slot) = self.forwarder.session_rejection_handler.write() {
+            *slot = Some(Arc::new(handler));
+        }
+    }
+
     pub(crate) fn set_timeouts(&self, timeouts: GatewayHttpTimeouts) {
         if let Ok(mut current) = self.timeouts.write() {
             *current = timeouts;
@@ -122,6 +132,28 @@ impl GatewayControlClient {
         path: &str,
         value: &T,
     ) -> Result<()> {
+        self.post_with_session_fence(target_key, path, value, None)
+            .await
+    }
+
+    pub(crate) async fn post_for_session<T: serde::Serialize>(
+        &self,
+        target_key: &str,
+        gateway_session_id: uuid::Uuid,
+        path: &str,
+        value: &T,
+    ) -> Result<()> {
+        self.post_with_session_fence(target_key, path, value, Some(gateway_session_id))
+            .await
+    }
+
+    async fn post_with_session_fence<T: serde::Serialize>(
+        &self,
+        target_key: &str,
+        path: &str,
+        value: &T,
+        gateway_session_id: Option<uuid::Uuid>,
+    ) -> Result<()> {
         let Some(api_url) = &self.api_url else {
             anyhow::bail!("gateway API URL is required for event forwarding");
         };
@@ -142,6 +174,7 @@ impl GatewayControlClient {
                     kind,
                     critical,
                     command_output: None,
+                    gateway_session_id,
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
                     enqueue_seq: self.forwarder.next_enqueue_seq(),
@@ -177,6 +210,7 @@ impl GatewayControlClient {
                     kind: GatewayForwardEventKind::CommandOutput,
                     critical: true,
                     command_output: Some(CommandOutputReplayRef::from(value)),
+                    gateway_session_id: None,
                     created_at: time::Instant::now(),
                     created_unix: unix_now(),
                     enqueue_seq: self.forwarder.next_enqueue_seq(),
@@ -291,6 +325,7 @@ struct GatewayEventForwarder {
     queues: Mutex<HashMap<String, GatewayForwardQueue>>,
     telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
     critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
+    session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
     metrics: Arc<GatewayForwardMetrics>,
     spool: Arc<GatewayForwardSpool>,
     runtime_config: Arc<GatewayForwardRuntimeConfig>,
@@ -365,10 +400,31 @@ struct GatewayForwardEvent {
     kind: GatewayForwardEventKind,
     critical: bool,
     command_output: Option<CommandOutputReplayRef>,
+    gateway_session_id: Option<uuid::Uuid>,
     created_at: time::Instant,
     created_unix: u64,
     enqueue_seq: u64,
 }
+
+#[derive(Debug)]
+struct GatewayHttpStatusError {
+    status: String,
+    status_code: u16,
+    body: String,
+}
+
+impl fmt::Display for GatewayHttpStatusError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "API returned {}: {}",
+            self.status,
+            self.body.trim()
+        )
+    }
+}
+
+impl std::error::Error for GatewayHttpStatusError {}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -607,6 +663,7 @@ impl GatewayEventForwarder {
             queues: Mutex::default(),
             telemetry_pending: Arc::default(),
             critical_failure_handler: Arc::default(),
+            session_rejection_handler: Arc::default(),
             metrics: Arc::default(),
             spool,
             runtime_config: Arc::new(GatewayForwardRuntimeConfig::new(forward_config)),
@@ -887,6 +944,7 @@ impl GatewayEventForwarder {
                 let metrics = self.metrics.clone();
                 let telemetry_pending = self.telemetry_pending.clone();
                 let critical_failure_handler = self.critical_failure_handler.clone();
+                let session_rejection_handler = self.session_rejection_handler.clone();
                 let spool = self.spool.clone();
                 let runtime_config = self.runtime_config.clone();
                 self.metrics.active_queues.fetch_add(1, Ordering::Relaxed);
@@ -896,6 +954,7 @@ impl GatewayEventForwarder {
                     telemetry_pending,
                     metrics,
                     critical_failure_handler,
+                    session_rejection_handler,
                     spool,
                     runtime_config,
                     timeouts,
@@ -1769,6 +1828,7 @@ async fn run_forward_queue(
     telemetry_pending: Arc<Mutex<HashMap<String, GatewayForwardEvent>>>,
     metrics: Arc<GatewayForwardMetrics>,
     critical_failure_handler: Arc<StdRwLock<Option<CriticalForwardingFailureHandler>>>,
+    session_rejection_handler: Arc<StdRwLock<Option<GatewaySessionRejectionHandler>>>,
     spool: Arc<GatewayForwardSpool>,
     runtime_config: Arc<GatewayForwardRuntimeConfig>,
     timeouts: Arc<StdRwLock<GatewayHttpTimeouts>>,
@@ -1823,6 +1883,7 @@ async fn run_forward_queue(
             &target_key,
             &metrics,
             &critical_failure_handler,
+            &session_rejection_handler,
             &telemetry_pending,
             &spool,
             &runtime_config,
@@ -1990,6 +2051,7 @@ async fn post_json_retry_until_expired(
     target_key: &str,
     metrics: &GatewayForwardMetrics,
     critical_failure_handler: &StdRwLock<Option<CriticalForwardingFailureHandler>>,
+    session_rejection_handler: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
     telemetry_pending: &Mutex<HashMap<String, GatewayForwardEvent>>,
     spool: &GatewayForwardSpool,
     runtime_config: &GatewayForwardRuntimeConfig,
@@ -2027,8 +2089,16 @@ async fn post_json_retry_until_expired(
             Ok(_) => return GatewayForwardOutcome::Delivered,
             Err(error) => {
                 metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
+                let session_not_active = error_is_gateway_session_not_active(&error);
                 let error_message = error.to_string();
-                if error_is_gateway_session_not_active(&error_message)
+                if session_not_active {
+                    notify_session_rejection(
+                        session_rejection_handler,
+                        target_key,
+                        event.gateway_session_id,
+                    );
+                }
+                if session_not_active
                     && event_spools_under_pressure(event)
                     && !event_marked_spooled_replay(event)
                 {
@@ -2065,7 +2135,7 @@ async fn post_json_retry_until_expired(
                         }
                     }
                 }
-                if gateway_event_error_is_non_retryable(event, &error_message) {
+                if gateway_event_error_is_non_retryable(event, &error, session_not_active) {
                     metrics.record_drop(event.kind, GatewayForwardDropReason::ProtocolConflict);
                     warn!(
                         error = %error_message,
@@ -2127,17 +2197,39 @@ fn notify_critical_failure(
     }
 }
 
-fn gateway_event_error_is_non_retryable(event: &GatewayForwardEvent, error_message: &str) -> bool {
-    if !error_message.contains("409 Conflict") {
+fn notify_session_rejection(
+    handler_slot: &StdRwLock<Option<GatewaySessionRejectionHandler>>,
+    target_key: &str,
+    gateway_session_id: Option<uuid::Uuid>,
+) {
+    let Some(gateway_session_id) = gateway_session_id else {
+        return;
+    };
+    if let Ok(slot) = handler_slot.read() {
+        if let Some(handler) = slot.as_ref() {
+            handler(target_key.to_string(), gateway_session_id);
+        }
+    }
+}
+
+fn gateway_event_error_is_non_retryable(
+    event: &GatewayForwardEvent,
+    error: &anyhow::Error,
+    session_not_active: bool,
+) -> bool {
+    let Some(http_error) = error.downcast_ref::<GatewayHttpStatusError>() else {
+        return false;
+    };
+    if http_error.status_code != 409 {
         return false;
     }
-    if error_message.contains("gateway_session_not_active") {
+    if session_not_active {
         return !event_spools_under_pressure(event) || event_marked_spooled_replay(event);
     }
     event.kind == GatewayForwardEventKind::CommandOutput
-        && (error_message.contains("job_output_sequence_conflict")
-            || error_message.contains("job_target_not_active")
-            || error_message.contains("job_output_payload_hash_mismatch"))
+        && (http_error.body.contains("job_output_sequence_conflict")
+            || http_error.body.contains("job_target_not_active")
+            || http_error.body.contains("job_output_payload_hash_mismatch"))
 }
 
 async fn post_json<T: serde::Serialize>(
@@ -2211,7 +2303,17 @@ async fn post_json_bytes_inner(
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow!("invalid API response missing HTTP body"))?;
     if !status.contains(" 2") {
-        return Err(anyhow!("API returned {status}: {}", body.trim()));
+        let status_code = status
+            .split_ascii_whitespace()
+            .nth(1)
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or_default();
+        return Err(GatewayHttpStatusError {
+            status: status.to_string(),
+            status_code,
+            body: body.trim().to_string(),
+        }
+        .into());
     }
     Ok(body.trim().to_string())
 }
@@ -2301,8 +2403,15 @@ fn event_marked_spooled_replay(event: &GatewayForwardEvent) -> bool {
     }
 }
 
-fn error_is_gateway_session_not_active(error_message: &str) -> bool {
-    error_message.contains("409 Conflict") && error_message.contains("gateway_session_not_active")
+fn error_is_gateway_session_not_active(error: &anyhow::Error) -> bool {
+    let Some(error) = error.downcast_ref::<GatewayHttpStatusError>() else {
+        return false;
+    };
+    error.status_code == 409
+        && serde_json::from_str::<serde_json::Value>(&error.body).is_ok_and(|body| {
+            body.get("error").and_then(serde_json::Value::as_str)
+                == Some("gateway_session_not_active")
+        })
 }
 
 impl GatewayForwardEvent {
@@ -2407,6 +2516,7 @@ fn decode_spooled_event(path: &Path, bytes: &[u8]) -> Result<GatewayForwardEvent
         kind: header.kind,
         critical: header.critical,
         command_output: header.command_output,
+        gateway_session_id: None,
         created_at,
         created_unix: header.created_unix,
         enqueue_seq: header.enqueue_seq,

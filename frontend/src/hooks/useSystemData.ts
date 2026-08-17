@@ -1,5 +1,10 @@
 import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, apiPut, isApiUnauthorized } from "../api";
+import {
+  snapshotSourceAvailable,
+  snapshotSourceError,
+  type SnapshotSource,
+} from "../homeSnapshot";
 import type {
   SuiteConfigResponse,
   SuiteConfigUpdateResponse,
@@ -105,6 +110,31 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
     }
   }, [apiToken, onUnauthorized]);
 
+  const beginHomeSystemDashboardHydration = useCallback(
+    () => {
+      setSystemDashboardLoading(true);
+      return ++systemDashboardLoadGeneration.current;
+    },
+    [],
+  );
+
+  const hydrateHomeSystemDashboard = useCallback(
+    (generation: number, source: SnapshotSource<SystemDashboardRecord>) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (systemDashboardLoadGeneration.current !== generation) {
+        return;
+      }
+      if (snapshotSourceAvailable(source)) {
+        setSystemDashboard(source.data);
+      }
+      setSystemDashboardError(snapshotSourceError("System overview", source));
+      setSystemDashboardLoading(false);
+    },
+    [apiToken],
+  );
+
   const validateSuiteConfig = useCallback(
     async (toml: string) =>
       apiPost<SuiteConfigValidateResponse>("/api/v1/admin/suite-config/validate", apiToken, { toml }),
@@ -157,8 +187,10 @@ export function useSystemData(apiToken: string, onUnauthorized: () => void) {
 
   return {
     clearSystem,
+    beginHomeSystemDashboardHydration,
     loadSuiteConfig,
     loadSystemDashboard,
+    hydrateHomeSystemDashboard,
     setSystemDashboardPointDensity: setSystemDashboardPointDensityAndReload,
     setSystemDashboardWindow: setSystemDashboardWindowAndReload,
     suiteConfig,

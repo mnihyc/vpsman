@@ -1,6 +1,11 @@
 import { useCallback, useRef, useState } from "react";
 import { apiGet, apiPost, buildListPath, isApiUnauthorized } from "../api";
 import { HISTORY_DETAIL_LIMIT } from "../constants";
+import {
+  snapshotSourceAvailable,
+  snapshotSourceError,
+  type SnapshotSource,
+} from "../homeSnapshot";
 import type {
   AuditLogRecord,
   HistoryExportRecord,
@@ -105,6 +110,33 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
       }
     }
   }, [apiToken, onUnauthorized]);
+
+  const beginHomeAuditHydration = useCallback(
+    () => {
+      setAuditLoading(true);
+      return ++auditLoadGeneration.current;
+    },
+    [],
+  );
+
+  const hydrateHomeAudit = useCallback(
+    (generation: number, source: SnapshotSource<AuditLogRecord[]>) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (auditLoadGeneration.current !== generation) {
+        return;
+      }
+      if (snapshotSourceAvailable(source)) {
+        setAudits(source.data);
+        setAuditsTruncated(source.data.length >= HISTORY_DETAIL_LIMIT);
+      }
+      setAuditEvidenceAvailable(snapshotSourceAvailable(source));
+      setAuditError(snapshotSourceError("Audit log", source));
+      setAuditLoading(false);
+    },
+    [apiToken],
+  );
 
   const loadAuditEvent = useCallback(
     async (auditId: string): Promise<AuditLogRecord | null> => {
@@ -240,6 +272,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
 
   return {
     auditError,
+    beginHomeAuditHydration,
     auditEvidenceAvailable,
     auditLoading,
     audits,
@@ -248,6 +281,7 @@ export function useAuditData(apiToken: string, onUnauthorized: () => void) {
     historyExport,
     historyPruneResult,
     historyRetentionPolicies,
+    hydrateHomeAudit,
     loadAudits,
     loadAuditEvent,
     loadHistoryExport,

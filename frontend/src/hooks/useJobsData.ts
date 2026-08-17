@@ -2,6 +2,11 @@ import { useCallback, useRef, useState } from "react";
 import { apiDelete, apiGet, apiGetBlob, apiPost, apiPostPreview, buildListPath, isApiUnauthorized } from "../api";
 import { downloadVerifiedArtifact, type ArtifactDownloadMode } from "../artifactDownload";
 import { FLEET_DETAIL_LIMIT, HISTORY_DETAIL_LIMIT } from "../constants";
+import {
+  snapshotSourceAvailable,
+  snapshotSourceError,
+  type SnapshotSource,
+} from "../homeSnapshot";
 import type {
   AgentUpdateReleaseRecord,
   CommandTemplateRecord,
@@ -50,6 +55,11 @@ const JOB_SOURCE_LABELS = [
   "file transfer sources",
   "command templates",
 ] as const;
+
+type HomeJobsHydrationFence = {
+  inventory: number;
+  terminal: number;
+};
 
 export function useJobsData(
   apiToken: string,
@@ -122,6 +132,70 @@ export function useJobsData(
       throw error;
     },
     [apiToken, onUnauthorized],
+  );
+
+  const beginHomeJobsHydration = useCallback(
+    (): HomeJobsHydrationFence => {
+      setJobsLoading(true);
+      return {
+        inventory: ++jobsLoadGeneration.current,
+        terminal: ++terminalSessionsLoadGeneration.current,
+      };
+    },
+    [],
+  );
+
+  const hydrateHomeJobs = useCallback(
+    (
+      fence: HomeJobsHydrationFence,
+      jobSource: SnapshotSource<JobHistoryRecord[]>,
+      fileTransferSource: SnapshotSource<FileTransferSessionRecord[]>,
+      terminalSessionSource: SnapshotSource<TerminalSessionRecord[]>,
+    ) => {
+      if (currentApiToken.current !== apiToken) {
+        return;
+      }
+      if (fence.inventory === jobsLoadGeneration.current) {
+        if (snapshotSourceAvailable(jobSource)) {
+          jobsRef.current = jobSource.data;
+          setJobs(jobSource.data);
+          setJobsTruncated(jobSource.data.length >= HISTORY_DETAIL_LIMIT);
+        }
+        if (snapshotSourceAvailable(fileTransferSource)) {
+          setFileTransfers(fileTransferSource.data);
+          setFileTransfersTruncated(
+            fileTransferSource.data.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        setJobsEvidenceAvailable(
+          snapshotSourceAvailable(jobSource) &&
+            snapshotSourceAvailable(fileTransferSource),
+        );
+        const inventoryFailures = [
+          snapshotSourceError("Job history", jobSource),
+          snapshotSourceError("File transfer sessions", fileTransferSource),
+        ].filter((message): message is string => message !== null);
+        jobsInventoryError.current =
+          inventoryFailures.length > 0
+            ? `Some job sources are unavailable: ${inventoryFailures.join("; ")}`
+            : null;
+        setJobsLoading(false);
+      }
+      if (fence.terminal === terminalSessionsLoadGeneration.current) {
+        if (snapshotSourceAvailable(terminalSessionSource)) {
+          setTerminalSessions(terminalSessionSource.data);
+          setTerminalSessionsTruncated(
+            terminalSessionSource.data.length >= FLEET_DETAIL_LIMIT,
+          );
+        }
+        terminalSessionsError.current = snapshotSourceError(
+          "Terminal sessions",
+          terminalSessionSource,
+        );
+      }
+      publishJobsError();
+    },
+    [apiToken, publishJobsError],
   );
 
   const loadJobs = useCallback(async () => {
@@ -1234,6 +1308,7 @@ export function useJobsData(
 
   return {
     clearJobs,
+    beginHomeJobsHydration,
     createAgentUpdateRelease,
     createJob,
     createJobApproval,
@@ -1251,6 +1326,7 @@ export function useJobsData(
     jobRollouts,
     jobRolloutsTruncated,
     jobs,
+    hydrateHomeJobs,
     jobsTruncated,
     jobsError,
     jobsEvidenceAvailable,

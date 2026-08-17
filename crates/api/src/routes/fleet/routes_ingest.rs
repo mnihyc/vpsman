@@ -26,6 +26,7 @@ use crate::{
     model::{
         AuthContext, GatewayIdentityValidationRequest, GatewayIdentityValidationResponse, WsEvent,
     },
+    repository_ingest::TelemetryRecordOutcome,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     runtime_config::request_runtime_config_reload_for_agent,
     state::AppState,
@@ -159,10 +160,7 @@ pub(crate) async fn request_runtime_config_reload(
         )
         .await?
     {
-        return Ok(Json(IngestResponse {
-            accepted: false,
-            message: "gateway session not active".to_string(),
-        }));
+        return Err(ApiError::conflict("gateway_session_not_active"));
     }
     let reconcile_scope =
         vpsman_common::RuntimeConfigReconcileScope::from_reload_request(&event.request);
@@ -209,33 +207,24 @@ pub(crate) async fn ingest_telemetry(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_gateway_telemetry_event(&event)?;
-    if !state
-        .repo
-        .active_gateway_session_matches(
-            &event.gateway_id,
-            &event.telemetry.client_id,
-            event.gateway_session_id,
-            event.process_incarnation_id,
-        )
-        .await?
-    {
-        return Ok(Json(IngestResponse {
-            accepted: false,
-            message: "gateway session not active".to_string(),
-        }));
+    match state.repo.record_telemetry_outcome(&event).await? {
+        TelemetryRecordOutcome::Recorded => {
+            state.invalidate_fleet_telemetry();
+            Ok(Json(IngestResponse {
+                accepted: true,
+                message: "telemetry recorded".to_string(),
+            }))
+        }
+        TelemetryRecordOutcome::AcceptedDuplicate | TelemetryRecordOutcome::AcceptedStale => {
+            Ok(Json(IngestResponse {
+                accepted: true,
+                message: "telemetry already recorded".to_string(),
+            }))
+        }
+        TelemetryRecordOutcome::GatewaySessionNotActive => {
+            Err(ApiError::conflict("gateway_session_not_active"))
+        }
     }
-    let recorded = state.repo.record_telemetry(&event).await?;
-    if recorded {
-        state.invalidate_fleet_telemetry();
-    }
-    Ok(Json(IngestResponse {
-        accepted: true,
-        message: if recorded {
-            "telemetry recorded".to_string()
-        } else {
-            "telemetry already recorded".to_string()
-        },
-    }))
 }
 
 pub(crate) async fn ingest_command_output(

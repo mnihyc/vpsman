@@ -7,8 +7,8 @@ async fn stale_reconnect_cleanup_does_not_remove_newer_session() {
     let newer_session_id = uuid::Uuid::new_v4();
     let (older_tx, _older_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
     let (newer_tx, _newer_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
-    let (older_close_tx, _older_close_rx) = watch::channel(None::<String>);
-    let (newer_close_tx, _newer_close_rx) = watch::channel(None::<String>);
+    let (older_close_tx, _older_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    let (newer_close_tx, _newer_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     state.sessions.write().await.insert(
         "client-a".to_string(),
         GatewaySession {
@@ -49,8 +49,8 @@ async fn registering_replacement_session_closes_displaced_session() {
     let state = GatewayState::default();
     let (older_tx, _older_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
     let (newer_tx, _newer_rx) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
-    let (older_close_tx, mut older_close_rx) = watch::channel(None::<String>);
-    let (newer_close_tx, _newer_close_rx) = watch::channel(None::<String>);
+    let (older_close_tx, mut older_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    let (newer_close_tx, _newer_close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     let newer_session_id = uuid::Uuid::new_v4();
 
     register_session(
@@ -78,8 +78,10 @@ async fn registering_replacement_session_closes_displaced_session() {
 
     older_close_rx.changed().await.unwrap();
     assert_eq!(
-        older_close_rx.borrow().as_deref(),
-        Some("replaced_by_new_session")
+        older_close_rx.borrow().as_ref(),
+        Some(&GatewaySessionCloseRequest::Graceful(
+            "replaced_by_new_session".to_string()
+        ))
     );
     assert_eq!(
         state
@@ -89,6 +91,62 @@ async fn registering_replacement_session_closes_displaced_session() {
             .get("client-a")
             .map(|session| session.session_id),
         Some(newer_session_id)
+    );
+}
+
+#[tokio::test]
+async fn api_rejection_only_terminates_the_exact_current_session() {
+    let state = GatewayState::default();
+    let stale_session_id = uuid::Uuid::new_v4();
+    let current_session_id = uuid::Uuid::new_v4();
+    let (sender, _receiver) = mpsc::channel(SESSION_COMMAND_QUEUE_CAPACITY);
+    let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
+    state.sessions.write().await.insert(
+        "client-a".to_string(),
+        GatewaySession {
+            session_id: current_session_id,
+            process_incarnation_id: uuid::Uuid::new_v4(),
+            sender,
+            close_tx,
+        },
+    );
+
+    assert!(
+        !invalidate_agent_session_if_current(
+            &state,
+            "client-a",
+            stale_session_id,
+            "gateway_session_not_active",
+        )
+        .await
+    );
+    assert_eq!(
+        state
+            .sessions
+            .read()
+            .await
+            .get("client-a")
+            .map(|session| session.session_id),
+        Some(current_session_id)
+    );
+    assert!(close_rx.has_changed().is_ok_and(|changed| !changed));
+
+    assert!(
+        invalidate_agent_session_if_current(
+            &state,
+            "client-a",
+            current_session_id,
+            "gateway_session_not_active",
+        )
+        .await
+    );
+    assert!(!state.sessions.read().await.contains_key("client-a"));
+    close_rx.changed().await.unwrap();
+    assert_eq!(
+        close_rx.borrow().as_ref(),
+        Some(&GatewaySessionCloseRequest::Immediate(
+            "gateway_session_not_active".to_string()
+        ))
     );
 }
 

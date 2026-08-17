@@ -35,6 +35,13 @@ pub(crate) async fn system_dashboard(
     Query(query): Query<SystemDashboardQuery>,
 ) -> Result<Json<SystemDashboardView>, ApiError> {
     state.require_operator_scope(&headers, "fleet:read").await?;
+    Ok(Json(load_system_dashboard(&state, &query).await?))
+}
+
+pub(crate) async fn load_system_dashboard(
+    state: &AppState,
+    query: &SystemDashboardQuery,
+) -> Result<SystemDashboardView, ApiError> {
     let window = validate_window(query.window.as_deref())?;
     let chart_points = query
         .chart_points
@@ -71,7 +78,7 @@ pub(crate) async fn system_dashboard(
             "system_metrics_unavailable",
             "System metric history could not be loaded.",
         ))?;
-    Ok(Json(SystemDashboardView {
+    Ok(SystemDashboardView {
         generated_at: Utc::now().to_rfc3339(),
         window: window.to_string(),
         requested_step_secs,
@@ -82,7 +89,7 @@ pub(crate) async fn system_dashboard(
         capacity: suite_capacity(&state),
         series: system_metric_series(rollups),
         notes: collected.notes,
-    }))
+    })
 }
 
 pub(crate) async fn record_system_dashboard_sample(state: &AppState) -> anyhow::Result<()> {

@@ -19,7 +19,7 @@ use crate::{
     unix_now,
 };
 
-const FLEET_DETAIL_LIMIT: i64 = 200;
+pub(crate) const FLEET_DETAIL_LIMIT: i64 = 200;
 const FLEET_LATEST_TELEMETRY_LIMIT: i64 = 1_000;
 const FLEET_NETWORK_RATE_SNAPSHOT_LIMIT: i64 = 5_000;
 
@@ -88,6 +88,75 @@ struct LiveSources {
     telemetry_network_rates: FleetSnapshotSource<Vec<crate::model::TelemetryNetworkRateView>>,
     telemetry_tunnels: FleetSnapshotSource<Vec<crate::model::TelemetryTunnelView>>,
     telemetry_uptimes: FleetSnapshotSource<Vec<crate::model::TelemetryUptimeView>>,
+}
+
+pub(crate) struct HomeFleetSources {
+    pub(crate) summary: FleetSnapshotSource<crate::model::FleetSummary>,
+    pub(crate) agents: FleetSnapshotSource<Vec<crate::model::AgentView>>,
+    pub(crate) telemetry_rollups: FleetSnapshotSource<Vec<crate::model::TelemetryRollupView>>,
+    pub(crate) telemetry_network_rates:
+        FleetSnapshotSource<Vec<crate::model::TelemetryNetworkRateView>>,
+    pub(crate) fleet_alerts: FleetSnapshotSource<Vec<crate::model::FleetAlertView>>,
+}
+
+pub(crate) async fn load_home_agents(
+    state: &AppState,
+    scopes: &[String],
+) -> FleetSnapshotSource<Vec<crate::model::AgentView>> {
+    load_source(
+        "agents",
+        operator_has_scope(scopes, SCOPE_FLEET_READ),
+        state.repo.list_agents(),
+    )
+    .await
+}
+
+pub(crate) async fn load_home_fleet_sources(
+    state: &AppState,
+    scopes: &[String],
+    agents: FleetSnapshotSource<Vec<crate::model::AgentView>>,
+) -> HomeFleetSources {
+    let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
+    let backups_read = operator_has_scope(scopes, SCOPE_BACKUPS_READ);
+    let (summary, telemetry_rollups, telemetry_network_rates, fleet_alerts) = tokio::join!(
+        load_source("summary", fleet_read, state.repo.fleet_summary()),
+        load_source(
+            "telemetry_rollups",
+            fleet_read,
+            state
+                .repo
+                .list_latest_telemetry_rollups(FLEET_LATEST_TELEMETRY_LIMIT, None, None,),
+        ),
+        load_source(
+            "telemetry_network_rates",
+            fleet_read,
+            state.repo.list_latest_telemetry_network_rates(
+                FLEET_NETWORK_RATE_SNAPSHOT_LIMIT,
+                None,
+                None,
+                None,
+            ),
+        ),
+        load_source(
+            "fleet_alerts",
+            fleet_read && backups_read,
+            state.list_fleet_alerts(FleetAlertQuery {
+                limit: Some(FLEET_DETAIL_LIMIT),
+                client_id: None,
+                severity: None,
+                category: None,
+                operator_state: None,
+                include_muted: Some(true),
+            }),
+        ),
+    );
+    HomeFleetSources {
+        summary,
+        agents,
+        telemetry_rollups,
+        telemetry_network_rates,
+        fleet_alerts,
+    }
 }
 
 async fn load_live_sources(state: &AppState, scopes: &[String]) -> LiveSources {

@@ -41,8 +41,9 @@ use crate::{
     },
     control::run_control_listener,
     state::{
-        cancel_ack_result, finish_pending_command_response, GatewaySession, GatewaySessionMessage,
-        GatewayState, PendingCommand, SESSION_COMMAND_QUEUE_CAPACITY,
+        cancel_ack_result, finish_pending_command_response, GatewaySession,
+        GatewaySessionCloseRequest, GatewaySessionMessage, GatewayState, PendingCommand,
+        SESSION_COMMAND_QUEUE_CAPACITY,
     },
 };
 
@@ -197,6 +198,32 @@ async fn main() -> Result<()> {
         let state = critical_failure_state.clone();
         tokio::spawn(async move {
             request_agent_disconnect(&state, &client_id, reason).await;
+        });
+    });
+    let session_rejection_state = state.clone();
+    api_client.set_session_rejection_handler(move |client_id, gateway_session_id| {
+        let state = session_rejection_state.clone();
+        tokio::spawn(async move {
+            if invalidate_agent_session_if_current(
+                &state,
+                &client_id,
+                gateway_session_id,
+                "gateway_session_not_active",
+            )
+            .await
+            {
+                warn!(
+                    client_id,
+                    %gateway_session_id,
+                    "API rejected the current gateway session; terminating its transport"
+                );
+            } else {
+                debug!(
+                    client_id,
+                    %gateway_session_id,
+                    "ignored API rejection for a superseded gateway session"
+                );
+            }
         });
     });
     let agent_args = args.clone();
@@ -574,7 +601,7 @@ async fn handle_agent(
     let mut process_incarnation_id = None::<uuid::Uuid>;
     let (command_tx, mut command_rx) =
         mpsc::channel::<GatewaySessionMessage>(SESSION_COMMAND_QUEUE_CAPACITY);
-    let (close_tx, mut close_rx) = watch::channel(None::<String>);
+    let (close_tx, mut close_rx) = watch::channel(None::<GatewaySessionCloseRequest>);
     let mut outbound_seq = 2_u64;
     let mut pending_commands = HashMap::<uuid::Uuid, PendingCommand>::new();
     let mut pending_cancels = HashMap::new();
@@ -597,10 +624,18 @@ async fn handle_agent(
                 if changed.is_err() {
                     break Err(anyhow!("agent_session_close_channel_dropped"));
                 }
-                let reason = close_rx
+                let request = close_rx
                     .borrow()
                     .clone()
-                    .unwrap_or_else(|| "gateway_requested_disconnect".to_string());
+                    .unwrap_or_else(|| GatewaySessionCloseRequest::Graceful(
+                        "gateway_requested_disconnect".to_string()
+                    ));
+                let reason = match request {
+                    GatewaySessionCloseRequest::Immediate(reason) => {
+                        break Err(anyhow!("agent_session_invalidated:{reason}"));
+                    }
+                    GatewaySessionCloseRequest::Graceful(reason) => reason,
+                };
                 let frame = AgentSessionDisconnect {
                     reason: reason.clone(),
                 };
@@ -810,7 +845,9 @@ async fn register_session(state: &GatewayState, client_id: &str, session: Gatewa
     if let Some(previous) = previous {
         let _ = previous
             .close_tx
-            .send(Some("replaced_by_new_session".to_string()));
+            .send(Some(GatewaySessionCloseRequest::Graceful(
+                "replaced_by_new_session".to_string(),
+            )));
     }
 }
 
@@ -819,7 +856,38 @@ async fn close_agent_session_now(state: &GatewayState, client_id: &str, reason: 
     let Some(session) = previous else {
         return false;
     };
-    let _ = session.close_tx.send(Some(reason.to_string()));
+    let _ = session
+        .close_tx
+        .send(Some(GatewaySessionCloseRequest::Graceful(
+            reason.to_string(),
+        )));
+    true
+}
+
+async fn invalidate_agent_session_if_current(
+    state: &GatewayState,
+    client_id: &str,
+    gateway_session_id: uuid::Uuid,
+    reason: &str,
+) -> bool {
+    let session = {
+        let mut sessions = state.sessions.write().await;
+        if !sessions
+            .get(client_id)
+            .is_some_and(|session| session.session_id == gateway_session_id)
+        {
+            return false;
+        }
+        sessions.remove(client_id)
+    };
+    let Some(session) = session else {
+        return false;
+    };
+    let _ = session
+        .close_tx
+        .send(Some(GatewaySessionCloseRequest::Immediate(
+            reason.to_string(),
+        )));
     true
 }
 
@@ -867,7 +935,7 @@ struct AgentFrameContext<'a> {
     remote_ip: &'a str,
     session_id: uuid::Uuid,
     command_tx: &'a mpsc::Sender<GatewaySessionMessage>,
-    close_tx: &'a watch::Sender<Option<String>>,
+    close_tx: &'a watch::Sender<Option<GatewaySessionCloseRequest>>,
 }
 
 async fn handle_agent_frame(
@@ -970,7 +1038,12 @@ async fn handle_agent_frame(
             let target_key = ingest.telemetry.client_id.clone();
             context
                 .control
-                .post(&target_key, "/internal/v1/gateway/telemetry", &ingest)
+                .post_for_session(
+                    &target_key,
+                    context.session_id,
+                    "/internal/v1/gateway/telemetry",
+                    &ingest,
+                )
                 .await?;
         }
         MessageKind::CommandAck => {
@@ -1110,8 +1183,9 @@ async fn handle_agent_frame(
             };
             context
                 .control
-                .post(
+                .post_for_session(
                     &target_key,
+                    context.session_id,
                     "/internal/v1/gateway/runtime-config-reload",
                     &ingest,
                 )

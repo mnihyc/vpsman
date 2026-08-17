@@ -407,6 +407,72 @@ async function installAuthSessionApiMock(
       },
     });
   });
+  await page.route("**/api/v1/home/snapshot**", async (route) => {
+    if (!isAuthorized(route.request())) {
+      await route.fulfill({
+        contentType: "application/json",
+        json: { error: "missing_bearer_token" },
+        status: 401,
+      });
+      return;
+    }
+    const available = <T,>(data: T) => ({ data, error: null });
+    const unavailable = (error: string) => ({ data: null, error });
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        generated_at: "2026-06-05T20:44:58Z",
+        operator: {
+          id: "99999999-aaaa-4bbb-8ccc-000000000001",
+          preferences,
+          role: "admin",
+          scopes: ["*"],
+          totp_enabled: false,
+          username: "session-admin",
+        },
+        summary: available({
+          never: 0,
+          offline: 0,
+          online: 1,
+          revoked: 0,
+          running_jobs: 0,
+          stale: 0,
+          total: 1,
+          unknown: 0,
+          warnings: 0,
+        }),
+        agents: available([
+          {
+            capabilities: {
+              can_apply_process_limits: true,
+              can_attempt_privileged_ops: true,
+              can_manage_runtime_tunnels: true,
+              effective_uid: 0,
+              privilege_mode: "root",
+              unprivileged_hint: null,
+            },
+            display_name: "session-edge-01",
+            id: "session-agent-01",
+            status: "online",
+            tags: ["edge"],
+          },
+        ]),
+        telemetry_rollups: available([]),
+        telemetry_network_rates: available([]),
+        fleet_alerts: available([]),
+        monitoring_cards: available([]),
+        jobs: available([]),
+        file_transfers: available([]),
+        terminal_sessions: available([]),
+        backups: available([]),
+        backup_artifacts: available([]),
+        audit: available([]),
+        schedules: available([]),
+        system_dashboard: unavailable("auth_fixture_source_not_projected"),
+        dashboard_overview: unavailable("auth_fixture_source_not_projected"),
+      },
+    });
+  });
   await page.route("**/api/v1/fleet/snapshot**", async (route) => {
     if (!isAuthorized(route.request())) {
       await route.fulfill({

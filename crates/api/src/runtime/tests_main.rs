@@ -1,8 +1,9 @@
 use super::*;
 use base64::Engine as _;
 use vpsman_common::{
-    job_command_type_label, AgentHello, CommandOutput, GatewayAgentHelloIngest,
-    GatewayTerminalOutputIngest, JobCommand,
+    job_command_type_label, AgentHello, AgentRuntimeConfigReloadRequest, CommandOutput,
+    GatewayAgentHelloIngest, GatewayRuntimeConfigReloadRequest, GatewayTelemetryIngest,
+    GatewayTerminalOutputIngest, JobCommand, TelemetryEnvelope,
 };
 use vpsman_server_core::{
     TARGET_STATUS_AGENT_LOST, TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING,
@@ -2885,6 +2886,104 @@ async fn spooled_command_output_accepts_seen_inactive_gateway_session() {
         repo.list_job_targets(job_id).await.unwrap()[0].status,
         "completed"
     );
+}
+
+#[tokio::test]
+async fn inactive_gateway_session_rejects_async_ingest_without_mutation() {
+    let repo = Repository::Memory(MemoryState::default());
+    let client_id = "inactive-async-ingest-client";
+    let gateway_id = "gateway-a";
+    let gateway_session_id = Uuid::new_v4();
+    let process_incarnation_id = Uuid::new_v4();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    memory.agents.write().await.push(AgentView {
+        id: client_id.to_string(),
+        display_name: client_id.to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: Some(process_incarnation_id),
+        stale_since: None,
+        stale_reason: None,
+        capabilities: Default::default(),
+    });
+    let lifecycle = vpsman_common::GatewaySessionLifecycleIngest {
+        gateway_id: gateway_id.to_string(),
+        client_id: client_id.to_string(),
+        session_id: gateway_session_id,
+        noise_public_key_hex: None,
+        remote_ip: None,
+        agent_version: Some("test".to_string()),
+        reason: None,
+    };
+    repo.record_gateway_session_started(&lifecycle)
+        .await
+        .unwrap();
+    repo.record_gateway_session_ended(&vpsman_common::GatewaySessionLifecycleIngest {
+        reason: Some("agent_offline_timeout".to_string()),
+        ..lifecycle
+    })
+    .await
+    .unwrap();
+
+    let mut state = test_app_state(repo.clone());
+    state.internal_token = Some("test-token".to_string());
+    let headers = internal_headers("test-token");
+    let observed_unix = unix_now().max(1);
+    let telemetry_error = crate::routes_ingest::ingest_telemetry(
+        axum::extract::State(state.clone()),
+        headers.clone(),
+        axum::Json(GatewayTelemetryIngest {
+            gateway_id: gateway_id.to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            telemetry_seq: 1,
+            remote_ip: None,
+            telemetry: TelemetryEnvelope {
+                client_id: client_id.to_string(),
+                metrics: vpsman_common::AgentMetrics {
+                    observed_unix,
+                    hostname: client_id.to_string(),
+                    ..Default::default()
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(telemetry_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(telemetry_error.code, "gateway_session_not_active");
+
+    let reload_error = crate::routes_ingest::request_runtime_config_reload(
+        axum::extract::State(state),
+        headers,
+        axum::Json(GatewayRuntimeConfigReloadRequest {
+            gateway_id: gateway_id.to_string(),
+            gateway_session_id,
+            process_incarnation_id,
+            remote_ip: None,
+            request: AgentRuntimeConfigReloadRequest {
+                client_id: client_id.to_string(),
+                current_content_hash: "a".repeat(64),
+                reason: "agent_reconnect_authoritative_sync".to_string(),
+                requires_authoritative_sync: true,
+                reconcile_resources: Vec::new(),
+                requires_port_forwarding_sync: false,
+            },
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(reload_error.status, axum::http::StatusCode::CONFLICT);
+    assert_eq!(reload_error.code, "gateway_session_not_active");
+    assert!(memory.telemetry_samples.read().await.is_empty());
+    assert!(memory.jobs.read().await.is_empty());
 }
 
 #[tokio::test]

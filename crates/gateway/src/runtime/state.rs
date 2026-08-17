@@ -65,7 +65,13 @@ pub(crate) struct GatewaySession {
     pub(crate) session_id: uuid::Uuid,
     pub(crate) process_incarnation_id: uuid::Uuid,
     pub(crate) sender: mpsc::Sender<GatewaySessionMessage>,
-    pub(crate) close_tx: watch::Sender<Option<String>>,
+    pub(crate) close_tx: watch::Sender<Option<GatewaySessionCloseRequest>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GatewaySessionCloseRequest {
+    Graceful(String),
+    Immediate(String),
 }
 
 pub(crate) enum GatewaySessionMessage {

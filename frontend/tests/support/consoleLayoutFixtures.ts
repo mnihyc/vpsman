@@ -3579,6 +3579,8 @@ export async function installConsoleApiMock(
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     fleetSnapshotAfterDeleteDelayMs?: number;
     holdInitialFleetSnapshots?: boolean;
+    holdInitialHomeSnapshot?: boolean;
+    homeSnapshotSourceFailure?: "monitoring_cards" | "system_dashboard";
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
     runtimeConfigBulkPreviewStateDrift?: boolean;
@@ -3616,6 +3618,7 @@ export async function installConsoleApiMock(
     privilegeVerificationDelayMs?: number;
     privilegeVerificationFailure?: "denied" | "unavailable";
     schedulesOverride?: ScheduleRecord[];
+    storedAuthSession?: boolean;
     tagOrderStateOverride?: {
       namespace_natural_sort_enabled: boolean;
       tags: TagView[];
@@ -3687,6 +3690,8 @@ export async function installConsoleApiMock(
       fleetAlertsFixture,
       fleetSnapshotAfterDeleteDelayMsFixture,
       holdInitialFleetSnapshotsFixture,
+      holdInitialHomeSnapshotFixture,
+      homeSnapshotSourceFailureFixture,
       policyAlertsFixture,
       policyDryRunFixture,
       portForwardRulesFixture,
@@ -3718,6 +3723,7 @@ export async function installConsoleApiMock(
       privilegeVerificationFailureFixture,
       processSupervisorInventoryFixture,
       schedulesFixture,
+      storedAuthSessionFixture,
       summaryFixture,
       suiteConfigRedactedFixture,
       suiteConfigTomlFixture,
@@ -3744,6 +3750,10 @@ export async function installConsoleApiMock(
       webhookDeliveriesFixture,
       webhookRulesFixture,
     }) => {
+      if (storedAuthSessionFixture) {
+        window.localStorage.setItem("vpsman.accessToken", "a".repeat(64));
+        window.localStorage.setItem("vpsman.refreshToken", "b".repeat(64));
+      }
       const originalFetch = window.fetch.bind(window);
       let fleetSnapshotsHeld = holdInitialFleetSnapshotsFixture;
       const fleetSnapshotWaiters: Array<() => void> = [];
@@ -3752,6 +3762,15 @@ export async function installConsoleApiMock(
         value: () => {
           fleetSnapshotsHeld = false;
           for (const resolve of fleetSnapshotWaiters.splice(0)) resolve();
+        },
+      });
+      let homeSnapshotHeld = holdInitialHomeSnapshotFixture;
+      const homeSnapshotWaiters: Array<() => void> = [];
+      Object.defineProperty(window, "__vpsmanReleaseHomeSnapshot", {
+        configurable: true,
+        value: () => {
+          homeSnapshotHeld = false;
+          for (const resolve of homeSnapshotWaiters.splice(0)) resolve();
         },
       });
       const vpsRulesEffectiveGateResolvers = new Map<string, () => void>();
@@ -5499,6 +5518,132 @@ export async function installConsoleApiMock(
           new Headers(init?.headers).get("x-vpsman-fixture-internal") === "1";
         if (!fixtureInternalRequest) {
           trackedWindow.__vpsmanFetchRequests.push({ method, url });
+        }
+        if (pathname === "/api/v1/home/snapshot" && method === "GET") {
+          if (homeSnapshotHeld) {
+            await new Promise<void>((resolve) => {
+              homeSnapshotWaiters.push(resolve);
+            });
+          }
+          const loadHomeSource = async (source: string, path: string) => {
+            if (homeSnapshotSourceFailureFixture === source) {
+              return {
+                data: null,
+                error: `home_snapshot_${source}_unavailable`,
+              };
+            }
+            const response = await window.fetch(path, {
+              headers: { "x-vpsman-fixture-internal": "1" },
+            });
+            const body = await response.json();
+            return response.ok
+              ? { data: body, error: null }
+              : {
+                  data: null,
+                  error:
+                    (body as { error?: string; message?: string }).message ??
+                    (body as { error?: string }).error ??
+                    `home snapshot source returned ${response.status}`,
+                };
+          };
+          const loadHomeMonitoringCards = async () => {
+            const source = await loadHomeSource(
+              "monitoring_cards",
+              "/api/v1/monitoring/cards?limit=1000&offset=0",
+            );
+            return source.data === null
+              ? source
+              : {
+                  data: (source.data as { items: unknown[] }).items,
+                  error: null,
+                };
+          };
+          const query = new URL(url, window.location.href).search;
+          const [
+            fleetSummary,
+            fleetAgents,
+            telemetryRollups,
+            telemetryNetworkRates,
+            fleetAlerts,
+            homeMonitoringCards,
+            homeJobs,
+            homeFileTransfers,
+            homeTerminalSessions,
+            homeBackups,
+            homeBackupArtifacts,
+            homeAudit,
+            homeSchedules,
+            homeSystemDashboard,
+            homeDashboardOverview,
+          ] = await Promise.all([
+            loadHomeSource("summary", "/api/v1/fleet/summary"),
+            loadHomeSource("agents", "/api/v1/agents"),
+            loadHomeSource(
+              "telemetry_rollups",
+              "/api/v1/telemetry/rollups?latest=true&limit=1000",
+            ),
+            loadHomeSource(
+              "telemetry_network_rates",
+              "/api/v1/telemetry/network-rates?latest=true&limit=5000",
+            ),
+            loadHomeSource(
+              "fleet_alerts",
+              "/api/v1/fleet-alerts?limit=200&include_muted=true",
+            ),
+            loadHomeMonitoringCards(),
+            loadHomeSource(
+              "jobs",
+              "/api/v1/jobs?limit=1000&sort=created_at&dir=desc",
+            ),
+            loadHomeSource("file_transfers", "/api/v1/file-transfers?limit=200"),
+            loadHomeSource(
+              "terminal_sessions",
+              "/api/v1/terminal-sessions?limit=200",
+            ),
+            loadHomeSource(
+              "backups",
+              "/api/v1/backups?limit=1000&sort=created_at&dir=desc",
+            ),
+            loadHomeSource(
+              "backup_artifacts",
+              "/api/v1/backup-artifacts?limit=1000&sort=created_at&dir=desc",
+            ),
+            loadHomeSource(
+              "audit",
+              "/api/v1/audit?limit=1000&sort=created_at&dir=desc",
+            ),
+            loadHomeSource(
+              "schedules",
+              "/api/v1/schedules?limit=1000&sort=next_run_at&dir=asc",
+            ),
+            loadHomeSource(
+              "system_dashboard",
+              "/api/v1/system/dashboard?chart_points=240&window=1d",
+            ),
+            loadHomeSource(
+              "dashboard_overview",
+              `/api/v1/dashboard/overview${query}`,
+            ),
+          ]);
+          return jsonResponse({
+            generated_at: "2026-06-05T20:44:58Z",
+            operator: operatorView(currentOperatorRecord),
+            summary: fleetSummary,
+            agents: fleetAgents,
+            telemetry_rollups: telemetryRollups,
+            telemetry_network_rates: telemetryNetworkRates,
+            fleet_alerts: fleetAlerts,
+            monitoring_cards: homeMonitoringCards,
+            jobs: homeJobs,
+            file_transfers: homeFileTransfers,
+            terminal_sessions: homeTerminalSessions,
+            backups: homeBackups,
+            backup_artifacts: homeBackupArtifacts,
+            audit: homeAudit,
+            schedules: homeSchedules,
+            system_dashboard: homeSystemDashboard,
+            dashboard_overview: homeDashboardOverview,
+          });
         }
         if (pathname === "/api/v1/dashboard/overview") {
           const params = new URL(url, window.location.href).searchParams;
@@ -10602,6 +10747,10 @@ export async function installConsoleApiMock(
         options.fleetSnapshotAfterDeleteDelayMs ?? 0,
       holdInitialFleetSnapshotsFixture:
         options.holdInitialFleetSnapshots ?? false,
+      holdInitialHomeSnapshotFixture:
+        options.holdInitialHomeSnapshot ?? false,
+      homeSnapshotSourceFailureFixture:
+        options.homeSnapshotSourceFailure ?? null,
       fleetAlertNotificationsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...fleetAlertNotifications[0],
@@ -10717,6 +10866,7 @@ export async function installConsoleApiMock(
         options.privilegeVerificationFailure ?? null,
       processSupervisorInventoryFixture: processSupervisorInventory,
       schedulesFixture: options.schedulesOverride ?? schedules,
+      storedAuthSessionFixture: options.storedAuthSession ?? false,
       summaryFixture: summary,
       suiteConfigRedactedFixture: suiteConfigRedacted,
       suiteConfigTomlFixture: suiteConfigToml,
