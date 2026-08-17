@@ -518,7 +518,7 @@ async fn import_test_state() -> (AppState, uuid::Uuid) {
 fn test_state(repo: Repository) -> AppState {
     AppState {
         repo,
-        events: tokio::sync::broadcast::channel(1).0,
+        events: crate::state::WsEventBus::new(1).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,

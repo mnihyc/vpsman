@@ -274,6 +274,12 @@ async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
         .unwrap();
     let revision_a = runtime_config_override_revision(Some(current_a));
     let revision_b = runtime_config_override_revision(Some(current_b));
+    let retry_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with((*db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let retry_repo = Repository::Postgres(retry_pool.clone());
 
     let stale = db
         .repo
@@ -296,7 +302,10 @@ async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("review_stale"));
-    let unchanged = db.repo.list_runtime_config_overrides(None).await.unwrap();
+    let unchanged = retry_repo
+        .list_runtime_config_overrides(None)
+        .await
+        .unwrap();
     assert_eq!(
         unchanged
             .iter()
@@ -306,7 +315,7 @@ async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
         "telemetry_interval_secs = 41\n"
     );
 
-    db.repo
+    retry_repo
         .replace_runtime_config_overrides_cas(
             &[
                 RuntimeConfigOverrideReplacement {
@@ -331,6 +340,8 @@ async fn postgres_runtime_config_override_cas_is_atomic_and_supports_reset() {
         .await
         .unwrap()
         .is_empty());
+    drop(retry_repo);
+    retry_pool.close().await;
     db.cleanup().await;
 }
 
@@ -9457,7 +9468,7 @@ fn postgres_alert_test_tunnel_input() -> TunnelPlanInput {
 }
 
 fn postgres_app_state(db: &PgReliabilityTestDb) -> AppState {
-    let (events, _) = broadcast::channel(16);
+    let (events, _) = crate::state::WsEventBus::new(16);
     AppState {
         repo: db.repo.clone(),
         events,

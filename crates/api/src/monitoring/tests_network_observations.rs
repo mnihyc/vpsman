@@ -4,7 +4,6 @@ use axum::{
     extract::{Query, State},
     Json,
 };
-use tokio::sync::broadcast;
 use vpsman_common::{
     observed_ospf_cost, plan_tunnel, CommandOutput, OspfCostPolicy, OutputStream, TunnelKind,
     TunnelPlan, TunnelPlanInput,
@@ -1768,7 +1767,7 @@ fn topology_test_tunnel(
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

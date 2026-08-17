@@ -3441,7 +3441,7 @@ pub(crate) fn test_operator() -> AuthContext {
 }
 
 pub(crate) fn test_app_state(repo: Repository) -> AppState {
-    let (events, _) = tokio::sync::broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

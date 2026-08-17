@@ -1328,7 +1328,7 @@ fn find_identity_gateway_header_end(bytes: &[u8]) -> Option<usize> {
 fn identity_route_test_state(
     gateway: crate::gateway_client::GatewayDispatchClient,
 ) -> crate::state::AppState {
-    let (events, _) = tokio::sync::broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     crate::state::AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,

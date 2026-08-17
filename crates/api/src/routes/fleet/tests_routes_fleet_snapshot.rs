@@ -1,5 +1,4 @@
 use axum::extract::{Query, State};
-use tokio::sync::broadcast;
 
 use super::*;
 use crate::{
@@ -9,7 +8,7 @@ use crate::{
 };
 
 fn test_state() -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,

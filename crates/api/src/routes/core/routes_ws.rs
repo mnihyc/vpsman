@@ -12,6 +12,7 @@ use futures_util::{
 use serde::Deserialize;
 use tokio::{
     sync::broadcast,
+    task::JoinHandle,
     time::{self, Duration},
 };
 
@@ -19,10 +20,12 @@ use crate::{
     auth_model::AuthContext,
     model::WsEvent,
     security::{operator_has_scope, SCOPE_FLEET_READ},
-    state::AppState,
+    state::{AppState, WsEventBus, WsInvalidationDriver},
 };
 
 const WS_AUTH_REVALIDATE_SECS: u64 = 30;
+const FLEET_TELEMETRY_INVALIDATION_WINDOW: Duration = Duration::from_secs(15);
+const JOB_DETAILS_INVALIDATION_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 struct WsClientAuth {
@@ -33,6 +36,44 @@ struct WsClientAuth {
 pub(crate) async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
         .into_response()
+}
+
+pub(crate) fn spawn_ws_invalidation_coalescer(
+    events: WsEventBus,
+    invalidations: WsInvalidationDriver,
+) -> JoinHandle<()> {
+    tokio::spawn(run_ws_invalidation_coalescer(events, invalidations))
+}
+
+async fn run_ws_invalidation_coalescer(events: WsEventBus, invalidations: WsInvalidationDriver) {
+    let now = time::Instant::now();
+    let mut telemetry_boundaries = time::interval_at(
+        now + FLEET_TELEMETRY_INVALIDATION_WINDOW,
+        FLEET_TELEMETRY_INVALIDATION_WINDOW,
+    );
+    telemetry_boundaries.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut job_boundaries = time::interval_at(
+        now + JOB_DETAILS_INVALIDATION_WINDOW,
+        JOB_DETAILS_INVALIDATION_WINDOW,
+    );
+    job_boundaries.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = telemetry_boundaries.tick() => {
+                if invalidations.take_fleet_telemetry() {
+                    events.publish(WsEvent::FleetTelemetryInvalidated);
+                }
+            }
+            _ = job_boundaries.tick() => {
+                let job_ids = invalidations.take_job_ids();
+                if !job_ids.is_empty() {
+                    events.publish(WsEvent::JobDetailsInvalidated { job_ids });
+                }
+            }
+        }
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -91,6 +132,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             if !send_ws_event(&mut sender, &snapshot).await {
                                 break;
                             }
+                        }
+                        if !send_ws_event(&mut sender, &WsEvent::FleetTelemetryInvalidated).await {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -165,3 +209,7 @@ async fn send_ws_event(sender: &mut SplitSink<WebSocket, Message>, event: &WsEve
     };
     sender.send(Message::Text(payload.into())).await.is_ok()
 }
+
+#[cfg(test)]
+#[path = "tests_routes_ws.rs"]
+mod tests;

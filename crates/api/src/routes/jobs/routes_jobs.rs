@@ -766,22 +766,19 @@ async fn create_job_inner(
             .await
             .map_err(map_job_recording_error)?
     };
-    for precompleted in &precompleted_targets {
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id,
-            client_id: precompleted.client_id.clone(),
-            seq: 0,
-            done: true,
-        });
+    if !precompleted_targets.is_empty() {
+        state.invalidate_job_details(job_id);
     }
     let refreshed = state
         .repo
         .refresh_job_status_from_targets(job_id)
         .await
         .map_err(job_status_refresh_failed)?;
-    let status = state
-        .terminal_job_status_after_refresh(job_id, refreshed)
-        .await?
+    let terminal_status = state
+        .terminal_job_status_after_refresh(job_id, refreshed.clone())
+        .await?;
+    let status = refreshed
+        .or(terminal_status)
         .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     if let Err(error) = state.process_job_terminal_events(500).await {
         warn!(

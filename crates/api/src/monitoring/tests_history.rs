@@ -1,6 +1,5 @@
 use axum::{extract::State, Json};
 use serde_json::json;
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::{
@@ -757,7 +756,7 @@ fn job_output(
 }
 
 fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

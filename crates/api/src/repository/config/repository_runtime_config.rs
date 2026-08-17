@@ -804,42 +804,43 @@ impl Repository {
                 Ok(selected)
             }
             RuntimeConfigDesiredStateGuard::Postgres { mut tx } => {
-                for client_id in &client_ids {
-                    let visible = sqlx::query_scalar::<_, String>(
-                        "SELECT id FROM clients WHERE id = $1 AND hidden_at IS NULL FOR UPDATE",
-                    )
-                    .bind(client_id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                    anyhow::ensure!(
-                        visible.is_some(),
-                        "runtime_config_target_no_longer_available"
-                    );
-                }
-                for replacement in &replacements {
-                    let current = sqlx::query(
-                        r#"
+                let mutation: Result<Vec<RuntimeConfigOverrideView>> = async {
+                    for client_id in &client_ids {
+                        let visible = sqlx::query_scalar::<_, String>(
+                            "SELECT id FROM clients WHERE id = $1 AND hidden_at IS NULL FOR UPDATE",
+                        )
+                        .bind(client_id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                        anyhow::ensure!(
+                            visible.is_some(),
+                            "runtime_config_target_no_longer_available"
+                        );
+                    }
+                    for replacement in &replacements {
+                        let current = sqlx::query(
+                            r#"
                         SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
                         FROM client_runtime_config_overrides
                         WHERE client_id = $1
                         FOR UPDATE
                         "#,
-                    )
-                    .bind(&replacement.client_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .map(runtime_config_override_from_row)
-                    .transpose()?;
-                    anyhow::ensure!(
-                        runtime_config_override_revision(current.as_ref())
-                            == replacement.expected_revision,
-                        "runtime_config_override_review_stale"
-                    );
-                }
-                for replacement in &replacements {
-                    if let Some(toml) = replacement.toml.as_deref() {
-                        sqlx::query(
-                            r#"
+                        )
+                        .bind(&replacement.client_id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .map(runtime_config_override_from_row)
+                        .transpose()?;
+                        anyhow::ensure!(
+                            runtime_config_override_revision(current.as_ref())
+                                == replacement.expected_revision,
+                            "runtime_config_override_review_stale"
+                        );
+                    }
+                    for replacement in &replacements {
+                        if let Some(toml) = replacement.toml.as_deref() {
+                            sqlx::query(
+                                r#"
                             INSERT INTO client_runtime_config_overrides (
                                 client_id, toml, reason, updated_by, updated_at
                             )
@@ -851,59 +852,70 @@ impl Repository {
                                 updated_by = EXCLUDED.updated_by,
                                 updated_at = now()
                             "#,
-                        )
-                        .bind(&replacement.client_id)
-                        .bind(toml)
-                        .bind(reason)
-                        .bind(operator.operator.id)
-                        .execute(&mut *tx)
-                        .await?;
-                    } else {
+                            )
+                            .bind(&replacement.client_id)
+                            .bind(toml)
+                            .bind(reason)
+                            .bind(operator.operator.id)
+                            .execute(&mut *tx)
+                            .await?;
+                        } else {
+                            sqlx::query(
+                                "DELETE FROM client_runtime_config_overrides WHERE client_id = $1",
+                            )
+                            .bind(&replacement.client_id)
+                            .execute(&mut *tx)
+                            .await?;
+                        }
                         sqlx::query(
-                            "DELETE FROM client_runtime_config_overrides WHERE client_id = $1",
-                        )
-                        .bind(&replacement.client_id)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                    sqlx::query(
-                        r#"
+                            r#"
                         INSERT INTO audit_logs (id, actor_id, action, target, metadata)
                         VALUES ($1, $2, $3, $4, $5)
                         "#,
-                    )
-                    .bind(Uuid::new_v4())
-                    .bind(operator.operator.id)
-                    .bind(if replacement.toml.is_some() {
-                        "runtime_config.client_override_replaced"
-                    } else {
-                        "runtime_config.client_override_reset"
-                    })
-                    .bind(format!("client:{}", replacement.client_id))
-                    .bind(runtime_config_override_audit_metadata(
-                        &replacement.client_id,
-                        reason,
-                        operator,
-                    ))
-                    .execute(&mut *tx)
-                    .await?;
-                }
-                let selected = sqlx::query(
-                    r#"
+                        )
+                        .bind(Uuid::new_v4())
+                        .bind(operator.operator.id)
+                        .bind(if replacement.toml.is_some() {
+                            "runtime_config.client_override_replaced"
+                        } else {
+                            "runtime_config.client_override_reset"
+                        })
+                        .bind(format!("client:{}", replacement.client_id))
+                        .bind(runtime_config_override_audit_metadata(
+                            &replacement.client_id,
+                            reason,
+                            operator,
+                        ))
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    let selected = sqlx::query(
+                        r#"
                     SELECT client_id, toml, reason, updated_at::text AS updated_at, updated_by
                     FROM client_runtime_config_overrides
                     WHERE client_id = ANY($1::text[])
                     ORDER BY client_id
                     "#,
-                )
-                .bind(&client_ids)
-                .fetch_all(&mut *tx)
-                .await?
-                .into_iter()
-                .map(runtime_config_override_from_row)
-                .collect::<Result<Vec<_>>>()?;
-                tx.commit().await?;
-                Ok(selected)
+                    )
+                    .bind(&client_ids)
+                    .fetch_all(&mut *tx)
+                    .await?
+                    .into_iter()
+                    .map(runtime_config_override_from_row)
+                    .collect::<Result<Vec<_>>>()?;
+                    Ok(selected)
+                }
+                .await;
+                match mutation {
+                    Ok(selected) => {
+                        tx.commit().await?;
+                        Ok(selected)
+                    }
+                    Err(error) => {
+                        tx.rollback().await?;
+                        Err(error)
+                    }
+                }
             }
         }
     }

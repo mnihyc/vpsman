@@ -4,7 +4,6 @@ use axum::{
     http::header,
     Json,
 };
-use tokio::sync::broadcast;
 use vpsman_common::{AgentPingProbeKind, AgentPingTarget, AgentRuntimeConfig, PingTargetResult};
 
 use super::*;
@@ -1496,7 +1495,7 @@ async fn seed_monitoring_agent(repo: &Repository, client_id: &str) {
 }
 
 fn monitoring_test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(16);
+    let (events, _) = crate::state::WsEventBus::new(16);
     AppState {
         repo,
         events,

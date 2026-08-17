@@ -1551,24 +1551,13 @@ export type WsEvent =
   | { type: "hello"; service: string; stream: string }
   | { type: "fleet_snapshot"; summary: FleetSummary; agents: AgentView[] }
   | { type: "agent_updated"; client_id: string; gateway_id: string }
-  | {
-      type: "telemetry_updated";
-      client_id: string;
-      observed_unix: number;
-      gateway_id: string;
-    }
+  | { type: "fleet_telemetry_invalidated" }
   | {
       type: "job_rejected";
       job_id: string;
       status: JobStatus;
     }
-  | {
-      type: "job_output_recorded";
-      job_id: string;
-      client_id: string;
-      seq: number;
-      done: boolean;
-    }
+  | { type: "job_details_invalidated"; job_ids: string[] }
   | {
       type: "terminal_output_recorded";
       job_id: string;
@@ -1589,10 +1578,11 @@ export type WsEvent =
       artifact_id: string;
     };
 
-export type WsJobOutputEvent = Extract<
-  WsEvent,
-  { type: "job_output_recorded" }
->;
+export type JobDetailsInvalidationSignal = {
+  generation: number;
+  job_ids: string[];
+};
+
 export type OperatorView = {
   id: string;
   username: string;

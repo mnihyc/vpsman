@@ -1,7 +1,6 @@
 use super::*;
 
 use axum::{extract::State, Json};
-use tokio::sync::broadcast;
 use vpsman_common::{
     plan_tunnel, JobCommand, OspfControlMode, OspfCostPolicy, RoutingCostAdapterCommands,
     RoutingCostCommandSource, RuntimeTunnelAdapterCommands, RuntimeTunnelCommand,
@@ -1769,7 +1768,7 @@ pub(crate) async fn seed_online_agent(repo: &Repository, client_id: &str) {
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(32);
+    let (events, _) = crate::state::WsEventBus::new(32);
     AppState {
         repo,
         events,

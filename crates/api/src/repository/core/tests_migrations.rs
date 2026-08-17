@@ -1,6 +1,5 @@
 use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{payload_hash, AgentHello, JobCommand};
 
@@ -613,7 +612,7 @@ fn bind_migration_archive(
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

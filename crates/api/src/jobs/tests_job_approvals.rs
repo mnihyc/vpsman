@@ -1,5 +1,4 @@
 use axum::{extract::State, http::StatusCode, Json};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 use vpsman_common::{AgentCapabilitySnapshot, AgentHello};
 
@@ -496,7 +495,7 @@ async fn seed_agent(repo: &Repository, client_id: &str) {
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

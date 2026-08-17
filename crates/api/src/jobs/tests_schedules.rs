@@ -4,7 +4,6 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use tokio::sync::broadcast;
 use vpsman_common::{
     encode_json, payload_hash, AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, JobCommand,
 };
@@ -56,7 +55,7 @@ fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
 }
 
 fn schedule_test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

@@ -3188,7 +3188,7 @@ async fn operator_password_reset_clears_totp_secret_material() {
 
 #[test]
 fn internal_gateway_token_requires_matching_bearer() {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     let state = AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,
@@ -3248,7 +3248,7 @@ fn api_startup_rejects_gateway_verifier_env() {
 
 #[test]
 fn internal_gateway_token_is_mandatory_for_memory_repository() {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     let state = AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,
@@ -3276,7 +3276,7 @@ fn internal_gateway_token_is_mandatory_for_memory_repository() {
 }
 
 fn memory_test_state() -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,

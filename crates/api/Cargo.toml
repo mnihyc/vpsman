@@ -42,4 +42,5 @@ vpsman-server-core = { path = "../server-core" }
 vpsman-server-build-info = { path = "../server-build-info" }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true

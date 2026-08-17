@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{OnceLock, RwLock as StdRwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak},
     time::Duration,
 };
 
@@ -33,6 +33,83 @@ const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
 const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
 static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
     OnceLock::new();
+
+#[derive(Default)]
+struct PendingWsInvalidations {
+    fleet_telemetry: bool,
+    job_ids: BTreeSet<uuid::Uuid>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WsEventBus {
+    public_events: broadcast::Sender<WsEvent>,
+    invalidations: Weak<Mutex<PendingWsInvalidations>>,
+}
+
+pub(crate) struct WsInvalidationDriver {
+    pending: Arc<Mutex<PendingWsInvalidations>>,
+}
+
+impl WsEventBus {
+    pub(crate) fn new(capacity: usize) -> (Self, WsInvalidationDriver) {
+        let (public_events, _) = broadcast::channel(capacity);
+        let pending = Arc::new(Mutex::new(PendingWsInvalidations::default()));
+        (
+            Self {
+                public_events,
+                invalidations: Arc::downgrade(&pending),
+            },
+            WsInvalidationDriver { pending },
+        )
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
+        self.public_events.subscribe()
+    }
+
+    pub(crate) fn publish(&self, event: WsEvent) {
+        let _ = self.public_events.send(event);
+    }
+
+    pub(crate) fn invalidate_fleet_telemetry(&self) {
+        let Some(pending) = self.invalidations.upgrade() else {
+            return;
+        };
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .fleet_telemetry = true;
+    }
+
+    pub(crate) fn invalidate_job_details(&self, job_id: uuid::Uuid) {
+        let Some(pending) = self.invalidations.upgrade() else {
+            return;
+        };
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .job_ids
+            .insert(job_id);
+    }
+}
+
+impl WsInvalidationDriver {
+    pub(crate) fn take_fleet_telemetry(&self) -> bool {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut pending.fleet_telemetry)
+    }
+
+    pub(crate) fn take_job_ids(&self) -> Vec<uuid::Uuid> {
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::take(&mut pending.job_ids).into_iter().collect()
+    }
+}
 
 pub(crate) fn remember_suite_config(path: &Path, config: &SuiteConfig) {
     let cache = SUITE_CONFIG_LAST_KNOWN_GOOD.get_or_init(|| StdRwLock::new(HashMap::new()));
@@ -67,7 +144,7 @@ fn load_suite_config_last_known_good(path: &Path) -> Option<SuiteConfig> {
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) repo: Repository,
-    pub(crate) events: broadcast::Sender<WsEvent>,
+    pub(crate) events: WsEventBus,
     pub(crate) internal_token: Option<String>,
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
@@ -523,7 +600,15 @@ impl AppState {
     }
 
     pub(crate) fn publish(&self, event: WsEvent) {
-        let _ = self.events.send(event);
+        self.events.publish(event);
+    }
+
+    pub(crate) fn invalidate_fleet_telemetry(&self) {
+        self.events.invalidate_fleet_telemetry();
+    }
+
+    pub(crate) fn invalidate_job_details(&self, job_id: uuid::Uuid) {
+        self.events.invalidate_job_details(job_id);
     }
 
     pub(crate) async fn terminal_job_status_after_refresh(
@@ -532,7 +617,10 @@ impl AppState {
         refreshed: Option<String>,
     ) -> Result<Option<String>> {
         if let Some(status) = refreshed {
-            return Ok(Some(status));
+            return Ok(
+                (!matches!(status.as_str(), JOB_STATUS_QUEUED | JOB_STATUS_RUNNING))
+                    .then_some(status),
+            );
         }
         let Some(job) = self.repo.get_job(job_id).await? else {
             return Ok(None);

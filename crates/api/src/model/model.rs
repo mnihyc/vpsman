@@ -1227,20 +1227,13 @@ pub(crate) enum WsEvent {
         client_id: String,
         gateway_id: String,
     },
-    TelemetryUpdated {
-        client_id: String,
-        observed_unix: u64,
-        gateway_id: String,
-    },
+    FleetTelemetryInvalidated,
     JobRejected {
         job_id: Uuid,
         status: String,
     },
-    JobOutputRecorded {
-        job_id: Uuid,
-        client_id: String,
-        seq: i32,
-        done: bool,
+    JobDetailsInvalidated {
+        job_ids: Vec<Uuid>,
     },
     TerminalOutputRecorded {
         job_id: Uuid,

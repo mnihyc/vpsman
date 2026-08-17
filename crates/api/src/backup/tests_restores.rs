@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::sync::Arc;
 use tokio::{
     net::TcpListener,
-    sync::{broadcast, oneshot, Mutex},
+    sync::{oneshot, Mutex},
 };
 use uuid::Uuid;
 use vpsman_common::{
@@ -659,7 +659,7 @@ fn restore_test_operator() -> AuthContext {
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,
@@ -684,7 +684,7 @@ fn test_state_without_privilege(repo: Repository) -> AppState {
 }
 
 fn test_state_with_privilege_auto_approve(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

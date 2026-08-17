@@ -57,6 +57,7 @@ const customMockTests = new Set([
   "fleet monitor cards remain readable for 20 generated VPS fixtures",
   "fleet monitor cards remain readable for 100 generated VPS fixtures",
   "fleet monitor cards remain readable for 1000 generated VPS fixtures",
+  "startup WebSocket core preserves the in-flight HTTP telemetry snapshot",
   "fleet telemetry refresh keeps successful domains current when one domain fails",
   "fleet metrics freshness uses exact sample time instead of the coarse chart bucket",
   "system maintenance presents an empty cleanup preview as a neutral no-op",
@@ -82,45 +83,6 @@ test.beforeEach(async ({ page }, testInfo) => {
 async function gotoConsoleHome(page: Page) {
   await page.goto("/");
   await waitForConsoleShell(page);
-}
-
-async function websocketRefreshCounts(page: Page): Promise<{
-  auditRefreshes: number;
-  backupRefreshes: number;
-  fleetSnapshots: number;
-  fleetSnapshotModes: string[];
-  inventoryRefreshes: number;
-  jobDetailRefreshes: number;
-  jobRefreshes: number;
-}> {
-  return page.evaluate(() => {
-    const trackedWindow = window as typeof window & {
-      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
-    };
-    const urls = (trackedWindow.__vpsmanFetchRequests ?? [])
-      .filter((request) => request.method === "GET")
-      .map((request) => new URL(request.url, window.location.href));
-    const paths = urls.map((url) => url.pathname);
-    const fleetSnapshots = urls.filter(
-      (url) => url.pathname === "/api/v1/fleet/snapshot",
-    );
-    return {
-      auditRefreshes: paths.filter((path) => path === "/api/v1/audit").length,
-      backupRefreshes: paths.filter((path) => path === "/api/v1/backups")
-        .length,
-      fleetSnapshots: fleetSnapshots.length,
-      fleetSnapshotModes: fleetSnapshots.map(
-        (url) => url.searchParams.get("mode") ?? "",
-      ),
-      inventoryRefreshes: paths.filter((path) => path === "/api/v1/tags/order")
-        .length,
-      jobDetailRefreshes: paths.filter(
-        (path) =>
-          path === "/api/v1/jobs/55555555-aaaa-4bbb-8ccc-dddddddddddd/targets",
-      ).length,
-      jobRefreshes: paths.filter((path) => path === "/api/v1/jobs").length,
-    };
-  });
 }
 
 async function selectEvidenceGridRecord(grid: Locator, label: string) {
@@ -2633,34 +2595,154 @@ test("fleet monitor densities remain distinct at a common laptop width", async (
     .toBeLessThanOrEqual(40);
 });
 
-test("steady-state fleet polling uses one live snapshot without reloading operational tables", async ({
+test("startup WebSocket core preserves the in-flight HTTP telemetry snapshot", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the startup snapshot ordering contract is viewport independent",
+  );
+  await installConsoleApiMock(page, { holdInitialFleetSnapshots: true });
+  await page.goto("/");
+  await waitForConsoleShell(page);
+
+  const fleetSnapshotModes = () =>
+    page.evaluate(
+      () =>
+        (
+          window as typeof window & {
+            __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+          }
+        ).__vpsmanFetchRequests
+          ?.filter(
+            (request) =>
+              request.method === "GET" &&
+              new URL(request.url, window.location.href).pathname ===
+                "/api/v1/fleet/snapshot",
+          )
+          .map(
+            (request) =>
+              new URL(request.url, window.location.href).searchParams.get(
+                "mode",
+              ) ?? "",
+          ) ?? [],
+    );
+  await expect.poll(fleetSnapshotModes).toContain("full");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanTestWebSockets: EventTarget[];
+            }
+          ).__vpsmanTestWebSockets.length,
+      ),
+    )
+    .toBeGreaterThan(0);
+
+  await page.evaluate(async () => {
+    const [summaryResponse, agentsResponse] = await Promise.all([
+      window.fetch("/api/v1/fleet/summary"),
+      window.fetch("/api/v1/agents"),
+    ]);
+    const summary = (await summaryResponse.json()) as Record<string, unknown>;
+    const agents = (await agentsResponse.json()) as Array<
+      Record<string, unknown>
+    >;
+    agents[0] = { ...agents[0], display_name: "WS startup core" };
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: EventTarget[];
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "fleet_snapshot",
+          summary: { ...summary, running_jobs: 91 },
+          agents,
+        }),
+      }),
+    );
+  });
+  await expect(page.getByText(/WS startup core/).first()).toBeVisible();
+
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __vpsmanReleaseFleetSnapshots?: () => void;
+      }
+    ).__vpsmanReleaseFleetSnapshots?.();
+  });
+  await openConsoleSubpage(page, "Fleet", "Monitor");
+  const startupCard = page
+    .getByLabel("VPS monitor cards")
+    .locator(".vpsMonitorCard", { hasText: "WS startup core" });
+  await expect(startupCard).toBeVisible();
+  await expect(
+    startupCard.locator('[data-fact-kind="uptime"] strong'),
+  ).toHaveText("8d 3h");
+  expect((await fleetSnapshotModes()).every((mode) => mode === "full")).toBe(
+    true,
+  );
+});
+
+test("connected fleet consumes one aggregate telemetry invalidation without live polling", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
     "the polling contract is viewport independent",
   );
+  await page.clock.install({ time: new Date("2026-06-02T10:02:00Z") });
   await gotoConsoleHome(page);
-  await page.waitForTimeout(1_000);
+  const clockTime = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(clockTime + 1_000);
   await page.evaluate(() => {
     const trackedWindow = window as typeof window & {
       __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
     };
     trackedWindow.__vpsmanFetchRequests = [];
   });
-  await page.waitForTimeout(15_500);
-  const requests = await page.evaluate(() => {
+  const fleetSnapshotModes = () =>
+    page.evaluate(() => {
+      const trackedWindow = window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      };
+      return (trackedWindow.__vpsmanFetchRequests ?? [])
+        .filter((request) => request.method === "GET")
+        .map((request) => new URL(request.url, window.location.href))
+        .filter((url) => url.pathname === "/api/v1/fleet/snapshot")
+        .map((url) => url.searchParams.get("mode") ?? "");
+    });
+
+  await page.clock.runFor(15_500);
+  expect(await fleetSnapshotModes()).toEqual([]);
+
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanTestWebSockets: Array<EventTarget>;
+    };
+    trackedWindow.__vpsmanTestWebSockets.at(-1)?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "fleet_telemetry_invalidated" }),
+      }),
+    );
+  });
+
+  await expect.poll(fleetSnapshotModes).toEqual(["live"]);
+  await page.clock.runFor(15_000);
+  expect(await fleetSnapshotModes()).toEqual(["live"]);
+
+  const urls = await page.evaluate(() => {
     const trackedWindow = window as typeof window & {
       __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
     };
-    return trackedWindow.__vpsmanFetchRequests ?? [];
+    return (trackedWindow.__vpsmanFetchRequests ?? []).map(
+      (request) => request.url,
+    );
   });
-  const urls = requests.map((request) => request.url);
-  const liveSnapshots = urls.filter(
-    (url) =>
-      url.includes("/api/v1/fleet/snapshot") && url.includes("mode=live"),
-  );
-  expect(liveSnapshots).toHaveLength(1);
   for (const replacedPath of [
     "/api/v1/fleet/summary",
     "/api/v1/agents",
@@ -2679,134 +2761,681 @@ test("steady-state fleet polling uses one live snapshot without reloading operat
   ]) {
     expect(urls.some((url) => url.includes(operationalPath))).toBe(false);
   }
+
+  await page.clock.runFor(30_000);
+  await expect.poll(fleetSnapshotModes).toEqual(["live", "full"]);
 });
 
-test("batches a sustained WebSocket update wave into 15-second refreshes", async ({
+test("reconnecting fleet performs one live recovery refresh", async ({
   page,
 }, testInfo) => {
   test.skip(
     testInfo.project.name.includes("mobile"),
-    "the refresh batching contract is viewport independent",
+    "the recovery contract is viewport independent",
   );
   await page.clock.install({ time: new Date("2026-06-02T10:02:00Z") });
-  await page.goto("/#/jobs/history/55555555-aaaa-4bbb-8ccc-dddddddddddd");
-  await waitForConsoleShell(page);
-  await expect(
-    page.getByRole("heading", { name: "Target results" }),
-  ).toBeVisible();
+  await gotoConsoleHome(page);
   const clockTime = await page.evaluate(() => Date.now());
   await page.clock.pauseAt(clockTime + 1_000);
   await page.evaluate(() => {
     const trackedWindow = window as typeof window & {
       __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      __vpsmanTestWebSockets: Array<{ close: () => void }>;
     };
     trackedWindow.__vpsmanFetchRequests = [];
+    trackedWindow.__vpsmanTestWebSockets.at(-1)?.close();
   });
-  await page.clock.fastForward(15_000);
+  await page.clock.runFor(1_100);
   await expect
-    .poll(() => websocketRefreshCounts(page))
-    .toMatchObject({ fleetSnapshots: 1 });
-  await page.evaluate(() => {
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as typeof window & {
+            __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+          }
+        ).__vpsmanFetchRequests;
+        return (requests ?? []).filter(
+          (request) =>
+            request.method === "GET" &&
+            request.url.includes("/api/v1/fleet/snapshot") &&
+            request.url.includes("mode=live"),
+        ).length;
+      }),
+    )
+    .toBe(1);
+  await page.clock.runFor(14_000);
+  const liveRefreshCount = await page.evaluate(() => {
     const trackedWindow = window as typeof window & {
       __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
     };
+    return (trackedWindow.__vpsmanFetchRequests ?? []).filter(
+      (request) =>
+        request.method === "GET" &&
+        request.url.includes("/api/v1/fleet/snapshot") &&
+        request.url.includes("mode=live"),
+    ).length;
+  });
+  expect(liveRefreshCount).toBe(1);
+});
+
+test("disconnected fleet falls back to one live snapshot per 15 seconds", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the fallback contract is viewport independent",
+  );
+  await page.clock.install({ time: new Date("2026-06-02T10:02:00Z") });
+  await gotoConsoleHome(page);
+  const clockTime = await page.evaluate(() => Date.now());
+  await page.clock.pauseAt(clockTime + 1_000);
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      __vpsmanTestWebSockets: Array<{ close: () => void }>;
+    };
     trackedWindow.__vpsmanFetchRequests = [];
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      value: class StalledWebSocket extends EventTarget {
+        static CONNECTING = 0;
+        static OPEN = 1;
+        static CLOSING = 2;
+        static CLOSED = 3;
+        readyState = StalledWebSocket.CONNECTING;
+        close() {
+          this.readyState = StalledWebSocket.CLOSED;
+        }
+        send() {}
+      },
+    });
+    trackedWindow.__vpsmanTestWebSockets.at(-1)?.close();
+  });
+
+  await page.clock.runFor(15_100);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const requests = (
+          window as typeof window & {
+            __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+          }
+        ).__vpsmanFetchRequests;
+        return (requests ?? []).filter(
+          (request) =>
+            request.method === "GET" &&
+            request.url.includes("/api/v1/fleet/snapshot") &&
+            request.url.includes("mode=live"),
+        ).length;
+      }),
+    )
+    .toBe(1);
+});
+
+test("Ping targets stays idle and keeps rows interactive during manual refresh", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the Ping target request lifecycle is viewport independent",
+  );
+  await gotoConsoleHome(page);
+
+  let listGets = 0;
+  let detailGets = 0;
+  let listGate: Promise<void> | null = null;
+  let releaseList: (() => void) | null = null;
+  let target = {
+    assigned_count: 1,
+    created_at: "2026-06-02T10:00:00Z",
+    enabled: true,
+    generation: 3,
+    host: "1.1.1.1",
+    id: "41000000-0000-4000-8000-000000000001",
+    name: "Cloud resolver",
+    port: null,
+    primary_count: 1,
+    probe_kind: "icmp",
+    runtime_sync: { reason: "agent acknowledged", state: "applied" },
+    selector_expression: "provider:edge",
+    target_client_ids: ["agent-sfo-01"],
+    target_update_available: false,
+    target_update_evidence_available: true,
+    updated_at: "2026-06-02T10:00:00Z",
+  };
+  await page.route("**/api/v1/ping-targets*", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === "/api/v1/ping-targets") {
+      listGets += 1;
+      if (listGate) await listGate;
+      await route.fulfill({ json: [target] });
+      return;
+    }
+    if (/^\/api\/v1\/ping-targets\/[^/]+$/.test(pathname)) {
+      detailGets += 1;
+      await route.fulfill({ json: { assignments: [], target } });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await openConsoleSubpage(page, "Observability", "Ping targets");
+  const grid = page.getByLabel("Ping targets data grid");
+  const row = grid.locator(".gridBody [role=row]", {
+    hasText: "Cloud resolver",
+  });
+  await expect(row).toBeVisible();
+  await expect.poll(() => listGets).toBeGreaterThanOrEqual(1);
+  const initialListGets = listGets;
+  expect(initialListGets).toBeLessThanOrEqual(2);
+  expect(detailGets).toBe(0);
+
+  await page.evaluate(() => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    for (let index = 0; index < 100; index += 1) {
+      socket?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({ type: "fleet_telemetry_invalidated" }),
+        }),
+      );
+    }
+  });
+  await grid.getByLabel("Ping targets search").fill("Cloud");
+  await page.waitForTimeout(100);
+  expect({ detailGets, listGets }).toEqual({
+    detailGets: 0,
+    listGets: initialListGets,
+  });
+
+  listGate = new Promise<void>((resolve) => {
+    releaseList = resolve;
+  });
+  target = {
+    ...target,
+    assigned_count: 2,
+    updated_at: "2026-06-02T10:05:00Z",
+  };
+  const refresh = grid.getByRole("button", { name: "Refresh", exact: true });
+  await refresh.click();
+  await expect.poll(() => listGets).toBe(initialListGets + 1);
+  await expect(row).toBeVisible();
+  await expect(row.getByRole("gridcell").nth(5)).toHaveText("1");
+  await grid.getByLabel("Ping targets search").fill("resolver");
+  await expect(grid.getByLabel("Ping targets search")).toHaveValue("resolver");
+  expect(detailGets).toBe(0);
+
+  releaseList?.();
+  listGate = null;
+  await expect(refresh).toBeEnabled();
+  await expect(row.getByRole("gridcell").nth(5)).toHaveText("2");
+  expect({ detailGets, listGets }).toEqual({
+    detailGets: 0,
+    listGets: initialListGets + 1,
+  });
+});
+test("job detail invalidations keep visible data and coalesce an in-flight wave", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the job detail refresh contract is viewport independent",
+  );
+  const selectedJobId = "55555555-aaaa-4bbb-8ccc-dddddddddddd";
+  await page.goto(`/#/jobs/history/${selectedJobId}`);
+  await waitForConsoleShell(page);
+  const detail = page.getByRole("region", { name: "Job target details" });
+  await expect(
+    detail.getByRole("heading", { name: "Target results" }),
+  ).toBeVisible();
+  await expect(
+    detail.getByText("edge-sfo-01 (fo01)", { exact: true }).first(),
+  ).toBeVisible();
+
+  await page.evaluate((jobId) => {
+    type DetailKind = "comparison" | "outputs" | "targets";
+    type DetailStressState = {
+      activeTargets: number;
+      counts: Record<DetailKind, number>;
+      hold: boolean;
+      maxActiveTargets: number;
+      release: () => void;
+      waiters: Array<() => void>;
+    };
+    const trackedWindow = window as typeof window & {
+      __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      __vpsmanJobDetailStress?: DetailStressState;
+    };
+    const originalFetch = window.fetch.bind(window);
+    const state: DetailStressState = {
+      activeTargets: 0,
+      counts: { comparison: 0, outputs: 0, targets: 0 },
+      hold: true,
+      maxActiveTargets: 0,
+      release: () => {
+        state.hold = false;
+        for (const resolve of state.waiters.splice(0)) {
+          resolve();
+        }
+      },
+      waiters: [],
+    };
+    trackedWindow.__vpsmanJobDetailStress = state;
+    trackedWindow.__vpsmanFetchRequests = [];
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const pathname = new URL(url, window.location.href).pathname;
+      const prefix = `/api/v1/jobs/${jobId}`;
+      const kind: DetailKind | null =
+        pathname === `${prefix}/targets`
+          ? "targets"
+          : pathname === `${prefix}/outputs`
+            ? "outputs"
+            : pathname === `${prefix}/output-comparison`
+              ? "comparison"
+              : null;
+      if (!kind) {
+        return originalFetch(input, init);
+      }
+      state.counts[kind] += 1;
+      if (kind === "targets") {
+        state.activeTargets += 1;
+        state.maxActiveTargets = Math.max(
+          state.maxActiveTargets,
+          state.activeTargets,
+        );
+      }
+      try {
+        if (state.hold) {
+          await new Promise<void>((resolve) => state.waiters.push(resolve));
+        }
+        return await originalFetch(input, init);
+      } finally {
+        if (kind === "targets") {
+          state.activeTargets -= 1;
+        }
+      }
+    };
+  }, selectedJobId);
+
+  await page.evaluate((jobId) => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "job_details_invalidated",
+          job_ids: [
+            jobId,
+            ...Array.from(
+              { length: 200 },
+              (_, index) => `unselected-job-${index}`,
+            ),
+          ],
+        }),
+      }),
+    );
+  }, selectedJobId);
+
+  const detailRequestCounts = () =>
+    page.evaluate(() => {
+      const state = (
+        window as typeof window & {
+          __vpsmanJobDetailStress?: {
+            counts: Record<string, number>;
+            maxActiveTargets: number;
+          };
+        }
+      ).__vpsmanJobDetailStress;
+      return {
+        comparison: state?.counts.comparison ?? 0,
+        maxActiveTargets: state?.maxActiveTargets ?? 0,
+        outputs: state?.counts.outputs ?? 0,
+        targets: state?.counts.targets ?? 0,
+      };
+    });
+  await expect.poll(detailRequestCounts).toEqual({
+    comparison: 1,
+    maxActiveTargets: 1,
+    outputs: 1,
+    targets: 1,
+  });
+  await expect(
+    detail.getByText("edge-sfo-01 (fo01)", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(detail.getByText("Loading target records")).toHaveCount(0);
+  await expect(detail.getByText("Loading output records")).toHaveCount(0);
+
+  await page.evaluate((jobId) => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    for (let sequence = 0; sequence < 100; sequence += 1) {
+      socket?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "job_details_invalidated",
+            job_ids: [jobId, `concurrent-job-${sequence}`],
+          }),
+        }),
+      );
+    }
+  }, selectedJobId);
+  expect(await detailRequestCounts()).toEqual({
+    comparison: 1,
+    maxActiveTargets: 1,
+    outputs: 1,
+    targets: 1,
   });
 
   await page.evaluate(() => {
-    const trackedWindow = window as typeof window & {
-      __vpsmanTestWebSockets: Array<EventTarget>;
-      __vpsmanUpdateWaveCount?: number;
-      __vpsmanUpdateWaveTimer?: number;
-    };
-    const socket = trackedWindow.__vpsmanTestWebSockets.at(-1);
-    let sequence = 0;
-    trackedWindow.__vpsmanUpdateWaveCount = 0;
-    trackedWindow.__vpsmanUpdateWaveTimer = window.setInterval(() => {
-      sequence += 1;
-      trackedWindow.__vpsmanUpdateWaveCount = sequence;
-      const clientId = `stress-vps-${String(sequence % 100).padStart(3, "0")}`;
-      for (const event of [
-        {
-          client_id: clientId,
-          gateway_id: "gateway-stress",
-          observed_unix: 1_780_393_320 + sequence,
-          type: "telemetry_updated",
-        },
-        {
-          client_id: clientId,
-          gateway_id: "gateway-stress",
-          type: "agent_updated",
-        },
-        {
-          client_id: clientId,
-          done: false,
-          job_id: "55555555-aaaa-4bbb-8ccc-dddddddddddd",
-          seq: sequence,
-          type: "job_output_recorded",
-        },
-        {
-          client_id: clientId,
-          done: false,
-          job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-          seq: sequence,
-          type: "job_output_recorded",
-        },
-        {
-          job_id: "77777777-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-          status: "running",
-          type: "job_finished",
-        },
-        {
-          artifact_id: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
-          backup_request_id: "11111111-2222-4333-8444-555555555555",
-          client_id: clientId,
-          type: "backup_artifact_recorded",
-        },
-      ]) {
-        socket?.dispatchEvent(
-          new MessageEvent("message", { data: JSON.stringify(event) }),
-        );
+    (
+      window as typeof window & {
+        __vpsmanJobDetailStress?: { release: () => void };
       }
-    }, 200);
+    ).__vpsmanJobDetailStress?.release();
   });
+  await expect.poll(detailRequestCounts).toEqual({
+    comparison: 2,
+    maxActiveTargets: 1,
+    outputs: 2,
+    targets: 2,
+  });
+  await expect(
+    detail.getByText("edge-sfo-01 (fo01)", { exact: true }).first(),
+  ).toBeVisible();
 
-  await page.clock.runFor(14_999);
-  await expect
-    .poll(() => websocketRefreshCounts(page))
-    .toEqual({
-      auditRefreshes: 0,
-      backupRefreshes: 0,
-      fleetSnapshots: 0,
-      fleetSnapshotModes: [],
-      inventoryRefreshes: 0,
-      jobDetailRefreshes: 0,
-      jobRefreshes: 0,
-    });
+  await page.evaluate(() => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "job_details_invalidated",
+          job_ids: ["unselected-job"],
+        }),
+      }),
+    );
+  });
+  await page.waitForTimeout(50);
+  expect(await detailRequestCounts()).toEqual({
+    comparison: 2,
+    maxActiveTargets: 1,
+    outputs: 2,
+    targets: 2,
+  });
+  const jobListRefreshes = await page.evaluate(() => {
+    const requests = (
+      window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+      }
+    ).__vpsmanFetchRequests;
+    return (requests ?? []).filter(
+      (request) =>
+        request.method === "GET" &&
+        new URL(request.url, window.location.href).pathname === "/api/v1/jobs",
+    ).length;
+  });
+  expect(jobListRefreshes).toBe(0);
+});
 
-  await page.clock.runFor(46_001);
-  const updateWaveCount = await page.evaluate(() => {
-    const trackedWindow = window as typeof window & {
-      __vpsmanUpdateWaveCount?: number;
-      __vpsmanUpdateWaveTimer?: number;
+test("job terminal events update loaded history rows without replacing the page", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.includes("mobile"),
+    "the paged history transport contract is viewport independent",
+  );
+  await gotoConsoleHome(page);
+  await page.evaluate(() => {
+    type HistoryJob = {
+      actor_id: string | null;
+      command_type: string;
+      completed_at: string | null;
+      created_at: string;
+      id: string;
+      max_timeout_secs: number;
+      payload_hash: string;
+      privileged: boolean;
+      source_schedule_id: string | null;
+      status: string;
+      target_count: number;
     };
-    if (trackedWindow.__vpsmanUpdateWaveTimer !== undefined) {
-      window.clearInterval(trackedWindow.__vpsmanUpdateWaveTimer);
-    }
-    return trackedWindow.__vpsmanUpdateWaveCount ?? 0;
+    type HistoryStressState = {
+      itemGetIds: string[];
+      jobs: HistoryJob[];
+      listGets: number;
+    };
+    const trackedWindow = window as typeof window & {
+      __vpsmanJobHistoryStress?: HistoryStressState;
+    };
+    const originalFetch = window.fetch.bind(window);
+    const jobs = Array.from(
+      { length: 15 },
+      (_, index): HistoryJob => ({
+        actor_id: null,
+        command_type: `history_probe_${index + 1}`,
+        completed_at: null,
+        created_at: new Date(
+          Date.parse("2026-06-02T10:00:00Z") - index * 1_000,
+        ).toISOString(),
+        id: `10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
+        max_timeout_secs: 60,
+        payload_hash: String(index).padStart(64, "0"),
+        privileged: false,
+        source_schedule_id: null,
+        status: "running",
+        target_count: 1,
+      }),
+    );
+    const state: HistoryStressState = {
+      itemGetIds: [],
+      jobs,
+      listGets: 0,
+    };
+    trackedWindow.__vpsmanJobHistoryStress = state;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      const pathname = new URL(url, window.location.href).pathname;
+      const method = (
+        init?.method ?? (input instanceof Request ? input.method : "GET")
+      ).toUpperCase();
+      if (method === "GET" && pathname === "/api/v1/jobs") {
+        state.listGets += 1;
+        return new Response(JSON.stringify(state.jobs), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      }
+      const jobMatch = pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/);
+      if (method === "GET" && jobMatch) {
+        const jobId = decodeURIComponent(jobMatch[1]);
+        state.itemGetIds.push(jobId);
+        const job = state.jobs.find((candidate) => candidate.id === jobId);
+        return new Response(JSON.stringify(job ?? { error: "not_found" }), {
+          headers: { "Content-Type": "application/json" },
+          status: job ? 200 : 404,
+        });
+      }
+      return originalFetch(input, init);
+    };
   });
-  expect(updateWaveCount).toBe(305);
+
+  await openConsoleSubpage(page, "Jobs", "History");
+  const jobsGrid = page.getByLabel("Job records data grid");
+  await expect(jobsGrid).toContainText("15 of 15 jobs");
+  await jobsGrid.getByLabel("Job records page size").selectOption("10");
+  await jobsGrid.getByLabel("Job records next page").click();
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
+
+  const loadedJobId = "10000000-0000-4000-8000-000000000014";
+  const loadedRow = jobsGrid
+    .locator(".gridBody [role=row]")
+    .filter({ hasText: "history probe 14" });
+  await expect(loadedRow.locator(".status")).toHaveAttribute(
+    "title",
+    "running",
+  );
+  await page.evaluate((jobId) => {
+    const state = (
+      window as typeof window & {
+        __vpsmanJobHistoryStress?: {
+          itemGetIds: string[];
+          jobs: Array<{ id: string; status: string }>;
+          listGets: number;
+        };
+      }
+    ).__vpsmanJobHistoryStress;
+    if (!state) return;
+    state.itemGetIds = [];
+    state.listGets = 0;
+    const job = state.jobs.find((candidate) => candidate.id === jobId);
+    if (job) job.status = "completed";
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "job_finished",
+          job_id: jobId,
+          status: "completed",
+        }),
+      }),
+    );
+  }, loadedJobId);
+
+  await expect(loadedRow.locator(".status")).toHaveAttribute(
+    "title",
+    "completed",
+  );
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
   await expect
-    .poll(() => websocketRefreshCounts(page))
-    .toEqual({
-      auditRefreshes: 4,
-      backupRefreshes: 4,
-      fleetSnapshots: 4,
-      fleetSnapshotModes: ["full", "full", "full", "full"],
-      inventoryRefreshes: 4,
-      jobDetailRefreshes: 4,
-      jobRefreshes: 4,
+    .poll(() =>
+      page.evaluate(() => {
+        const state = (
+          window as typeof window & {
+            __vpsmanJobHistoryStress?: {
+              itemGetIds: string[];
+              listGets: number;
+            };
+          }
+        ).__vpsmanJobHistoryStress;
+        return {
+          itemGetIds: state?.itemGetIds ?? [],
+          listGets: state?.listGets ?? -1,
+        };
+      }),
+    )
+    .toEqual({ itemGetIds: [loadedJobId], listGets: 0 });
+
+  const unknownJobId = "20000000-0000-4000-8000-000000000001";
+  await page.evaluate((jobId) => {
+    const socket = (
+      window as typeof window & {
+        __vpsmanTestWebSockets: Array<EventTarget>;
+      }
+    ).__vpsmanTestWebSockets.at(-1);
+    socket?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "job_rejected",
+          job_id: jobId,
+          status: "rejected",
+        }),
+      }),
+    );
+  }, unknownJobId);
+  await page.waitForTimeout(100);
+  expect(
+    await page.evaluate((jobId) => {
+      const state = (
+        window as typeof window & {
+          __vpsmanJobHistoryStress?: {
+            itemGetIds: string[];
+            listGets: number;
+          };
+        }
+      ).__vpsmanJobHistoryStress;
+      return {
+        itemGetIds: state?.itemGetIds ?? [],
+        listGets: state?.listGets ?? -1,
+        unknownRequested: state?.itemGetIds.includes(jobId) ?? false,
+      };
+    }, unknownJobId),
+  ).toEqual({
+    itemGetIds: [loadedJobId],
+    listGets: 0,
+    unknownRequested: false,
+  });
+  await expect(jobsGrid.getByTitle(unknownJobId)).toHaveCount(0);
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
+
+  const historySearch = jobsGrid.getByLabel("Job records search");
+  await historySearch.fill("history probe 14");
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("1 / 1");
+  await expect(loadedRow).toBeVisible();
+  await historySearch.fill("");
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("1 / 2");
+
+  const manualJobId = "30000000-0000-4000-8000-000000000001";
+  await page.evaluate((jobId) => {
+    const state = (
+      window as typeof window & {
+        __vpsmanJobHistoryStress?: {
+          jobs: Array<Record<string, unknown>>;
+        };
+      }
+    ).__vpsmanJobHistoryStress;
+    state?.jobs.unshift({
+      actor_id: null,
+      command_type: "manual_refresh_head",
+      completed_at: null,
+      created_at: "2026-06-02T10:01:00Z",
+      id: jobId,
+      max_timeout_secs: 60,
+      payload_hash: "f".repeat(64),
+      privileged: false,
+      source_schedule_id: null,
+      status: "running",
+      target_count: 1,
     });
+  }, manualJobId);
+  const historyPanel = page.locator(".fleetPanel").filter({
+    has: page.getByRole("heading", {
+      level: 2,
+      name: "Job history",
+      exact: true,
+    }),
+  });
+  await historyPanel.getByRole("button", { name: "Refresh" }).click();
+  await expect(jobsGrid).toContainText("16 of 16 jobs");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as typeof window & {
+              __vpsmanJobHistoryStress?: { listGets: number };
+            }
+          ).__vpsmanJobHistoryStress?.listGets ?? -1,
+      ),
+    )
+    .toBe(1);
+  await expect(jobsGrid.getByTitle(manualJobId)).toBeVisible();
 });
 
 test("fleet telemetry refresh keeps successful domains current when one domain fails", async ({

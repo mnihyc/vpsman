@@ -79,8 +79,10 @@ export function useJobsData(
   const [serverJobsError, setServerJobsError] = useState<string | null>(null);
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobsEvidenceAvailable, setJobsEvidenceAvailable] = useState(false);
+  const jobsRef = useRef<JobHistoryRecord[]>([]);
   const jobRolloutsRef = useRef<JobRolloutRecord[]>([]);
   const jobsLoadGeneration = useRef(0);
+  const jobRowRefreshGeneration = useRef(new Map<string, number>());
   const jobRolloutsLoadGeneration = useRef(0);
   const agentUpdateReleasesLoadGeneration = useRef(0);
   const terminalSessionsLoadGeneration = useRef(0);
@@ -196,6 +198,7 @@ export function useJobsData(
       if (unauthorized) {
         onUnauthorized();
         setJobsEvidenceAvailable(false);
+        jobsRef.current = [];
         setJobs([]);
         setJobApprovals([]);
         setJobRollouts([]);
@@ -225,6 +228,7 @@ export function useJobsData(
         return;
       }
       if (jobsResult.status === "fulfilled") {
+        jobsRef.current = jobsResult.value;
         setJobs(jobsResult.value);
         setJobsTruncated(jobsResult.value.length >= HISTORY_DETAIL_LIMIT);
       }
@@ -672,6 +676,52 @@ export function useJobsData(
       }
     },
     [apiToken, rethrowDirectRequestError],
+  );
+
+  const refreshLoadedJob = useCallback(
+    async (jobId: string) => {
+      if (
+        currentApiToken.current !== apiToken ||
+        !jobsRef.current.some((job) => job.id === jobId)
+      ) {
+        return;
+      }
+      const listGeneration = jobsLoadGeneration.current;
+      const rowGeneration =
+        (jobRowRefreshGeneration.current.get(jobId) ?? 0) + 1;
+      jobRowRefreshGeneration.current.set(jobId, rowGeneration);
+      try {
+        const refreshed = await apiGet<JobHistoryRecord>(
+          `/api/v1/jobs/${encodeURIComponent(jobId)}`,
+          apiToken,
+        );
+        if (
+          currentApiToken.current !== apiToken ||
+          jobsLoadGeneration.current !== listGeneration ||
+          jobRowRefreshGeneration.current.get(jobId) !== rowGeneration
+        ) {
+          return;
+        }
+        setJobs((current) => {
+          const index = current.findIndex((job) => job.id === jobId);
+          if (index < 0) {
+            return current;
+          }
+          const next = [...current];
+          next[index] = refreshed;
+          jobsRef.current = next;
+          return next;
+        });
+      } catch (error) {
+        if (
+          currentApiToken.current === apiToken &&
+          isApiUnauthorized(error)
+        ) {
+          onUnauthorized();
+        }
+      }
+    },
+    [apiToken, onUnauthorized],
   );
 
   const loadJobOutputs = useCallback(
@@ -1155,6 +1205,8 @@ export function useJobsData(
     agentUpdateReleasesError.current = null;
     terminalSessionsError.current = null;
     commandTemplatesError.current = null;
+    jobsRef.current = [];
+    jobRowRefreshGeneration.current.clear();
     jobRolloutsRef.current = [];
     setJobs([]);
     setJobApprovals([]);
@@ -1212,6 +1264,7 @@ export function useJobsData(
     cancelServerJob,
     cancelJob,
     loadJob,
+    refreshLoadedJob,
     loadJobRollout,
     loadJobRollouts,
     createArtifactCleanupJob,

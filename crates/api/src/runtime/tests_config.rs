@@ -1,6 +1,6 @@
 use axum::{extract::State, Json};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::oneshot;
 
 use crate::{
     gateway_client::GatewayDispatchClient,
@@ -1723,7 +1723,7 @@ async fn agent_update_degrades_unprivileged_target_after_privilege_verification(
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

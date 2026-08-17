@@ -209,9 +209,6 @@ pub(crate) async fn ingest_telemetry(
 ) -> Result<Json<IngestResponse>, ApiError> {
     state.require_internal_gateway(&headers)?;
     validate_gateway_telemetry_event(&event)?;
-    let client_id = event.telemetry.client_id.clone();
-    let received_unix = crate::unix_now();
-    let gateway_id = event.gateway_id.clone();
     if !state
         .repo
         .active_gateway_session_matches(
@@ -229,11 +226,7 @@ pub(crate) async fn ingest_telemetry(
     }
     let recorded = state.repo.record_telemetry(&event).await?;
     if recorded {
-        state.publish(WsEvent::TelemetryUpdated {
-            client_id,
-            observed_unix: received_unix,
-            gateway_id,
-        });
+        state.invalidate_fleet_telemetry();
     }
     Ok(Json(IngestResponse {
         accepted: true,
@@ -332,12 +325,6 @@ pub(crate) async fn ingest_command_output(
             return Err(ApiError::conflict("job_output_sequence_conflict"));
         }
         if network_traffic_import_output_advances_finalization(write_result) {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id: event.job_id,
-                client_id: event.client_id.clone(),
-                seq: event.seq,
-                done: true,
-            });
             state
                 .repo
                 .mark_job_target_running(
@@ -346,6 +333,7 @@ pub(crate) async fn ingest_command_output(
                     "vnStat history collected; server import pending",
                 )
                 .await?;
+            state.invalidate_job_details(event.job_id);
             wake_network_traffic_import_finalizer(state.clone());
         }
     } else if event.output.done {
@@ -375,12 +363,7 @@ pub(crate) async fn ingest_command_output(
         if record_result.write_result == JobOutputWriteResult::DuplicateConflict {
             return Err(ApiError::conflict("job_output_sequence_conflict"));
         }
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id: event.job_id,
-            client_id: event.client_id.clone(),
-            seq: event.seq,
-            done: event.output.done,
-        });
+        state.invalidate_job_details(event.job_id);
         if record_result.target_terminalized {
             let refreshed = state
                 .repo
@@ -466,18 +449,13 @@ pub(crate) async fn ingest_command_output(
         if !is_network_traffic_import
             || network_traffic_import_output_advances_finalization(write_result)
         {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id: event.job_id,
-                client_id: event.client_id.clone(),
-                seq: event.seq,
-                done: event.output.done,
-            });
             let message = status_output_message(&event.output)
                 .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
             state
                 .repo
                 .mark_job_target_running(event.job_id, &event.client_id, &message)
                 .await?;
+            state.invalidate_job_details(event.job_id);
         }
         if is_network_traffic_import {
             if network_traffic_import_output_advances_finalization(write_result) {

@@ -48,6 +48,7 @@ import type {
   JobOutputRecord,
   JobTargetRecord,
   JobTargetSelection,
+  JobDetailsInvalidationSignal,
   ScheduleRecord,
   UpsertCommandTemplateRequest,
 } from "../types";
@@ -254,7 +255,7 @@ export function JobsPanel({
   commandTemplates,
   commandTemplatesTruncated,
   dispatchPreset,
-  jobRefreshBatch,
+  jobDetailsInvalidation,
   loading,
   onApproveJobApproval,
   onCreateJob,
@@ -295,7 +296,7 @@ export function JobsPanel({
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
   dispatchPreset?: JobDispatchPreset | null;
-  jobRefreshBatch: string[];
+  jobDetailsInvalidation: JobDetailsInvalidationSignal | null;
   loading: boolean;
   onApproveJobApproval: (
     approvalId: string,
@@ -357,6 +358,18 @@ export function JobsPanel({
   const targetDetailRef = useRef<HTMLDivElement | null>(null);
   const targetLoadGenerationRef = useRef(0);
   const comparisonLoadGenerationRef = useRef(0);
+  const selectedJobIdRef = useRef<string | null>(null);
+  const activeDetailRequestRef = useRef<{
+    jobId: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const detailRefreshPendingRef = useRef(false);
+  const startBackgroundDetailRefreshRef = useRef<(jobId: string) => void>(
+    () => undefined,
+  );
+  const consumedDetailInvalidationGenerationRef = useRef(
+    jobDetailsInvalidation?.generation ?? 0,
+  );
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [targets, setTargets] = useState<JobTargetRecord[]>([]);
   const [outputs, setOutputs] = useState<JobOutputRecord[]>([]);
@@ -507,43 +520,47 @@ export function JobsPanel({
     setComparisonMode(preferences.bulk_output_compare_mode);
   }, [preferences.bulk_output_compare_mode]);
 
-  const openTargets = useCallback(
-    async (jobId: string) => {
+  const loadTargetDetails = useCallback(
+    async (jobId: string, initialLoad: boolean) => {
       const generation = ++targetLoadGenerationRef.current;
       const comparisonGeneration = ++comparisonLoadGenerationRef.current;
-      setSelectedJobId(jobId);
-      setTargets([]);
-      setOutputs([]);
-      setOutputComparison(null);
-      setTargetsLoading(true);
-      setOutputsLoading(true);
-      setComparisonLoading(true);
-      setTargetError(null);
-      setOutputError(null);
-      setComparisonError(null);
-      setDownloadError(null);
-      setSelectedComparisonGroupId(null);
+      if (initialLoad) {
+        setTargets([]);
+        setOutputs([]);
+        setOutputComparison(null);
+        setTargetsLoading(true);
+        setOutputsLoading(true);
+        setComparisonLoading(true);
+        setTargetError(null);
+        setOutputError(null);
+        setComparisonError(null);
+        setDownloadError(null);
+        setSelectedComparisonGroupId(null);
+      }
       const [targetResult, outputResult, comparisonResult] =
         await Promise.allSettled([
           onLoadTargets(jobId),
           onLoadOutputs(jobId),
           onLoadOutputComparison(jobId, comparisonMode),
         ]);
-      if (generation !== targetLoadGenerationRef.current) {
+      if (
+        generation !== targetLoadGenerationRef.current ||
+        selectedJobIdRef.current !== jobId
+      ) {
         return;
       }
       if (targetResult.status === "fulfilled") {
         setTargets(targetResult.value);
+        setTargetError(null);
       } else {
-        setTargets([]);
         setTargetError(
           errorMessage(targetResult.reason, "Job target history unavailable"),
         );
       }
       if (outputResult.status === "fulfilled") {
         setOutputs(outputResult.value);
+        setOutputError(null);
       } else {
-        setOutputs([]);
         setOutputError(
           errorMessage(outputResult.reason, "Job output unavailable"),
         );
@@ -551,8 +568,8 @@ export function JobsPanel({
       if (comparisonGeneration === comparisonLoadGenerationRef.current) {
         if (comparisonResult.status === "fulfilled") {
           setOutputComparison(comparisonResult.value);
+          setComparisonError(null);
         } else {
-          setOutputComparison(null);
           setComparisonError(
             errorMessage(
               comparisonResult.reason,
@@ -568,7 +585,60 @@ export function JobsPanel({
     [comparisonMode, onLoadOutputComparison, onLoadOutputs, onLoadTargets],
   );
 
+  const trackDetailRequest = useCallback(
+    (jobId: string, request: Promise<void>) => {
+      const trackedRequest = request.finally(() => {
+        if (activeDetailRequestRef.current?.promise !== trackedRequest) {
+          return;
+        }
+        activeDetailRequestRef.current = null;
+        if (
+          detailRefreshPendingRef.current &&
+          selectedJobIdRef.current === jobId
+        ) {
+          detailRefreshPendingRef.current = false;
+          queueMicrotask(() => startBackgroundDetailRefreshRef.current(jobId));
+        }
+      });
+      activeDetailRequestRef.current = {
+        jobId,
+        promise: trackedRequest,
+      };
+      return trackedRequest;
+    },
+    [],
+  );
+
+  const startBackgroundDetailRefresh = useCallback(
+    (jobId: string) => {
+      if (selectedJobIdRef.current !== jobId) {
+        return;
+      }
+      if (activeDetailRequestRef.current?.jobId === jobId) {
+        detailRefreshPendingRef.current = true;
+        return;
+      }
+      detailRefreshPendingRef.current = false;
+      void trackDetailRequest(jobId, loadTargetDetails(jobId, false));
+    },
+    [loadTargetDetails, trackDetailRequest],
+  );
+  startBackgroundDetailRefreshRef.current = startBackgroundDetailRefresh;
+
+  const openTargets = useCallback(
+    (jobId: string) => {
+      selectedJobIdRef.current = jobId;
+      detailRefreshPendingRef.current = false;
+      setSelectedJobId(jobId);
+      void trackDetailRequest(jobId, loadTargetDetails(jobId, true));
+    },
+    [loadTargetDetails, trackDetailRequest],
+  );
+
   const clearTargetDetails = useCallback(() => {
+    selectedJobIdRef.current = null;
+    activeDetailRequestRef.current = null;
+    detailRefreshPendingRef.current = false;
     targetLoadGenerationRef.current += 1;
     comparisonLoadGenerationRef.current += 1;
     setSelectedJobId(null);
@@ -1311,10 +1381,23 @@ export function JobsPanel({
   }
 
   useEffect(() => {
-    if (selectedJobId && jobRefreshBatch.includes(selectedJobId)) {
-      void openTargets(selectedJobId);
+    if (
+      !jobDetailsInvalidation ||
+      jobDetailsInvalidation.generation <=
+        consumedDetailInvalidationGenerationRef.current
+    ) {
+      return;
     }
-  }, [jobRefreshBatch, openTargets, selectedJobId]);
+    consumedDetailInvalidationGenerationRef.current =
+      jobDetailsInvalidation.generation;
+    const selectedJobId = selectedJobIdRef.current;
+    if (
+      selectedJobId &&
+      jobDetailsInvalidation.job_ids.includes(selectedJobId)
+    ) {
+      startBackgroundDetailRefresh(selectedJobId);
+    }
+  }, [jobDetailsInvalidation, startBackgroundDetailRefresh]);
 
   async function downloadOutputStreamForClient(
     clientId: string,
@@ -1543,6 +1626,7 @@ export function JobsPanel({
                 }
                 getRowId={(job) => job.id}
                 itemLabel="jobs"
+                preservePageOnDataUpdate
                 renderExpandedRow={(job) => (
                   <div className="consoleInlineDetailGrid">
                     <span>Job ID</span>

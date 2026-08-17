@@ -12,7 +12,6 @@ use std::io::Write;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    sync::broadcast,
 };
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -2295,7 +2294,7 @@ async fn backup_request_requires_privilege_gateway_verification() {
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,

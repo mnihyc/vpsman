@@ -12,7 +12,6 @@ use axum::{
     extract::ConnectInfo,
     http::{Request, StatusCode},
 };
-use tokio::sync::broadcast;
 use tower::ServiceExt;
 
 use crate::{
@@ -33,7 +32,7 @@ use crate::{
 };
 
 fn router_test_state() -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo: Repository::Memory(MemoryState::default()),
         events,

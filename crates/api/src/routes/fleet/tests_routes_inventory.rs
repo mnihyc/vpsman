@@ -14,7 +14,6 @@ use axum::{
     body::{to_bytes, Body},
     http::{header::AUTHORIZATION, header::CONTENT_TYPE, Request, StatusCode},
 };
-use tokio::sync::broadcast;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -232,7 +231,7 @@ async fn tag_order_routes_enforce_authority_and_exact_json_contracts() {
 
 fn tag_order_route_test_state() -> (AppState, MemoryState) {
     let memory = MemoryState::default();
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     (
         AppState {
             repo: Repository::Memory(memory.clone()),

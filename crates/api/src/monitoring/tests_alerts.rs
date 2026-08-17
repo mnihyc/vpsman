@@ -3587,7 +3587,7 @@ async fn webhook_rule_dispatch_generated_event_id_can_be_confirmed_when_reused()
 fn alert_test_state(repo: Repository) -> AppState {
     AppState {
         repo,
-        events: tokio::sync::broadcast::channel(4).0,
+        events: crate::state::WsEventBus::new(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,

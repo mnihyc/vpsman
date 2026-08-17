@@ -83,11 +83,16 @@ type FleetSnapshotRecord = {
 export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const apiTokenRef = useRef(apiToken);
   const fleetFullGeneration = useRef(0);
-  const fleetSnapshotGeneration = useRef(0);
+  const fleetCoreGeneration = useRef(0);
+  const fleetTelemetryGeneration = useRef(0);
   const fleetTelemetryInFlight = useRef<{
     token: string;
     promise: Promise<void>;
   } | null>(null);
+  const fleetTelemetryRefreshPending = useRef(false);
+  const loadFleetTelemetryRef = useRef<() => Promise<void>>(() =>
+    Promise.resolve(),
+  );
   const deletedClientIds = useRef(new Set<string>());
   const fleetSourceErrors = useRef<Partial<Record<FleetErrorSource, string>>>(
     {},
@@ -154,7 +159,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [],
   );
 
-  const applyLiveFleetSnapshot = useCallback(
+  const applyFleetCoreSnapshot = useCallback(
     (snapshot: FleetSnapshotRecord) => {
       const nextAgents = snapshot.agents.data;
       const staleDeletedIds = nextAgents
@@ -182,7 +187,12 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           ? staleFleetSnapshotMessage(staleDeletedIds)
           : coreError,
       );
+    },
+    [publishFleetError],
+  );
 
+  const applyFleetTelemetrySnapshot = useCallback(
+    (snapshot: FleetSnapshotRecord) => {
       if (snapshot.telemetry_rollups.data) {
         setTelemetryRollups(
           withoutDeletedClients(
@@ -341,7 +351,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       return;
     }
     const fullGeneration = ++fleetFullGeneration.current;
-    const requestGeneration = ++fleetSnapshotGeneration.current;
+    const coreGeneration = ++fleetCoreGeneration.current;
+    const telemetryGeneration = ++fleetTelemetryGeneration.current;
     try {
       const snapshot = await apiGet<FleetSnapshotRecord>(
         "/api/v1/fleet/snapshot?mode=full",
@@ -350,22 +361,27 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (apiTokenRef.current !== apiToken || snapshot.mode !== "full") {
         return;
       }
-      const snapshotIsCurrent =
-        requestGeneration === fleetSnapshotGeneration.current;
+      const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+      const telemetryIsCurrent =
+        telemetryGeneration === fleetTelemetryGeneration.current;
       const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
-      if (snapshotIsCurrent) {
-        applyLiveFleetSnapshot(snapshot);
+      if (coreIsCurrent) {
+        applyFleetCoreSnapshot(snapshot);
+      }
+      if (telemetryIsCurrent) {
+        applyFleetTelemetrySnapshot(snapshot);
       }
       if (fullLoadIsCurrent) {
         applyFleetDetailSnapshot(snapshot);
       }
     } catch (error) {
       const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
-      const snapshotIsCurrent =
-        requestGeneration === fleetSnapshotGeneration.current;
+      const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+      const telemetryIsCurrent =
+        telemetryGeneration === fleetTelemetryGeneration.current;
       if (
         apiTokenRef.current !== apiToken ||
-        (!fullLoadIsCurrent && !snapshotIsCurrent)
+        (!fullLoadIsCurrent && !coreIsCurrent && !telemetryIsCurrent)
       ) {
         return;
       }
@@ -397,9 +413,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       const message =
         error instanceof Error ? error.message : "Fleet refresh unavailable";
-      if (snapshotIsCurrent) {
+      if (coreIsCurrent) {
         setFleetCoreEvidenceAvailable(false);
         publishFleetError("core", message);
+      }
+      if (telemetryIsCurrent) {
         publishFleetError("telemetry", message);
       }
       if (fullLoadIsCurrent) {
@@ -411,8 +429,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     }
   }, [
     apiToken,
+    applyFleetCoreSnapshot,
     applyFleetDetailSnapshot,
-    applyLiveFleetSnapshot,
+    applyFleetTelemetrySnapshot,
     onUnauthorized,
     publishFleetError,
   ]);
@@ -422,27 +441,34 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       return Promise.resolve();
     }
     if (fleetTelemetryInFlight.current?.token === apiToken) {
+      fleetTelemetryRefreshPending.current = true;
       return fleetTelemetryInFlight.current.promise;
     }
-    const requestGeneration = ++fleetSnapshotGeneration.current;
+    fleetTelemetryRefreshPending.current = false;
+    const coreGeneration = ++fleetCoreGeneration.current;
+    const telemetryGeneration = ++fleetTelemetryGeneration.current;
     const request = (async () => {
       try {
         const snapshot = await apiGet<FleetSnapshotRecord>(
           "/api/v1/fleet/snapshot?mode=live",
           apiToken,
         );
-        if (
-          apiTokenRef.current !== apiToken ||
-          requestGeneration !== fleetSnapshotGeneration.current ||
-          snapshot.mode !== "live"
-        ) {
+        if (apiTokenRef.current !== apiToken || snapshot.mode !== "live") {
           return;
         }
-        applyLiveFleetSnapshot(snapshot);
+        if (coreGeneration === fleetCoreGeneration.current) {
+          applyFleetCoreSnapshot(snapshot);
+        }
+        if (telemetryGeneration === fleetTelemetryGeneration.current) {
+          applyFleetTelemetrySnapshot(snapshot);
+        }
       } catch (error) {
+        const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+        const telemetryIsCurrent =
+          telemetryGeneration === fleetTelemetryGeneration.current;
         if (
           apiTokenRef.current !== apiToken ||
-          requestGeneration !== fleetSnapshotGeneration.current
+          (!coreIsCurrent && !telemetryIsCurrent)
         ) {
           return;
         }
@@ -460,18 +486,29 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           setApiError("Operator login required");
           return;
         }
-        setFleetCoreEvidenceAvailable(false);
         const message =
           error instanceof Error
             ? error.message
             : "Live fleet telemetry unavailable";
-        publishFleetError("core", message);
-        publishFleetError("telemetry", message);
+        if (coreIsCurrent) {
+          setFleetCoreEvidenceAvailable(false);
+          publishFleetError("core", message);
+        }
+        if (telemetryIsCurrent) {
+          publishFleetError("telemetry", message);
+        }
       }
     })();
     const trackedRequest = request.finally(() => {
       if (fleetTelemetryInFlight.current?.promise === trackedRequest) {
         fleetTelemetryInFlight.current = null;
+        if (
+          fleetTelemetryRefreshPending.current &&
+          apiTokenRef.current === apiToken
+        ) {
+          fleetTelemetryRefreshPending.current = false;
+          queueMicrotask(() => void loadFleetTelemetryRef.current());
+        }
       }
     });
     fleetTelemetryInFlight.current = {
@@ -479,14 +516,21 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       promise: trackedRequest,
     };
     return trackedRequest;
-  }, [apiToken, applyLiveFleetSnapshot, onUnauthorized, publishFleetError]);
+  }, [
+    apiToken,
+    applyFleetCoreSnapshot,
+    applyFleetTelemetrySnapshot,
+    onUnauthorized,
+    publishFleetError,
+  ]);
+  loadFleetTelemetryRef.current = loadFleetTelemetry;
 
   const replaceFleetSnapshot = useCallback(
     (nextSummary: FleetSummary, nextAgents: AgentView[]) => {
       if (apiTokenRef.current !== apiToken) {
         return;
       }
-      fleetSnapshotGeneration.current += 1;
+      fleetCoreGeneration.current += 1;
       const staleDeletedIds = deletedIdsInAgentSnapshot(
         nextAgents,
         deletedClientIds.current,
@@ -955,8 +999,10 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const clearFleet = useCallback(() => {
     apiTokenRef.current = "";
     fleetFullGeneration.current += 1;
-    fleetSnapshotGeneration.current += 1;
+    fleetCoreGeneration.current += 1;
+    fleetTelemetryGeneration.current += 1;
     fleetTelemetryInFlight.current = null;
+    fleetTelemetryRefreshPending.current = false;
     fleetSourceErrors.current = {};
     deletedClientIds.current.clear();
     setSummary(emptySummary);

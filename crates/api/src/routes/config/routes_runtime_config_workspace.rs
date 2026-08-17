@@ -456,7 +456,6 @@ mod tests {
         body::{to_bytes, Body},
         http::{header::AUTHORIZATION, Request},
     };
-    use tokio::sync::broadcast;
     use tower::ServiceExt;
     use uuid::Uuid;
     use vpsman_common::{AgentCapabilitySnapshot, AgentHello};
@@ -725,7 +724,7 @@ mod tests {
 
     fn runtime_config_route_test_state() -> (AppState, MemoryState) {
         let memory = MemoryState::default();
-        let (events, _) = broadcast::channel(1);
+        let (events, _) = crate::state::WsEventBus::new(1);
         (
             AppState {
                 repo: Repository::Memory(memory.clone()),

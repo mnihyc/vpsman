@@ -127,6 +127,7 @@ export function ConsoleDataGrid<T>({
   openRowOnClick = true,
   openRowLabel = "Open",
   openRowTitle,
+  preservePageOnDataUpdate = false,
   showMobileOpenRowAction = false,
   showMobileRowActions = false,
   onSelectionChange,
@@ -157,6 +158,7 @@ export function ConsoleDataGrid<T>({
   openRowOnClick?: boolean;
   openRowLabel?: string;
   openRowTitle?: (row: T) => string;
+  preservePageOnDataUpdate?: boolean;
   showMobileOpenRowAction?: boolean;
   showMobileRowActions?: boolean;
   onSelectionChange?: (rows: T[]) => void;
@@ -373,6 +375,7 @@ export function ConsoleDataGrid<T>({
     }),
   );
   const table = useReactTable({
+    autoResetPageIndex: preservePageOnDataUpdate ? false : undefined,
     columnResizeMode: "onChange",
     columns: tableColumns,
     data: filteredRows,
@@ -395,6 +398,21 @@ export function ConsoleDataGrid<T>({
       sorting,
     },
   });
+  useEffect(() => {
+    if (preservePageOnDataUpdate) {
+      table.setPageIndex(0);
+    }
+  }, [globalFilter, preservePageOnDataUpdate, sorting, table]);
+  useEffect(() => {
+    if (!preservePageOnDataUpdate) {
+      return;
+    }
+    const pageCount = Math.ceil(filteredRows.length / pageSize);
+    const pageIndex = table.getState().pagination.pageIndex;
+    if (pageIndex >= pageCount) {
+      table.setPageIndex(Math.max(0, pageCount - 1));
+    }
+  }, [filteredRows.length, pageSize, preservePageOnDataUpdate, table]);
   const visibleMinimumGridWidth = table
     .getVisibleLeafColumns()
     .reduce((total, column) => {

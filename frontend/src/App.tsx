@@ -2404,7 +2404,7 @@ export function App() {
         dispatchPreset={jobDispatchPreset}
         fileTransferSources={dashboard.fileTransferSources}
         fileTransferSourcesTruncated={dashboard.fileTransferSourcesTruncated}
-        jobRefreshBatch={dashboard.jobRefreshBatch}
+        jobDetailsInvalidation={dashboard.jobDetailsInvalidation}
         loading={dashboard.jobsLoading}
         onApproveJobApproval={dashboard.approveJobApproval}
         onCreateJob={dashboard.createJob}

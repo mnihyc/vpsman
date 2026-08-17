@@ -3578,6 +3578,7 @@ export async function installConsoleApiMock(
     fleetAlertStateFailure?: boolean;
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     fleetSnapshotAfterDeleteDelayMs?: number;
+    holdInitialFleetSnapshots?: boolean;
     recordPagesSaturated?: boolean;
     runtimeConfigApplyFailure?: boolean;
     runtimeConfigBulkPreviewStateDrift?: boolean;
@@ -3685,6 +3686,7 @@ export async function installConsoleApiMock(
       fleetAlertStatesFixture,
       fleetAlertsFixture,
       fleetSnapshotAfterDeleteDelayMsFixture,
+      holdInitialFleetSnapshotsFixture,
       policyAlertsFixture,
       policyDryRunFixture,
       portForwardRulesFixture,
@@ -3743,6 +3745,15 @@ export async function installConsoleApiMock(
       webhookRulesFixture,
     }) => {
       const originalFetch = window.fetch.bind(window);
+      let fleetSnapshotsHeld = holdInitialFleetSnapshotsFixture;
+      const fleetSnapshotWaiters: Array<() => void> = [];
+      Object.defineProperty(window, "__vpsmanReleaseFleetSnapshots", {
+        configurable: true,
+        value: () => {
+          fleetSnapshotsHeld = false;
+          for (const resolve of fleetSnapshotWaiters.splice(0)) resolve();
+        },
+      });
       const vpsRulesEffectiveGateResolvers = new Map<string, () => void>();
       const vpsRulesEffectiveGates = new Map(
         vpsRulesEffectiveGatedClientIdsFixture.map((clientId) => [
@@ -5705,6 +5716,11 @@ export async function installConsoleApiMock(
           });
         }
         if (pathname === "/api/v1/fleet/snapshot" && method === "GET") {
+          if (fleetSnapshotsHeld) {
+            await new Promise<void>((resolve) =>
+              fleetSnapshotWaiters.push(resolve),
+            );
+          }
           if (
             deletedAgentIds.size > 0 &&
             fleetSnapshotAfterDeleteDelayMsFixture > 0
@@ -10584,6 +10600,8 @@ export async function installConsoleApiMock(
         fleetAlertNotificationChannels,
       fleetSnapshotAfterDeleteDelayMsFixture:
         options.fleetSnapshotAfterDeleteDelayMs ?? 0,
+      holdInitialFleetSnapshotsFixture:
+        options.holdInitialFleetSnapshots ?? false,
       fleetAlertNotificationsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...fleetAlertNotifications[0],

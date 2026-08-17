@@ -21,7 +21,7 @@ use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
     internal_operator::{server_issued_job_actor, system_operator},
     job_traffic_import::wake_network_traffic_import_finalizer,
-    model::{AuthContext, BackupRequestStatus, CreateBackupRequest, WsEvent},
+    model::{AuthContext, BackupRequestStatus, CreateBackupRequest},
     repository::Repository,
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
@@ -492,13 +492,8 @@ async fn finish_claimed_target(
                 "vnStat history collected; server import pending",
             )
             .await?;
-        if let Some((seq, output)) = outcome.outputs.iter().enumerate().next_back() {
-            state.publish(WsEvent::JobOutputRecorded {
-                job_id: claimed.job_id,
-                client_id: claimed.client_id.clone(),
-                seq: seq as i32,
-                done: output.done,
-            });
+        if !outcome.outputs.is_empty() {
+            state.invalidate_job_details(claimed.job_id);
         }
         wake_network_traffic_import_finalizer(state.clone());
         return Ok(());
@@ -507,13 +502,8 @@ async fn finish_claimed_target(
         .repo
         .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
         .await?;
-    if let Some((seq, output)) = outcome.outputs.iter().enumerate().next_back() {
-        state.publish(WsEvent::JobOutputRecorded {
-            job_id: claimed.job_id,
-            client_id: claimed.client_id.clone(),
-            seq: seq as i32,
-            done: output.done,
-        });
+    if !outcome.outputs.is_empty() {
+        state.invalidate_job_details(claimed.job_id);
     }
     if target_terminalized
         && matches!(&claimed.operation, JobCommand::Backup { .. })

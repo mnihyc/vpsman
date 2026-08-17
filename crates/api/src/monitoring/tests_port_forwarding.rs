@@ -2,7 +2,6 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use tokio::sync::broadcast;
 use vpsman_common::{
     pair_port_expressions, PortForwardProtocol, PortForwardRuleRuntimeStat,
     PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
@@ -636,7 +635,7 @@ async fn port_forward_repo() -> Repository {
 }
 
 fn port_forward_test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(16);
+    let (events, _) = crate::state::WsEventBus::new(16);
     AppState {
         repo,
         events,

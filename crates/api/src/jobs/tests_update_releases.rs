@@ -605,7 +605,7 @@ fn test_state(
 ) -> AppState {
     AppState {
         repo,
-        events: tokio::sync::broadcast::channel(4).0,
+        events: crate::state::WsEventBus::new(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::new(
             Some("http://127.0.0.1:9".to_string()),

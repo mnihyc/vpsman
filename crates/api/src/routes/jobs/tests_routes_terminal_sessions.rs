@@ -417,7 +417,7 @@ async fn route_test_state(state_name: &str) -> (AppState, MemoryState, Uuid, Uui
         .await
         .push(test_terminal_session(session_id, job_id, state_name));
     let repo = Repository::Memory(memory.clone());
-    let (events, _) = tokio::sync::broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     let state = AppState {
         repo,
         events,

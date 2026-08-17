@@ -255,8 +255,10 @@ use gateway_client::{GatewayClientTimeouts, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
 use routes::build_router;
-use state::{remember_suite_config, AppState, UpdateReleasePolicy, DEFAULT_ARTIFACT_MAX_BYTES};
-use tokio::{sync::broadcast, time};
+use state::{
+    remember_suite_config, AppState, UpdateReleasePolicy, WsEventBus, DEFAULT_ARTIFACT_MAX_BYTES,
+};
+use tokio::time;
 use tracing::info;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use vpsman_common::{
@@ -736,7 +738,7 @@ async fn main() -> Result<()> {
     );
     reject_api_privilege_verifier_env()?;
     let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
-    let (events, _) = broadcast::channel(256);
+    let (events, ws_invalidations) = WsEventBus::new(256);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
     let gateway = GatewayDispatchClient::new_with_timeouts(
         args.gateway_control_url.clone(),
@@ -828,12 +830,21 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind API on {}", args.bind))?;
     info!(bind = %args.bind, "api listening");
-    axum::serve(
+    let ws_invalidation_task =
+        routes_ws::spawn_ws_invalidation_coalescer(state.events.clone(), ws_invalidations);
+    let server_result = axum::serve(
         listener,
         build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .await;
+    ws_invalidation_task.abort();
+    match ws_invalidation_task.await {
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => return Err(error).context("WebSocket invalidation task failed"),
+        Ok(()) => {}
+    }
+    server_result?;
     Ok(())
 }
 

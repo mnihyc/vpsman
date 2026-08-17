@@ -432,7 +432,7 @@ fn file_download_outputs_with_hash(
 fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState {
     AppState {
         repo,
-        events: tokio::sync::broadcast::channel(4).0,
+        events: crate::state::WsEventBus::new(4).0,
         internal_token: None,
         gateway: GatewayDispatchClient::default(),
         backup_object_store: Some(store),

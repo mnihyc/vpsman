@@ -6,7 +6,6 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use tokio::sync::broadcast;
 use vpsman_common::{
     AgentCapabilitySnapshot, AgentHello, AgentPrivilegeMode, HostPackageCapability,
     HostPackageCapabilityStatus, HostPackageProvider, HostPackageUpdatePlanSnapshot,
@@ -886,7 +885,7 @@ fn host_job_output_for(
 }
 
 fn test_state(repo: Repository) -> AppState {
-    let (events, _) = broadcast::channel(1);
+    let (events, _) = crate::state::WsEventBus::new(1);
     AppState {
         repo,
         events,
