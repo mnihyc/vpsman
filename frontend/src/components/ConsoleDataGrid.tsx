@@ -127,7 +127,7 @@ export function ConsoleDataGrid<T>({
   openRowOnClick = true,
   openRowLabel = "Open",
   openRowTitle,
-  preservePageOnDataUpdate = false,
+  pageResetKey,
   showMobileOpenRowAction = false,
   showMobileRowActions = false,
   onSelectionChange,
@@ -158,7 +158,8 @@ export function ConsoleDataGrid<T>({
   openRowOnClick?: boolean;
   openRowLabel?: string;
   openRowTitle?: (row: T) => string;
-  preservePageOnDataUpdate?: boolean;
+  /** Change only when this mounted grid switches to a different logical list. */
+  pageResetKey?: string | number | null;
   showMobileOpenRowAction?: boolean;
   showMobileRowActions?: boolean;
   onSelectionChange?: (rows: T[]) => void;
@@ -375,7 +376,9 @@ export function ConsoleDataGrid<T>({
     }),
   );
   const table = useReactTable({
-    autoResetPageIndex: preservePageOnDataUpdate ? false : undefined,
+    // Same-list refreshes update rows in place without redirecting the operator.
+    // Search, sort, storage scope, and pageResetKey changes reset explicitly below.
+    autoResetPageIndex: false,
     columnResizeMode: "onChange",
     columns: tableColumns,
     data: filteredRows,
@@ -399,20 +402,15 @@ export function ConsoleDataGrid<T>({
     },
   });
   useEffect(() => {
-    if (preservePageOnDataUpdate) {
-      table.setPageIndex(0);
-    }
-  }, [globalFilter, preservePageOnDataUpdate, sorting, table]);
+    table.setPageIndex(0);
+  }, [globalFilter, pageResetKey, sorting, storageKey, table]);
   useEffect(() => {
-    if (!preservePageOnDataUpdate) {
-      return;
-    }
     const pageCount = Math.ceil(filteredRows.length / pageSize);
     const pageIndex = table.getState().pagination.pageIndex;
     if (pageIndex >= pageCount) {
       table.setPageIndex(Math.max(0, pageCount - 1));
     }
-  }, [filteredRows.length, pageSize, preservePageOnDataUpdate, table]);
+  }, [filteredRows.length, pageSize, table]);
   const visibleMinimumGridWidth = table
     .getVisibleLeafColumns()
     .reduce((total, column) => {

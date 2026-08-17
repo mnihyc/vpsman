@@ -893,6 +893,7 @@ function RolloutDetail({
         }
         getRowId={(target) => target.client_id}
         itemLabel="targets"
+        pageResetKey={rollout.job_id}
         rows={rollout.targets}
         searchPlaceholder="Search VPS or result"
         selectable={false}

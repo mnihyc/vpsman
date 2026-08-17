@@ -774,6 +774,7 @@ export function HostServicesPanel({
           expandOnRowClick
           getRowId={(service) => service.name}
           itemLabel="services"
+          pageResetKey={inventory?.client_id ?? null}
           renderExpandedRow={(service) => (
             <div className="consoleInlineDetailGrid">
               <span>Service</span>

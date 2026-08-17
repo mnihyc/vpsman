@@ -336,6 +336,7 @@ export function JobArtifactsPanel({
           }
           getRowId={(row) => row.id}
           itemLabel="artifacts"
+          pageResetKey={typeFilter}
           renderExpandedRow={(row) => (
             <div className="consoleInlineDetailGrid artifactDetailGrid">
               <span>

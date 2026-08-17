@@ -2918,6 +2918,7 @@ function SystemSessionsPanel({
             expandOnRowClick
             getRowId={(row) => row.id}
             itemLabel="events"
+            pageResetKey={authFilter}
             renderExpandedRow={(row) => <AuthEventDetailGrid event={row} />}
             rows={filteredAuthEvents}
             rowsTruncated={authEventsTruncated}

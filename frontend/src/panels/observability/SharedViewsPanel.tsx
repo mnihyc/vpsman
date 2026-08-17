@@ -986,6 +986,7 @@ export function SharedViewsPanel({
             }
             getRowId={(share) => share.id}
             itemLabel="shared views"
+            pageResetKey={statusFilter}
             renderExpandedRow={(share) => <ShareEvidence share={share} />}
             rowActions={rowActions}
             rows={visibleShares}

@@ -1880,6 +1880,7 @@ export function App() {
         configurationSources={dashboard.configurationSources}
         fleetAlerts={dashboard.fleetAlerts}
         fleetAlertStates={dashboard.fleetAlertStates}
+        fleetPageResetKey={fleetViews.fleetQuery}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         policyAlerts={dashboard.policyAlerts}
         trafficAccounting={dashboard.trafficAccounting}

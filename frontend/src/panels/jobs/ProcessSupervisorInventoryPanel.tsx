@@ -914,6 +914,7 @@ export function ProcessSupervisorInventoryPanel({
           expandOnRowClick
           getRowId={(row) => `${row.client_id}:${row.name}`}
           itemLabel="processes"
+          pageResetKey={focusedClientId ?? "all"}
           empty={
             <div className="emptyState">
               <TerminalSquare size={22} />

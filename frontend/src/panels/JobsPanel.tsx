@@ -1626,7 +1626,6 @@ export function JobsPanel({
                 }
                 getRowId={(job) => job.id}
                 itemLabel="jobs"
-                preservePageOnDataUpdate
                 renderExpandedRow={(job) => (
                   <div className="consoleInlineDetailGrid">
                     <span>Job ID</span>
@@ -1709,6 +1708,7 @@ export function JobsPanel({
                   expandOnRowClick
                   getRowId={(target) => `${target.job_id}:${target.client_id}`}
                   itemLabel="targets"
+                  pageResetKey={selectedJobId}
                   empty={
                     <div className="emptyState">
                       <Server size={22} />
@@ -1995,6 +1995,7 @@ export function JobsPanel({
                           )}
                           rowActions={comparisonGroupActions}
                           rows={outputComparison.groups}
+                          pageResetKey={`${outputComparison.job_id}:${outputComparison.mode}`}
                           searchPlaceholder="Search grouped outcomes"
                           showMobileRowActions={false}
                           singleExpandedRow
@@ -2037,6 +2038,7 @@ export function JobsPanel({
                             </div>
                           )}
                           rows={displayedComparisonRows}
+                          pageResetKey={`${outputComparison.job_id}:${outputComparison.mode}:${selectedComparisonGroupId ?? "all"}`}
                           searchPlaceholder="Search target results"
                           selectable={false}
                           singleExpandedRow

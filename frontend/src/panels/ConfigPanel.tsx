@@ -4002,6 +4002,11 @@ function VpsRulesPanel({
         empty="No VPS rule rows loaded."
         getRowId={(row) => `${row.client_id}:${row.key}`}
         itemLabel="rules"
+        pageResetKey={JSON.stringify([
+          keyFilter,
+          stateFilter,
+          showIncompleteOnly,
+        ])}
         renderExpandedRow={(row) => (
           <div className="consoleInlineDetailGrid">
             <span>
@@ -4563,6 +4568,7 @@ function VpsRulesPreviewTable({
           `${change.client_id}:${change.key}:${change.action}`
         }
         itemLabel="changes"
+        pageResetKey={preview.preview_hash}
         rows={preview.changes}
         searchPlaceholder="Search dry-run changes"
         selectable={false}

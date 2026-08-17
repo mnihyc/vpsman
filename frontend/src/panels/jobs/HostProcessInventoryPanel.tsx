@@ -456,6 +456,7 @@ export function HostProcessInventoryPanel({
           expandOnRowClick
           getRowId={(row) => String(row.pid)}
           itemLabel="host processes"
+          pageResetKey={inventory?.client_id ?? null}
           renderExpandedRow={(row) => (
             <div className="consoleInlineDetailGrid">
               <span>Name</span>

@@ -311,6 +311,7 @@ export function FleetWorkspace({
   fleetCoreEvidenceAvailable,
   fleetAlerts,
   fleetAlertStates,
+  fleetPageResetKey,
   fleetAlertPolicies,
   policyAlerts,
   trafficAccounting,
@@ -368,6 +369,7 @@ export function FleetWorkspace({
   fleetCoreEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
   fleetAlertStates: FleetAlertStateRecord[];
+  fleetPageResetKey: string;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   policyAlerts: PolicyAlertRecord[];
   trafficAccounting: TrafficAccountingRecord[];
@@ -1568,6 +1570,7 @@ export function FleetWorkspace({
           deletePending={deletePending}
           deleteSnapshot={deleteSnapshot}
           fleetCoreEvidenceAvailable={fleetCoreEvidenceAvailable}
+          pageResetKey={fleetPageResetKey}
           lifecycleError={lifecycleError}
           lifecyclePending={lifecyclePending}
           lifecycleProgress={lifecycleProgress}
@@ -1854,6 +1857,7 @@ function FleetInstancesPanel({
   onOpenJobDetails,
   onOpenMonitor,
   onRegisterVps,
+  pageResetKey,
   onSelectionChange,
   renderExpandedRow,
   renderSelectionPanel,
@@ -1884,6 +1888,7 @@ function FleetInstancesPanel({
   onOpenJobDetails?: (jobId: string) => void;
   onOpenMonitor?: () => void;
   onRegisterVps?: () => void;
+  pageResetKey: string;
   onSelectionChange: (rows: AgentView[]) => void;
   renderExpandedRow: (row: AgentView) => ReactNode;
   renderSelectionPanel: (rows: AgentView[]) => ReactNode;
@@ -1988,6 +1993,7 @@ function FleetInstancesPanel({
         getRowId={(agent) => agent.id}
         itemLabel="instances"
         onSelectionChange={onSelectionChange}
+        pageResetKey={pageResetKey}
         renderExpandedRow={renderExpandedRow}
         renderSelectionPanel={renderSelectionPanel}
         rows={stableAgents}
@@ -7855,6 +7861,9 @@ export function NotificationDeliveryHistoryGrid({
       }
       getRowId={(delivery) => delivery.id}
       itemLabel="deliveries"
+      pageResetKey={
+        preview ? (deliveries[0]?.review_preview_hash ?? null) : "history"
+      }
       renderExpandedRow={(delivery) => (
         <div className="gridDetailLine">
           <strong>{delivery.channel_name}</strong>
@@ -9770,6 +9779,9 @@ export function WebhookDeliveryHistoryGrid({
       }
       getRowId={(delivery) => delivery.id}
       itemLabel="deliveries"
+      pageResetKey={
+        preview ? (deliveries[0]?.review_preview_hash ?? null) : "history"
+      }
       renderExpandedRow={(delivery) => (
         <div className="gridDetailLine">
           <strong>{delivery.rule_name}</strong>

@@ -869,6 +869,7 @@ export function AuditLogPanel({
             }
             getRowId={(audit) => audit.id}
             itemLabel="records"
+            pageResetKey={JSON.stringify(auditFilters)}
             expandOnRowClick
             renderExpandedRow={(audit) => (
               <AuditEventDetailPanel

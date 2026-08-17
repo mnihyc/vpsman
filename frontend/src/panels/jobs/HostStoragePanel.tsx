@@ -672,6 +672,7 @@ export function HostStoragePanel({
           expandOnRowClick
           getRowId={(device) => device.path}
           itemLabel="block devices"
+          pageResetKey={`${inventory?.client_id ?? "none"}:${inventory?.include_pseudo_mounts ?? "none"}`}
           renderExpandedRow={(device) => (
             <DeviceDetails
               device={device}
@@ -700,6 +701,7 @@ export function HostStoragePanel({
           expandOnRowClick
           getRowId={(mount) => `${mount.mount_id}:${mount.target}`}
           itemLabel="mounts"
+          pageResetKey={`${inventory?.client_id ?? "none"}:${inventory?.include_pseudo_mounts ?? "none"}`}
           renderExpandedRow={(mount) => (
             <MountDetails mount={mount} observedAt={inventory?.observed_at} />
           )}

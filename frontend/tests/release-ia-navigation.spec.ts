@@ -868,6 +868,125 @@ test(
 );
 
 test(
+  "fleet alert refreshes preserve pagination while table controls reset it",
+  { tag: "@record-pages-saturated" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the paginated table state contract is viewport independent",
+    );
+    await gotoConsoleHome(page);
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+
+    const grid = page.getByLabel("Fleet alerts data grid");
+    await grid.getByLabel("Fleet alerts page size").selectOption("10");
+    await grid.getByLabel("Fleet alerts next page").click();
+    await grid.getByLabel("Fleet alerts next page").click();
+    await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
+
+    await page.evaluate(async () => {
+      type AlertRow = { title: string } & Record<string, unknown>;
+      type AlertRefreshState = { rows: AlertRow[] };
+      const trackedWindow = window as typeof window & {
+        __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
+        __vpsmanFleetAlertRefreshState?: AlertRefreshState;
+        __vpsmanTestWebSockets: EventTarget[];
+      };
+      const originalFetch = window.fetch.bind(window);
+      const response = await originalFetch("/api/v1/fleet-alerts");
+      const rows = (await response.json()) as AlertRow[];
+      rows[20] = { ...rows[20], title: "Refreshed page-three alert" };
+      const state = { rows };
+      trackedWindow.__vpsmanFleetAlertRefreshState = state;
+      trackedWindow.__vpsmanFetchRequests = [];
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        const pathname = new URL(url, window.location.href).pathname;
+        const method = (
+          init?.method ?? (input instanceof Request ? input.method : "GET")
+        ).toUpperCase();
+        if (method === "GET" && pathname === "/api/v1/fleet-alerts") {
+          return new Response(JSON.stringify(state.rows), {
+            headers: { "Content-Type": "application/json" },
+            status: 200,
+          });
+        }
+        return originalFetch(input, init);
+      };
+      trackedWindow.__vpsmanTestWebSockets.at(-1)?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "agent_updated",
+            client_id: "agent-fra-02",
+            gateway_id: "gateway-eu-01",
+          }),
+        }),
+      );
+    });
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as typeof window & {
+                __vpsmanFetchRequests?: Array<{
+                  method: string;
+                  url: string;
+                }>;
+              }
+            ).__vpsmanFetchRequests?.filter(
+              (request) =>
+                request.method === "GET" &&
+                request.url.includes("/api/v1/fleet/snapshot") &&
+                request.url.includes("mode=full"),
+            ).length ?? 0,
+        ),
+      )
+      .toBe(1);
+    await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
+    await expect(grid).toContainText("Refreshed page-three alert");
+
+    const search = grid.getByLabel("Fleet alerts search");
+    await search.fill("Refreshed page-three alert");
+    await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 1");
+    await search.fill("");
+    await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 20");
+
+    await grid.getByLabel("Fleet alerts next page").click();
+    await expect(grid.locator(".gridPageLabel")).toHaveText("2 / 20");
+    await grid.getByRole("button", { name: "Severity", exact: true }).click();
+    await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 20");
+
+    await grid.getByLabel("Fleet alerts next page").click();
+    await grid.getByLabel("Fleet alerts next page").click();
+    await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
+    await page.evaluate(() => {
+      const trackedWindow = window as typeof window & {
+        __vpsmanFleetAlertRefreshState?: {
+          rows: Array<Record<string, unknown>>;
+        };
+        __vpsmanTestWebSockets: EventTarget[];
+      };
+      if (trackedWindow.__vpsmanFleetAlertRefreshState) {
+        trackedWindow.__vpsmanFleetAlertRefreshState.rows =
+          trackedWindow.__vpsmanFleetAlertRefreshState.rows.slice(0, 12);
+      }
+      trackedWindow.__vpsmanTestWebSockets.at(-1)?.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "agent_updated",
+            client_id: "agent-fra-02",
+            gateway_id: "gateway-eu-01",
+          }),
+        }),
+      );
+    });
+    await expect(grid.locator(".gridPageLabel")).toHaveText("2 / 2");
+  },
+);
+
+test(
   "bounded alert subcounts identify the loaded page",
   { tag: "@alert-evidence-saturated" },
   async ({ page }) => {
@@ -2613,14 +2732,12 @@ test("startup WebSocket core preserves the in-flight Home telemetry snapshot", a
           window as typeof window & {
             __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
           }
-        ).__vpsmanFetchRequests
-          ?.filter(
-            (request) =>
-              request.method === "GET" &&
-              new URL(request.url, window.location.href).pathname ===
-                "/api/v1/home/snapshot",
-          )
-          .length ?? 0,
+        ).__vpsmanFetchRequests?.filter(
+          (request) =>
+            request.method === "GET" &&
+            new URL(request.url, window.location.href).pathname ===
+              "/api/v1/home/snapshot",
+        ).length ?? 0,
     );
   await expect.poll(homeSnapshotCount).toBe(1);
   await expect
@@ -2688,11 +2805,10 @@ test("startup WebSocket core preserves the in-flight Home telemetry snapshot", a
           window as typeof window & {
             __vpsmanFetchRequests?: Array<{ method: string; url: string }>;
           }
-        ).__vpsmanFetchRequests?.some(
-          (request) =>
-            ["/api/v1/fleet/snapshot", "/api/v1/monitoring/cards"].includes(
-              new URL(request.url, window.location.href).pathname,
-            ),
+        ).__vpsmanFetchRequests?.some((request) =>
+          ["/api/v1/fleet/snapshot", "/api/v1/monitoring/cards"].includes(
+            new URL(request.url, window.location.href).pathname,
+          ),
         ) ?? false,
     ),
   ).toBe(false);
@@ -3400,6 +3516,8 @@ test("job terminal events update loaded history rows without replacing the page"
   await expect(loadedRow).toBeVisible();
   await historySearch.fill("");
   await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("1 / 2");
+  await jobsGrid.getByLabel("Job records next page").click();
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
 
   const manualJobId = "30000000-0000-4000-8000-000000000001";
   await page.evaluate((jobId) => {
@@ -3445,6 +3563,9 @@ test("job terminal events update loaded history rows without replacing the page"
       ),
     )
     .toBe(1);
+  await expect(jobsGrid.locator(".gridPageLabel")).toHaveText("2 / 2");
+  await expect(jobsGrid.getByTitle(manualJobId)).toHaveCount(0);
+  await jobsGrid.getByLabel("Job records previous page").click();
   await expect(jobsGrid.getByTitle(manualJobId)).toBeVisible();
 });
 
