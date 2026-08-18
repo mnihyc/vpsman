@@ -27,20 +27,6 @@ pub struct SuiteApiConfig {
     pub require_registered_agent_updates: Option<bool>,
     pub job_output_artifact_min_bytes: Option<usize>,
     pub artifact_max_bytes: Option<usize>,
-    // Parse-only compatibility for configurations shipped before resource
-    // thresholds moved into explicit alert policies. These values are ignored.
-    #[serde(rename = "alert_memory_available_warning_ratio")]
-    pub deprecated_alert_memory_available_warning_ratio: Option<f64>,
-    #[serde(rename = "alert_memory_available_critical_ratio")]
-    pub deprecated_alert_memory_available_critical_ratio: Option<f64>,
-    #[serde(rename = "alert_disk_available_warning_ratio")]
-    pub deprecated_alert_disk_available_warning_ratio: Option<f64>,
-    #[serde(rename = "alert_disk_available_critical_ratio")]
-    pub deprecated_alert_disk_available_critical_ratio: Option<f64>,
-    #[serde(rename = "alert_cpu_load_warning")]
-    pub deprecated_alert_cpu_load_warning: Option<f64>,
-    #[serde(rename = "alert_cpu_load_critical")]
-    pub deprecated_alert_cpu_load_critical: Option<f64>,
     pub trusted_proxy_cidrs: Option<Vec<String>>,
     pub operator_auth_username_failed_attempt_limit: Option<i64>,
     pub operator_auth_ip_failed_attempt_limit: Option<i64>,
@@ -410,43 +396,6 @@ impl SuiteConfig {
                 "network.tunnel_*_allocation_pool_cidr".to_string(),
             ],
         }
-    }
-}
-
-impl SuiteApiConfig {
-    pub fn deprecated_resource_alert_threshold_fields(&self) -> Vec<&'static str> {
-        [
-            (
-                "api.alert_memory_available_warning_ratio",
-                self.deprecated_alert_memory_available_warning_ratio
-                    .is_some(),
-            ),
-            (
-                "api.alert_memory_available_critical_ratio",
-                self.deprecated_alert_memory_available_critical_ratio
-                    .is_some(),
-            ),
-            (
-                "api.alert_disk_available_warning_ratio",
-                self.deprecated_alert_disk_available_warning_ratio.is_some(),
-            ),
-            (
-                "api.alert_disk_available_critical_ratio",
-                self.deprecated_alert_disk_available_critical_ratio
-                    .is_some(),
-            ),
-            (
-                "api.alert_cpu_load_warning",
-                self.deprecated_alert_cpu_load_warning.is_some(),
-            ),
-            (
-                "api.alert_cpu_load_critical",
-                self.deprecated_alert_cpu_load_critical.is_some(),
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(field, present)| present.then_some(field))
-        .collect()
     }
 }
 

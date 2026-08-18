@@ -44,16 +44,17 @@ const EVENT_EXPRESSION_ROOTS: [&str; 9] = [
     "telemetry",
     "event",
     "policy",
-    "rule",
+    "policy_rule",
     "traffic",
 ];
-const EVENT_DELIVERY_ROOTS: [&str; 7] = [
+const EVENT_DELIVERY_ROOTS: [&str; 8] = [
     "server",
     "job",
     "schedule",
     "alert",
     "telemetry",
     "policy",
+    "policy_rule",
     "traffic",
 ];
 
@@ -512,9 +513,6 @@ fn webhook_candidate_for_event_with_vps_rules(
                     context = context.with_json_root(root, value);
                 }
             }
-            if let Some(value) = event_payload.get("rule").cloned() {
-                context = context.with_json_root("policy_rule", value);
-            }
             expression_matches(&context, &expression)
         })
         .collect::<Vec<_>>();
@@ -673,12 +671,6 @@ fn merge_event_payload_roots(payload: &mut Value, event_payload: &Value) {
         if let Some(value) = event_payload.get(root).cloned() {
             target.insert(root.to_string(), value);
         }
-    }
-    // `rule` is reserved for webhook-rule template compatibility. Policy
-    // events still evaluate their source rule as `rule.*`, while the delivered
-    // payload exposes that source unambiguously as `policy_rule`.
-    if let Some(value) = event_payload.get("rule").cloned() {
-        target.insert("policy_rule".to_string(), value);
     }
     if let Some(event) = event_payload.get("event").and_then(Value::as_object) {
         if let Some(target_event) = target.get_mut("event").and_then(Value::as_object_mut) {

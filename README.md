@@ -48,17 +48,17 @@ UIs. `vpsman` targets a different operating model:
 
 ## Features
 
-| Area | What it covers |
-| --- | --- |
-| Fleet operations | Inventory, tags, groups, target preview, summaries, alerts, and per-VPS detail panels. |
-| Remote work | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, host and managed processes, native services, read-only storage inventory, and schedules. |
-| Host maintenance | Explicit APT/DNF/YUM/Pacman update plans, stale-plan rejection, per-VPS apply evidence, and durable canary/batch job rollouts. |
-| Backups | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention. |
-| Runtime config | Immutable system presets, reusable custom presets, a typed per-VPS desired-config tree with explicit inherit/reset controls, reviewed bulk incremental patches, and visible runtime sync state. |
-| Network | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters. |
-| Observability | Clickable Home posture, an all-VPS visual grid with Comfortable and Compact densities, canonical per-VPS resource/network/Ping history, reusable Ping targets, managed read-only shared views, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
-| Access and audit | Operator roles/scopes, searchable and revocable bearer sessions, QR-assisted TOTP enrollment, direct gateway identities, key rotation/revocation, audit logs, and evidence views. |
-| Releases | Authoritative `version.json` metadata, GitHub release assets, compose updater, agent update jobs, and rollback-friendly deployment layout. |
+| Area             | What it covers                                                                                                                                                                                                                                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fleet operations | Inventory, tags, groups, target preview, summaries, alerts, and per-VPS detail panels.                                                                                                                                                                                                                     |
+| Remote work      | Reviewed shell/script jobs, interactive terminal sessions, file browser, file transfer, host and managed processes, native services, read-only storage inventory, and schedules.                                                                                                                           |
+| Host maintenance | Explicit APT/DNF/YUM/Pacman update plans, stale-plan rejection, per-VPS apply evidence, and durable canary/batch job rollouts.                                                                                                                                                                             |
+| Backups          | Bounded recursive configuration snapshots, chunked artifacts, restore plans, rollback, migration links, and object-store retention.                                                                                                                                                                        |
+| Runtime config   | Immutable system presets, reusable custom presets, a typed per-VPS desired-config tree with explicit inherit/reset controls, reviewed bulk incremental patches, and visible runtime sync state.                                                                                                            |
+| Network          | Explicit NAT-safe tunnel plans, per-VPS owned nftables port forwarding, exact endpoint evidence, topology, bounded network tests, and optional daemon-neutral routing-cost adapters.                                                                                                                       |
+| Observability    | Clickable Home posture, an all-VPS visual grid with Comfortable and Compact densities, canonical per-VPS resource/network/Ping history, reusable Ping targets, managed read-only shared views, explicit freshness and coverage, alert policies, event webhooks, and bounded automatic telemetry retention. |
+| Access and audit | Operator roles/scopes, searchable and revocable bearer sessions, QR-assisted TOTP enrollment, direct gateway identities, key rotation/revocation, audit logs, and evidence views.                                                                                                                          |
+| Releases         | Authoritative `version.json` metadata, GitHub release assets, compose updater, agent update jobs, and rollback-friendly deployment layout.                                                                                                                                                                 |
 
 ## Architecture
 
@@ -282,6 +282,13 @@ deliberate target refresh for mutable Schedule and Ping snapshots. Shared-view
 targets are also mutable only through their dedicated reviewed **Update
 targets** action; visibility and approval evidence remain immutable.
 
+Schedules have two explicit trigger modes. **Time · cron** retains the reviewed
+recurring workflow. **Alert event** listens only to policy-confirmed
+`alert.triggered` and `alert.resolved` edges, then renders a strict argv template
+and dispatches the same fixed target snapshot. It never reacts directly to a
+raw status, job, or telemetry event, so policy Sustained/Count confirmation and
+Resolve hysteresis absorb flapping before automation runs.
+
 Read more in [docs/target-selectors.md](docs/target-selectors.md).
 
 ### Monitoring and shared views
@@ -306,6 +313,13 @@ split a coarse retained bucket into fabricated fine points.
 
 **Observability > Ping targets** manages reusable ICMP/TCP definitions, frozen
 VPS assignments, and an explicit primary target for each card.
+**Observability > Alerts** owns every alert through typed state, metric, or
+occurrence evidence. Each rule has a Trigger condition, an optional Trigger
+meta condition (Immediate by default), an optional Resolve condition, and a
+Resolve meta condition. Conditions recover automatically; occurrences expire
+automatically after their configured elapsed window and may be resolved early.
+Only the generic `alert.triggered` and `alert.resolved` lifecycle edges reach
+webhooks or Alert-event schedules.
 **Observability > Shared views** creates expiring public read-only projections,
 then retains the lifecycle needed to update frozen targets, copy the URL, extend
 active links, or revoke them. Each share freezes its VPS and visible-data scope
@@ -357,8 +371,10 @@ Compose deployments keep durable state under their `runtime/` directory:
 
 The current canonical database is intentionally fresh-first. Supported
 in-place steps are checksum-pinned: the exact v0.4.4 `0001`–`0009` baseline
-may apply `0010` and then `0011`, while the exact v0.3.5 `0001`–`0008`
-baseline may apply `0009`, `0010`, and then `0011`. Review
+may apply `0010`, `0011`, and then `0012`, while the exact v0.3.5
+`0001`–`0008` baseline may apply `0009`, `0010`, `0011`, and then `0012`.
+Drain all nonterminal webhook deliveries, then stop API/application and worker
+writers for the full migration sequence. Review
 [migration compatibility](docs/migration-compatibility.md) before updating any
 deployment.
 

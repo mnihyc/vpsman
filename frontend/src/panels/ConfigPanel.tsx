@@ -2921,6 +2921,7 @@ type VpsRulesEditMode = "upsert" | "unset";
 type VpsRuleAlertPolicyImpact = {
   conditionExpression: string;
   enabled: boolean;
+  phase: "Trigger" | "Resolve";
   policyId: string;
   policyName: string;
   ruleId: string;
@@ -3093,19 +3094,35 @@ function affectedAlertPolicyRules(
   const matchKeys = keys.length > 0 ? keys : [...VPS_RULE_KEYS];
   return policies
     .flatMap((policy) =>
-      policy.rules
-        .filter((rule) =>
-          matchKeys.some((key) => rule.condition_expression.includes(key)),
-        )
-        .map((rule) => ({
-          conditionExpression: rule.condition_expression,
-          enabled: policy.enabled && rule.enabled,
-          policyId: policy.id,
-          policyName: policy.name,
-          ruleId: rule.id,
-          ruleName: rule.name,
-          severity: rule.severity,
-        })),
+      policy.rules.flatMap((rule) =>
+        [
+          {
+            conditionExpression: rule.trigger_condition_expression,
+            phase: "Trigger" as const,
+          },
+          ...(rule.resolve_condition_expression
+            ? [
+                {
+                  conditionExpression: rule.resolve_condition_expression,
+                  phase: "Resolve" as const,
+                },
+              ]
+            : []),
+        ]
+          .filter(({ conditionExpression }) =>
+            matchKeys.some((key) => conditionExpression.includes(key)),
+          )
+          .map(({ conditionExpression, phase }) => ({
+            conditionExpression,
+            enabled: policy.enabled && rule.enabled,
+            phase,
+            policyId: policy.id,
+            policyName: policy.name,
+            ruleId: rule.id,
+            ruleName: rule.name,
+            severity: rule.severity,
+          })),
+      ),
     )
     .sort(
       (left, right) =>
@@ -4385,11 +4402,11 @@ function VpsRulesPanel({
               {affectedPolicyRules.slice(0, 6).map((impact) => (
                 <div
                   className="configRiskRow"
-                  key={`${impact.policyId}:${impact.ruleId}`}
+                  key={`${impact.policyId}:${impact.ruleId}:${impact.phase}`}
                 >
                   <span>
                     <strong>
-                      {impact.policyName} / {impact.ruleName}
+                      {impact.policyName} / {impact.ruleName} / {impact.phase}
                     </strong>
                     <small className="monoValue">
                       {impact.conditionExpression}

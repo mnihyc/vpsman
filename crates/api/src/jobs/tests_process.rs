@@ -811,6 +811,8 @@ fn host_job(id: Uuid, command_type: &str, created_at: &str, status: &str) -> Job
         actor_id: None,
         command_type: command_type.to_string(),
         source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
         privileged: false,
         status: status.to_string(),
         target_count: 1,

@@ -1360,7 +1360,7 @@ const fleetAlerts = [
       },
       policy: { name: "edge-resource-policy" },
       rule: {
-        condition_expression:
+        trigger_condition_expression:
           "traffic.cycle.total >= traffic.quota.total * 0.8",
       },
       traffic: { cycle_percent: 80.33, reset_day: 14 },
@@ -1385,7 +1385,7 @@ const fleetAlerts = [
     state_actor_id: null,
     state_reason: null,
     state_updated_at: null,
-    status: "policy_reached",
+    status: "policy_condition",
     target_id: "agent-sfo-01:policy-alert-fixture-01",
     target_kind: "policy_rule",
     title: "Traffic quota threshold reached",
@@ -1402,7 +1402,9 @@ const fleetAlerts = [
         state: "unknown",
       },
       policy: { name: "edge-resource-policy" },
-      rule: { condition_expression: "cpu.utilization_ratio >= 0.75" },
+      rule: {
+        trigger_condition_expression: "cpu.utilization_ratio >= 0.75",
+      },
     },
     escalation_level: 0,
     id: "policy-alert:policy-alert-fixture-unknown",
@@ -1424,7 +1426,7 @@ const fleetAlerts = [
     state_actor_id: null,
     state_reason: null,
     state_updated_at: null,
-    status: "policy_reached",
+    status: "policy_condition",
     target_id: "fbfbfbfb-2222-4111-8111-111111111111",
     target_kind: "policy_rule",
     title: "CPU utilization evidence unavailable",
@@ -1604,24 +1606,83 @@ const fleetAlertPolicies = [
     rule_count: 1,
     rules: [
       {
+        armed_after_evidence_seq: 42,
+        armed_at: "2026-06-02T10:00:00Z",
+        category: "traffic",
+        correlation_mode: "natural_key",
         created_at: "2026-06-02T10:00:00Z",
+        detail_template:
+          "{subject.display_name} matched {policy_rule.trigger_condition_expression}",
         enabled: true,
+        evidence_source: "telemetry.combined",
         group_id: "fbfbfbfb-1111-4111-8111-111111111111",
         id: "fbfbfbfb-2222-4111-8111-111111111111",
-        condition_expression:
-          "traffic.cycle.total >= traffic.quota.total * 0.8",
         name: "80% total quota",
+        resolve_condition_expression: null,
+        resolve_meta_condition: null,
+        rule_kind: "metric",
         rule_version: 1,
         severity: "warning",
         sort_order: 0,
+        system_seed_key: null,
+        title_template: "Traffic quota threshold reached",
         traffic_selector: null,
+        trigger_condition_expression:
+          "traffic.cycle.total >= traffic.quota.total * 0.8",
+        trigger_meta_condition: null,
         updated_at: "2026-06-02T10:00:00Z",
-        window_secs: 0,
       },
     ],
     selector_expression: "tag:edge",
     updated_at: "2026-06-02T10:00:00Z",
     updated_by: "99999999-aaaa-4bbb-8ccc-000000000001",
+  },
+  {
+    active_critical_count: 0,
+    active_info_count: 0,
+    active_warning_count: 0,
+    created_at: "2026-06-02T09:00:00Z",
+    created_by: null,
+    enabled: true,
+    id: "abababab-1111-4111-8111-111111111111",
+    enabled_rule_count: 1,
+    incomplete_vps_count: 0,
+    last_evaluated_at: "2026-06-02T10:01:00Z",
+    matched_vps_count: 2,
+    name: "Default agent connectivity",
+    notes: "Enabled system policy with anti-flap confirmation.",
+    rule_count: 1,
+    rules: [
+      {
+        armed_after_evidence_seq: 40,
+        armed_at: "2026-06-02T09:00:00Z",
+        category: "agent_status",
+        correlation_mode: "natural_key",
+        created_at: "2026-06-02T09:00:00Z",
+        detail_template:
+          "{subject.display_name} currently reports {evidence.status}",
+        enabled: true,
+        evidence_source: "agent.status",
+        group_id: "abababab-1111-4111-8111-111111111111",
+        id: "abababab-2222-4111-8111-111111111111",
+        name: "Agent offline",
+        resolve_condition_expression: "evidence.status = online",
+        resolve_meta_condition: { kind: "sustained", seconds: 60 },
+        rule_kind: "state",
+        rule_version: 1,
+        severity: "critical",
+        sort_order: 0,
+        system_seed_key: "default.agent.offline",
+        title_template: "Agent is not online",
+        traffic_selector: null,
+        trigger_condition_expression: "evidence.status = offline",
+        trigger_meta_condition: { kind: "sustained", seconds: 120 },
+        updated_at: "2026-06-02T09:00:00Z",
+      },
+    ],
+    selector_expression: "*",
+    updated_at: "2026-06-02T09:00:00Z",
+    updated_by: null,
   },
 ];
 
@@ -1810,10 +1871,14 @@ const policyDryRunFixture = {
     "2222222222222222222222222222222222222222222222222222222222222222",
   rule_previews: [
     {
+      trigger_condition_expression:
+        "traffic.cycle.total >= traffic.quota.total * 0.8",
+      trigger_meta_condition: null,
+      resolve_condition_expression: null,
+      resolve_meta_condition: null,
       false_count: 0,
       incomplete_count: 0,
       category: "traffic",
-      condition_expression: "traffic.cycle.total >= traffic.quota.total * 0.8",
       rule_name: "80% total quota",
       severity: "warning",
       true_count: 1,
@@ -4049,7 +4114,9 @@ export async function installConsoleApiMock(
     privilegeVerificationDelayMs?: number;
     privilegeVerificationFailure?: "denied" | "unavailable";
     policyAlertHistorySaturated?: boolean;
-    schedulesOverride?: ScheduleRecord[];
+    policyAlertGlobalOccurrence?: boolean;
+    policyDryRunOccurrence?: boolean;
+    schedulesOverride?: Array<Partial<ScheduleRecord>>;
     storedAuthSession?: boolean;
     tagOrderStateOverride?: {
       namespace_natural_sort_enabled: boolean;
@@ -4555,6 +4622,7 @@ export async function installConsoleApiMock(
         portForwardRules: [] as unknown[],
         restorePlans: [] as unknown[],
         scheduleActions: [] as unknown[],
+        scheduleEventPreviews: [] as unknown[],
         schedules: [] as unknown[],
         suiteConfigs: [] as unknown[],
         suiteConfigReads: 0,
@@ -5131,56 +5199,94 @@ export async function installConsoleApiMock(
         }
         return Array.from(ids);
       };
-      const normalizeScheduleRecord = (schedule: Record<string, unknown>) => ({
-        catch_up_limit: schedule.catch_up_limit ?? 1,
-        catch_up_policy: schedule.catch_up_policy ?? "run_once",
-        command_type:
-          schedule.command_type ??
-          commandTypeForOperation(
-            schedule.operation as Record<string, unknown> | undefined,
-          ) ??
-          "shell_argv",
-        created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
-        cron_expr: schedule.cron_expr ?? "0 * * * *",
-        cadence_error: schedule.cadence_error ?? null,
-        deferred_until: schedule.deferred_until ?? null,
-        deleted_at: schedule.deleted_at ?? null,
-        enabled: schedule.enabled ?? true,
-        failure_count: schedule.failure_count ?? 0,
-        id: schedule.id ?? "52525252-6161-4717-8abc-defdefdefdef",
-        last_error: schedule.last_error ?? null,
-        last_run_at: schedule.last_run_at ?? null,
-        max_failures: schedule.max_failures ?? 3,
-        name: schedule.name ?? "scheduled-job",
-        next_run_at: schedule.next_run_at ?? "2026-06-02T11:00:00Z",
-        next_runs: schedule.next_runs ?? [
-          "2026-06-02T11:00:00Z",
-          "2026-06-02T12:00:00Z",
-          "2026-06-02T13:00:00Z",
-          "2026-06-02T14:00:00Z",
-          "2026-06-02T15:00:00Z",
-        ],
-        operation:
-          "operation" in schedule
-            ? schedule.operation
-            : {
-                argv: ["uptime"],
-                pty: false,
-                type: "shell",
-              },
-        operation_error: schedule.operation_error ?? null,
-        operation_payload_hash: schedule.operation_payload_hash,
-        retry_delay_secs: schedule.retry_delay_secs ?? 300,
-        selector_expression: schedule.selector_expression ?? "id:*",
-        target_client_ids: Array.isArray(schedule.target_client_ids)
-          ? schedule.target_client_ids
-          : scheduleTargetIdsFromSelector(
-              schedule.selector_expression ?? "id:*",
-            ),
-        timezone: schedule.timezone ?? "UTC",
-        updated_at:
-          schedule.updated_at ?? schedule.created_at ?? "2026-06-02T10:00:00Z",
-      });
+      const normalizeScheduleRecord = (schedule: Record<string, unknown>) => {
+        const triggerKind =
+          schedule.trigger_kind === "event" ? "event" : "cron";
+        return {
+          trigger_kind: triggerKind,
+          definition_revision: schedule.definition_revision ?? 1,
+          catch_up_limit:
+            triggerKind === "event" ? null : (schedule.catch_up_limit ?? 1),
+          catch_up_policy:
+            triggerKind === "event"
+              ? null
+              : (schedule.catch_up_policy ?? "run_once"),
+          command_type:
+            schedule.command_type ??
+            commandTypeForOperation(
+              schedule.operation as Record<string, unknown> | undefined,
+            ) ??
+            "shell_argv",
+          created_at: schedule.created_at ?? "2026-06-02T10:00:00Z",
+          cron_expr:
+            triggerKind === "event"
+              ? null
+              : (schedule.cron_expr ?? "0 * * * *"),
+          event_expression:
+            triggerKind === "event"
+              ? (schedule.event_expression ?? "alert.triggered")
+              : null,
+          event_armed_at:
+            triggerKind === "event"
+              ? (schedule.event_armed_at ?? "2026-06-02T10:00:00Z")
+              : null,
+          cadence_error:
+            triggerKind === "event" ? null : (schedule.cadence_error ?? null),
+          deferred_until: schedule.deferred_until ?? null,
+          deleted_at: schedule.deleted_at ?? null,
+          enabled: schedule.enabled ?? true,
+          failure_count: schedule.failure_count ?? 0,
+          id: schedule.id ?? "52525252-6161-4717-8abc-defdefdefdef",
+          last_error: schedule.last_error ?? null,
+          last_run_at: schedule.last_run_at ?? null,
+          max_failures: schedule.max_failures ?? 3,
+          name: schedule.name ?? "scheduled-job",
+          next_run_at:
+            triggerKind === "event"
+              ? null
+              : (schedule.next_run_at ?? "2026-06-02T11:00:00Z"),
+          next_runs:
+            triggerKind === "event"
+              ? []
+              : (schedule.next_runs ?? [
+                  "2026-06-02T11:00:00Z",
+                  "2026-06-02T12:00:00Z",
+                  "2026-06-02T13:00:00Z",
+                  "2026-06-02T14:00:00Z",
+                  "2026-06-02T15:00:00Z",
+                ]),
+          operation:
+            triggerKind === "event"
+              ? null
+              : "operation" in schedule
+                ? schedule.operation
+                : {
+                    argv: ["uptime"],
+                    pty: false,
+                    type: "shell",
+                  },
+          event_argv_template:
+            triggerKind === "event"
+              ? (schedule.event_argv_template ?? null)
+              : null,
+          operation_error: schedule.operation_error ?? null,
+          operation_payload_hash: schedule.operation_payload_hash,
+          retry_delay_secs:
+            triggerKind === "event" ? null : (schedule.retry_delay_secs ?? 300),
+          selector_expression: schedule.selector_expression ?? "id:*",
+          target_client_ids: Array.isArray(schedule.target_client_ids)
+            ? schedule.target_client_ids
+            : scheduleTargetIdsFromSelector(
+                schedule.selector_expression ?? "id:*",
+              ),
+          timezone:
+            triggerKind === "event" ? null : (schedule.timezone ?? "UTC"),
+          updated_at:
+            schedule.updated_at ??
+            schedule.created_at ??
+            "2026-06-02T10:00:00Z",
+        };
+      };
       const currentSchedules = (
         schedulesFixture as Array<Record<string, unknown>>
       ).map((schedule) => normalizeScheduleRecord(schedule));
@@ -9548,30 +9654,108 @@ export async function installConsoleApiMock(
             currentSchedules.filter((schedule) => !schedule.deleted_at),
           );
         }
+        if (
+          pathname === "/api/v1/schedules/preview-event-template" &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            event_argv_template?: string[] | null;
+            event_expression?: string;
+          };
+          requests.scheduleEventPreviews.push(body);
+          const templateArgv = body.event_argv_template ?? ["/bin/true"];
+          const expression = body.event_expression?.toLowerCase() ?? "";
+          const eventKinds = [
+            ...(expression.includes("alert.triggered")
+              ? ["alert.triggered"]
+              : []),
+            ...(expression.includes("alert.resolved")
+              ? ["alert.resolved"]
+              : []),
+          ];
+          const previews = eventKinds.map((eventKind) => {
+            const contextValues: Record<string, string> = {
+              "alert.category": "traffic",
+              "alert.id": "fixture-alert-episode-01",
+              "alert.resolution_reason": "condition_recovered",
+              "alert.severity": "warning",
+              "alert.title": "Traffic policy threshold reached",
+              "alert.trigger_generation": "3",
+              "event.id": `alert-event-fixture-${eventKind.split(".")[1]}-01`,
+              "event.kind": eventKind,
+              "policy.name": "Edge traffic policy",
+              "policy_rule.name": "80% quota sustained",
+            };
+            const renderedArgv = templateArgv.map((value) =>
+              value.replace(/\{([a-z0-9_.]+)\}/gi, (_match, path: string) =>
+                Object.prototype.hasOwnProperty.call(contextValues, path)
+                  ? contextValues[path]
+                  : `{${path}}`,
+              ),
+            );
+            return {
+              context: {
+                alert_category: "traffic",
+                alert_severity: "warning",
+                alert_title: "Traffic policy threshold reached",
+                event_kind: eventKind,
+                policy_name: "Edge traffic policy",
+                policy_rule_name: "80% quota sustained",
+              },
+              elements: templateArgv.map((template, index) => ({
+                error_code: null,
+                error_message: null,
+                index,
+                rendered: renderedArgv[index],
+                template,
+              })),
+              rendered_argv: renderedArgv,
+              rendered_hash: "8".repeat(64),
+            };
+          });
+          return jsonResponse({
+            previews,
+            template_argv: templateArgv,
+            template_hash: "7".repeat(64),
+            uses_default_noop: body.event_argv_template == null,
+          });
+        }
         if (pathname === "/api/v1/schedules" && method === "POST") {
           const body = await readJsonBody(input, init);
           requests.schedules.push(body);
           const request = body as {
-            catch_up_limit?: number;
-            catch_up_policy?: string;
-            cron_expr?: string;
+            catch_up_limit?: number | null;
+            catch_up_policy?: string | null;
+            cron_expr?: string | null;
             enabled?: boolean;
+            event_argv_template?: string[] | null;
+            event_expression?: string | null;
             max_failures?: number;
             name?: string;
-            operation?: Record<string, unknown>;
-            retry_delay_secs?: number;
+            operation?: Record<string, unknown> | null;
+            retry_delay_secs?: number | null;
             selector_expression?: string;
             target_client_ids?: string[];
-            timezone?: string;
+            timezone?: string | null;
+            trigger_kind?: "cron" | "event";
           };
-          const cronExpr = request.cron_expr ?? "0 * * * *";
+          const triggerKind = request.trigger_kind ?? "cron";
+          const cronExpr =
+            triggerKind === "cron" ? (request.cron_expr ?? "0 * * * *") : null;
           const schedule = normalizeScheduleRecord({
-            catch_up_limit: request.catch_up_limit ?? 1,
-            catch_up_policy: request.catch_up_policy ?? "run_once",
+            trigger_kind: triggerKind,
+            catch_up_limit:
+              triggerKind === "cron" ? (request.catch_up_limit ?? 1) : null,
+            catch_up_policy:
+              triggerKind === "cron"
+                ? (request.catch_up_policy ?? "run_once")
+                : null,
             command_type:
               commandTypeForOperation(request.operation) ?? "shell_argv",
             created_at: "2026-06-02T10:04:00Z",
             cron_expr: cronExpr,
+            event_argv_template: request.event_argv_template ?? null,
+            event_expression: request.event_expression ?? null,
             deferred_until: null,
             deleted_at: null,
             enabled: request.enabled ?? true,
@@ -9581,27 +9765,35 @@ export async function installConsoleApiMock(
             last_run_at: null,
             max_failures: request.max_failures ?? 3,
             name: request.name ?? "scheduled-job",
-            next_run_at: "2026-06-02T11:04:00Z",
-            next_runs: [
-              "2026-06-02T11:04:00Z",
-              "2026-06-02T12:04:00Z",
-              "2026-06-02T13:04:00Z",
-              "2026-06-02T14:04:00Z",
-              "2026-06-02T15:04:00Z",
-            ],
-            operation: request.operation ?? {
-              argv: ["uptime"],
-              pty: false,
-              type: "shell",
-            },
-            retry_delay_secs: request.retry_delay_secs ?? 300,
+            next_run_at: triggerKind === "cron" ? "2026-06-02T11:04:00Z" : null,
+            next_runs:
+              triggerKind === "cron"
+                ? [
+                    "2026-06-02T11:04:00Z",
+                    "2026-06-02T12:04:00Z",
+                    "2026-06-02T13:04:00Z",
+                    "2026-06-02T14:04:00Z",
+                    "2026-06-02T15:04:00Z",
+                  ]
+                : [],
+            operation:
+              triggerKind === "event"
+                ? null
+                : (request.operation ?? {
+                    argv: ["uptime"],
+                    pty: false,
+                    type: "shell",
+                  }),
+            retry_delay_secs:
+              triggerKind === "cron" ? (request.retry_delay_secs ?? 300) : null,
             selector_expression: request.selector_expression ?? "id:*",
             target_client_ids:
               request.target_client_ids ??
               scheduleTargetIdsFromSelector(
                 request.selector_expression ?? "id:*",
               ),
-            timezone: request.timezone ?? "UTC",
+            timezone:
+              triggerKind === "cron" ? (request.timezone ?? "UTC") : null,
             updated_at: "2026-06-02T10:04:00Z",
           });
           currentSchedules.push(schedule);
@@ -9616,37 +9808,87 @@ export async function installConsoleApiMock(
             return jsonResponse({ error: "schedule_not_found" }, 404);
           }
           const request = body as {
-            catch_up_limit?: number;
-            catch_up_policy?: string;
-            cron_expr?: string;
+            catch_up_limit?: number | null;
+            catch_up_policy?: string | null;
+            cron_expr?: string | null;
             enabled?: boolean;
+            event_argv_template?: string[] | null;
+            event_expression?: string | null;
             max_failures?: number;
             name?: string;
-            operation?: Record<string, unknown>;
-            retry_delay_secs?: number;
+            operation?: Record<string, unknown> | null;
+            retry_delay_secs?: number | null;
             selector_expression?: string;
             target_client_ids?: string[];
-            timezone?: string;
+            timezone?: string | null;
+            trigger_kind?: "cron" | "event";
           };
+          const triggerKind = request.trigger_kind ?? schedule.trigger_kind;
           Object.assign(schedule, {
-            catch_up_limit: request.catch_up_limit ?? schedule.catch_up_limit,
+            trigger_kind: triggerKind,
+            definition_revision: Number(schedule.definition_revision) + 1,
+            catch_up_limit:
+              triggerKind === "event"
+                ? null
+                : "catch_up_limit" in request
+                  ? request.catch_up_limit
+                  : schedule.catch_up_limit,
             catch_up_policy:
-              request.catch_up_policy ?? schedule.catch_up_policy,
+              triggerKind === "event"
+                ? null
+                : "catch_up_policy" in request
+                  ? request.catch_up_policy
+                  : schedule.catch_up_policy,
             command_type:
-              commandTypeForOperation(request.operation) ??
-              schedule.command_type,
-            cron_expr: request.cron_expr ?? schedule.cron_expr,
+              triggerKind === "event"
+                ? "shell_argv"
+                : (commandTypeForOperation(request.operation) ??
+                  schedule.command_type),
+            cron_expr:
+              triggerKind === "event"
+                ? null
+                : "cron_expr" in request
+                  ? request.cron_expr
+                  : schedule.cron_expr,
+            event_argv_template:
+              triggerKind === "event"
+                ? "event_argv_template" in request
+                  ? request.event_argv_template
+                  : schedule.event_argv_template
+                : null,
+            event_expression:
+              triggerKind === "event"
+                ? "event_expression" in request
+                  ? request.event_expression
+                  : schedule.event_expression
+                : null,
+            event_armed_at:
+              triggerKind === "event" ? "2026-06-02T10:05:00Z" : null,
             enabled: request.enabled ?? schedule.enabled,
             max_failures: request.max_failures ?? schedule.max_failures,
             name: request.name ?? schedule.name,
-            operation: request.operation ?? schedule.operation,
+            operation:
+              triggerKind === "event"
+                ? null
+                : "operation" in request
+                  ? request.operation
+                  : schedule.operation,
             retry_delay_secs:
-              request.retry_delay_secs ?? schedule.retry_delay_secs,
+              triggerKind === "event"
+                ? null
+                : "retry_delay_secs" in request
+                  ? request.retry_delay_secs
+                  : schedule.retry_delay_secs,
             selector_expression:
               request.selector_expression ?? schedule.selector_expression,
             target_client_ids:
               request.target_client_ids ?? schedule.target_client_ids,
-            timezone: request.timezone ?? schedule.timezone,
+            timezone:
+              triggerKind === "event"
+                ? null
+                : "timezone" in request
+                  ? request.timezone
+                  : schedule.timezone,
             updated_at: "2026-06-02T10:05:00Z",
           });
           return jsonResponse(schedule);
@@ -9660,6 +9902,8 @@ export async function installConsoleApiMock(
           }
           schedule.deleted_at = "2026-06-02T10:08:00Z";
           schedule.enabled = false;
+          schedule.definition_revision =
+            Number(schedule.definition_revision) + 1;
           schedule.updated_at = "2026-06-02T10:08:00Z";
           return jsonResponse(schedule);
         }
@@ -9676,6 +9920,11 @@ export async function installConsoleApiMock(
           schedule.target_client_ids = scheduleTargetIdsFromSelector(
             schedule.selector_expression,
           );
+          schedule.definition_revision =
+            Number(schedule.definition_revision) + 1;
+          if (schedule.trigger_kind === "event") {
+            schedule.event_armed_at = "2026-06-02T10:06:30Z";
+          }
           schedule.updated_at = "2026-06-02T10:06:30Z";
           return jsonResponse(schedule);
         }
@@ -9692,11 +9941,18 @@ export async function installConsoleApiMock(
           }
           if (action === "enable") {
             schedule.enabled = true;
+            schedule.definition_revision =
+              Number(schedule.definition_revision) + 1;
+            if (schedule.trigger_kind === "event") {
+              schedule.event_armed_at = "2026-06-02T10:06:00Z";
+            }
             schedule.updated_at = "2026-06-02T10:06:00Z";
             return jsonResponse(schedule);
           }
           if (action === "disable") {
             schedule.enabled = false;
+            schedule.definition_revision =
+              Number(schedule.definition_revision) + 1;
             schedule.updated_at = "2026-06-02T10:06:00Z";
             return jsonResponse(schedule);
           }
@@ -9704,6 +9960,11 @@ export async function installConsoleApiMock(
             schedule.deferred_until =
               (body as { deferred_until?: string } | null)?.deferred_until ??
               "2026-06-03T12:00:00Z";
+            schedule.definition_revision =
+              Number(schedule.definition_revision) + 1;
+            if (schedule.trigger_kind === "event") {
+              schedule.event_armed_at = "2026-06-02T10:07:00Z";
+            }
             schedule.updated_at = "2026-06-02T10:07:00Z";
             return jsonResponse(schedule);
           }
@@ -11601,7 +11862,30 @@ export async function installConsoleApiMock(
               ...policyAlerts[1],
               id: `policy-alert-history-${String(index).padStart(3, "0")}`,
             }))
-          : policyAlerts,
+          : options.policyAlertGlobalOccurrence
+            ? [
+                ...policyAlerts,
+                {
+                  ...policyAlerts[0],
+                  actual_value: null,
+                  category: "job",
+                  client_id: null,
+                  detail: "Three terminal jobs failed inside five minutes.",
+                  id: "policy-alert-global-job-occurrence",
+                  last_confirmed_at: "2026-06-23T07:35:00Z",
+                  lifecycle_state: "persisting",
+                  payload: {
+                    alert: { category: "job", severity: "critical" },
+                  },
+                  policy_rule_id: "fbfbfbfb-3333-4111-8111-111111111111",
+                  severity: "critical",
+                  target_id: "global:job.terminal",
+                  target_kind: "policy_source",
+                  threshold_value: null,
+                  title: "Repeated terminal job failures",
+                },
+              ]
+            : policyAlerts,
       currentPolicyAlertsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...policyAlerts[0],
@@ -11609,7 +11893,30 @@ export async function installConsoleApiMock(
           }))
         : [policyAlerts[0]],
       currentPolicyAlertsTruncatedFixture: options.alertEvidenceSaturated,
-      policyDryRunFixture,
+      policyDryRunFixture: options.policyDryRunOccurrence
+        ? {
+            ...policyDryRunFixture,
+            rule_previews: [
+              ...policyDryRunFixture.rule_previews,
+              {
+                category: "job",
+                false_count: 0,
+                incomplete_count: 0,
+                resolve_condition_expression: null,
+                resolve_meta_condition: {
+                  kind: "elapsed_since_trigger",
+                  seconds: 604800,
+                },
+                rule_name: "Job failure",
+                severity: "critical",
+                trigger_condition_expression:
+                  "evidence.status in [failed, agent_timeout, control_timeout]",
+                trigger_meta_condition: null,
+                true_count: 1,
+              },
+            ],
+          }
+        : policyDryRunFixture,
       portForwardRulesFixture: portForwardRules,
       fileTransferSourceArtifactsFixture:
         options.fileTransferSourceArtifactsOverride ??

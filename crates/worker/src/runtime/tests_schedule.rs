@@ -40,6 +40,8 @@ fn schedule_with_policy(policy: &str, limit: i32) -> DueSchedule {
         actor_username: None,
         actor_role: None,
         name: "test".to_string(),
+        definition_revision: 1,
+        trigger_kind: "cron".to_string(),
         operation: JobCommand::Shell {
             argv: vec!["/bin/true".to_string()],
             pty: false,
@@ -54,6 +56,7 @@ fn schedule_with_policy(policy: &str, limit: i32) -> DueSchedule {
         max_failures: 3,
         failure_count: 0,
         last_error: None,
+        materialization: ScheduleMaterializationContext::default(),
     }
 }
 
@@ -355,7 +358,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
         &db.pool,
         "invalid-template-webhook-rule",
         "status = online",
-        "[if alert.open]missing end",
+        "[if alert.triggered]missing end",
     )
     .await;
     let expanding_template = format!("[for v in matched_vps]{}[endfor]", "x".repeat(3_900));
@@ -828,7 +831,7 @@ async fn postgres_scheduled_update_skips_busy_targets() {
 }
 
 #[tokio::test]
-async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
+async fn postgres_scheduled_capability_skip_records_neutral_policy_evidence() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
@@ -888,74 +891,99 @@ async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
     assert_eq!(output["type"], "capability_degraded");
     assert_eq!(output["command_type"], "agent_update_check");
 
-    let episode = sqlx::query(
+    let job_lineage = sqlx::query("SELECT causation_id, schedule_lineage FROM jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let expected_causation_id = job_lineage
+        .try_get::<Option<Uuid>, _>("causation_id")
+        .unwrap();
+    let expected_schedule_lineage = job_lineage
+        .try_get::<Vec<Uuid>, _>("schedule_lineage")
+        .unwrap();
+    let evidence = sqlx::query(
         r#"
-        SELECT id, lifecycle_state, trigger_generation, producer_kind,
-               category, client_id, source_status
-        FROM operational_alert_episodes
-        WHERE producer_kind = 'capability_degraded'
-          AND natural_key = $1
+        SELECT id, source_event_id, fact_kind, natural_key,
+               confirmation_bucket_key, subject_client_id, target_kind,
+               target_id, source_status, completeness, subject_snapshot,
+               payload, state_started_at, causation_id, schedule_lineage
+        FROM alert_policy_evidence
+        WHERE source_kind = 'job.capability' AND natural_key = $1
         "#,
     )
     .bind(format!("{job_id}:edge-unprivileged"))
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let episode_id: Uuid = episode.try_get("id").unwrap();
+    let evidence_id: Uuid = evidence.try_get("id").unwrap();
     assert_eq!(
-        episode.try_get::<String, _>("lifecycle_state").unwrap(),
-        "triggered"
-    );
-    assert_eq!(episode.try_get::<i64, _>("trigger_generation").unwrap(), 1);
-    assert_eq!(
-        episode.try_get::<String, _>("category").unwrap(),
-        "capability_degraded"
+        evidence.try_get::<String, _>("source_event_id").unwrap(),
+        format!("{job_id}:edge-unprivileged")
     );
     assert_eq!(
-        episode.try_get::<Option<String>, _>("client_id").unwrap(),
+        evidence.try_get::<String, _>("fact_kind").unwrap(),
+        "occurrence"
+    );
+    assert_eq!(
+        evidence
+            .try_get::<String, _>("confirmation_bucket_key")
+            .unwrap(),
+        format!("{job_id}:edge-unprivileged")
+    );
+    assert_eq!(
+        evidence
+            .try_get::<Option<String>, _>("subject_client_id")
+            .unwrap(),
         Some("edge-unprivileged".to_string())
     );
     assert_eq!(
-        episode.try_get::<String, _>("source_status").unwrap(),
-        "target_agent_lacks_agent_update_capability"
+        evidence.try_get::<String, _>("target_kind").unwrap(),
+        "job_target"
     );
-
-    let edge = sqlx::query(
-        r#"
-        SELECT payload, event_predicates, subject_client_ids
-        FROM webhook_events
-        WHERE kind = 'alert.triggered' AND event_id = $1
-        "#,
-    )
-    .bind(format!("fleet-alert:{episode_id}:triggered"))
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    let payload = edge
-        .try_get::<SqlJson<serde_json::Value>, _>("payload")
+    assert_eq!(
+        evidence.try_get::<String, _>("target_id").unwrap(),
+        format!("{job_id}:edge-unprivileged")
+    );
+    assert_eq!(
+        evidence.try_get::<String, _>("source_status").unwrap(),
+        "skipped"
+    );
+    assert_eq!(
+        evidence.try_get::<String, _>("completeness").unwrap(),
+        "complete"
+    );
+    assert!(evidence
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("state_started_at")
         .unwrap()
-        .0;
-    assert_eq!(payload["alert"]["producer_kind"], "capability_degraded");
-    assert_eq!(payload["alert"]["lifecycle_state"], "triggered");
-    assert_eq!(payload["alert"]["trigger_generation"], 1);
-    assert_eq!(payload["alert"]["client_id"], "edge-unprivileged");
+        .is_none());
     assert_eq!(
-        payload["alert"]["source_status"],
+        evidence.try_get::<Option<Uuid>, _>("causation_id").unwrap(),
+        expected_causation_id
+    );
+    assert_eq!(
+        evidence
+            .try_get::<Vec<Uuid>, _>("schedule_lineage")
+            .unwrap(),
+        expected_schedule_lineage
+    );
+    let subject_snapshot = evidence
+        .try_get::<serde_json::Value, _>("subject_snapshot")
+        .unwrap();
+    assert_eq!(subject_snapshot["client_id"], "edge-unprivileged");
+    assert_eq!(subject_snapshot["display_name"], "edge-unprivileged");
+    let payload = evidence.try_get::<serde_json::Value, _>("payload").unwrap();
+    assert_eq!(payload["status"], "skipped");
+    assert_eq!(
+        payload["source_status"],
         "target_agent_lacks_agent_update_capability"
     );
+    assert_eq!(payload["client_id"], "edge-unprivileged");
+    assert_eq!(payload["job_id"], job_id.to_string());
+    assert_eq!(payload["command_type"], "scheduled_agent_update_check");
     assert_eq!(
-        edge.try_get::<Vec<String>, _>("event_predicates").unwrap(),
-        vec![
-            "alert.category:capability_degraded",
-            "alert.open",
-            "alert.severity:warning",
-            "alert.triggered",
-        ]
-    );
-    assert_eq!(
-        edge.try_get::<Vec<String>, _>("subject_client_ids")
-            .unwrap(),
-        vec!["edge-unprivileged"]
+        payload["reason"], payload["hint"],
+        "neutral reason mirrors the source capability hint"
     );
 
     let mut retry = db.pool.begin().await.unwrap();
@@ -967,8 +995,8 @@ async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
         sqlx::query_scalar::<_, i64>(
             r#"
             SELECT count(*)
-            FROM operational_alert_episodes
-            WHERE producer_kind = 'capability_degraded' AND natural_key = $1
+            FROM alert_policy_evidence
+            WHERE source_kind = 'job.capability' AND natural_key = $1
             "#,
         )
         .bind(format!("{job_id}:edge-unprivileged"))
@@ -978,13 +1006,172 @@ async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
         1
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE event_id = $1",)
-            .bind(format!("fleet-alert:{episode_id}:triggered"))
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM alert_policy_evidence WHERE source_kind = 'job.capability' AND natural_key = $1",
+        )
+            .bind(format!("{job_id}:edge-unprivileged"))
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        1,
-        "schedule retries must not recreate the capability episode or trigger edge"
+        evidence_id,
+        "schedule retries must retain the original immutable occurrence fact"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM webhook_events
+            WHERE kind LIKE 'alert.%'
+               OR EXISTS (
+                    SELECT 1 FROM unnest(event_predicates) predicate
+                    WHERE predicate LIKE 'alert.%'
+                  )
+            "#,
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "schedule facts must not publish retired alert lifecycle aliases"
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_scheduled_terminal_job_evidence_preserves_lineage_and_dedupes() {
+    let Some(db) = PgWorkerTestDb::maybe_new().await else {
+        return;
+    };
+    let job_id = Uuid::new_v4();
+    let causation_id = Uuid::new_v4();
+    let lineage = vec![Uuid::new_v4(), Uuid::new_v4()];
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            operation, request_fingerprint, max_timeout_secs, completed_at,
+            causation_id, schedule_lineage
+        ) VALUES (
+            $1, 'scheduled_shell', TRUE, 'failed', 0, $2,
+            '{}'::jsonb, $3, 60, clock_timestamp(), $4, $5
+        )
+        "#,
+    )
+    .bind(job_id)
+    .bind(format!("hash-{job_id}"))
+    .bind(format!("fingerprint-{job_id}"))
+    .bind(causation_id)
+    .bind(&lineage)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut first = db.pool.begin().await.unwrap();
+    reconcile_scheduled_job_event_sources_in_tx(&mut first, job_id)
+        .await
+        .unwrap();
+    first.commit().await.unwrap();
+    let evidence = sqlx::query(
+        r#"
+        SELECT id, source_event_id, fact_kind, natural_key,
+               confirmation_bucket_key, subject_client_id, target_kind,
+               target_id, source_status, completeness, subject_snapshot,
+               payload, state_started_at, causation_id, schedule_lineage
+        FROM alert_policy_evidence
+        WHERE source_kind = 'job.terminal' AND natural_key = $1
+        "#,
+    )
+    .bind(job_id.to_string())
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let evidence_id: Uuid = evidence.try_get("id").unwrap();
+    assert_eq!(
+        evidence.try_get::<String, _>("source_event_id").unwrap(),
+        job_id.to_string()
+    );
+    assert_eq!(
+        evidence.try_get::<String, _>("fact_kind").unwrap(),
+        "occurrence"
+    );
+    assert_eq!(
+        evidence
+            .try_get::<String, _>("confirmation_bucket_key")
+            .unwrap(),
+        job_id.to_string()
+    );
+    assert!(evidence
+        .try_get::<Option<String>, _>("subject_client_id")
+        .unwrap()
+        .is_none());
+    assert_eq!(evidence.try_get::<String, _>("target_kind").unwrap(), "job");
+    assert_eq!(
+        evidence.try_get::<String, _>("target_id").unwrap(),
+        job_id.to_string()
+    );
+    assert_eq!(
+        evidence.try_get::<String, _>("source_status").unwrap(),
+        "failed"
+    );
+    assert_eq!(
+        evidence.try_get::<String, _>("completeness").unwrap(),
+        "complete"
+    );
+    assert_eq!(
+        evidence
+            .try_get::<serde_json::Value, _>("subject_snapshot")
+            .unwrap(),
+        serde_json::json!({})
+    );
+    assert!(evidence
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("state_started_at")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        evidence.try_get::<Option<Uuid>, _>("causation_id").unwrap(),
+        Some(causation_id)
+    );
+    let mut canonical_lineage = lineage.clone();
+    canonical_lineage.sort_unstable();
+    assert_eq!(
+        evidence
+            .try_get::<Vec<Uuid>, _>("schedule_lineage")
+            .unwrap(),
+        canonical_lineage
+    );
+    let payload = evidence.try_get::<serde_json::Value, _>("payload").unwrap();
+    assert_eq!(payload["status"], "failed");
+    assert_eq!(payload["source_status"], "failed");
+    assert_eq!(payload["client_id"], serde_json::Value::Null);
+    assert_eq!(payload["job_id"], job_id.to_string());
+    assert_eq!(payload["command_type"], "scheduled_shell");
+    assert_eq!(payload["target_count"], 0);
+    assert_eq!(payload["causation_id"], causation_id.to_string());
+
+    let mut retry = db.pool.begin().await.unwrap();
+    reconcile_scheduled_job_event_sources_in_tx(&mut retry, job_id)
+        .await
+        .unwrap();
+    retry.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM alert_policy_evidence WHERE source_kind = 'job.terminal' AND natural_key = $1",
+        )
+        .bind(job_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        evidence_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM alert_policy_evidence WHERE source_kind = 'job.terminal' AND natural_key = $1",
+        )
+        .bind(job_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
     );
     db.cleanup().await;
 }

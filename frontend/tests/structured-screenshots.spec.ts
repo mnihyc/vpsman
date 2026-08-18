@@ -1560,7 +1560,7 @@ async function navigateAndScreenshot(
     await editor.getByLabel("Webhook rule name").fill("edge-status-webhook");
     await editor
       .getByLabel("Webhook expression")
-      .fill("interval.30sec && tag:edge");
+      .fill("alert.triggered && alert.category:agent_status");
     await editor
       .getByLabel("Webhook target")
       .fill("https://hooks.example.net/vpsman");

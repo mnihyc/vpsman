@@ -36,18 +36,21 @@ fn schedule_test_operator() -> AuthContext {
 fn shell_schedule_request(name: &str, enabled: bool) -> CreateScheduleRequest {
     CreateScheduleRequest {
         name: name.to_string(),
-        operation: JobCommand::Shell {
+        operation: Some(JobCommand::Shell {
             argv: vec!["/usr/bin/uptime".to_string()],
             pty: false,
-        },
+        }),
+        event_argv_template: None,
         selector_expression: "tag:edge".to_string(),
         target_client_ids: vec!["client-a".to_string()],
-        cron_expr: "0 * * * *".to_string(),
-        timezone: "UTC".to_string(),
+        trigger_kind: ScheduleTriggerKind::Cron,
+        cron_expr: Some("0 * * * *".to_string()),
+        timezone: Some("UTC".to_string()),
+        event_expression: None,
         enabled,
-        catch_up_policy: "run_all_limited".to_string(),
-        catch_up_limit: 3,
-        retry_delay_secs: 120,
+        catch_up_policy: Some("run_all_limited".to_string()),
+        catch_up_limit: Some(3),
+        retry_delay_secs: Some(120),
         max_failures: 5,
         privilege_assertion: None,
         confirmed: true,
@@ -171,12 +174,12 @@ async fn schedule_create_lists_durable_selector_without_plaintext_privilege_mate
     assert_eq!(schedule.name, "nightly-uptime");
     assert_eq!(schedule.command_type, "shell_argv");
     assert_eq!(schedule.selector_expression, "tag:edge");
-    assert_eq!(schedule.cron_expr, "0 * * * *");
-    assert_eq!(schedule.timezone, "UTC");
+    assert_eq!(schedule.cron_expr.as_deref(), Some("0 * * * *"));
+    assert_eq!(schedule.timezone.as_deref(), Some("UTC"));
     assert_eq!(schedule.next_runs.len(), 5);
-    assert_eq!(schedule.catch_up_policy, "run_all_limited");
-    assert_eq!(schedule.catch_up_limit, 3);
-    assert_eq!(schedule.retry_delay_secs, 120);
+    assert_eq!(schedule.catch_up_policy.as_deref(), Some("run_all_limited"));
+    assert_eq!(schedule.catch_up_limit, Some(3));
+    assert_eq!(schedule.retry_delay_secs, Some(120));
     assert_eq!(schedule.max_failures, 5);
     assert_eq!(schedule.failure_count, 0);
     assert_eq!(schedule.last_error, None);
@@ -243,40 +246,53 @@ async fn malformed_memory_schedule_stays_visible_blocks_partial_actions_and_can_
         .await
         .is_err());
     assert!(repo
-        .defer_schedule(malformed.id, "2099-01-01T00:00:00Z", None, &operator,)
+        .defer_schedule(
+            malformed.id,
+            "2099-01-01T00:00:00Z",
+            None,
+            malformed.definition_revision,
+            &operator,
+        )
         .await
         .is_err());
     assert!(repo
-        .set_schedule_enabled(malformed.id, true, &operator)
+        .set_schedule_enabled(malformed.id, true, malformed.definition_revision, &operator)
         .await
         .is_err());
-    assert!(
-        !repo
-            .set_schedule_enabled(malformed.id, false, &operator)
-            .await
-            .unwrap()
-            .enabled
-    );
+    let disabled = repo
+        .set_schedule_enabled(
+            malformed.id,
+            false,
+            malformed.definition_revision,
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert!(!disabled.enabled);
 
     let repaired = repo
         .update_schedule_record(
             malformed.id,
             UpdateScheduleRequest {
                 name: "repaired-operation".to_string(),
-                operation: JobCommand::Shell {
+                operation: Some(JobCommand::Shell {
                     argv: vec!["/bin/true".to_string()],
                     pty: false,
-                },
+                }),
+                event_argv_template: None,
                 selector_expression: "tag:edge".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
                 expected_selector_expression: "tag:edge".to_string(),
                 expected_target_client_ids: vec!["client-a".to_string()],
-                cron_expr: "0 * * * *".to_string(),
-                timezone: "UTC".to_string(),
+                expected_definition_revision: disabled.definition_revision,
+                trigger_kind: ScheduleTriggerKind::Cron,
+                cron_expr: Some("0 * * * *".to_string()),
+                timezone: Some("UTC".to_string()),
+                event_expression: None,
                 enabled: false,
-                catch_up_policy: "skip_missed".to_string(),
-                catch_up_limit: 1,
-                retry_delay_secs: 60,
+                catch_up_policy: Some("skip_missed".to_string()),
+                catch_up_limit: Some(1),
+                retry_delay_secs: Some(60),
                 max_failures: 3,
                 privilege_assertion: None,
                 confirmed: true,
@@ -446,13 +462,17 @@ async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_updat
         Path(schedule.id),
         Json(UpdateScheduleRequest {
             name: "frozen-edge-renamed".to_string(),
-            operation: schedule.operation.clone().unwrap(),
+            operation: schedule.operation.clone(),
+            event_argv_template: None,
             selector_expression: schedule.selector_expression.clone(),
             target_client_ids: schedule.target_client_ids.clone(),
             expected_selector_expression: schedule.selector_expression.clone(),
             expected_target_client_ids: schedule.target_client_ids.clone(),
+            expected_definition_revision: schedule.definition_revision,
+            trigger_kind: ScheduleTriggerKind::Cron,
             cron_expr: schedule.cron_expr.clone(),
             timezone: schedule.timezone.clone(),
+            event_expression: None,
             enabled: schedule.enabled,
             catch_up_policy: schedule.catch_up_policy.clone(),
             catch_up_limit: schedule.catch_up_limit,
@@ -471,6 +491,7 @@ async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_updat
         headers.clone(),
         Path(schedule.id),
         Json(UpdateScheduleTargetsRequest {
+            expected_definition_revision: updated.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -484,6 +505,7 @@ async fn unchanged_schedule_selector_preserves_frozen_targets_until_manual_updat
         headers,
         Path(schedule.id),
         Json(UpdateScheduleTargetsRequest {
+            expected_definition_revision: retargeted.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -510,6 +532,7 @@ async fn schedule_target_update_persists_an_empty_resolution() {
         headers.clone(),
         Path(schedule.id),
         Json(UpdateScheduleTargetsRequest {
+            expected_definition_revision: schedule.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -523,13 +546,17 @@ async fn schedule_target_update_persists_an_empty_resolution() {
         Path(schedule.id),
         Json(UpdateScheduleRequest {
             name: "empty-retarget-renamed".to_string(),
-            operation: updated.operation.clone().unwrap(),
+            operation: updated.operation.clone(),
+            event_argv_template: None,
             selector_expression: updated.selector_expression.clone(),
             target_client_ids: Vec::new(),
             expected_selector_expression: updated.selector_expression.clone(),
             expected_target_client_ids: Vec::new(),
+            expected_definition_revision: updated.definition_revision,
+            trigger_kind: ScheduleTriggerKind::Cron,
             cron_expr: updated.cron_expr.clone(),
             timezone: updated.timezone.clone(),
+            event_expression: None,
             enabled: updated.enabled,
             catch_up_policy: updated.catch_up_policy.clone(),
             catch_up_limit: updated.catch_up_limit,
@@ -567,19 +594,24 @@ async fn concurrent_schedule_edit_cannot_overwrite_retargeted_clients() {
     let expectation = crate::repository_schedules::ScheduleSnapshotExpectation {
         selector_expression: schedule.selector_expression.clone(),
         target_client_ids: schedule.target_client_ids.clone(),
+        definition_revision: schedule.definition_revision,
     };
     let update = crate::repository_schedules::ScheduleCreateInput {
         name: "concurrent-snapshot-edited".to_string(),
-        operation: schedule.operation.clone().unwrap(),
+        operation: schedule.operation.clone(),
+        event_argv_template: None,
         selector_expression: schedule.selector_expression.clone(),
         target_client_ids: schedule.target_client_ids.clone(),
+        trigger_kind: ScheduleTriggerKind::Cron,
         cron_expr: schedule.cron_expr.clone(),
         timezone: schedule.timezone.clone(),
+        event_expression: None,
         enabled: schedule.enabled,
         catch_up_policy: schedule.catch_up_policy.clone(),
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
         max_failures: schedule.max_failures,
+        expected_definition_revision: Some(schedule.definition_revision),
     };
 
     let (edit_result, retarget_result) = tokio::join!(
@@ -625,20 +657,24 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
             first.id,
             UpdateScheduleRequest {
                 name: "shared-name".to_string(),
-                operation: JobCommand::Shell {
+                operation: Some(JobCommand::Shell {
                     argv: vec!["/bin/true".to_string()],
                     pty: false,
-                },
+                }),
+                event_argv_template: None,
                 selector_expression: "tag:edge && id:client-a".to_string(),
                 target_client_ids: vec!["client-a".to_string()],
                 expected_selector_expression: "tag:edge".to_string(),
                 expected_target_client_ids: vec!["client-a".to_string()],
-                cron_expr: "15 * * * *".to_string(),
-                timezone: "UTC".to_string(),
+                expected_definition_revision: first.definition_revision,
+                trigger_kind: ScheduleTriggerKind::Cron,
+                cron_expr: Some("15 * * * *".to_string()),
+                timezone: Some("UTC".to_string()),
+                event_expression: None,
                 enabled: false,
-                catch_up_policy: "skip_missed".to_string(),
-                catch_up_limit: 1,
-                retry_delay_secs: 60,
+                catch_up_policy: Some("skip_missed".to_string()),
+                catch_up_limit: Some(1),
+                retry_delay_secs: Some(60),
                 max_failures: 2,
                 privilege_assertion: None,
                 confirmed: true,
@@ -651,22 +687,19 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
         .unwrap();
     assert_eq!(updated.id, first.id);
     assert_eq!(updated.name, "shared-name");
-    assert_eq!(updated.cron_expr, "15 * * * *");
+    assert_eq!(updated.cron_expr.as_deref(), Some("15 * * * *"));
     assert!(!updated.enabled);
 
-    assert!(
-        repo.set_schedule_enabled(first.id, true, &operator)
-            .await
-            .unwrap()
-            .enabled
-    );
-    assert!(
-        !repo
-            .set_schedule_enabled(first.id, false, &operator)
-            .await
-            .unwrap()
-            .enabled
-    );
+    let enabled = repo
+        .set_schedule_enabled(first.id, true, updated.definition_revision, &operator)
+        .await
+        .unwrap();
+    assert!(enabled.enabled);
+    let disabled = repo
+        .set_schedule_enabled(first.id, false, enabled.definition_revision, &operator)
+        .await
+        .unwrap();
+    assert!(!disabled.enabled);
 
     let deferred_until = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
     let deferred = repo
@@ -674,6 +707,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
             first.id,
             &deferred_until,
             Some("maintenance window"),
+            disabled.definition_revision,
             &operator,
         )
         .await
@@ -683,7 +717,7 @@ async fn schedule_uuid_lifecycle_hides_soft_deleted_rows() {
         Some(deferred_until.as_str())
     );
 
-    repo.soft_delete_schedule(first.id, &operator)
+    repo.soft_delete_schedule(first.id, deferred.definition_revision, &operator)
         .await
         .unwrap();
     let visible = repo.list_schedules().await.unwrap();
@@ -713,7 +747,7 @@ async fn scheduled_failed_job_updates_retry_controls_on_finish() {
     seed_never_connected_agent(&repo, "client-a").await;
     let mut schedule_request = shell_schedule_request("retrying-schedule", true);
     schedule_request.max_failures = 2;
-    schedule_request.retry_delay_secs = 120;
+    schedule_request.retry_delay_secs = Some(120);
     let schedule = repo
         .create_schedule(schedule_request, &operator)
         .await
@@ -906,10 +940,10 @@ async fn schedule_apply_now_allows_disabled_schedule_without_advancing_next_run(
 
     let mut request = shell_schedule_request("update-window", false);
     request.selector_expression = "id:client-a".to_string();
-    request.operation = JobCommand::UpdateAgent {
+    request.operation = Some(JobCommand::UpdateAgent {
         artifact_url: "https://updates.example/vpsman-agent".to_string(),
         sha256_hex: "ab".repeat(32),
-    };
+    });
     let schedule = repo.create_schedule(request, &operator).await.unwrap();
     let next_run_before = schedule.next_run_at.clone();
 
@@ -920,6 +954,7 @@ async fn schedule_apply_now_allows_disabled_schedule_without_advancing_next_run(
         headers,
         Path(schedule.id),
         Json(SchedulePrivilegeMutationRequest {
+            expected_definition_revision: schedule.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -989,6 +1024,7 @@ async fn schedule_apply_now_skips_saved_fixed_target_that_no_longer_resolves() {
         headers,
         Path(schedule.id),
         Json(SchedulePrivilegeMutationRequest {
+            expected_definition_revision: schedule.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -1092,18 +1128,21 @@ async fn wait_for_job_status(
 fn schedule_validation_rejects_unsafe_or_empty_requests() {
     let mut request = CreateScheduleRequest {
         name: "bad".to_string(),
-        operation: JobCommand::Shell {
+        operation: Some(JobCommand::Shell {
             argv: vec!["/bin/true".to_string()],
             pty: false,
-        },
+        }),
+        event_argv_template: None,
         selector_expression: "".to_string(),
         target_client_ids: Vec::new(),
-        cron_expr: "*/5 * * * *".to_string(),
-        timezone: "UTC".to_string(),
+        trigger_kind: ScheduleTriggerKind::Cron,
+        cron_expr: Some("*/5 * * * *".to_string()),
+        timezone: Some("UTC".to_string()),
+        event_expression: None,
         enabled: true,
-        catch_up_policy: "skip_missed".to_string(),
-        catch_up_limit: 1,
-        retry_delay_secs: 300,
+        catch_up_policy: Some("skip_missed".to_string()),
+        catch_up_limit: Some(1),
+        retry_delay_secs: Some(300),
         max_failures: 3,
         privilege_assertion: None,
         confirmed: true,
@@ -1115,58 +1154,58 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
     );
     request.selector_expression = "tag:edge".to_string();
     request.target_client_ids = vec!["client-a".to_string()];
-    request.cron_expr = "bad cron".to_string();
+    request.cron_expr = Some("bad cron".to_string());
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.cron_expr = "0 0 31 2 *".to_string();
+    request.cron_expr = Some("0 0 31 2 *".to_string());
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.cron_expr = "*/5 * * * *".to_string();
-    request.timezone = "America/New_York".to_string();
+    request.cron_expr = Some("*/5 * * * *".to_string());
+    request.timezone = Some("America/New_York".to_string());
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.timezone = "UTC".to_string();
-    request.operation = JobCommand::Shell {
+    request.timezone = Some("UTC".to_string());
+    request.operation = Some(JobCommand::Shell {
         argv: vec!["/bin/sh".to_string()],
         pty: true,
-    };
+    });
     assert!(validate_schedule_request(&request).is_ok());
-    request.operation = JobCommand::Shell {
+    request.operation = Some(JobCommand::Shell {
         argv: Vec::new(),
         pty: false,
-    };
+    });
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.operation = JobCommand::Shell {
+    request.operation = Some(JobCommand::Shell {
         argv: vec!["/bin/true".to_string()],
         pty: false,
-    };
-    request.catch_up_policy = "retry_everything".to_string();
+    });
+    request.catch_up_policy = Some("retry_everything".to_string());
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.catch_up_policy = "skip_missed".to_string();
-    request.catch_up_limit = 0;
+    request.catch_up_policy = Some("skip_missed".to_string());
+    request.catch_up_limit = Some(0);
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.catch_up_limit = 1;
-    request.retry_delay_secs = 0;
+    request.catch_up_limit = Some(1);
+    request.retry_delay_secs = Some(0);
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
         axum::http::StatusCode::BAD_REQUEST
     );
-    request.retry_delay_secs = 300;
+    request.retry_delay_secs = Some(300);
     request.max_failures = 0;
     assert_eq!(
         validate_schedule_request(&request).unwrap_err().status,
@@ -1178,7 +1217,7 @@ fn schedule_validation_rejects_unsafe_or_empty_requests() {
 fn schedule_validation_rejects_agent_lifecycle_commands() {
     for operation in [JobCommand::AgentStop, JobCommand::AgentRestart] {
         let mut request = shell_schedule_request("invalid-agent-lifecycle", true);
-        request.operation = operation;
+        request.operation = Some(operation);
         assert_eq!(
             validate_schedule_request(&request).unwrap_err().code,
             "agent_lifecycle_not_schedulable"
@@ -1190,20 +1229,24 @@ fn schedule_validation_rejects_agent_lifecycle_commands() {
 fn schedule_update_validation_rejects_cadence_without_a_future_occurrence() {
     let request = UpdateScheduleRequest {
         name: "legacy-cadence-repair".to_string(),
-        operation: JobCommand::Shell {
+        operation: Some(JobCommand::Shell {
             argv: vec!["/bin/true".to_string()],
             pty: false,
-        },
+        }),
+        event_argv_template: None,
         selector_expression: "tag:edge".to_string(),
         target_client_ids: vec!["client-a".to_string()],
         expected_selector_expression: "tag:edge".to_string(),
         expected_target_client_ids: vec!["client-a".to_string()],
-        cron_expr: "0 0 31 2 *".to_string(),
-        timezone: "UTC".to_string(),
+        expected_definition_revision: 1,
+        trigger_kind: ScheduleTriggerKind::Cron,
+        cron_expr: Some("0 0 31 2 *".to_string()),
+        timezone: Some("UTC".to_string()),
+        event_expression: None,
         enabled: true,
-        catch_up_policy: "skip_missed".to_string(),
-        catch_up_limit: 1,
-        retry_delay_secs: 300,
+        catch_up_policy: Some("skip_missed".to_string()),
+        catch_up_limit: Some(1),
+        retry_delay_secs: Some(300),
         max_failures: 3,
         privilege_assertion: None,
         confirmed: true,

@@ -77,14 +77,14 @@ remains the raw audit/export representation.
 
 ## Resource Metrics
 
-| Display metric | Retained meaning | Important unavailable state |
-| --- | --- | --- |
-| CPU utilization | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and maximum reported core count. | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted. |
-| Load 1/5/15 | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track. | Missing load evidence remains unavailable; it is not CPU utilization. |
-| Memory used | `(MemTotal - MemAvailable) / MemTotal` per accepted snapshot; interval history retains the sample-weighted average and maximum of those ratios. Capacity maximum and availability average/minimum remain separate evidence. | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero. |
-| Swap used | `(SwapTotal - SwapAvailable) / SwapTotal` per complete, positive-capacity snapshot; interval history retains the swap-sample-weighted average and maximum. `swap_sample_count` counts only those positive-capacity utilization samples. A complete `(0, 0)` report is retained as explicit “no swap” current evidence but contributes no utilization point or weight. | Missing, one-sided, invalid, and zero-capacity swap evidence remain chart gaps. Swap has its own sample count instead of borrowing memory coverage or fabricating 0%. |
-| Aggregate reported-filesystem disk used | `(summed total - summed available) / summed total` per accepted snapshot, then sample-weighted average and maximum across the interval. Capacity maximum and availability average/minimum remain separate evidence. | This is an aggregate of reported filesystems, not a root-volume or quota claim. |
-| TCP/UDP sockets | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry. | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
+| Display metric                          | Retained meaning                                                                                                                                                                                                                                                                                                                                                      | Important unavailable state                                                                                                                                                                         |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPU utilization                         | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and maximum reported core count.                                                                                                                                                                                 | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted.                                                                 |
+| Load 1/5/15                             | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track.                                                                                                                                                                                             | Missing load evidence remains unavailable; it is not CPU utilization.                                                                                                                               |
+| Memory used                             | `(MemTotal - MemAvailable) / MemTotal` per accepted snapshot; interval history retains the sample-weighted average and maximum of those ratios. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                           | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero.                                                                                                |
+| Swap used                               | `(SwapTotal - SwapAvailable) / SwapTotal` per complete, positive-capacity snapshot; interval history retains the swap-sample-weighted average and maximum. `swap_sample_count` counts only those positive-capacity utilization samples. A complete `(0, 0)` report is retained as explicit “no swap” current evidence but contributes no utilization point or weight. | Missing, one-sided, invalid, and zero-capacity swap evidence remain chart gaps. Swap has its own sample count instead of borrowing memory coverage or fabricating 0%.                               |
+| Aggregate reported-filesystem disk used | `(summed total - summed available) / summed total` per accepted snapshot, then sample-weighted average and maximum across the interval. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                                   | This is an aggregate of reported filesystems, not a root-volume or quota claim.                                                                                                                     |
+| TCP/UDP sockets                         | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry.                                                                                                                                                                             | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
 The Linux disk collector ignores non-storage pseudo filesystems, including
 `nsfs` network-namespace handles and Docker `overlay`/`fuse-overlayfs` layers,
@@ -383,11 +383,11 @@ Only observations bound to a saved tunnel plan appear in Network Metrics.
 Status records that do not contain the selected measurement remain evidence but
 do not become empty chart points.
 
-| Measurement | Point definition | Retained trend definition |
-| --- | --- | --- |
-| Latency | Mean RTT reported by one bounded ICMP probe run. | Arithmetic mean of retained run averages that contain latency. |
-| Packet loss | Lost/transmitted packet ratio from one bounded ICMP probe run. | Arithmetic mean of retained run ratios that contain loss. |
-| Throughput | `bytes transferred * 8 / actual elapsed seconds / 1,000,000`; average TCP throughput over one duration-bounded test. | Arithmetic mean of retained test averages that contain throughput; maximum is the highest retained test average. |
+| Measurement | Point definition                                                                                                     | Retained trend definition                                                                                        |
+| ----------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Latency     | Mean RTT reported by one bounded ICMP probe run.                                                                     | Arithmetic mean of retained run averages that contain latency.                                                   |
+| Packet loss | Lost/transmitted packet ratio from one bounded ICMP probe run.                                                       | Arithmetic mean of retained run ratios that contain loss.                                                        |
+| Throughput  | `bytes transferred * 8 / actual elapsed seconds / 1,000,000`; average TCP throughput over one duration-bounded test. | Arithmetic mean of retained test averages that contain throughput; maximum is the highest retained test average. |
 
 Throughput is not an interface line-speed sample. The configured duration
 always bounds its transfer phase, and the overall job timeout bounds the full
@@ -430,15 +430,18 @@ set or an unbounded export:
 - `GET /api/v1/fleet-alert-history` applies the same filters and returns all
   lifecycle states, including Resolved episodes.
 - `GET /api/v1/fleet-alert-events` is a dedicated manual review feed for
-  unresolved operational events. It orders by `triggered_at DESC, episode UUID
-  DESC` and returns `{items,next_cursor,has_more}` with an opaque exclusive
-  cursor. Filters and triage are applied before pagination.
+  unresolved occurrence episodes. It orders by
+  `triggered_at DESC, episode UUID DESC` and returns
+  `{items,next_cursor,has_more}` with an opaque exclusive cursor. Filters and
+  triage are applied before pagination.
 
-Both endpoints merge every operational category with policy conditions before
-one source-independent order and cap. Current ordering puts active episodes
-first. Filtering and the final cap are part of the query contract; the UI must
-not reconstruct current state from history or infer a cap merely because the
-returned array happens to equal a familiar page size.
+Every row is owned by an Alert Policy, regardless of whether its typed evidence
+came from agent state, tunnel health, a terminal job, a backup, a capability
+result, or telemetry. The endpoints apply one policy-independent order and cap.
+Current ordering puts active episodes first. Filtering and the final cap are
+part of the query contract; the UI must not reconstruct current state from
+history or infer a cap merely because the returned array happens to equal a
+familiar page size.
 
 Full fleet snapshots expose the sources separately as `fleet_alerts` and
 `fleet_alert_history`, with independent availability envelopes and explicit
@@ -463,18 +466,20 @@ An episode has a required `record_kind` (`condition` or `event`) and required
 lifecycle with Triggered, Persisting, Unknown, or Resolved state, generation,
 and causal timestamps. Structurally impossible combinations fail closed in the
 console: they are malformed, inactive, non-actionable, and non-resolvable.
-Operational event incidents can be resolved explicitly only while Triggered or
-Persisting and require a separately confirmed reason. Conditions recover or
-leave scope from producer evidence and cannot be manually resolved.
+Occurrence episodes can be resolved explicitly only while Triggered or
+Persisting and require a separately confirmed reason. Their configured elapsed
+Resolve meta condition also resolves them automatically. Conditions recover,
+match a separate Resolve condition, or leave scope from policy evidence and
+cannot be manually resolved.
 
 Lifecycle and operator triage are independent. Active means Triggered or
 Persisting; actionable means active with Open or Escalated triage. Unknown
 conditions can still be acknowledged, muted, escalated, or reset because they
 remain current, but they are not active. The API triage action `clear` is shown
 as **Reset triage to Open** and does not resolve lifecycle state. The
-`fleet_alert_states` ledger is the durable triage source and can include legacy
-or orphan records; it is not a visible lifecycle count. Audit records retain
-triage transitions and explicit incident resolutions.
+`fleet_alert_states` ledger is the durable triage state keyed by the
+policy-owned alert public ID; it is not a visible lifecycle count. Audit
+records retain triage transitions and explicit incident resolutions.
 
 Triage and explicit resolution controls require Operator or Admin role plus
 `fleet:read`, `backups:read`, and `integrations:write` (or `*`). Other readers
@@ -490,9 +495,13 @@ When a Fleet scope is active, `client_id=null` global job episodes are excluded
 from scoped shell and Home counts/lists, matching backend `include_global=false`;
 they are not silently attributed to every tag or provider scope.
 
-Triggered and Resolved lifecycle edges can fire expression webhooks. Delivery
-is at least once and paired edges may arrive out of order; consumers merge by
-episode UUID, generation, lifecycle state, and causal timestamps rather than
-HTTP arrival order. Persisting and Unknown do not emit lifecycle edges. See
-`docs/target-selectors.md` for the all-category source matrix, exact resolution
-reasons, predicates, payload fields, and compatibility aliases.
+Triggered and Resolved lifecycle edges can fire expression webhooks and Alert
+event schedules. Webhook delivery is at least once and paired HTTP requests may
+arrive out of order; consumers merge by episode UUID, generation, lifecycle
+state, and causal timestamps rather than HTTP arrival order. Schedule receipts
+are exactly deduplicated per saved definition and lifecycle edge, and recovery
+jobs wait only for their matching mitigation job. Persisting and Unknown do not
+emit lifecycle edges. See the authoritative Alert Policy and automation
+playbook in `docs/target-selectors.md` for policy evidence, complete
+Trigger/Resolve syntax, lifecycle predicates, direct argv, common workflows,
+and the webhook message body.

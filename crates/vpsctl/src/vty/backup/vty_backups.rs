@@ -15,7 +15,7 @@ use crate::{
     http::{http_post_json, http_put_json},
     privilege::{
         build_privilege_for_schedule, load_super_password, load_super_salt_hex,
-        SchedulePrivilegeRequest,
+        SchedulePrivilegePayload, SchedulePrivilegeRequest,
     },
     vty_jobs::{
         vty_submit_operation, vty_submit_operation_with_force, VtyJobSelection, VtyPrivilegeContext,
@@ -825,17 +825,22 @@ pub(crate) fn submit_vty_backup_policy_upsert(
         SchedulePrivilegeRequest {
             action: target.action,
             schedule_id: target.schedule_id.as_deref(),
+            definition_revision: stored_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.definition_revision),
             name: &request.name,
-            command: &operation,
+            payload: SchedulePrivilegePayload::Operation(&operation),
             command_type: "backup",
             selector_expression: &selector_expression,
             resolved_targets: &target_client_ids,
-            cron_expr: &request.cron_expr,
-            timezone: "UTC",
+            trigger_kind: "cron",
+            cron_expr: Some(&request.cron_expr),
+            timezone: Some("UTC"),
+            event_expression: None,
             enabled: request.enabled,
-            catch_up_policy: &request.catch_up_policy,
-            catch_up_limit: request.catch_up_limit,
-            retry_delay_secs: request.retry_delay_secs,
+            catch_up_policy: Some(&request.catch_up_policy),
+            catch_up_limit: Some(request.catch_up_limit),
+            retry_delay_secs: Some(request.retry_delay_secs),
             max_failures: request.max_failures,
             deferred_until: None,
             deleted: false,
@@ -870,6 +875,8 @@ pub(crate) fn submit_vty_backup_policy_upsert(
         "privilege_assertion": privilege_assertion,
     });
     if let Some(snapshot) = stored_snapshot {
+        payload["expected_definition_revision"] =
+            serde_json::Value::from(snapshot.definition_revision);
         payload["expected_selector_expression"] =
             serde_json::Value::String(snapshot.selector_expression);
         payload["expected_target_client_ids"] = serde_json::to_value(snapshot.target_client_ids)?;

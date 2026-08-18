@@ -17,10 +17,18 @@ export async function buildScheduleTargetUpdatePrivilegeAssertion({
   selectorExpression: string;
   targetClientIds: string[];
 }) {
+  const privilegeOperation =
+    schedule.trigger_kind === "event"
+      ? {
+          type: "shell" as const,
+          argv: schedule.event_argv_template ?? ["/bin/true"],
+          pty: false,
+        }
+      : schedule.operation;
   const operationHash =
     schedule.operation_payload_hash?.trim() ||
-    (schedule.operation
-      ? await operationPayloadHashHex(schedule.operation)
+    (privilegeOperation
+      ? await operationPayloadHashHex(privilegeOperation)
       : "");
   if (!operationHash) {
     throw new Error(
@@ -31,13 +39,16 @@ export async function buildScheduleTargetUpdatePrivilegeAssertion({
     intent: canonicalSchedulePrivilegeIntent({
       action: "schedule.targets.update",
       scheduleId: schedule.id,
+      definitionRevision: schedule.definition_revision,
       name: schedule.name,
       commandType: schedule.command_type,
       operationPayloadHash: operationHash,
       selectorExpression,
       resolvedTargets: targetClientIds,
+      triggerKind: schedule.trigger_kind,
       cronExpr: schedule.cron_expr,
       timezone: schedule.timezone,
+      eventExpression: schedule.event_expression,
       enabled: schedule.enabled,
       catchUpPolicy: schedule.catch_up_policy,
       catchUpLimit: schedule.catch_up_limit,

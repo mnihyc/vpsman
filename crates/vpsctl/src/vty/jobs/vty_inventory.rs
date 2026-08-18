@@ -120,20 +120,14 @@ enum VtyInventoryCommand {
     AlertPolicyPreview {
         name: String,
         selector: String,
-        rules: Vec<String>,
-        window_secs: i64,
-        severity: String,
-        traffic_selector: Option<String>,
+        rule_json: Vec<String>,
         enabled: bool,
         notes: Option<String>,
     },
     AlertPolicyUpsert {
         name: String,
         selector: String,
-        rules: Vec<String>,
-        window_secs: i64,
-        severity: String,
-        traffic_selector: Option<String>,
+        rule_json: Vec<String>,
         enabled: bool,
         notes: Option<String>,
         confirmed: bool,
@@ -752,10 +746,7 @@ pub(crate) fn submit_vty_inventory_command(
         VtyInventoryCommand::AlertPolicyPreview {
             name,
             selector,
-            rules,
-            window_secs,
-            severity,
-            traffic_selector,
+            rule_json,
             enabled,
             notes,
         } => {
@@ -763,10 +754,7 @@ pub(crate) fn submit_vty_inventory_command(
                 commands_inventory::AlertPolicyWriteOptions {
                     name,
                     selector: Some(selector),
-                    rules,
-                    window_secs,
-                    severity,
-                    traffic_selector,
+                    rule_json,
                     enabled,
                     notes,
                     file: None,
@@ -780,10 +768,7 @@ pub(crate) fn submit_vty_inventory_command(
         VtyInventoryCommand::AlertPolicyUpsert {
             name,
             selector,
-            rules,
-            window_secs,
-            severity,
-            traffic_selector,
+            rule_json,
             enabled,
             notes,
             confirmed,
@@ -792,10 +777,7 @@ pub(crate) fn submit_vty_inventory_command(
                 commands_inventory::AlertPolicyWriteOptions {
                     name,
                     selector: Some(selector),
-                    rules,
-                    window_secs,
-                    severity,
-                    traffic_selector,
+                    rule_json,
                     enabled,
                     notes,
                     file: None,
@@ -1077,7 +1059,8 @@ pub(crate) fn submit_vty_inventory_command(
 }
 
 fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
-    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let owned_parts = split_vty_inventory_command(command)?;
+    let parts = owned_parts.iter().map(String::as_str).collect::<Vec<_>>();
     let name = parts.first().copied().context("empty inventory command")?;
     match name {
         "tag-create" => {
@@ -1246,6 +1229,60 @@ fn parse_vty_inventory_command(command: &str) -> Result<VtyInventoryCommand> {
         }
         other => anyhow::bail!("unknown inventory command: {other}"),
     }
+}
+
+fn split_vty_inventory_command(command: &str) -> Result<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut part = String::new();
+    let mut part_started = false;
+    let mut quote = None;
+    let mut chars = command.chars();
+
+    while let Some(character) = chars.next() {
+        match quote {
+            Some(active_quote) if character == active_quote => quote = None,
+            Some('\'') => part.push(character),
+            Some('"') if character == '\\' => {
+                part.push(
+                    chars
+                        .next()
+                        .context("inventory command ends with an incomplete escape")?,
+                );
+            }
+            Some(_) => part.push(character),
+            None if character.is_whitespace() => {
+                if part_started {
+                    parts.push(std::mem::take(&mut part));
+                    part_started = false;
+                }
+            }
+            None if matches!(character, '\'' | '"') => {
+                quote = Some(character);
+                part_started = true;
+            }
+            None if character == '\\' => {
+                part.push(
+                    chars
+                        .next()
+                        .context("inventory command ends with an incomplete escape")?,
+                );
+                part_started = true;
+            }
+            None => {
+                part.push(character);
+                part_started = true;
+            }
+        }
+    }
+
+    anyhow::ensure!(
+        quote.is_none(),
+        "inventory command has an unterminated quote"
+    );
+    if part_started {
+        parts.push(part);
+    }
+    Ok(parts)
 }
 
 fn parse_config_preset_create(parts: &[&str]) -> Result<VtyInventoryCommand> {
@@ -2003,10 +2040,7 @@ fn parse_alert_policy_get(parts: &[&str]) -> Result<VtyInventoryCommand> {
 fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryCommand> {
     let mut name = None;
     let mut selector = None;
-    let mut rules = Vec::new();
-    let mut window_secs = 0_i64;
-    let mut severity = "warning".to_string();
-    let mut traffic_selector = None;
+    let mut rule_json = Vec::new();
     let mut enabled = true;
     let mut notes = None;
     let mut confirmed = false;
@@ -2021,22 +2055,8 @@ fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryC
                 selector = Some(next_arg(parts, index, "--selector")?.to_string());
                 index += 2;
             }
-            "--rule" => {
-                rules.push(next_arg(parts, index, "--rule")?.to_string());
-                index += 2;
-            }
-            "--window-secs" => {
-                window_secs = next_arg(parts, index, "--window-secs")?
-                    .parse()
-                    .context("--window-secs must be an integer")?;
-                index += 2;
-            }
-            "--severity" => {
-                severity = next_arg(parts, index, "--severity")?.to_string();
-                index += 2;
-            }
-            "--traffic-selector" => {
-                traffic_selector = Some(next_arg(parts, index, "--traffic-selector")?.to_string());
+            "--rule-json" => {
+                rule_json.push(next_arg(parts, index, "--rule-json")?.to_string());
                 index += 2;
             }
             "--enabled" => {
@@ -2059,24 +2079,8 @@ fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryC
                 selector = Some(value.trim_start_matches("--selector=").to_string());
                 index += 1;
             }
-            value if value.starts_with("--rule=") => {
-                rules.push(value.trim_start_matches("--rule=").to_string());
-                index += 1;
-            }
-            value if value.starts_with("--window-secs=") => {
-                window_secs = value
-                    .trim_start_matches("--window-secs=")
-                    .parse()
-                    .context("--window-secs must be an integer")?;
-                index += 1;
-            }
-            value if value.starts_with("--severity=") => {
-                severity = value.trim_start_matches("--severity=").to_string();
-                index += 1;
-            }
-            value if value.starts_with("--traffic-selector=") => {
-                traffic_selector =
-                    Some(value.trim_start_matches("--traffic-selector=").to_string());
+            value if value.starts_with("--rule-json=") => {
+                rule_json.push(value.trim_start_matches("--rule-json=").to_string());
                 index += 1;
             }
             value if value.starts_with("--enabled=") => {
@@ -2091,8 +2095,8 @@ fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryC
         }
     }
     anyhow::ensure!(
-        !rules.is_empty(),
-        "alert-policy command requires at least one --rule"
+        !rule_json.is_empty(),
+        "alert-policy command requires at least one --rule-json PolicyRuleRequest"
     );
     let name = name.context("alert-policy command requires --name")?;
     let selector = selector.context("alert-policy command requires --selector")?;
@@ -2100,10 +2104,7 @@ fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryC
         Ok(VtyInventoryCommand::AlertPolicyUpsert {
             name,
             selector,
-            rules,
-            window_secs,
-            severity,
-            traffic_selector,
+            rule_json,
             enabled,
             notes,
             confirmed,
@@ -2112,10 +2113,7 @@ fn parse_alert_policy_write(parts: &[&str], apply: bool) -> Result<VtyInventoryC
         Ok(VtyInventoryCommand::AlertPolicyPreview {
             name,
             selector,
-            rules,
-            window_secs,
-            severity,
-            traffic_selector,
+            rule_json,
             enabled,
             notes,
         })

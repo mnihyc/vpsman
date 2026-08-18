@@ -681,7 +681,15 @@
 }
 
 .shellOperation {
+  align-items: end;
   grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.commandPayloadEditor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
 }
 
 .filePathOperation {
@@ -918,9 +926,15 @@
   min-width: 260px;
 }
 
-.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
+.fileBrowserPanel
+  input:not([type="checkbox"]):not([type="file"]):not(
+    .searchExpressionEditor
+  ):not(.vpsComboboxEditor),
 .fileBrowserPanel select,
-.multiFilePanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor),
+.multiFilePanel
+  input:not([type="checkbox"]):not([type="file"]):not(
+    .searchExpressionEditor
+  ):not(.vpsComboboxEditor),
 .multiFilePanel select,
 .multiFilePanel textarea {
   box-sizing: border-box;
@@ -933,9 +947,15 @@
   padding: 7px 10px;
 }
 
-.fileBrowserPanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
+.fileBrowserPanel
+  input:not([type="checkbox"]):not([type="file"]):not(
+    .searchExpressionEditor
+  ):not(.vpsComboboxEditor):focus,
 .fileBrowserPanel select:focus,
-.multiFilePanel input:not([type="checkbox"]):not([type="file"]):not(.searchExpressionEditor):not(.vpsComboboxEditor):focus,
+.multiFilePanel
+  input:not([type="checkbox"]):not([type="file"]):not(
+    .searchExpressionEditor
+  ):not(.vpsComboboxEditor):focus,
 .multiFilePanel select:focus,
 .multiFilePanel textarea:focus {
   border-color: var(--primary);
@@ -4759,6 +4779,391 @@
   color: var(--text);
 }
 
+.scheduleTriggerFieldset {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.scheduleTriggerFieldset legend {
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scheduleTriggerChoices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.scheduleTriggerChoices > label {
+  display: grid;
+  grid-template-columns: 18px 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  cursor: pointer;
+  padding: 12px;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.scheduleTriggerChoices > label:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.scheduleTriggerChoices > label.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+
+.scheduleTriggerChoices input {
+  margin: 3px 0 0;
+  accent-color: var(--primary);
+}
+
+.scheduleTriggerChoices svg {
+  margin-top: 1px;
+  color: var(--primary);
+}
+
+.scheduleTriggerChoices span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.scheduleTriggerChoices strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.scheduleTriggerChoices small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.scheduleTemplateGuide,
+.scheduleEventDefinition {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary-soft) 54%, var(--surface)),
+    var(--surface) 62%
+  );
+  padding: 12px;
+}
+
+.scheduleTemplateGuideHeader,
+.scheduleEventSemantics {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scheduleTemplateGuideHeader svg,
+.scheduleEventSemantics svg {
+  margin-top: 1px;
+  color: var(--primary);
+}
+
+.scheduleTemplateGuideHeader > span,
+.scheduleEventSemantics > span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.scheduleTemplateGuideHeader strong,
+.scheduleEventSemantics strong,
+.scheduleEventReceiptNote strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.scheduleTemplateGuideHeader small,
+.scheduleEventSemantics small,
+.scheduleEventReceiptNote span {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.scheduleTemplateRecipes {
+  justify-content: flex-start;
+}
+
+.scheduleTemplateTokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scheduleTemplateTokens button {
+  min-height: 27px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--primary-text);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.scheduleTemplateTokens button:hover,
+.scheduleTemplateTokens button:focus-visible {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.exactPayloadInspector {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--canvas) 82%, transparent);
+  padding: 10px;
+}
+
+.exactPayloadInspectorHeader {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.exactPayloadInspectorTitle {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.exactPayloadInspectorTitle .fieldLabelWithHelp {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.exactPayloadInspectorTitle strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.exactPayloadInspectorTitle small,
+.exactPayloadElements small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.exactPayloadSerialized {
+  display: block;
+  overflow: auto;
+  max-height: 112px;
+  max-width: 100%;
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  padding: 7px 8px;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.exactPayloadElements {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.exactPayloadElements li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  grid-template-areas:
+    "index value"
+    ". detail";
+  align-items: start;
+  gap: 3px 10px;
+  min-width: 0;
+  border-left: 2px solid var(--ok);
+  border-radius: 3px;
+  background: var(--surface);
+  padding: 7px 8px;
+}
+
+.exactPayloadElements li.invalid {
+  border-left-color: var(--danger);
+}
+
+.exactPayloadElements li.invalid small {
+  color: var(--danger);
+}
+
+.exactPayloadIndex {
+  grid-area: index;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.exactPayloadElements code {
+  grid-area: value;
+  min-width: 0;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.exactPayloadElements small {
+  grid-area: detail;
+  min-width: 0;
+}
+
+.exactPayloadSerialized:focus-visible,
+.exactPayloadElements code:focus-visible {
+  border-radius: 4px;
+  box-shadow: var(--focus-ring);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.confirmationPromptBody dl > div:has(.scheduleReviewExactValue) {
+  grid-column: 1 / -1;
+}
+
+.confirmationPromptBody dd:has(.scheduleReviewExactValue) {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.scheduleReviewExactValue {
+  display: block;
+  max-height: 150px;
+  overflow: auto;
+  border-radius: 5px;
+  background: var(--canvas);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  padding: 7px 8px;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.scheduleReviewExactValue:focus-visible {
+  box-shadow: var(--focus-ring);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .shellOperation {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .shellOperation .checkRow {
+    justify-self: start;
+  }
+
+  .exactPayloadElements li {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "index"
+      "value"
+      "detail";
+    gap: 4px;
+  }
+}
+
+.scheduleEventExamples {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 7px;
+}
+
+.scheduleEventExamples button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.scheduleEventExamples button:hover,
+.scheduleEventExamples button:focus-visible,
+.scheduleEventExamples button.selected {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.scheduleEventExamples strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.scheduleEventExamples small {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduleEventSemantics {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 9px;
+}
+
+.scheduleEventReceiptNote {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  min-height: 42px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 9px 10px;
+}
+
 .schedulePreview {
   display: grid;
   gap: 6px;
@@ -4853,4 +5258,18 @@
   width: 100%;
   max-width: 100%;
   margin-top: 4px;
+}
+
+@media (max-width: 640px) {
+  .scheduleTriggerChoices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scheduleEventExamples {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scheduleTemplateRecipes > button {
+    flex: 1 1 140px;
+  }
 }

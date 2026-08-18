@@ -598,21 +598,25 @@ async fn record_backup_request_for_claim(
         );
         return Ok(());
     };
+    let source = BackupRequestSourceLink {
+        job_id: Some(claimed.job_id),
+        schedule_id: claimed.source_schedule_id,
+        causation_id: claimed.causation_id,
+        schedule_lineage: claimed.schedule_lineage.clone(),
+    };
     if let Some(request) = state
         .repo
-        .find_open_backup_request_for_artifact(&claimed.client_id, &claimed.payload_hash)
+        .find_open_backup_request_for_source(&claimed.client_id, &claimed.payload_hash, &source)
         .await?
     {
-        state
+        if state
             .repo
-            .attach_backup_request_source(
-                request.id,
-                Some(claimed.job_id),
-                claimed.source_schedule_id,
-                &operator,
-            )
-            .await?;
-        return Ok(());
+            .attach_backup_request_source(request.id, &source)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
     }
     let request = CreateBackupRequest {
         client_id: claimed.client_id.clone(),
@@ -633,10 +637,7 @@ async fn record_backup_request_for_claim(
             &command_scope,
             &operator,
             BackupRequestStatus::RequestedMetadataOnly,
-            BackupRequestSourceLink {
-                job_id: Some(claimed.job_id),
-                schedule_id: claimed.source_schedule_id,
-            },
+            source,
         )
         .await?;
     Ok(())

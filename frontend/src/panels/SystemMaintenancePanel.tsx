@@ -537,6 +537,8 @@ function StaleSelectorMaintenancePanel({
               `/api/v1/schedules/${encodeURIComponent(update.schedule.id)}/targets`,
               apiToken,
               {
+                expected_definition_revision:
+                  update.schedule.definition_revision,
                 confirmed: true,
                 privilege_assertion: update.privilegeAssertion,
               },
@@ -808,7 +810,8 @@ function staleSelectorRows(
       continue;
     }
     const operationInvalid =
-      !schedule.operation || Boolean(schedule.operation_error);
+      Boolean(schedule.operation_error) ||
+      (schedule.trigger_kind === "cron" && !schedule.operation);
     const reason = parsed.error
       ? `Invalid saved selector: ${parsed.error}`
       : ruleEvidenceUnavailable

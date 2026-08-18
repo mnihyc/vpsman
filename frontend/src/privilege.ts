@@ -50,17 +50,20 @@ export type JobPrivilegeIntentInput = {
 export type SchedulePrivilegeIntentInput = {
   action: string;
   scheduleId?: string | null;
+  definitionRevision?: number | null;
   name: string;
   commandType: string;
   operationPayloadHash: string;
   selectorExpression: string;
   resolvedTargets: string[];
-  cronExpr: string;
-  timezone: string;
+  triggerKind: "cron" | "event";
+  cronExpr: string | null;
+  timezone: string | null;
+  eventExpression: string | null;
   enabled: boolean;
-  catchUpPolicy: string;
-  catchUpLimit: number;
-  retryDelaySecs: number;
+  catchUpPolicy: string | null;
+  catchUpLimit: number | null;
+  retryDelaySecs: number | null;
   maxFailures: number;
   deferredUntil?: string | null;
   deleted: boolean;
@@ -89,7 +92,7 @@ export type OperatorDbPayloadInput = {
 export function parseCommandArgv(input: string): string[] {
   const argv: string[] = [];
   let current = "";
-  let quote: "'" | "\"" | null = null;
+  let quote: "'" | '"' | null = null;
   let escaping = false;
   let tokenStarted = false;
 
@@ -107,7 +110,7 @@ export function parseCommandArgv(input: string): string[] {
         escaping = false;
         continue;
       }
-      if (quote === "\"" && !["$", "`", "\"", "\\"].includes(char)) {
+      if (quote === '"' && !["$", "`", '"', "\\"].includes(char)) {
         current += `\\${char}`;
       } else {
         current += char;
@@ -120,15 +123,15 @@ export function parseCommandArgv(input: string): string[] {
       escaping = true;
       continue;
     }
-    if (quote === "\"") {
-      if (char === "\"") {
+    if (quote === '"') {
+      if (char === '"') {
         quote = null;
       } else {
         current += char;
       }
       continue;
     }
-    if (char === "'" || char === "\"") {
+    if (char === "'" || char === '"') {
       quote = char;
       tokenStarted = true;
       continue;
@@ -241,7 +244,10 @@ export async function buildPrivilegeForJobPayloadHash({
   };
 }
 
-export async function deriveSuperKeyHex(superPassword: string, superSaltHex: string): Promise<string> {
+export async function deriveSuperKeyHex(
+  superPassword: string,
+  superSaltHex: string,
+): Promise<string> {
   if (!superPassword) {
     throw new Error("Super password is required");
   }
@@ -252,7 +258,9 @@ export async function deriveSuperKeyHex(superPassword: string, superSaltHex: str
     salt,
     encoder.encode(superPassword),
   ]);
-  const keyBytes = new Uint8Array(await cryptoProvider().subtle.digest("SHA-256", bufferSource(keyMaterial)));
+  const keyBytes = new Uint8Array(
+    await cryptoProvider().subtle.digest("SHA-256", bufferSource(keyMaterial)),
+  );
   return bytesToHex(keyBytes);
 }
 
@@ -270,7 +278,9 @@ export async function derivePrivilegeMaterial(
   };
 }
 
-export async function operationPayloadHashHex(operation: JobOperation): Promise<string> {
+export async function operationPayloadHashHex(
+  operation: JobOperation,
+): Promise<string> {
   return sha256Hex(operationPayloadBytes(operation));
 }
 
@@ -292,14 +302,25 @@ export async function textPayloadHashHex(text: string): Promise<string> {
   return sha256Hex(encoder.encode(text));
 }
 
-export async function operatorDbPayloadHashHex(input: OperatorDbPayloadInput): Promise<string> {
+export async function operatorDbPayloadHashHex(
+  input: OperatorDbPayloadInput,
+): Promise<string> {
   const payload = ordered([
     ["version", 1],
     ["action", input.action],
     ["target", input.target],
     ["username", input.username ? input.username.trim() : null],
     ["role", input.role ? input.role.trim() : null],
-    ["scopes", Array.from(new Set([...(input.scopes ?? [])].map((scope) => scope.trim()).filter(Boolean))).sort()],
+    [
+      "scopes",
+      Array.from(
+        new Set(
+          [...(input.scopes ?? [])]
+            .map((scope) => scope.trim())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    ],
     ["session_refresh_ttl_secs", input.sessionRefreshTtlSecs ?? null],
     ["status", input.status ? input.status.trim() : null],
     ["admin_risk_acknowledged", input.adminRiskAcknowledged],
@@ -345,7 +366,12 @@ export async function buildPrivilegeAssertion({
   const superKey = await deriveSuperHmacKey(privilegeMaterial);
   const intentHashHex = await sha256Hex(encoder.encode(intent));
   const issuedUnix = Math.floor(Date.now() / 1000);
-  if (!Number.isFinite(ttlSecs) || !Number.isInteger(ttlSecs) || ttlSecs < 15 || ttlSecs > 300) {
+  if (
+    !Number.isFinite(ttlSecs) ||
+    !Number.isInteger(ttlSecs) ||
+    ttlSecs < 15 ||
+    ttlSecs > 300
+  ) {
     throw new Error("Privilege TTL must be between 15 and 300 seconds");
   }
   const expiresUnix = issuedUnix + ttlSecs;
@@ -357,7 +383,9 @@ export async function buildPrivilegeAssertion({
     u64Bytes(issuedUnix),
     u64Bytes(expiresUnix),
   ]);
-  const assertionBytes = new Uint8Array(await cryptoProvider().subtle.sign("HMAC", superKey, bufferSource(payload)));
+  const assertionBytes = new Uint8Array(
+    await cryptoProvider().subtle.sign("HMAC", superKey, bufferSource(payload)),
+  );
   return {
     nonce_hex: bytesToHex(nonce),
     issued_unix: issuedUnix,
@@ -366,7 +394,9 @@ export async function buildPrivilegeAssertion({
   };
 }
 
-export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): string {
+export function canonicalJobPrivilegeIntent(
+  input: JobPrivilegeIntentInput,
+): string {
   const entries: Array<[string, JsonValue]> = [
     ["version", 1],
     ["action", "job.dispatch"],
@@ -384,22 +414,31 @@ export function canonicalJobPrivilegeIntent(input: JobPrivilegeIntentInput): str
     ["force_unprivileged", input.forceUnprivileged],
     ["privileged", input.privileged],
   ];
-  assertGeneratedFieldOrder("job privilege", entries, JOB_PRIVILEGE_INTENT_FIELDS);
+  assertGeneratedFieldOrder(
+    "job privilege",
+    entries,
+    JOB_PRIVILEGE_INTENT_FIELDS,
+  );
   return JSON.stringify(ordered(entries));
 }
 
-export function canonicalSchedulePrivilegeIntent(input: SchedulePrivilegeIntentInput): string {
+export function canonicalSchedulePrivilegeIntent(
+  input: SchedulePrivilegeIntentInput,
+): string {
   const entries: Array<[string, JsonValue]> = [
-    ["version", 1],
+    ["version", 2],
     ["action", input.action],
     ["schedule_id", input.scheduleId ?? null],
+    ["definition_revision", input.definitionRevision ?? null],
     ["name", input.name.trim()],
     ["command_type", input.commandType],
     ["operation_payload_hash", normalizeSha256Hex(input.operationPayloadHash)],
     ["selector_expression", input.selectorExpression.trim()],
     ["resolved_targets", [...input.resolvedTargets].sort()],
-    ["cron_expr", input.cronExpr.trim()],
+    ["trigger_kind", input.triggerKind],
+    ["cron_expr", input.cronExpr?.trim() ?? null],
     ["timezone", input.timezone],
+    ["event_expression", input.eventExpression?.trim() ?? null],
     ["enabled", input.enabled],
     ["catch_up_policy", input.catchUpPolicy],
     ["catch_up_limit", input.catchUpLimit],
@@ -408,21 +447,37 @@ export function canonicalSchedulePrivilegeIntent(input: SchedulePrivilegeIntentI
     ["deferred_until", input.deferredUntil ?? null],
     ["deleted", input.deleted],
   ];
-  assertGeneratedFieldOrder("schedule privilege", entries, SCHEDULE_PRIVILEGE_INTENT_FIELDS);
+  assertGeneratedFieldOrder(
+    "schedule privilege",
+    entries,
+    SCHEDULE_PRIVILEGE_INTENT_FIELDS,
+  );
   return JSON.stringify(ordered(entries));
 }
 
-export function canonicalDbPrivilegeIntent(input: DbPrivilegeIntentInput): string {
+export function canonicalDbPrivilegeIntent(
+  input: DbPrivilegeIntentInput,
+): string {
   const entries: Array<[string, JsonValue]> = [
     ["version", 1],
     ["action", input.action],
     ["target", input.target],
-    ["selector_expression", input.selectorExpression ? input.selectorExpression.trim() : null],
+    [
+      "selector_expression",
+      input.selectorExpression ? input.selectorExpression.trim() : null,
+    ],
     ["resolved_targets", [...(input.resolvedTargets ?? [])].sort()],
     ["confirmed", input.confirmed],
-    ["payload_hash", input.payloadHash ? normalizeSha256Hex(input.payloadHash) : null],
+    [
+      "payload_hash",
+      input.payloadHash ? normalizeSha256Hex(input.payloadHash) : null,
+    ],
   ];
-  assertGeneratedFieldOrder("db privilege", entries, DB_PRIVILEGE_INTENT_FIELDS);
+  assertGeneratedFieldOrder(
+    "db privilege",
+    entries,
+    DB_PRIVILEGE_INTENT_FIELDS,
+  );
   return JSON.stringify(ordered(entries));
 }
 
@@ -434,14 +489,27 @@ export function canonicalOperationJson(operation: JobOperation): string {
   return JSON.stringify(canonicalJobOperation(operation));
 }
 
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
 
 function canonicalJobOperation(operation: JobOperation): JsonValue {
   switch (operation.type) {
     case "shell":
-      return ordered([["type", operation.type], ["argv", operation.argv], ["pty", operation.pty]]);
+      return ordered([
+        ["type", operation.type],
+        ["argv", operation.argv],
+        ["pty", operation.pty],
+      ]);
     case "shell_script":
-      return ordered([["type", operation.type], ["script", operation.script]]);
+      return ordered([
+        ["type", operation.type],
+        ["script", operation.script],
+      ]);
     case "terminal_open":
       return ordered([
         ["type", operation.type],
@@ -463,7 +531,10 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["follow_symlinks", operation.follow_symlinks],
       ]);
     case "file_stat":
-      return ordered([["type", operation.type], ["path", operation.path]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+      ]);
     case "config_read":
       return ordered([["type", operation.type]]);
     case "runtime_config_sync":
@@ -486,7 +557,10 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["restart_agent", skipFalse(operation.restart_agent)],
       ]);
     case "agent_update_rollback":
-      return ordered([["type", operation.type], ["rollback_sha256_hex", optional(operation.rollback_sha256_hex)]]);
+      return ordered([
+        ["type", operation.type],
+        ["rollback_sha256_hex", optional(operation.rollback_sha256_hex)],
+      ]);
     case "agent_update_check":
       return ordered([
         ["type", operation.type],
@@ -550,7 +624,11 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       ]);
     case "file_transfer_commit":
     case "file_transfer_abort":
-      return ordered([["type", operation.type], ["session_id", operation.session_id], ["resume_token_hash", operation.resume_token_hash]]);
+      return ordered([
+        ["type", operation.type],
+        ["session_id", operation.session_id],
+        ["resume_token_hash", operation.resume_token_hash],
+      ]);
     case "file_transfer_download_start":
       return ordered([
         ["type", operation.type],
@@ -597,11 +675,28 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["policy", operation.policy ?? "fail"],
       ]);
     case "file_mkdir":
-      return ordered([["type", operation.type], ["path", operation.path], ["mode", operation.mode], ["recursive", operation.recursive ?? false], ["policy", operation.policy ?? "fail"]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["mode", operation.mode],
+        ["recursive", operation.recursive ?? false],
+        ["policy", operation.policy ?? "fail"],
+      ]);
     case "file_rename":
-      return ordered([["type", operation.type], ["path", operation.path], ["new_path", operation.new_path], ["overwrite", operation.overwrite ?? false], ["policy", operation.policy ?? "fail"]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["new_path", operation.new_path],
+        ["overwrite", operation.overwrite ?? false],
+        ["policy", operation.policy ?? "fail"],
+      ]);
     case "file_delete":
-      return ordered([["type", operation.type], ["path", operation.path], ["recursive", operation.recursive ?? false], ["policy", operation.policy ?? "fail"]]);
+      return ordered([
+        ["type", operation.type],
+        ["path", operation.path],
+        ["recursive", operation.recursive ?? false],
+        ["policy", operation.policy ?? "fail"],
+      ]);
     case "file_chmod":
       return ordered([
         ["type", operation.type],
@@ -650,7 +745,10 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
     case "user_sessions":
       return ordered([["type", operation.type]]);
     case "process_list":
-      return ordered([["type", operation.type], ["limit", operation.limit]]);
+      return ordered([
+        ["type", operation.type],
+        ["limit", operation.limit],
+      ]);
     case "storage_inventory":
       return ordered([
         ["type", operation.type],
@@ -669,11 +767,21 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
       ]);
     case "process_stop":
     case "process_restart":
-      return ordered([["type", operation.type], ["name", operation.name]]);
+      return ordered([
+        ["type", operation.type],
+        ["name", operation.name],
+      ]);
     case "process_status":
-      return ordered([["type", operation.type], ["name", operation.name ?? null]]);
+      return ordered([
+        ["type", operation.type],
+        ["name", operation.name ?? null],
+      ]);
     case "process_logs":
-      return ordered([["type", operation.type], ["name", operation.name], ["max_bytes", operation.max_bytes]]);
+      return ordered([
+        ["type", operation.type],
+        ["name", operation.name],
+        ["max_bytes", operation.max_bytes],
+      ]);
     case "service_inventory":
       return ordered([
         ["type", operation.type],
@@ -728,16 +836,33 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["archive_size_bytes", operation.archive_size_bytes ?? null],
         ["archive_sha256_hex", operation.archive_sha256_hex ?? null],
         ["dry_run", skipFalse(operation.dry_run)],
-        ["post_restore_argv", operation.post_restore_argv?.length ? operation.post_restore_argv : undefined],
+        [
+          "post_restore_argv",
+          operation.post_restore_argv?.length
+            ? operation.post_restore_argv
+            : undefined,
+        ],
       ]);
     case "restore_rollback":
       return ordered([
         ["type", operation.type],
         ["source_restore_job_id", operation.source_restore_job_id],
-        ["restored_files", operation.restored_files.map(canonicalRestoreRollbackFile)],
+        [
+          "restored_files",
+          operation.restored_files.map(canonicalRestoreRollbackFile),
+        ],
       ]);
     case "network_status":
-      return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["runtime_adapter", optional(operation.runtime_adapter as JsonValue | null | undefined)]]);
+      return ordered([
+        ["type", operation.type],
+        ["plan_id", operation.plan_id],
+        ["plan", operation.plan as JsonValue],
+        ["side", operation.side],
+        [
+          "runtime_adapter",
+          optional(operation.runtime_adapter as JsonValue | null | undefined),
+        ],
+      ]);
     case "network_interfaces":
       return ordered([["type", operation.type]]);
     case "network_traffic_import_vnstat":
@@ -747,7 +872,14 @@ function canonicalJobOperation(operation: JobOperation): JsonValue {
         ["start_unix", operation.start_unix],
       ]);
     case "network_probe":
-      return ordered([["type", operation.type], ["plan_id", operation.plan_id], ["plan", operation.plan as JsonValue], ["side", operation.side], ["count", operation.count], ["interval_ms", operation.interval_ms]]);
+      return ordered([
+        ["type", operation.type],
+        ["plan_id", operation.plan_id],
+        ["plan", operation.plan as JsonValue],
+        ["side", operation.side],
+        ["count", operation.count],
+        ["interval_ms", operation.interval_ms],
+      ]);
     case "network_speed_test":
       return ordered([
         ["type", operation.type],
@@ -797,7 +929,10 @@ function assertGeneratedFieldOrder(
   expected: readonly string[],
 ) {
   const actual = entries.map(([key]) => key);
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
     throw new Error(`${label} contract drift; run npm run generate:contracts`);
   }
 }
@@ -810,12 +945,20 @@ function skipFalse(value: boolean | undefined): boolean | undefined {
   return value ? true : undefined;
 }
 
-function skipDefault<T extends JsonValue>(value: T | null | undefined, defaultValue: T): T | undefined {
+function skipDefault<T extends JsonValue>(
+  value: T | null | undefined,
+  defaultValue: T,
+): T | undefined {
   const actual = value ?? defaultValue;
   return actual === defaultValue ? undefined : actual;
 }
 
-function canonicalFilePushChunk(chunk: { offset: number; size_bytes: number; sha256_hex: string; data_base64: string }): JsonValue {
+function canonicalFilePushChunk(chunk: {
+  offset: number;
+  size_bytes: number;
+  sha256_hex: string;
+  data_base64: string;
+}): JsonValue {
   return ordered([
     ["offset", chunk.offset],
     ["size_bytes", chunk.size_bytes],
@@ -831,7 +974,12 @@ function canonicalProcessPolicy(
   const restartMaxRetries = policy?.restart_max_retries ?? 0;
   const restartBackoffSecs = policy?.restart_backoff_secs ?? 5;
   const gracefulStopSecs = policy?.graceful_stop_secs ?? 5;
-  if (restart === "never" && restartMaxRetries === 0 && restartBackoffSecs === 5 && gracefulStopSecs === 5) {
+  if (
+    restart === "never" &&
+    restartMaxRetries === 0 &&
+    restartBackoffSecs === 5 &&
+    gracefulStopSecs === 5
+  ) {
     return undefined;
   }
   return ordered([
@@ -855,7 +1003,12 @@ function canonicalProcessLimits(
   return Object.keys(value).length === 0 ? undefined : value;
 }
 
-function canonicalRestoreRollbackFile(file: Extract<JobOperation, { type: "restore_rollback" }>["restored_files"][number]): JsonValue {
+function canonicalRestoreRollbackFile(
+  file: Extract<
+    JobOperation,
+    { type: "restore_rollback" }
+  >["restored_files"][number],
+): JsonValue {
   return ordered([
     ["archive_path", file.archive_path],
     ["destination_path", file.destination_path],
@@ -866,30 +1019,46 @@ function canonicalRestoreRollbackFile(file: Extract<JobOperation, { type: "resto
 }
 
 function sortedRecord(record: Record<string, string>): JsonValue {
-  return Object.fromEntries(Object.entries(record).sort(([left], [right]) => rustAsciiKeyCompare(left, right)));
+  return Object.fromEntries(
+    Object.entries(record).sort(([left], [right]) =>
+      rustAsciiKeyCompare(left, right),
+    ),
+  );
 }
 
 function rustAsciiKeyCompare(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
-async function deriveSuperHmacKey(material: PrivilegeMaterial): Promise<CryptoKey> {
+async function deriveSuperHmacKey(
+  material: PrivilegeMaterial,
+): Promise<CryptoKey> {
   const keyBytes = hexToBytes(
     (await derivePrivilegeMaterial(material)).superKeyHex,
   );
-  return cryptoProvider().subtle.importKey("raw", bufferSource(keyBytes), { name: "HMAC", hash: "SHA-256" }, false, [
-    "sign",
-  ]);
+  return cryptoProvider().subtle.importKey(
+    "raw",
+    bufferSource(keyBytes),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
 }
 
 async function sha256Hex(payload: Uint8Array): Promise<string> {
-  const hash = new Uint8Array(await cryptoProvider().subtle.digest("SHA-256", bufferSource(payload)));
+  const hash = new Uint8Array(
+    await cryptoProvider().subtle.digest("SHA-256", bufferSource(payload)),
+  );
   return bytesToHex(hash);
 }
 
 export function normalizeHex(value: string): string {
   const normalized = value.trim().toLowerCase();
-  if (normalized.length === 0 || normalized.length % 2 !== 0 || /[^0-9a-f]/.test(normalized)) {
+  if (
+    normalized.length === 0 ||
+    normalized.length % 2 !== 0 ||
+    /[^0-9a-f]/.test(normalized)
+  ) {
     throw new Error("Invalid hex value");
   }
   return normalized;
@@ -913,7 +1082,9 @@ function hexToBytes(value: string): Uint8Array {
 }
 
 function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 function randomBytes(length: number): Uint8Array {
@@ -943,7 +1114,10 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
 }
 
 function bufferSource(bytes: Uint8Array): ArrayBuffer {
-  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
 }
 
 function cryptoProvider(): Crypto {

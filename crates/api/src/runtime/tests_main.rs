@@ -11,26 +11,23 @@ use vpsman_server_core::{
 };
 
 #[test]
-fn legacy_resource_alert_cli_flags_remain_parse_only() {
-    let args = Args::try_parse_from([
-        "vpsman-api",
+fn retired_resource_alert_cli_flags_are_rejected() {
+    for flag in [
         "--alert-memory-available-warning-ratio",
-        "0.2",
+        "--alert-memory-available-critical-ratio",
+        "--alert-disk-available-warning-ratio",
         "--alert-disk-available-critical-ratio",
-        "0.1",
         "--alert-cpu-load-warning",
-        "2",
-    ])
-    .expect("legacy resource alert flags remain parse-compatible");
-
-    assert_eq!(
-        args.deprecated_resource_alert_threshold_fields(),
-        vec![
-            "--alert-memory-available-warning-ratio",
-            "--alert-disk-available-critical-ratio",
-            "--alert-cpu-load-warning",
-        ]
-    );
+        "--alert-cpu-load-critical",
+    ] {
+        let error = Args::try_parse_from(["vpsman-api", flag, "0.2"])
+            .expect_err("retired resource alert flags must not remain parse-compatible");
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::UnknownArgument,
+            "{flag}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -66,6 +63,8 @@ async fn fleet_summary_accounts_for_every_visible_connection_state() {
         actor_id: None,
         command_type: "shell".to_string(),
         source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
         privileged: false,
         status: status.to_string(),
         target_count: 1,
@@ -818,6 +817,8 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             actor_id: Some(test_operator().operator.id),
             command_type: "shell".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "queued".to_string(),
             target_count: 1,
@@ -843,6 +844,8 @@ async fn deleting_memory_agent_removes_inventory_access_and_bulk_targets() {
             actor_id: Some(test_operator().operator.id),
             command_type: "shell".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "running".to_string(),
             target_count: 1,
@@ -1182,6 +1185,8 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         actor_id: Some(test_operator().operator.id),
         command_type: "process_status".to_string(),
         source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
         privileged: false,
         status: "completed".to_string(),
         target_count: 1,
@@ -2507,7 +2512,7 @@ async fn memory_dispatch_claims_one_exclusive_target_per_client_per_batch() {
 }
 
 #[tokio::test]
-async fn memory_dispatch_claim_preserves_source_schedule_id() {
+async fn memory_dispatch_claim_preserves_complete_schedule_provenance() {
     let repo = Repository::Memory(MemoryState::default());
     seed_never_connected_memory_agent(&repo, "client-a").await;
     let operator = test_operator();
@@ -2515,6 +2520,7 @@ async fn memory_dispatch_claim_preserves_source_schedule_id() {
     let command = request.job_command().unwrap();
     let command_hash = payload_hash(&encode_json(&command).unwrap());
     let schedule_id = Uuid::new_v4();
+    let causation_id = Uuid::new_v4();
     let job_id = repo
         .record_dispatching_job_from_schedule(
             Uuid::new_v4(),
@@ -2527,11 +2533,21 @@ async fn memory_dispatch_claim_preserves_source_schedule_id() {
         )
         .await
         .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let mut jobs = memory.jobs.write().await;
+    let job = jobs.iter_mut().find(|job| job.id == job_id).unwrap();
+    job.causation_id = Some(causation_id);
+    job.schedule_lineage = vec![schedule_id];
+    drop(jobs);
 
     let claim = repo.claim_due_job_targets(10, 30, 0).await.unwrap();
     assert_eq!(claim.len(), 1);
     assert_eq!(claim[0].job_id, job_id);
     assert_eq!(claim[0].source_schedule_id, Some(schedule_id));
+    assert_eq!(claim[0].causation_id, Some(causation_id));
+    assert_eq!(claim[0].schedule_lineage, vec![schedule_id]);
 }
 
 #[tokio::test]
@@ -3635,6 +3651,8 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
         actor_id: Some(test_operator().operator.id),
         command_type: "terminal_open".to_string(),
         source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
         privileged: true,
         status: status.to_string(),
         target_count: 1,

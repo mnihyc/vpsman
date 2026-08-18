@@ -14,6 +14,43 @@ pub enum Expression {
     Or(Box<Expression>, Box<Expression>),
 }
 
+/// Three-valued result used when an expression is evaluated against a partial
+/// evidence document. The ordinary selector/webhook matcher intentionally
+/// remains boolean; policy evaluation uses this type so absent facts cannot be
+/// mistaken for a conclusive false (and therefore for recovery).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionTruth {
+    True,
+    False,
+    Unknown,
+}
+
+impl ExpressionTruth {
+    fn not(self) -> Self {
+        match self {
+            Self::True => Self::False,
+            Self::False => Self::True,
+            Self::Unknown => Self::Unknown,
+        }
+    }
+
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::False, _) | (_, Self::False) => Self::False,
+            (Self::True, Self::True) => Self::True,
+            _ => Self::Unknown,
+        }
+    }
+
+    fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::True, _) | (_, Self::True) => Self::True,
+            (Self::False, Self::False) => Self::False,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Predicate {
     Bare(String),
@@ -63,6 +100,7 @@ pub struct ExpressionContext {
     pub job: Option<Value>,
     pub schedule: Option<Value>,
     pub alert: Option<Value>,
+    pub policy_rule: Option<Value>,
     pub telemetry: Option<Value>,
     pub objects: BTreeMap<String, Value>,
     pub event_predicates: BTreeSet<String>,
@@ -126,7 +164,20 @@ enum TokenKind {
     Word(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetiredAlertAliasMode {
+    Reject,
+    AcceptForRewrite,
+}
+
 pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
+    parse_expression_with_alias_mode(input, RetiredAlertAliasMode::Reject)
+}
+
+fn parse_expression_with_alias_mode(
+    input: &str,
+    retired_alert_alias_mode: RetiredAlertAliasMode,
+) -> Result<Option<Expression>, String> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         return Ok(None);
@@ -134,6 +185,7 @@ pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
     let mut parser = Parser {
         position: 0,
         tokens,
+        retired_alert_alias_mode,
     };
     let expression = parser.parse_or()?;
     if parser.peek().is_some() {
@@ -141,6 +193,35 @@ pub fn parse_expression(input: &str) -> Result<Option<Expression>, String> {
     }
     validate_expression(&expression)?;
     Ok(Some(expression))
+}
+
+/// Rewrites retired alert lifecycle event predicates and policy-rule field
+/// references to their canonical forms.
+///
+/// Semantic [`Predicate::Event`] nodes and exact legacy values compared against
+/// `event.kind` are rewritten. Arbitrary text under other fields is left
+/// unchanged; policy-rule fields are rewritten only when the complete parsed
+/// field path matches a retired path.
+pub fn rewrite_retired_alert_event_aliases(input: &str) -> Result<String, String> {
+    let Some(mut expression) =
+        parse_expression_with_alias_mode(input, RetiredAlertAliasMode::AcceptForRewrite)?
+    else {
+        return Ok(input.to_string());
+    };
+
+    if !rewrite_retired_alert_event_nodes(&mut expression) {
+        return Ok(input.to_string());
+    }
+
+    let rewritten = format_expression(&expression);
+    let reparsed = parse_expression(&rewritten)?
+        .ok_or_else(|| "rewritten alert event expression is empty".to_string())?;
+    if reparsed != expression {
+        return Err(
+            "rewritten alert event expression did not preserve its syntax tree".to_string(),
+        );
+    }
+    Ok(rewritten)
 }
 
 pub fn expression_matches(context: &ExpressionContext, expression: &Expression) -> bool {
@@ -152,6 +233,26 @@ pub fn expression_matches(context: &ExpressionContext, expression: &Expression) 
         }
         Expression::Or(left, right) => {
             expression_matches(context, left) || expression_matches(context, right)
+        }
+    }
+}
+
+/// Evaluates the shared expression AST using strong Kleene logic.
+///
+/// A comparison or membership predicate whose field is absent, null, or a
+/// non-scalar object is `Unknown`. An explicitly present empty array is known
+/// and follows the normal membership semantics. This is the policy-evidence
+/// boundary: `Unknown` pauses confirmation gates and may never resolve an
+/// active condition through the inverse of its trigger expression.
+pub fn expression_truth(context: &ExpressionContext, expression: &Expression) -> ExpressionTruth {
+    match expression {
+        Expression::Predicate(predicate) => predicate_truth(context, predicate),
+        Expression::Not(inner) => expression_truth(context, inner).not(),
+        Expression::And(left, right) => {
+            expression_truth(context, left).and(expression_truth(context, right))
+        }
+        Expression::Or(left, right) => {
+            expression_truth(context, left).or(expression_truth(context, right))
         }
     }
 }
@@ -223,6 +324,7 @@ impl ExpressionContext {
             "job" => self.job = Some(value),
             "schedule" => self.schedule = Some(value),
             "alert" => self.alert = Some(value),
+            "policy_rule" => self.policy_rule = Some(value),
             "telemetry" => self.telemetry = Some(value),
             _ => {
                 self.objects.insert(root, value);
@@ -533,6 +635,7 @@ fn read_regex(
 struct Parser {
     tokens: Vec<TokenKind>,
     position: usize,
+    retired_alert_alias_mode: RetiredAlertAliasMode,
 }
 
 impl Parser {
@@ -591,32 +694,51 @@ impl Parser {
     }
 
     fn parse_predicate(&mut self, raw: String) -> Result<Predicate, String> {
+        let raw_field = raw.split_once(':').map_or(raw.as_str(), |(field, _)| field);
+        self.reject_retired_policy_rule_field(raw_field)?;
         if let Some(operator) = self.consume_comparison_operator() {
             let value = self.parse_scalar_value()?;
+            let field = canonical_field(&raw);
+            self.reject_retired_event_kind_scalar(&field, &value)?;
             return Ok(Predicate::Comparison {
-                field: canonical_field(&raw),
+                field,
                 operator,
                 value,
             });
         }
         if self.consume_in() {
             let values = self.parse_list_values()?;
+            let field = canonical_field(&raw);
+            self.reject_retired_event_kind_list(&field, &values)?;
             return Ok(Predicate::Membership {
-                field: canonical_field(&raw),
+                field,
                 negated: false,
                 values,
             });
         }
         if self.consume_not_in() {
             let values = self.parse_list_values()?;
+            let field = canonical_field(&raw);
+            self.reject_retired_event_kind_list(&field, &values)?;
             return Ok(Predicate::Membership {
-                field: canonical_field(&raw),
+                field,
                 negated: true,
                 values,
             });
         }
         if raw.eq_ignore_ascii_case("untagged") {
             return Ok(Predicate::Untagged);
+        }
+        if let Some(canonical) = canonical_retired_alert_event_alias(&raw) {
+            return match self.retired_alert_alias_mode {
+                RetiredAlertAliasMode::Reject => Err(format!(
+                    "retired alert event predicate `{}`; use `{canonical}`",
+                    raw.to_ascii_lowercase()
+                )),
+                RetiredAlertAliasMode::AcceptForRewrite => {
+                    Ok(Predicate::Event(raw.to_ascii_lowercase()))
+                }
+            };
         }
         if is_event_predicate(&raw) {
             return Ok(Predicate::Event(raw.to_ascii_lowercase()));
@@ -631,6 +753,51 @@ impl Parser {
             return shorthand_predicate(namespace, value);
         }
         Ok(Predicate::Bare(raw))
+    }
+
+    fn reject_retired_event_kind_scalar(
+        &self,
+        field: &str,
+        value: &ScalarValue,
+    ) -> Result<(), String> {
+        if self.retired_alert_alias_mode == RetiredAlertAliasMode::AcceptForRewrite
+            || field != "event.kind"
+        {
+            return Ok(());
+        }
+        let ScalarValue::Literal(value) = value;
+        reject_retired_event_kind_value(value)
+    }
+
+    fn reject_retired_policy_rule_field(&self, field: &str) -> Result<(), String> {
+        if self.retired_alert_alias_mode == RetiredAlertAliasMode::AcceptForRewrite {
+            return Ok(());
+        }
+        let field = field.to_ascii_lowercase();
+        let Some(canonical) = canonical_retired_policy_rule_path(&field) else {
+            return Ok(());
+        };
+        Err(format!(
+            "retired policy-rule field `{field}`; use `{canonical}`"
+        ))
+    }
+
+    fn reject_retired_event_kind_list(
+        &self,
+        field: &str,
+        values: &[ListValue],
+    ) -> Result<(), String> {
+        if self.retired_alert_alias_mode == RetiredAlertAliasMode::AcceptForRewrite
+            || field != "event.kind"
+        {
+            return Ok(());
+        }
+        for value in values {
+            if let ListValue::Literal(value) = value {
+                reject_retired_event_kind_value(value)?;
+            }
+        }
+        Ok(())
     }
 
     fn parse_scalar_value(&mut self) -> Result<ScalarValue, String> {
@@ -824,25 +991,195 @@ fn is_event_predicate(raw: &str) -> bool {
         || lower.starts_with("schedule.name:")
         || lower.starts_with("alert.severity:")
         || lower.starts_with("alert.category:")
-        || lower.starts_with("alert.state:")
         || matches!(
             lower.as_str(),
             "server.on_start"
                 | "schedule.due"
-                | "schedule.dispatched"
+                | "schedule.job_finished"
                 | "schedule.failed"
                 | "vps.tag_changed"
                 | "job.created"
-                | "alert.open"
                 | "alert.triggered"
-                | "alert.policy_reached"
-                | "alert.policy_triggered"
-                | "alert.policy_resolved"
                 | "alert.resolved"
                 | "telemetry.rollup"
                 | "telemetry.network_rate"
                 | "telemetry.tunnel"
         )
+}
+
+fn canonical_retired_alert_event_alias(raw: &str) -> Option<&'static str> {
+    match raw.to_ascii_lowercase().as_str() {
+        "alert.open" | "alert.policy_reached" | "alert.policy_triggered" => Some("alert.triggered"),
+        "alert.policy_resolved" => Some("alert.resolved"),
+        _ => None,
+    }
+}
+
+fn reject_retired_event_kind_value(value: &str) -> Result<(), String> {
+    let Some(canonical) = canonical_retired_alert_event_alias(value) else {
+        return Ok(());
+    };
+    Err(format!(
+        "retired alert event kind value `{}`; use `{canonical}`",
+        value.to_ascii_lowercase()
+    ))
+}
+
+fn rewrite_retired_alert_event_nodes(expression: &mut Expression) -> bool {
+    match expression {
+        Expression::Predicate(Predicate::Event(event)) => {
+            let Some(canonical) = canonical_retired_alert_event_alias(event) else {
+                return false;
+            };
+            *event = canonical.to_string();
+            true
+        }
+        Expression::Predicate(Predicate::Comparison { field, value, .. }) => {
+            let mut changed = false;
+            if let Some(canonical) = canonical_retired_policy_rule_path(field) {
+                *field = canonical.to_string();
+                changed = true;
+            }
+            if field == "event.kind" {
+                let ScalarValue::Literal(value) = value;
+                if let Some(canonical) = canonical_retired_alert_event_alias(value) {
+                    *value = canonical.to_string();
+                    changed = true;
+                }
+            }
+            changed
+        }
+        Expression::Predicate(Predicate::Membership { field, values, .. }) => {
+            let mut changed = false;
+            if let Some(canonical) = canonical_retired_policy_rule_path(field) {
+                *field = canonical.to_string();
+                changed = true;
+            }
+            if field == "event.kind" {
+                for value in values {
+                    let ListValue::Literal(value) = value else {
+                        continue;
+                    };
+                    if let Some(canonical) = canonical_retired_alert_event_alias(value) {
+                        *value = canonical.to_string();
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        }
+        Expression::Predicate(Predicate::Bare(_) | Predicate::Untagged) => false,
+        Expression::Not(inner) => rewrite_retired_alert_event_nodes(inner),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            let left_changed = rewrite_retired_alert_event_nodes(left);
+            let right_changed = rewrite_retired_alert_event_nodes(right);
+            left_changed || right_changed
+        }
+    }
+}
+
+pub(crate) fn canonical_retired_policy_rule_path(path: &str) -> Option<&'static str> {
+    match path {
+        "policy_rule.condition_expression" => Some("policy_rule.trigger_condition_expression"),
+        "policy_rule.window_secs" => Some("policy_rule.trigger_meta_condition.window_seconds"),
+        _ => None,
+    }
+}
+
+fn format_expression(expression: &Expression) -> String {
+    match expression {
+        Expression::Predicate(predicate) => format_predicate(predicate),
+        Expression::Not(inner) => format!("!({})", format_expression(inner)),
+        Expression::And(left, right) => format!(
+            "({} && {})",
+            format_expression(left),
+            format_expression(right)
+        ),
+        Expression::Or(left, right) => format!(
+            "({} || {})",
+            format_expression(left),
+            format_expression(right)
+        ),
+    }
+}
+
+fn format_predicate(predicate: &Predicate) -> String {
+    match predicate {
+        Predicate::Bare(raw) | Predicate::Event(raw) => format_word(raw),
+        Predicate::Comparison {
+            field,
+            operator,
+            value: ScalarValue::Literal(value),
+        } => format!(
+            "{} {} {}",
+            format_word(field),
+            comparison_operator_label(*operator),
+            quote_literal(value)
+        ),
+        Predicate::Membership {
+            field,
+            negated,
+            values,
+        } => {
+            let values = values
+                .iter()
+                .map(format_list_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} {}in [{}]",
+                format_word(field),
+                if *negated { "not " } else { "" },
+                values
+            )
+        }
+        Predicate::Untagged => "untagged".to_string(),
+    }
+}
+
+fn comparison_operator_label(operator: ComparisonOperator) -> &'static str {
+    match operator {
+        ComparisonOperator::Eq => "=",
+        ComparisonOperator::NotEq => "!=",
+        ComparisonOperator::Lt => "<",
+        ComparisonOperator::Lte => "<=",
+        ComparisonOperator::Gt => ">",
+        ComparisonOperator::Gte => ">=",
+    }
+}
+
+fn format_list_value(value: &ListValue) -> String {
+    match value {
+        ListValue::Literal(value) => quote_literal(value),
+        ListValue::Regex(pattern) => format!("/{pattern}/"),
+    }
+}
+
+fn format_word(value: &str) -> String {
+    if let Ok(tokens) = tokenize(value) {
+        if matches!(tokens.as_slice(), [TokenKind::Word(parsed)] if parsed == value) {
+            return value.to_string();
+        }
+    }
+
+    let Some(first) = value.chars().next() else {
+        return value.to_string();
+    };
+    let rest = &value[first.len_utf8()..];
+    format!("{first}{}", quote_literal(rest))
+}
+
+fn quote_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn is_event_field_alias(namespace: &str) -> bool {
@@ -878,6 +1215,21 @@ pub fn validate_expression(expression: &Expression) -> Result<(), String> {
 }
 
 fn validate_predicate(predicate: &Predicate) -> Result<(), String> {
+    match predicate {
+        Predicate::Comparison { field, .. } | Predicate::Membership { field, .. }
+            if field.eq_ignore_ascii_case("alert.state") =>
+        {
+            return Err(
+                "retired alert field `alert.state`; use `alert.lifecycle_state`".to_string(),
+            );
+        }
+        Predicate::Bare(raw) if raw.eq_ignore_ascii_case("alert.state") => {
+            return Err(
+                "retired alert field `alert.state`; use `alert.lifecycle_state`".to_string(),
+            );
+        }
+        _ => {}
+    }
     match predicate {
         Predicate::Comparison {
             field,
@@ -1068,6 +1420,58 @@ fn predicate_matches(context: &ExpressionContext, predicate: &Predicate) -> bool
         } => membership_matches(context, field, *negated, values),
         Predicate::Event(name) => context.event_predicates.contains(name),
         Predicate::Untagged => context.vps.as_ref().is_some_and(|vps| vps.tags.is_empty()),
+    }
+}
+
+fn predicate_truth(context: &ExpressionContext, predicate: &Predicate) -> ExpressionTruth {
+    match predicate {
+        Predicate::Bare(raw) => {
+            if context.vps.is_none() {
+                ExpressionTruth::Unknown
+            } else if bare_matches(context, raw) {
+                ExpressionTruth::True
+            } else {
+                ExpressionTruth::False
+            }
+        }
+        Predicate::Comparison {
+            field,
+            operator,
+            value,
+        } => {
+            if field_values(context, field).is_none() {
+                ExpressionTruth::Unknown
+            } else if comparison_matches(context, field, *operator, value) {
+                ExpressionTruth::True
+            } else {
+                ExpressionTruth::False
+            }
+        }
+        Predicate::Membership {
+            field,
+            negated,
+            values,
+        } => {
+            if field_values(context, field).is_none() {
+                ExpressionTruth::Unknown
+            } else if membership_matches(context, field, *negated, values) {
+                ExpressionTruth::True
+            } else {
+                ExpressionTruth::False
+            }
+        }
+        Predicate::Event(name) => {
+            if context.event_predicates.contains(name) {
+                ExpressionTruth::True
+            } else {
+                ExpressionTruth::False
+            }
+        }
+        Predicate::Untagged => match context.vps.as_ref() {
+            Some(vps) if vps.tags.is_empty() => ExpressionTruth::True,
+            Some(_) => ExpressionTruth::False,
+            None => ExpressionTruth::Unknown,
+        },
     }
 }
 
@@ -1489,6 +1893,7 @@ fn field_values(context: &ExpressionContext, field: &str) -> Option<Vec<FieldVal
         "job" => context.job.as_ref(),
         "schedule" => context.schedule.as_ref(),
         "alert" => context.alert.as_ref(),
+        "policy_rule" => context.policy_rule.as_ref(),
         "telemetry" => context.telemetry.as_ref(),
         other => context.objects.get(other),
     }?;

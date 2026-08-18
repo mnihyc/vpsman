@@ -145,7 +145,8 @@ impl Repository {
             .keep_last
             .context("backup_policy_keep_last_required")?;
         let rotation_generation = normalize_policy_generation(request.rotation_generation.clone());
-        let schedule_request = backup_policy_schedule_input(&request);
+        let mut schedule_request = backup_policy_schedule_input(&request);
+        schedule_request.expected_definition_revision = Some(expectation.definition_revision);
         let (schedule, metadata) = match self {
             Self::Memory(memory) => {
                 let _agent_lifecycle_guard = memory.agent_key_lifecycle.lock().await;
@@ -941,6 +942,7 @@ fn backup_policy_view(
     };
     Some(BackupPolicyView {
         schedule_id: schedule.id,
+        definition_revision: schedule.definition_revision,
         name: schedule.name,
         enabled: schedule.enabled,
         selector_expression: schedule.selector_expression,
@@ -952,17 +954,17 @@ fn backup_policy_view(
         retention_days: metadata.retention_days,
         keep_last: metadata.keep_last,
         rotation_generation: metadata.rotation_generation,
-        cron_expr: schedule.cron_expr,
-        timezone: schedule.timezone,
+        cron_expr: schedule.cron_expr?,
+        timezone: schedule.timezone?,
         next_runs: schedule.next_runs,
         cadence_error: schedule.cadence_error,
-        catch_up_policy: schedule.catch_up_policy,
-        catch_up_limit: schedule.catch_up_limit,
-        retry_delay_secs: schedule.retry_delay_secs,
+        catch_up_policy: schedule.catch_up_policy?,
+        catch_up_limit: schedule.catch_up_limit?,
+        retry_delay_secs: schedule.retry_delay_secs?,
         max_failures: schedule.max_failures,
         failure_count: schedule.failure_count,
         last_error: schedule.last_error,
-        next_run_at: schedule.next_run_at,
+        next_run_at: schedule.next_run_at?,
         last_run_at: schedule.last_run_at,
         created_at: schedule.created_at,
         updated_at: metadata.updated_at,
@@ -978,21 +980,25 @@ fn normalize_policy_generation(value: Option<String>) -> Option<String> {
 fn backup_policy_schedule_input(request: &CreateBackupPolicyRequest) -> ScheduleCreateInput {
     ScheduleCreateInput {
         name: request.name.clone(),
-        operation: JobCommand::Backup {
+        operation: Some(JobCommand::Backup {
             paths: request.paths.clone(),
             include_config: request.include_config,
             follow_symlinks: request.follow_symlinks,
             missing_path_policy: request.missing_path_policy,
-        },
+        }),
+        event_argv_template: None,
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
-        cron_expr: request.cron_expr.clone(),
-        timezone: request.timezone.clone(),
+        trigger_kind: crate::model::ScheduleTriggerKind::Cron,
+        cron_expr: Some(request.cron_expr.clone()),
+        timezone: Some(request.timezone.clone()),
+        event_expression: None,
         enabled: request.enabled,
-        catch_up_policy: request.catch_up_policy.clone(),
-        catch_up_limit: request.catch_up_limit,
-        retry_delay_secs: request.retry_delay_secs,
+        catch_up_policy: Some(request.catch_up_policy.clone()),
+        catch_up_limit: Some(request.catch_up_limit),
+        retry_delay_secs: Some(request.retry_delay_secs),
         max_failures: request.max_failures,
+        expected_definition_revision: None,
     }
 }
 

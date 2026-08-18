@@ -1193,6 +1193,9 @@ export function App() {
   const canManageAlertLifecycle = operatorCanManageAlertLifecycle(
     dashboard.operator,
   );
+  const canManageAlertEventSchedules = operatorCanManageAlertEventSchedules(
+    dashboard.operator,
+  );
   const runtimeConfigEvidenceState = dashboard.runtimeConfigApplyLoading
     ? "loading"
     : dashboard.runtimeConfigApplyEvidenceAvailable
@@ -1756,10 +1759,14 @@ export function App() {
           : schedule.enabled
             ? "enabled"
             : "disabled"
-      } · ${schedule.cron_expr} · ${schedule.selector_expression}`,
+      } · ${
+        schedule.trigger_kind === "event"
+          ? `alert edge: ${schedule.event_expression ?? "invalid"}`
+          : `cron: ${schedule.cron_expr ?? "invalid"}`
+      } · ${schedule.selector_expression}`,
       keywords: `${schedule.id} ${schedule.name} ${schedule.command_type} ${
         schedule.cadence_error ?? ""
-      } ${schedule.selector_expression} ${schedule.target_client_ids.join(" ")}`,
+      } ${schedule.event_expression ?? ""} ${schedule.cron_expr ?? ""} ${schedule.selector_expression} ${schedule.target_client_ids.join(" ")}`,
       onSelect: () => selectView("Automation", "schedules"),
     }));
     const savedViewItems = fleetViews.savedViews.map((view) => ({
@@ -1888,6 +1895,7 @@ export function App() {
         agents={visibleAgents}
         apiToken={dashboard.apiToken}
         apiError={dashboard.apiError}
+        canManageAlertPolicies={canManageAlertLifecycle}
         fleetCoreEvidenceAvailable={dashboard.fleetCoreEvidenceAvailable}
         configurationSources={dashboard.configurationSources}
         fleetAlerts={dashboard.fleetAlerts}
@@ -2180,6 +2188,7 @@ export function App() {
       <AlertsPanel
         agents={dashboard.agents}
         apiError={dashboard.apiError}
+        canManageAlertPolicies={canManageAlertLifecycle}
         fleetAlertNotificationChannels={
           dashboard.fleetAlertNotificationChannels
         }
@@ -2589,6 +2598,7 @@ export function App() {
       <SchedulesPanel
         activeSubpage="registry"
         agents={dashboard.agents}
+        canManageAlertEventSchedules={canManageAlertEventSchedules}
         commandTemplates={dashboard.commandTemplates}
         commandTemplatesTruncated={dashboard.commandTemplatesTruncated}
         error={dashboard.schedulesError}
@@ -2601,6 +2611,7 @@ export function App() {
         onEnableSchedule={dashboard.enableSchedule}
         onOpenPrivilegeUnlock={openPrivilegeUnlock}
         onOpenScheduledRuns={() => selectView("Jobs", "scheduled_runs")}
+        onPreviewEventTemplate={dashboard.previewEventScheduleTemplate}
         onRefresh={dashboard.loadSchedules}
         onResolveTargets={dashboard.resolveJobTargets}
         onUpdateSchedule={dashboard.updateSchedule}
@@ -3392,6 +3403,22 @@ function operatorCanManageAlertLifecycle(
       (scopes.has("fleet:read") &&
         scopes.has("backups:read") &&
         scopes.has("integrations:write"))),
+  );
+}
+
+function operatorCanManageAlertEventSchedules(
+  operator: OperatorView | null,
+): boolean {
+  const scopes = new Set(operator?.scopes ?? []);
+  const hasAllScopes = scopes.has("*");
+  return Boolean(
+    operator &&
+    (operator.role === "operator" || operator.role === "admin") &&
+    (hasAllScopes ||
+      (scopes.has("fleet:read") &&
+        scopes.has("backups:read") &&
+        scopes.has("jobs:write") &&
+        scopes.has("schedules:write"))),
   );
 }
 

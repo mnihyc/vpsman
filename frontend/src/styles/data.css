@@ -1521,6 +1521,53 @@
   font-weight: 700;
 }
 
+.consoleField > .fieldLabelWithHelp {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  gap: 6px;
+}
+
+.consoleField .fieldHelpIcon {
+  appearance: none;
+  padding: 0;
+}
+
+.fieldHelpPopover {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 0;
+  z-index: var(--z-tooltip);
+  width: min(320px, calc(100vw - 48px));
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.45;
+  opacity: 0;
+  padding: 8px 9px;
+  pointer-events: none;
+  text-transform: none;
+  transform: translateY(-2px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease,
+    visibility 120ms ease;
+  visibility: hidden;
+}
+
+.fieldHelpIcon:hover .fieldHelpPopover,
+.fieldHelpIcon:focus .fieldHelpPopover {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
 .consoleField > small {
   color: var(--muted);
   font-size: 11px;
@@ -6036,6 +6083,111 @@
   min-width: 0;
 }
 
+.policyRuleHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.policyPresetLabel {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.policyDetailStack,
+.policyRuleProvenanceList {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.policyRuleProvenanceList {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+}
+
+.policyRuleProvenance {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.policyRuleProvenanceHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.policyRuleProvenanceHeader > span:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.policyRuleProvenanceHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.policyRuleProvenanceHeader small,
+.policyRuleProvenance dd small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.policyRuleProvenance dl {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+}
+
+.policyRuleProvenance dl > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.policyRuleProvenance dt {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.policyRuleProvenance dd {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.policyRuleProvenance code,
+.policySystemSeedKey {
+  min-width: 0;
+  color: var(--text);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.policySystemSeedKey {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 7px;
+}
+
 .policyRuleCard {
   display: grid;
   gap: 10px;
@@ -6054,8 +6206,188 @@
   min-width: 0;
 }
 
-.policyRuleFormGrid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+.policyRuleCardHeaderActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.policyRuleIdentityGrid,
+.policyRulePresentationGrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+}
+
+.policyEvidenceSourceGuide {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+  border: 1px solid var(--primary-border);
+  border-radius: 8px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  padding: 9px 10px;
+}
+
+.policyEvidenceSourceGuide > svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.policyEvidenceSourceGuide > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.policyEvidenceSourceGuide strong {
+  font-size: 12px;
+}
+
+.policyEvidenceSourceGuide small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.policyEvidenceSourceGuide code {
+  min-width: 0;
+  color: var(--primary-text);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.policyLifecyclePhases {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.policyLifecyclePhase {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: 10px;
+}
+
+.policyLifecyclePhase.triggerPhase {
+  border-top: 3px solid var(--primary);
+}
+
+.policyLifecyclePhase.resolvePhase {
+  border-top: 3px solid var(--success);
+}
+
+.policyLifecyclePhaseHeader {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.policyLifecyclePhaseHeader > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.policyLifecyclePhaseHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.policyLifecyclePhaseHeader small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.policyPhaseNumber {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary-text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.resolvePhase .policyPhaseNumber {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.policyMetaConditionEditor {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.policyMetaConditionEditor > .consoleField:first-child {
+  grid-column: 1 / -1;
+}
+
+.policyMetaConditionHint,
+.policyResolveExplanation,
+.policyProspectiveNotice {
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 8px 9px;
+}
+
+.policyMetaConditionHint,
+.policyProspectiveNotice {
+  grid-column: 1 / -1;
+}
+
+.policyProspectiveNotice {
+  border-color: var(--primary-border);
+  background: var(--primary-soft);
+  color: var(--primary-text);
+}
+
+.policyProspectiveValue {
+  color: var(--primary-text);
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .policyRuleHeaderActions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .policyPresetLabel {
+    flex-basis: 100%;
+  }
+
+  .policyLifecyclePhases {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 420px) {
+  .policyMetaConditionEditor {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .consoleFreshnessBanner {

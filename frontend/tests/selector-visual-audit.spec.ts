@@ -9,7 +9,10 @@ import {
   waitForConsoleShell,
 } from "./support/consoleNavigation";
 
-test.skip(!process.env.VPSMAN_VISUAL_AUDIT, "manual selector visual audit screenshots only");
+test.skip(
+  !process.env.VPSMAN_VISUAL_AUDIT,
+  "manual selector visual audit screenshots only",
+);
 test.setTimeout(180_000);
 
 test.beforeEach(async ({ page }) => {
@@ -32,7 +35,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await capture(page, outputDir, manifest, "home-quick-action-target");
 
   await openConsoleSubpage(page, "Config", "Per-VPS");
-  await openVpsMenu(page.locator(".configApplyGrid"), "VPS config target", "fra", /core-fra-02.*agent-fra-02/);
+  await openVpsMenu(
+    page.locator(".configApplyGrid"),
+    "VPS config target",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
   await capture(page, outputDir, manifest, "config-single-target");
 
   await unlockPrivilegeFromTop(page);
@@ -45,7 +53,9 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
     name: "Change effective configuration",
   });
   await expect(
-    assignmentDrawer.getByRole("button", { name: "Review reset to system default" }),
+    assignmentDrawer.getByRole("button", {
+      name: "Review reset to system default",
+    }),
   ).toBeDisabled();
   await assignmentDrawer.scrollIntoViewIfNeeded();
   await capture(
@@ -98,43 +108,58 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   );
 
   await openConsoleSubpage(page, "Fleet", "Bulk groups");
-  await page
-    .getByLabel("Bulk group selector expression")
-    .fill("status:online");
-  await expect(
-    page.getByLabel("Bulk group local VPS preview"),
-  ).toContainText("edge-sfo-01");
+  await page.getByLabel("Bulk group selector expression").fill("status:online");
+  await expect(page.getByLabel("Bulk group local VPS preview")).toContainText(
+    "edge-sfo-01",
+  );
   await capture(page, outputDir, manifest, "fleet-bulk-group-target-preview");
 
   await openConsoleSubpage(page, "Remote Operations", "Bulk files");
   await page.getByLabel("Bulk file target selector").fill("status:online");
-  await expect(
-    page.getByLabel("Bulk file local VPS preview"),
-  ).toContainText("edge-sfo-01");
+  await expect(page.getByLabel("Bulk file local VPS preview")).toContainText(
+    "edge-sfo-01",
+  );
   await capture(page, outputDir, manifest, "bulk-file-target-preview");
 
   await openConsoleSubpage(page, "Remote Operations", "Files");
-  await openVpsMenu(page.locator(".fileBrowserPanel"), "File browser target VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await openVpsMenu(
+    page.locator(".fileBrowserPanel"),
+    "File browser target VPS",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
   await capture(page, outputDir, manifest, "file-browser-target");
 
   await openConsoleSubpage(page, "Network", "Tunnel plans");
-  await activate(page.getByRole("button", { name: "Create plan", exact: true }));
+  await activate(
+    page.getByRole("button", { name: "Create plan", exact: true }),
+  );
   const tunnelComposer = page.locator(".tunnelPlanComposer", {
     has: page.getByRole("heading", { name: "Create tunnel plan" }),
   });
-  await openVpsMenu(tunnelComposer, "Left tunnel VPS", "sfo", /edge-sfo-01.*agent-sfo-01/);
+  await openVpsMenu(
+    tunnelComposer,
+    "Left tunnel VPS",
+    "sfo",
+    /edge-sfo-01.*agent-sfo-01/,
+  );
   await tunnelComposer
     .getByRole("combobox", { name: "Left tunnel VPS" })
     .press("Enter");
-  await openVpsMenu(tunnelComposer, "Right tunnel VPS", "fra", /core-fra-02.*agent-fra-02/);
+  await openVpsMenu(
+    tunnelComposer,
+    "Right tunnel VPS",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
   await capture(page, outputDir, manifest, "topology-tunnel-targets");
 
   await openConsoleSubpage(page, "Automation", "Schedules");
   await activate(page.getByRole("button", { name: "Expand Create schedule" }));
   await page.getByLabel("Schedule target expression").fill("country:US");
-  await expect(
-    page.getByLabel("Schedule local VPS preview"),
-  ).toContainText("edge-sfo-01");
+  await expect(page.getByLabel("Schedule local VPS preview")).toContainText(
+    "edge-sfo-01",
+  );
   await capture(page, outputDir, manifest, "schedule-target-preview");
 
   await openConsoleSubpage(page, "Backups", "Policies");
@@ -155,11 +180,22 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openConsoleSubpage(page, "Backups", "Restore");
   await activate(page.getByRole("button", { name: "Choose restore artifact" }));
   const restoreWorkflow = page.getByLabel("Choose restore artifact");
-  await restoreWorkflow.getByLabel("Restore source backup request").selectOption({ index: 1 });
-  await openVpsMenu(restoreWorkflow, "Restore target client", "fra", /core-fra-02.*agent-fra-02/);
+  await restoreWorkflow
+    .getByLabel("Restore source backup request")
+    .selectOption({ index: 1 });
+  await openVpsMenu(
+    restoreWorkflow,
+    "Restore target client",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
   await capture(page, outputDir, manifest, "restore-target");
   await restoreWorkflow.getByLabel("Restore target client").press("Enter");
-  await expect(restoreWorkflow.getByText("/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/agent-fra-02")).toBeVisible();
+  await expect(
+    restoreWorkflow.getByText(
+      "/var/lib/vpsman/restores/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/agent-fra-02",
+    ),
+  ).toBeVisible();
   await expect(restoreWorkflow.getByLabel("Staged archive")).toHaveValue(
     "agent-fra-02:50505050-2222-4333-8444-555555555555",
   );
@@ -172,9 +208,11 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
 
   await openConsoleSubpage(page, "Observability", "Alerts");
   await activate(page.getByRole("button", { name: "Create policy" }).first());
-  const policyEditor = page.locator(".consoleDetailPanel", {
-    hasText: "Create alert policy",
-  }).last();
+  const policyEditor = page
+    .locator(".consoleDetailPanel", {
+      hasText: "Create alert policy",
+    })
+    .last();
   await expect(policyEditor).toBeVisible();
   const policyExpression = policyEditor.getByRole("combobox", {
     name: "Policy VPS selector expression",
@@ -192,7 +230,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   );
   await activate(policyEditor.getByLabel("Close detail panel"));
   const policyGrid = page.getByLabel("Policy groups data grid");
-  await openExpressionMenu(policyGrid, "Policy groups search", "enabled", /^enabled$/);
+  await openExpressionMenu(
+    policyGrid,
+    "Policy groups search",
+    "enabled",
+    /^enabled$/,
+  );
   await capture(
     page,
     outputDir,
@@ -202,12 +245,21 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
 
   await activate(page.getByRole("tab", { name: /Destinations/ }));
   await activate(page.getByRole("button", { name: "Create channel" }).first());
-  const channelEditor = page.locator(".consoleDetailPanel", {
-    hasText: "Create notification channel",
-  }).last();
+  const channelEditor = page
+    .locator(".consoleDetailPanel", {
+      hasText: "Create notification channel",
+    })
+    .last();
   await expect(channelEditor).toBeVisible();
-  await channelEditor.getByLabel("Notification scope kind").selectOption("client");
-  await openVpsMenu(channelEditor, "Notification scope value", "fra", /core-fra-02.*agent-fra-02/);
+  await channelEditor
+    .getByLabel("Notification scope kind")
+    .selectOption("client");
+  await openVpsMenu(
+    channelEditor,
+    "Notification scope value",
+    "fra",
+    /core-fra-02.*agent-fra-02/,
+  );
   await capture(
     page,
     outputDir,
@@ -223,8 +275,8 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await openExpressionMenu(
     page.locator("main"),
     "Webhook expression",
-    "interval.",
-    /^interval\.30sec$/,
+    "alert.",
+    /^alert\.triggered$/,
   );
   await capture(
     page,
@@ -235,28 +287,99 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
 
   await openConsoleSubpage(page, "Jobs", "Dispatch");
   const dispatchComposer = page.locator(".commandComposer");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "name:s",
+    /edge-sfo-01.*Name.*agent-sfo-01/,
+  );
   await capture(page, outputDir, manifest, "dispatch-expression-name-search");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "name:s", /edge-sfo-01.*Name.*agent-sfo-01/);
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "name:s",
+    /edge-sfo-01.*Name.*agent-sfo-01/,
+  );
   await page.keyboard.press("Enter");
-  await expect(dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" })).toHaveValue("name:edge-sfo-01");
+  await expect(
+    dispatchComposer.getByRole("combobox", {
+      name: "Bulk target selector expression",
+    }),
+  ).toHaveValue("name:edge-sfo-01");
   await capture(page, outputDir, manifest, "dispatch-expression-name-selected");
-  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "fo01", /edge-sfo-01.*ID.*agent-sfo-01/);
-  await capture(page, outputDir, manifest, "dispatch-expression-id-suffix-search");
-  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "status:on", /^status:online$/);
+  await dispatchComposer
+    .getByRole("combobox", { name: "Bulk target selector expression" })
+    .fill("");
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "fo01",
+    /edge-sfo-01.*ID.*agent-sfo-01/,
+  );
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "dispatch-expression-id-suffix-search",
+  );
+  await dispatchComposer
+    .getByRole("combobox", { name: "Bulk target selector expression" })
+    .fill("");
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "status:on",
+    /^status:online$/,
+  );
   await capture(page, outputDir, manifest, "dispatch-expression-status-search");
-  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "vps.status:on", /^vps\.status:online$/);
-  await capture(page, outputDir, manifest, "dispatch-expression-vps-status-search");
-  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "role:e", /^role:edge$/);
-  await capture(page, outputDir, manifest, "dispatch-expression-unknown-namespace-search");
-  await dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" }).fill("");
-  await openExpressionMenu(dispatchComposer, "Bulk target selector expression", "*", /^\*$/);
-  await capture(page, outputDir, manifest, "dispatch-expression-all-wildcard-search");
-  const longExpression = dispatchComposer.getByRole("combobox", { name: "Bulk target selector expression" });
+  await dispatchComposer
+    .getByRole("combobox", { name: "Bulk target selector expression" })
+    .fill("");
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "vps.status:on",
+    /^vps\.status:online$/,
+  );
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "dispatch-expression-vps-status-search",
+  );
+  await dispatchComposer
+    .getByRole("combobox", { name: "Bulk target selector expression" })
+    .fill("");
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "role:e",
+    /^role:edge$/,
+  );
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "dispatch-expression-unknown-namespace-search",
+  );
+  await dispatchComposer
+    .getByRole("combobox", { name: "Bulk target selector expression" })
+    .fill("");
+  await openExpressionMenu(
+    dispatchComposer,
+    "Bulk target selector expression",
+    "*",
+    /^\*$/,
+  );
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "dispatch-expression-all-wildcard-search",
+  );
+  const longExpression = dispatchComposer.getByRole("combobox", {
+    name: "Bulk target selector expression",
+  });
   await longExpression.fill(
     "provider:alpha && country:US && status:online && role:edge && id:agent-sfo-01 || id:agent-fra-02 || id:agent-nyc-03 || " +
       "vps.status:online && vps.provider:alpha && vps.country:US && tag:role:edge && name:edge-sfo-01 || " +
@@ -266,7 +389,12 @@ test("captures exact VPS selector states", async ({ page }, testInfo) => {
   await expect
     .poll(() => longExpression.evaluate((element) => element.scrollLeft))
     .toBeGreaterThan(20);
-  await capture(page, outputDir, manifest, "dispatch-expression-long-scrolled-end");
+  await capture(
+    page,
+    outputDir,
+    manifest,
+    "dispatch-expression-long-scrolled-end",
+  );
 
   writeFileSync(
     join(outputDir, `manifest-${testInfo.project.name}.json`),
@@ -284,7 +412,10 @@ async function openVpsMenu(
   await expect(combobox).toBeVisible();
   await combobox.fill(query);
   await expect(
-    root.page().locator(".vpsComboboxMenu").getByRole("option", { name: expectedOption }),
+    root
+      .page()
+      .locator(".vpsComboboxMenu")
+      .getByRole("option", { name: expectedOption }),
   ).toBeVisible();
   await expectMenuAdjacentToControl(
     combobox.locator("xpath=.."),
@@ -305,7 +436,10 @@ async function openExpressionMenu(
   await searchbox.click();
   await searchbox.pressSequentially(query);
   await expect(
-    root.page().locator(".searchExpressionAutocomplete").getByRole("option", { name: expectedOption }),
+    root
+      .page()
+      .locator(".searchExpressionAutocomplete")
+      .getByRole("option", { name: expectedOption }),
   ).toBeVisible();
   await expectMenuAdjacentToControl(
     searchbox.locator(
@@ -357,7 +491,10 @@ async function capture(
           style.overflowX === "scroll" ||
           style.overflow === "auto" ||
           style.overflow === "scroll";
-        if (allowsHorizontalScroll && current.scrollWidth > current.clientWidth + 1) {
+        if (
+          allowsHorizontalScroll &&
+          current.scrollWidth > current.clientWidth + 1
+        ) {
           return true;
         }
         current = current.parentElement;
@@ -381,7 +518,10 @@ async function capture(
               : "",
           right: Math.round(rect.right),
           tagName: element.tagName.toLowerCase(),
-          text: (element.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 100),
+          text: (element.textContent ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 100),
           title: element.getAttribute("title") ?? "",
           whiteSpace: style.whiteSpace,
           width: Math.round(rect.width),
@@ -394,7 +534,10 @@ async function capture(
       (entry) => !entry.clippedByScroller,
     );
     return {
-      horizontalOverflowPx: Math.max(0, document.documentElement.scrollWidth - viewportWidth),
+      horizontalOverflowPx: Math.max(
+        0,
+        document.documentElement.scrollWidth - viewportWidth,
+      ),
       overflowCandidates,
       uncontainedOverflowCandidates,
       viewportWidth,
@@ -404,7 +547,13 @@ async function capture(
     layout.uncontainedOverflowCandidates,
     `${name} uncontained horizontal overflow candidates: ${JSON.stringify(layout.overflowCandidates)}`,
   ).toHaveLength(0);
-  const screenshot = join(outputDir, `${name}-${page.viewportSize()?.width ?? "viewport"}.png`);
-  await page.screenshot({ fullPage: options.fullPage ?? !hasOpenMenu, path: screenshot });
+  const screenshot = join(
+    outputDir,
+    `${name}-${page.viewportSize()?.width ?? "viewport"}.png`,
+  );
+  await page.screenshot({
+    fullPage: options.fullPage ?? !hasOpenMenu,
+    path: screenshot,
+  });
   manifest.push({ name, screenshot, ...layout });
 }

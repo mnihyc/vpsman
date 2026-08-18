@@ -1,6 +1,6 @@
 use anyhow::{ensure, Context, Result};
 use vpsman_common::{
-    canonical_db_privilege_intent, canonical_job_privilege_intent,
+    alert_event_argv_template_hash, canonical_db_privilege_intent, canonical_job_privilege_intent,
     canonical_schedule_privilege_intent, derive_super_key, encode_json, payload_hash, random_nonce,
     sign_privilege_assertion, JobCommand, JobPrivilegeIntentInput, PrivilegeAssertion,
     SchedulePrivilegeIntentInput,
@@ -16,20 +16,29 @@ pub(crate) struct BuiltJobPrivilege {
 pub(crate) struct SchedulePrivilegeRequest<'a> {
     pub(crate) action: &'a str,
     pub(crate) schedule_id: Option<&'a str>,
+    pub(crate) definition_revision: Option<i64>,
     pub(crate) name: &'a str,
-    pub(crate) command: &'a JobCommand,
+    pub(crate) payload: SchedulePrivilegePayload<'a>,
     pub(crate) command_type: &'a str,
     pub(crate) selector_expression: &'a str,
     pub(crate) resolved_targets: &'a [String],
-    pub(crate) cron_expr: &'a str,
-    pub(crate) timezone: &'a str,
+    pub(crate) trigger_kind: &'a str,
+    pub(crate) cron_expr: Option<&'a str>,
+    pub(crate) timezone: Option<&'a str>,
+    pub(crate) event_expression: Option<&'a str>,
     pub(crate) enabled: bool,
-    pub(crate) catch_up_policy: &'a str,
-    pub(crate) catch_up_limit: i32,
-    pub(crate) retry_delay_secs: i64,
+    pub(crate) catch_up_policy: Option<&'a str>,
+    pub(crate) catch_up_limit: Option<i32>,
+    pub(crate) retry_delay_secs: Option<i64>,
     pub(crate) max_failures: i32,
     pub(crate) deferred_until: Option<&'a str>,
     pub(crate) deleted: bool,
+}
+
+pub(crate) enum SchedulePrivilegePayload<'a> {
+    Operation(&'a JobCommand),
+    AlertEventArgv(Option<&'a [String]>),
+    StoredHash(&'a str),
 }
 
 pub(crate) fn build_privilege_for_job_command(
@@ -152,17 +161,26 @@ pub(crate) fn build_privilege_for_schedule(
     salt_hex: &str,
     ttl_secs: u64,
 ) -> Result<PrivilegeAssertion> {
-    let payload_hash_hex = payload_hash(&encode_json(request.command)?);
+    let payload_hash_hex = match request.payload {
+        SchedulePrivilegePayload::Operation(command) => payload_hash(&encode_json(command)?),
+        SchedulePrivilegePayload::AlertEventArgv(template) => {
+            alert_event_argv_template_hash(template).map_err(anyhow::Error::msg)?
+        }
+        SchedulePrivilegePayload::StoredHash(value) => normalize_sha256_hex(value)?,
+    };
     let intent = canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
         action: request.action,
         schedule_id: request.schedule_id,
+        definition_revision: request.definition_revision,
         name: request.name,
         command_type: request.command_type,
         operation_payload_hash: &payload_hash_hex,
         selector_expression: request.selector_expression,
         resolved_targets: request.resolved_targets,
+        trigger_kind: request.trigger_kind,
         cron_expr: request.cron_expr,
         timezone: request.timezone,
+        event_expression: request.event_expression,
         enabled: request.enabled,
         catch_up_policy: request.catch_up_policy,
         catch_up_limit: request.catch_up_limit,

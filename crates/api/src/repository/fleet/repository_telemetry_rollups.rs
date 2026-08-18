@@ -2489,28 +2489,6 @@ impl Repository {
         .await
     }
 
-    pub(crate) async fn list_fleet_alert_tunnel_candidates(
-        &self,
-        client_id: Option<&str>,
-        client_ids: Option<&[String]>,
-        severity: Option<&str>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        limit: usize,
-    ) -> Result<Vec<TelemetryTunnelView>> {
-        self.list_telemetry_tunnels_matching(
-            Some(limit),
-            client_id,
-            client_ids,
-            None,
-            true,
-            severity,
-            start_unix,
-            end_unix,
-        )
-        .await
-    }
-
     pub(crate) async fn list_declared_telemetry_tunnels_for_clients(
         &self,
         client_ids: &[String],

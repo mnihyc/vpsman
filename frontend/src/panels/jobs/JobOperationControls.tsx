@@ -29,6 +29,10 @@ import type {
 import type { FileExistingPolicy } from "../../types";
 import type { FileTransferSourceArtifactRecord } from "../../typesFileTransfer";
 import type { DispatchMode, SupervisorAction } from "../jobDispatchModel";
+import {
+  ArgvInspector,
+  ExactPayloadInspector,
+} from "../../components/ExactPayloadInspector";
 import { TerminalOperationControls } from "./TerminalOperationControls";
 
 export function OperationModeTabs({
@@ -178,6 +182,8 @@ export function JobOperationEditor({
   backupFollowSymlinks,
   backupSkipMissingPaths,
   backupPathsText,
+  commandArgv,
+  commandArgvError,
   commandText,
   shellPty,
   terminalArgv,
@@ -280,6 +286,8 @@ export function JobOperationEditor({
   backupFollowSymlinks: boolean;
   backupSkipMissingPaths: boolean;
   backupPathsText: string;
+  commandArgv: string[];
+  commandArgvError: string | null;
   commandText: string;
   shellPty: boolean;
   terminalArgv: string;
@@ -385,44 +393,84 @@ export function JobOperationEditor({
   const formatBytes = useByteCountFormatter();
   if (mode === "shell") {
     return (
-      <div className="compactOperation shellOperation">
-        <label
-          className="wideField"
-          title="Command and arguments submitted to each selected VPS."
-        >
-          <span>Command argv</span>
-          <textarea
-            aria-label="Command argv"
-            onChange={(event) => setCommandText(event.target.value)}
-            placeholder={COMMAND_ARGV_PLACEHOLDER}
-            rows={3}
-            value={commandText}
-          />
-        </label>
-        <label className="checkRow">
-          <input
-            checked={shellPty}
-            onChange={(event) => setShellPty(event.target.checked)}
-            type="checkbox"
-          />
-          <span>PTY</span>
-        </label>
+      <div className="commandPayloadEditor">
+        <div className="compactOperation shellOperation">
+          <label
+            className="wideField"
+            title="Command and arguments submitted to each selected VPS."
+          >
+            <span>Command argv</span>
+            <textarea
+              aria-label="Command argv"
+              onChange={(event) => setCommandText(event.target.value)}
+              placeholder={COMMAND_ARGV_PLACEHOLDER}
+              rows={3}
+              value={commandText}
+            />
+          </label>
+          <label className="checkRow">
+            <input
+              checked={shellPty}
+              onChange={(event) => setShellPty(event.target.checked)}
+              type="checkbox"
+            />
+            <span>PTY</span>
+          </label>
+        </div>
+        <ArgvInspector
+          ariaLabel="Dispatch argv elements"
+          argv={commandArgv}
+          elementDetail={(_value, index) =>
+            index === 0
+              ? "Executable value · passed directly"
+              : "Exact argument · passed directly"
+          }
+          error={commandArgvError}
+          footer="One row is one exact argument. Quotes only group authoring text and are not sent; values are never split or reparsed after this preview."
+          help="Whitespace separates authoring values unless quotes or backslash escaping group them. The resulting ordered argv is passed directly to the executable, without a shell or a second parse."
+          title="Parsed direct argv"
+        />
       </div>
     );
   }
 
   if (mode === "shell_script") {
+    const submittedScript = shellScript.trim();
+    const scriptBytes = new TextEncoder().encode(submittedScript).length;
+    const scriptLines = submittedScript
+      ? submittedScript.split(/\r\n|\r|\n/).length
+      : 0;
     return (
-      <label title="Shell script executed on each selected VPS.">
-        <span>Shell script</span>
-        <textarea
-          aria-label="Shell script"
-          onChange={(event) => setShellScript(event.target.value)}
-          placeholder="set -eu&#10;hostname&#10;uptime"
-          rows={5}
-          value={shellScript}
+      <div className="commandPayloadEditor">
+        <label title="Shell script executed on each selected VPS.">
+          <span>Shell script</span>
+          <textarea
+            aria-label="Shell script"
+            onChange={(event) => setShellScript(event.target.value)}
+            placeholder="set -eu&#10;hostname&#10;uptime"
+            rows={5}
+            value={shellScript}
+          />
+        </label>
+        <ExactPayloadInspector
+          ariaLabel="Submitted script payload"
+          exactValue={JSON.stringify(submittedScript)}
+          exactValueLabel="Exact submitted script JSON value"
+          footer="Outer whitespace is trimmed before review. The script remains one value; its target-specific configured shell argv prefix is not guessed by this composer."
+          help="The exact submitted script is appended as one value to each target agent's configured shell-script argv prefix. This composer does not infer a shell executable or environment."
+          items={[
+            {
+              detail: submittedScript
+                ? "One exact script value · interpreted by the target's configured shell"
+                : "Enter a script to preview the submitted value.",
+              label: "script",
+              value: submittedScript || "No script yet",
+            },
+          ]}
+          summary={`${scriptBytes} UTF-8 ${scriptBytes === 1 ? "byte" : "bytes"} · ${scriptLines} ${scriptLines === 1 ? "line" : "lines"}`}
+          title="Exact shell payload"
         />
-      </label>
+      </div>
     );
   }
 

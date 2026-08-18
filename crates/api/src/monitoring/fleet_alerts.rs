@@ -5,9 +5,7 @@ use anyhow::Result;
 use crate::{
     model::{AgentView, FleetAlertQuery, FleetAlertView},
     model_alert_notifications::FleetAlertNotificationMatchRule,
-    model_alert_policies::PolicyAlertQuery,
     model_alert_states::FleetAlertStateView,
-    repository_alert_policies::policy_alert_to_fleet_alert,
     repository_operational_alerts::{
         operational_episode_to_fleet_alert, OPERATIONAL_ALERT_SOURCE_LIMIT,
     },
@@ -136,34 +134,14 @@ impl AppState {
                 None,
             )
             .await?;
-        let policy_query = PolicyAlertQuery {
-            limit: Some(OPERATIONAL_ALERT_SOURCE_LIMIT as i64),
-            client_id: query.client_id.clone(),
-            severity: query.severity.clone(),
-            category: query.category.clone(),
-            policy_group_id: None,
-        };
-        let policy = self
-            .repo
-            .list_policy_alert_fleet_history(
-                &policy_query,
-                OPERATIONAL_ALERT_SOURCE_LIMIT,
-                start_unix,
-                end_unix,
-                query.operator_state.as_deref(),
-                query.include_muted.unwrap_or(false),
-            )
-            .await?;
+        // `alert_episodes` is the single lifecycle owner after 0012. The
+        // operational-shaped reader projects every policy-owned condition and
+        // occurrence; joining the policy-shaped compatibility projection here
+        // would return each client-owned episode twice.
         let mut alerts = operational
             .iter()
             .take(FLEET_EVENT_SOURCE_HORIZON_MAX as usize)
             .map(operational_episode_to_fleet_alert)
-            .chain(
-                policy
-                    .iter()
-                    .take(FLEET_EVENT_SOURCE_HORIZON_MAX as usize)
-                    .map(policy_alert_to_fleet_alert),
-            )
             .collect::<Vec<_>>();
         let alert_ids = alerts
             .iter()
@@ -179,9 +157,7 @@ impl AppState {
         let result_truncated = apply_alert_history_filters(&mut alerts, &query);
         Ok(FleetAlertSelection {
             alerts,
-            truncated: operational.len() >= OPERATIONAL_ALERT_SOURCE_LIMIT
-                || policy.len() >= OPERATIONAL_ALERT_SOURCE_LIMIT
-                || result_truncated,
+            truncated: operational.len() >= OPERATIONAL_ALERT_SOURCE_LIMIT || result_truncated,
         })
     }
 
@@ -214,15 +190,9 @@ impl AppState {
             .iter()
             .map(|agent| agent.id.clone())
             .collect::<HashSet<_>>();
-        let operational_client_ids = selector
-            .map(|selector| {
-                selector
-                    .allowed_client_ids
-                    .intersection(&visible_client_ids)
-                    .cloned()
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_else(|| visible_client_ids.clone());
+        let allowed_client_ids = selector
+            .map(|selector| selector.allowed_client_ids)
+            .unwrap_or(&visible_client_ids);
         let confirmed_active = matches!(policy_alert_source, PolicyAlertSource::ConfirmedActive);
         let record_kind_cohorts: &[Option<&str>] = if notification_rules.is_some() {
             &[Some("condition"), Some("event")]
@@ -237,7 +207,7 @@ impl AppState {
                     false,
                     confirmed_active,
                     *record_kind,
-                    selector.map(|selector| selector.allowed_client_ids),
+                    Some(allowed_client_ids),
                     selector.is_none_or(|selector| selector.include_global),
                     None,
                     selector.map(|selector| selector.end_unix),
@@ -253,30 +223,6 @@ impl AppState {
                     .map(operational_episode_to_fleet_alert),
             );
         }
-
-        let policy_query = PolicyAlertQuery {
-            limit: None,
-            client_id: query.client_id.clone(),
-            severity: query.severity.clone(),
-            category: query.category.clone(),
-            policy_group_id: None,
-        };
-        let policy_alerts = self
-            .repo
-            .list_policy_alert_fleet_candidates(
-                &policy_query,
-                FLEET_EVENT_SOURCE_HORIZON_MAX as usize,
-                matches!(policy_alert_source, PolicyAlertSource::ConfirmedActive),
-                Some(&operational_client_ids),
-                None,
-                selector.map(|selector| selector.end_unix),
-                query.operator_state.as_deref(),
-                query.include_muted.unwrap_or(false),
-                notification_rules,
-            )
-            .await?;
-        source_saturated |= policy_alerts.len() >= FLEET_EVENT_SOURCE_HORIZON_MAX as usize;
-        alerts.extend(policy_alerts.iter().map(policy_alert_to_fleet_alert));
 
         let alert_ids = alerts
             .iter()

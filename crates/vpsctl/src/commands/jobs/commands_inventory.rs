@@ -298,10 +298,7 @@ pub(crate) fn alert_policy_get(api_url: &str, token: Option<&str>, name: String)
 pub(crate) struct AlertPolicyWriteOptions {
     pub(crate) name: String,
     pub(crate) selector: Option<String>,
-    pub(crate) rules: Vec<String>,
-    pub(crate) window_secs: i64,
-    pub(crate) severity: String,
-    pub(crate) traffic_selector: Option<String>,
+    pub(crate) rule_json: Vec<String>,
     pub(crate) enabled: bool,
     pub(crate) notes: Option<String>,
     pub(crate) file: Option<PathBuf>,
@@ -1251,8 +1248,8 @@ pub(crate) fn alert_policy_request(
 ) -> Result<Value> {
     if let Some(file) = options.file {
         anyhow::ensure!(
-            options.selector.is_none() && options.rules.is_empty(),
-            "--file cannot be combined with --selector or --rule"
+            options.selector.is_none() && options.rule_json.is_empty(),
+            "--file cannot be combined with --selector or --rule-json"
         );
         let mut value: Value = serde_json::from_str(
             &fs::read_to_string(&file)
@@ -1278,22 +1275,14 @@ pub(crate) fn alert_policy_request(
         .filter(|value| !value.is_empty())
         .context("--selector is required without --file")?;
     anyhow::ensure!(
-        !options.rules.is_empty(),
-        "at least one --rule expression is required without --file"
+        !options.rule_json.is_empty(),
+        "at least one --rule-json PolicyRuleRequest is required without --file"
     );
     let rules = options
-        .rules
+        .rule_json
         .iter()
         .enumerate()
-        .map(|(index, expression)| {
-            policy_rule_from_expression(
-                expression,
-                index,
-                options.window_secs,
-                &options.severity,
-                options.traffic_selector.as_deref(),
-            )
-        })
+        .map(|(index, rule_json)| policy_rule_from_json(rule_json, index))
         .collect::<Result<Vec<_>>>()?;
     Ok(json!({
         "id": id,
@@ -1306,28 +1295,35 @@ pub(crate) fn alert_policy_request(
     }))
 }
 
-fn policy_rule_from_expression(
-    expression: &str,
-    index: usize,
-    window_secs: i64,
-    severity: &str,
-    traffic_selector: Option<&str>,
-) -> Result<Value> {
-    let expression = expression.trim();
+fn policy_rule_from_json(rule_json: &str, index: usize) -> Result<Value> {
+    let rule: Value = serde_json::from_str(rule_json)
+        .with_context(|| format!("--rule-json {} is not valid JSON", index + 1))?;
+    let object = rule
+        .as_object()
+        .with_context(|| format!("--rule-json {} must be a JSON object", index + 1))?;
     anyhow::ensure!(
-        !expression.is_empty(),
-        "--rule condition expression must not be empty"
+        !object.contains_key("condition_expression") && !object.contains_key("window_secs"),
+        "--rule-json {} uses obsolete condition_expression/window_secs fields",
+        index + 1
     );
-    Ok(json!({
-        "name": format!("rule-{}", index + 1),
-        "enabled": true,
-        "traffic_selector": traffic_selector
-            .map(str::trim)
-            .filter(|value| !value.is_empty()),
-        "condition_expression": expression,
-        "window_secs": window_secs,
-        "severity": severity,
-    }))
+    for field in [
+        "name",
+        "rule_kind",
+        "evidence_source",
+        "correlation_mode",
+        "trigger_condition_expression",
+        "severity",
+        "category",
+        "title_template",
+        "detail_template",
+    ] {
+        anyhow::ensure!(
+            object.contains_key(field),
+            "--rule-json {} is missing PolicyRuleRequest field {field}",
+            index + 1
+        );
+    }
+    Ok(rule)
 }
 
 fn fleet_alert_notification_channels_path(

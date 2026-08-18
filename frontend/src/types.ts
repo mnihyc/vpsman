@@ -551,6 +551,13 @@ export type VpsRulesBulkUnsetRequest = GeneratedVpsRulesBulkUnsetRequest;
 export type TrafficAccountingSelectorBreakdown =
   GeneratedTrafficAccountingSelectorBreakdown;
 export type TrafficAccountingRecord = GeneratedTrafficAccountingRecord;
+export type AlertPolicyRuleKind = "metric" | "state" | "occurrence";
+export type AlertPolicyCorrelationMode = "natural_key" | "subject" | "global";
+export type AlertPolicyMetaCondition =
+  | { kind: "immediate" }
+  | { kind: "sustained"; seconds: number }
+  | { kind: "count"; confirmations: number; within_seconds: number }
+  | { kind: "elapsed_since_trigger"; seconds: number };
 export type PolicyRuleRecord = GeneratedPolicyRuleRecord;
 export type PolicyGroupRecord = GeneratedPolicyGroupRecord;
 export type FleetAlertPolicyRecord = GeneratedPolicyGroupRecord;
@@ -1839,32 +1846,75 @@ export type JobOutputComparisonRowRecord = {
   preview: string;
 };
 
+export type ScheduleTriggerKind = "cron" | "event";
+
 export type ScheduleRecord = {
   id: string;
   name: string;
   enabled: boolean;
+  trigger_kind: ScheduleTriggerKind;
+  definition_revision: number;
   command_type: string;
   operation: JobOperation | null;
+  event_argv_template: string[] | null;
   operation_error?: string | null;
   operation_payload_hash?: string;
   selector_expression: string;
   target_client_ids: string[];
-  cron_expr: string;
+  cron_expr: string | null;
+  event_expression: string | null;
+  event_armed_at: string | null;
   cadence_error: string | null;
-  timezone: "UTC" | string;
+  timezone: "UTC" | string | null;
   next_runs: string[];
-  catch_up_policy: string;
-  catch_up_limit: number;
-  retry_delay_secs: number;
+  catch_up_policy: string | null;
+  catch_up_limit: number | null;
+  retry_delay_secs: number | null;
   max_failures: number;
   failure_count: number;
   last_error: string | null;
-  next_run_at: string;
+  next_run_at: string | null;
   last_run_at: string | null;
   deferred_until: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type EventScheduleTemplatePreviewRequest = {
+  event_expression: string;
+  event_argv_template: string[] | null;
+};
+
+export type EventScheduleTemplatePreviewContext = {
+  event_kind: string;
+  alert_title: string;
+  alert_category: string;
+  alert_severity: string;
+  policy_name: string;
+  policy_rule_name: string;
+};
+
+export type EventScheduleTemplateElementPreview = {
+  index: number;
+  template: string;
+  rendered: string | null;
+  error_code: string | null;
+  error_message: string | null;
+};
+
+export type EventScheduleTemplateEdgePreview = {
+  rendered_argv: string[] | null;
+  context: EventScheduleTemplatePreviewContext;
+  elements: EventScheduleTemplateElementPreview[];
+  rendered_hash: string | null;
+};
+
+export type EventScheduleTemplatePreviewResponse = {
+  uses_default_noop: boolean;
+  template_argv: string[];
+  previews: EventScheduleTemplateEdgePreview[];
+  template_hash: string;
 };
 
 export type TunnelKind =
@@ -3125,37 +3175,44 @@ export type JobApprovalDecisionResponse = {
 
 export type CreateScheduleRequest = {
   name: string;
-  operation: JobOperation;
+  operation: JobOperation | null;
+  event_argv_template: string[] | null;
   selector_expression: string;
   target_client_ids: string[];
-  cron_expr: string;
-  timezone: "UTC";
+  trigger_kind: ScheduleTriggerKind;
+  cron_expr: string | null;
+  timezone: "UTC" | null;
+  event_expression: string | null;
   enabled: boolean;
-  catch_up_policy: string;
-  catch_up_limit: number;
-  retry_delay_secs: number;
+  catch_up_policy: string | null;
+  catch_up_limit: number | null;
+  retry_delay_secs: number | null;
   max_failures: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type UpdateScheduleRequest = CreateScheduleRequest & {
+  expected_definition_revision: number;
   expected_selector_expression: string;
   expected_target_client_ids: string[];
 };
 
 export type UpdateScheduleTargetsRequest = {
+  expected_definition_revision: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type SchedulePrivilegeMutationRequest = {
+  expected_definition_revision: number;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
 };
 
 export type DeferScheduleRequest = {
   deferred_until: string;
+  expected_definition_revision: number;
   reason?: string | null;
   confirmed: boolean;
   privilege_assertion?: PrivilegeAssertion | null;
@@ -3163,6 +3220,7 @@ export type DeferScheduleRequest = {
 
 export type BackupPolicyRecord = {
   schedule_id: string;
+  definition_revision: number;
   name: string;
   enabled: boolean;
   selector_expression: string;
@@ -3216,6 +3274,7 @@ export type UpdateBackupPolicyRequest = Omit<
   CreateBackupPolicyRequest,
   "retention_days" | "keep_last" | "rotation_generation"
 > & {
+  expected_definition_revision: number;
   retention_days: number;
   keep_last: number;
   rotation_generation: string | null;

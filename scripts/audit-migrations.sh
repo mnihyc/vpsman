@@ -32,8 +32,31 @@ for file in "${files[@]}"; do
   tail -c 1 "$path" | grep -q $'\n' || fail "migration lacks trailing newline: $file"
   grep -Fq "$file" "$NOTES_FILE" || fail "migration lacks compatibility note: $file"
 
-  if grep -Eiq '\b(DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)|TRUNCATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE[[:space:]].+[[:space:]]DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)[[:space:]])' "$path"; then
-    fail "destructive DDL requires an explicit clean-baseline decision: $file"
+  destructive_pattern='\b(DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)|TRUNCATE[[:space:]]+TABLE|ALTER[[:space:]]+TABLE[[:space:]].+[[:space:]]DROP[[:space:]]+(TABLE|COLUMN|SCHEMA|DATABASE)[[:space:]])'
+  mapfile -t destructive_lines < <(grep -Ei "$destructive_pattern" "$path" || true)
+  if [[ "${#destructive_lines[@]}" -gt 0 ]]; then
+    # 0012 is the reviewed one-owner cutover: the replacement policy fields and
+    # unified episode rows are populated and constrained before these exact
+    # retired stores are removed. Keep this allowlist statement-specific so a
+    # later destructive edit to the same migration still fails this audit.
+    reviewed_destructive=0
+    if [[ "$file" == "0012_policy_owned_alerts_event_schedules.sql" &&
+      "${#destructive_lines[@]}" -eq 3 ]]; then
+      reviewed_destructive=1
+      expected_destructive=(
+        "    DROP COLUMN window_secs,"
+        "DROP TABLE policy_alerts;"
+        "DROP TABLE policy_rule_states;"
+      )
+      for index in "${!expected_destructive[@]}"; do
+        if [[ "${destructive_lines[$index]}" != "${expected_destructive[$index]}" ]]; then
+          reviewed_destructive=0
+          break
+        fi
+      done
+    fi
+    [[ "$reviewed_destructive" -eq 1 ]] ||
+      fail "destructive DDL requires an explicit clean-baseline decision: $file"
   fi
   if grep -Eiq 'ADD[[:space:]]+COLUMN[^;,\n]*NOT[[:space:]]+NULL' "$path" &&
     ! grep -Eiq 'ADD[[:space:]]+COLUMN[^;,\n]*NOT[[:space:]]+NULL[^;,\n]*DEFAULT' "$path"; then
@@ -43,7 +66,9 @@ for file in "${files[@]}"; do
   while IFS= read -r index_name; do
     [[ -n "$index_name" ]] || continue
     if [[ -n "${index_names[$index_name]:-}" ]]; then
-      fail "duplicate index name $index_name in $file and ${index_names[$index_name]}"
+      if ! grep -Eiq "DROP[[:space:]]+INDEX[[:space:]]+(IF[[:space:]]+EXISTS[[:space:]]+)?${index_name}[[:space:]]*;" "$path"; then
+        fail "duplicate index name $index_name in $file and ${index_names[$index_name]}"
+      fi
     fi
     index_names[$index_name]="$file"
   done < <(

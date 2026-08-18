@@ -470,6 +470,8 @@ async fn seed_terminal_open_job(memory: &MemoryState, job_id: Uuid, actor_id: Uu
         actor_id: Some(actor_id),
         command_type: "terminal_open".to_string(),
         source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
         privileged: true,
         status: "running".to_string(),
         target_count: 1,

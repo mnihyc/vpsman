@@ -4,6 +4,97 @@ use super::{
     telemetry_rollups_path, telemetry_tunnels_path, VtyInventoryCommand,
 };
 
+const TYPED_ALERT_RULE_JSON: &str = r#"{"name":"offline","enabled":true,"rule_kind":"state","evidence_source":"agent.status","correlation_mode":"natural_key","trigger_condition_expression":"evidence.status = offline","resolve_condition_expression":"evidence.status = online","resolve_meta_condition":{"kind":"sustained","seconds":60},"severity":"critical","category":"agent_status","title_template":"Agent offline","detail_template":"{subject.display_name} is offline"}"#;
+
+#[test]
+fn parses_typed_alert_policy_json_with_vty_quoting() {
+    assert_eq!(
+        parse_vty_inventory_command(&format!(
+            "alert-policy-preview --name offline-agents --selector tag:edge --rule-json='{TYPED_ALERT_RULE_JSON}' --notes 'reviewed by ops'"
+        ))
+        .unwrap(),
+        VtyInventoryCommand::AlertPolicyPreview {
+            name: "offline-agents".to_string(),
+            selector: "tag:edge".to_string(),
+            rule_json: vec![TYPED_ALERT_RULE_JSON.to_string()],
+            enabled: true,
+            notes: Some("reviewed by ops".to_string()),
+        }
+    );
+    assert_eq!(
+        parse_vty_inventory_command(&format!(
+            "alert-policy-upsert --name offline-agents --selector tag:edge --rule-json '{TYPED_ALERT_RULE_JSON}' --confirmed"
+        ))
+        .unwrap(),
+        VtyInventoryCommand::AlertPolicyUpsert {
+            name: "offline-agents".to_string(),
+            selector: "tag:edge".to_string(),
+            rule_json: vec![TYPED_ALERT_RULE_JSON.to_string()],
+            enabled: true,
+            notes: None,
+            confirmed: true,
+        }
+    );
+}
+
+#[test]
+fn rejects_obsolete_alert_policy_vty_vocabulary() {
+    for obsolete_argument in [
+        "--rule 'evidence.status = offline'",
+        "--window-secs 60",
+        "--severity critical",
+        "--traffic-selector eth0",
+    ] {
+        let command = format!(
+            "alert-policy-preview --name offline-agents --selector tag:edge --rule-json='{TYPED_ALERT_RULE_JSON}' {obsolete_argument}"
+        );
+        assert!(
+            parse_vty_inventory_command(&command).is_err(),
+            "accepted {obsolete_argument}"
+        );
+    }
+}
+
+#[test]
+fn builds_typed_alert_policy_request_without_legacy_fields() {
+    let request = crate::commands_inventory::alert_policy_request(
+        crate::commands_inventory::AlertPolicyWriteOptions {
+            name: "offline-agents".to_string(),
+            selector: Some("tag:edge".to_string()),
+            rule_json: vec![TYPED_ALERT_RULE_JSON.to_string()],
+            enabled: true,
+            notes: None,
+            file: None,
+            confirmed: false,
+        },
+        None,
+    )
+    .unwrap();
+    let rule = &request["rules"][0];
+    assert_eq!(
+        rule,
+        &serde_json::from_str::<serde_json::Value>(TYPED_ALERT_RULE_JSON).unwrap()
+    );
+    assert!(rule.get("condition_expression").is_none());
+    assert!(rule.get("window_secs").is_none());
+    assert!(rule.get("trigger_meta_condition").is_none());
+
+    let error = crate::commands_inventory::alert_policy_request(
+        crate::commands_inventory::AlertPolicyWriteOptions {
+            name: "legacy".to_string(),
+            selector: Some("tag:edge".to_string()),
+            rule_json: vec![r#"{"condition_expression":"true","window_secs":60}"#.to_string()],
+            enabled: true,
+            notes: None,
+            file: None,
+            confirmed: false,
+        },
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("obsolete"));
+}
+
 #[test]
 fn recognizes_inventory_commands() {
     assert!(is_vty_inventory_command(

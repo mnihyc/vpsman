@@ -105,7 +105,9 @@ export function parseSearchExpression(input: string): SearchParseResult {
       tokens: tokenResult.tokens,
     };
   }
-  const semanticError = validateVpsRuleExpression(expression);
+  const semanticError =
+    validateRetiredLifecycleExpression(expression) ??
+    validateVpsRuleExpression(expression);
   if (semanticError) {
     return {
       expression: null,
@@ -674,6 +676,58 @@ function isOrderedComparison(operator: ComparisonOperator): boolean {
   );
 }
 
+function retiredAlertEventReplacement(value: string): string | null {
+  const lower = asciiLowercase(value);
+  if (
+    lower === "alert.open" ||
+    lower === "alert.policy_reached" ||
+    lower === "alert.policy_triggered"
+  ) {
+    return "alert.triggered";
+  }
+  return lower === "alert.policy_resolved" ? "alert.resolved" : null;
+}
+
+function validateRetiredLifecycleExpression(
+  expression: SearchExpression | null,
+): string | null {
+  if (!expression) return null;
+  if (expression.type === "and" || expression.type === "or") {
+    return (
+      validateRetiredLifecycleExpression(expression.left) ??
+      validateRetiredLifecycleExpression(expression.right)
+    );
+  }
+  if (expression.type === "not") {
+    return validateRetiredLifecycleExpression(expression.expression);
+  }
+  const predicate = expression.predicate;
+  if (
+    predicate.type === "comparison" &&
+    canonicalField(predicate.field) === "event.kind"
+  ) {
+    const canonical = retiredAlertEventReplacement(predicate.value);
+    return canonical
+      ? `Retired alert event kind \`${asciiLowercase(predicate.value)}\`; use \`${canonical}\``
+      : null;
+  }
+  if (
+    predicate.type === "membership" &&
+    canonicalField(predicate.field) === "event.kind"
+  ) {
+    const retired = predicate.values.find(
+      (value) =>
+        value.type === "literal" &&
+        retiredAlertEventReplacement(value.value) !== null,
+    );
+    if (retired?.type === "literal") {
+      const canonical = retiredAlertEventReplacement(retired.value);
+      return `Retired alert event kind \`${asciiLowercase(retired.value)}\`; use \`${canonical}\``;
+    }
+  }
+  return null;
+}
+
 function validateVpsRuleExpression(
   expression: SearchExpression | null,
 ): string | null {
@@ -1022,18 +1076,13 @@ function isEventPredicate(raw: string): boolean {
     lower.startsWith("schedule.name:") ||
     lower.startsWith("alert.severity:") ||
     lower.startsWith("alert.category:") ||
-    lower.startsWith("alert.state:") ||
     lower === "server.on_start" ||
     lower === "schedule.due" ||
-    lower === "schedule.dispatched" ||
+    lower === "schedule.job_finished" ||
     lower === "schedule.failed" ||
     lower === "vps.tag_changed" ||
     lower === "job.created" ||
-    lower === "alert.open" ||
     lower === "alert.triggered" ||
-    lower === "alert.policy_triggered" ||
-    lower === "alert.policy_resolved" ||
-    lower === "alert.policy_reached" ||
     lower === "alert.resolved" ||
     lower === "telemetry.rollup" ||
     lower === "telemetry.network_rate" ||
@@ -1379,6 +1428,30 @@ class Parser {
   }
 
   private parsePredicate(raw: string): SearchPredicate | null {
+    const lower = asciiLowercase(raw);
+    const retiredEvent = retiredAlertEventReplacement(lower);
+    if (retiredEvent) {
+      this.error = `Retired alert event predicate \`${lower}\`; use \`${retiredEvent}\``;
+      return null;
+    }
+    if (lower === "alert.state" || lower.startsWith("alert.state:")) {
+      this.error =
+        "Retired alert field `alert.state`; use `alert.lifecycle_state`";
+      return null;
+    }
+    const retiredPolicyField = lower.includes(":")
+      ? lower.slice(0, lower.indexOf(":"))
+      : lower;
+    const canonicalPolicyField =
+      retiredPolicyField === "policy_rule.condition_expression"
+        ? "policy_rule.trigger_condition_expression"
+        : retiredPolicyField === "policy_rule.window_secs"
+          ? "policy_rule.trigger_meta_condition.window_seconds"
+          : null;
+    if (canonicalPolicyField) {
+      this.error = `Retired policy-rule field \`${retiredPolicyField}\`; use \`${canonicalPolicyField}\``;
+      return null;
+    }
     const operator = this.consumeComparisonOperator();
     if (operator) {
       const value = this.parseScalarValue();

@@ -249,6 +249,38 @@ pub(crate) struct TrafficAccountingQuery {
     pub(crate) limit: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AlertPolicyRuleKind {
+    Metric,
+    State,
+    Occurrence,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AlertPolicyCorrelationMode {
+    NaturalKey,
+    Subject,
+    Global,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum AlertPolicyMetaCondition {
+    Immediate,
+    Sustained {
+        seconds: i64,
+    },
+    Count {
+        confirmations: i32,
+        within_seconds: i64,
+    },
+    ElapsedSinceTrigger {
+        seconds: i64,
+    },
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PolicyRuleRecord {
     pub(crate) id: Uuid,
@@ -257,10 +289,21 @@ pub(crate) struct PolicyRuleRecord {
     pub(crate) sort_order: i32,
     pub(crate) name: String,
     pub(crate) enabled: bool,
+    pub(crate) rule_kind: AlertPolicyRuleKind,
+    pub(crate) evidence_source: String,
+    pub(crate) correlation_mode: AlertPolicyCorrelationMode,
     pub(crate) traffic_selector: Option<String>,
-    pub(crate) condition_expression: String,
-    pub(crate) window_secs: i64,
+    pub(crate) trigger_condition_expression: String,
+    pub(crate) trigger_meta_condition: Option<AlertPolicyMetaCondition>,
+    pub(crate) resolve_condition_expression: Option<String>,
+    pub(crate) resolve_meta_condition: Option<AlertPolicyMetaCondition>,
     pub(crate) severity: String,
+    pub(crate) category: String,
+    pub(crate) title_template: String,
+    pub(crate) detail_template: String,
+    pub(crate) system_seed_key: Option<String>,
+    pub(crate) armed_after_evidence_seq: i64,
+    pub(crate) armed_at: String,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
 }
@@ -354,11 +397,20 @@ pub(crate) struct PolicyRuleRequest {
     pub(crate) name: String,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    pub(crate) rule_kind: AlertPolicyRuleKind,
+    pub(crate) evidence_source: String,
+    pub(crate) correlation_mode: AlertPolicyCorrelationMode,
     pub(crate) traffic_selector: Option<String>,
-    pub(crate) condition_expression: String,
+    pub(crate) trigger_condition_expression: String,
     #[serde(default)]
-    pub(crate) window_secs: i64,
+    pub(crate) trigger_meta_condition: Option<AlertPolicyMetaCondition>,
+    pub(crate) resolve_condition_expression: Option<String>,
+    #[serde(default)]
+    pub(crate) resolve_meta_condition: Option<AlertPolicyMetaCondition>,
     pub(crate) severity: String,
+    pub(crate) category: String,
+    pub(crate) title_template: String,
+    pub(crate) detail_template: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,7 +445,14 @@ pub(crate) struct PolicyDryRunRequest {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct PolicyDryRunRulePreview {
     pub(crate) rule_name: String,
-    pub(crate) condition_expression: String,
+    /// `current` evaluates the latest authoritative state/metric facts;
+    /// `prospective` describes occurrence rules whose pre-arm history cannot
+    /// fire and therefore intentionally has no historical true/false counts.
+    pub(crate) preview_mode: String,
+    pub(crate) trigger_condition_expression: String,
+    pub(crate) trigger_meta_condition: Option<AlertPolicyMetaCondition>,
+    pub(crate) resolve_condition_expression: Option<String>,
+    pub(crate) resolve_meta_condition: Option<AlertPolicyMetaCondition>,
     pub(crate) category: String,
     pub(crate) severity: String,
     pub(crate) true_count: i64,

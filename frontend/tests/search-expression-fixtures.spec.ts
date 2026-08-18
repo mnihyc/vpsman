@@ -38,6 +38,11 @@ import {
   VPS_RULE_KEYS,
 } from "../src/vpsRules";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../src/webhookExpressionSuggestions";
+import { DEFAULT_WEBHOOK_BODY_TEMPLATE } from "../src/webhookTemplate";
+import {
+  SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS,
+  scheduleEventExpressionValidationMessage,
+} from "../src/eventExpression";
 
 type FixtureCase = {
   expression: string;
@@ -462,22 +467,245 @@ test("webhook expression autocomplete values are accepted event predicates", () 
   }
 });
 
-test("policy webhook suggestions prefer lifecycle predicates while retaining the reached alias", () => {
+test("webhook suggestions expose only the generic alert lifecycle predicates", () => {
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS.slice(0, 2)).toEqual([
+    "alert.triggered",
+    "alert.resolved",
+  ]);
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.triggered");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.resolved");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.policy_triggered");
-  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.policy_resolved");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.open");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain(
+    "alert.policy_triggered",
+  );
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_resolved");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_reached");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.state:open");
+});
 
-  const parsed = parseSearchExpression("alert.policy_reached");
-  expect(parsed.error).toBeNull();
+test("retired alert and policy-rule expressions fail with canonical guidance", () => {
+  for (const [expression, canonical] of [
+    ["alert.open", "alert.triggered"],
+    ["alert.policy_reached", "alert.triggered"],
+    ["alert.policy_triggered", "alert.triggered"],
+    ["alert.policy_resolved", "alert.resolved"],
+    ["event.kind = alert.policy_reached", "alert.triggered"],
+    [
+      "event.kind in [alert.triggered, alert.policy_resolved]",
+      "alert.resolved",
+    ],
+    ["alert.state:open", "alert.lifecycle_state"],
+    [
+      "policy_rule.condition_expression = failed",
+      "policy_rule.trigger_condition_expression",
+    ],
+    [
+      "policy_rule.window_secs:300",
+      "policy_rule.trigger_meta_condition.window_seconds",
+    ],
+  ] as const) {
+    const parsed = parseSearchExpression(expression);
+    expect(parsed.error, expression).toContain(canonical);
+  }
+});
+
+test("webhook starter is comprehensive alert-first executable documentation", () => {
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toMatch(/^\[if alert\.triggered\]/);
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Event: {event.kind} · {event.id}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Occurred at (unix): {event.occurred_at_unix}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Record: {alert.record_kind} · lifecycle {alert.lifecycle_state}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Classification: {alert.category} · {alert.severity}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain("Title: {alert.title}");
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain("Detail: {alert.detail}");
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Policy: {policy.name} ({policy.id})",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Rule: {policy_rule.name} ({policy_rule.id})",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Target: {alert.target_kind}:{alert.target_id}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Resolution: {alert.resolution_reason}",
+  );
+  const resolvedBranch = DEFAULT_WEBHOOK_BODY_TEMPLATE.indexOf(
+    "[elseif alert.resolved]",
+  );
+  const scheduleDueBranch = DEFAULT_WEBHOOK_BODY_TEMPLATE.indexOf(
+    '[elseif event.kind = "schedule.due"]',
+  );
+  const scheduleFinishedBranch = DEFAULT_WEBHOOK_BODY_TEMPLATE.indexOf(
+    '[elseif event.kind = "schedule.job_finished"]',
+  );
+  const genericJobBranch = DEFAULT_WEBHOOK_BODY_TEMPLATE.indexOf(
+    '[elseif event.kind = "job.status"]',
+  );
+  expect(resolvedBranch).toBeGreaterThan(0);
+  expect(scheduleDueBranch).toBeGreaterThan(resolvedBranch);
+  expect(scheduleFinishedBranch).toBeGreaterThan(scheduleDueBranch);
+  expect(genericJobBranch).toBeGreaterThan(scheduleFinishedBranch);
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Schedule: {schedule.name} ({schedule.id})",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Trigger: {schedule.trigger_kind} · definition revision {schedule.definition_revision}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Catch-up run: {schedule.catch_up_run_index}/{schedule.catch_up_run_count} · {schedule.catch_up_policy}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Job: {job.id} · {job.type} · {job.status}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    'Target IDs: {schedule.target_ids.join(", ")}',
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "[if schedule.last_job_error]Error: {schedule.last_job_error}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    '[elseif event.kind = "job.status"]',
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    'Target IDs: {job.target_ids.join(", ")}',
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    '[elseif event.kind = "vps.status_changed"]',
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Transition: {event.from_status} → {event.to_status}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    '[elseif event.kind = "telemetry.rollup"]',
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toContain(
+    "Telemetry subject: {telemetry.client_id} via {telemetry.gateway_id}",
+  );
+  expect(DEFAULT_WEBHOOK_BODY_TEMPLATE).toMatch(
+    /\[else\]\nℹ️ EVENT[\s\S]*\[endif\]$/,
+  );
+
+  const docsPath = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../docs/target-selectors.md",
+  );
+  const docs = readFileSync(docsPath, "utf8");
+  expect(docs).toContain("schedule.due && schedule.id:<saved-schedule-id>");
+  expect(docs).toContain(
+    "schedule.job_finished && schedule.id:<saved-schedule-id>",
+  );
+  expect(docs).toMatch(
+    /A webhook may instead match `alert\.triggered` or `alert\.resolved` directly/,
+  );
+  expect(docs).toMatch(
+    /vpsman does\s+not insert, identify, or specially parse a shell/,
+  );
+  const documentedStarter = docs.match(
+    /same starter shown[\s\S]*?```text\n([\s\S]*?)\n```/,
+  )?.[1];
+  expect(documentedStarter).toBe(DEFAULT_WEBHOOK_BODY_TEMPLATE);
+});
+
+test("schedule event expressions require a policy-filtered alert edge on every branch", () => {
+  for (const expression of ["alert.triggered", "alert.resolved"]) {
+    expect(
+      scheduleEventExpressionValidationMessage(expression),
+      expression,
+    ).toBeNull();
+  }
+  for (const suggestion of SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS) {
+    expect(parseSearchExpression(suggestion).error, suggestion).toBeNull();
+  }
+
   expect(
-    evaluateSearchExpression(parsed.expression, {
-      all: [],
-      events: ["alert.policy_reached"],
-    }),
-  ).toBe(true);
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && alert.category:traffic",
+    ),
+  ).toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "(alert.triggered && alert.category:traffic) || (alert.resolved && alert.category:traffic)",
+    ),
+  ).toBeNull();
+  expect(scheduleEventExpressionValidationMessage("interval.1min")).toBe(
+    "Schedules accept alert lifecycle fields only; raw VPS, job, telemetry, server, and interval predicates are not eligible",
+  );
+  expect(
+    scheduleEventExpressionValidationMessage("vps.status.become_offline"),
+  ).toBe(
+    "Schedules accept alert lifecycle fields only; raw VPS, job, telemetry, server, and interval predicates are not eligible",
+  );
+  expect(
+    scheduleEventExpressionValidationMessage("alert.category:traffic"),
+  ).toBe(
+    "Every OR branch must include non-negated alert.triggered or alert.resolved",
+  );
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered || alert.category:traffic",
+    ),
+  ).toBe(
+    "Every OR branch must include non-negated alert.triggered or alert.resolved",
+  );
+  expect(scheduleEventExpressionValidationMessage("!alert.triggered")).toBe(
+    "Every OR branch must include non-negated alert.triggered or alert.resolved",
+  );
+  for (const expression of [
+    "alert.triggered && status = offline",
+    "alert.triggered && tag:edge",
+    "alert.triggered && untagged",
+    "alert.triggered && vps.rules:network",
+    "alert.triggered && job.status = failed",
+    "alert.triggered && telemetry.cpu > 0.9",
+    "alert.triggered && alert.operator_state = open",
+    "alert.triggered && alert.evidence.cpu_percent > 90",
+    "alert.triggered && policy_rule.unknown = value",
+  ]) {
+    expect(
+      scheduleEventExpressionValidationMessage(expression),
+      expression,
+    ).not.toBeNull();
+  }
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && policy_rule.id = policy-rule-id",
+    ),
+  ).toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.resolved && alert.resolution_reason = condition_recovered",
+    ),
+  ).toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && alert.record_kind = event",
+    ),
+  ).toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && alert.category:trafic",
+    ),
+  ).not.toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && alert.severity:urgent",
+    ),
+  ).not.toBeNull();
+  expect(
+    scheduleEventExpressionValidationMessage(
+      "alert.triggered && alert.record_kind:event",
+    ),
+  ).toBe(
+    "Schedules accept alert lifecycle fields only; raw VPS, job, telemetry, server, and interval predicates are not eligible",
+  );
 });
 
 test("shared advertised autocomplete suggestions parse in the frontend parser", () => {
@@ -586,7 +814,7 @@ function fieldsForContext(context: FixtureContext): SearchFields {
     fields: {
       "alert.category": stringValues(context.alert?.category),
       "alert.severity": stringValues(context.alert?.severity),
-      "alert.state": stringValues(context.alert?.state),
+      "alert.lifecycle_state": stringValues(context.alert?.lifecycle_state),
       "job.status": stringValues(context.job?.status),
       "job.target.status": stringValues(
         (context.job?.target as Record<string, unknown> | undefined)?.status,

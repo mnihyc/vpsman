@@ -602,6 +602,8 @@ async fn seed_completed_archive_upload(
             actor_id: None,
             command_type: "file_transfer_commit".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "completed".to_string(),
             target_count: 1,

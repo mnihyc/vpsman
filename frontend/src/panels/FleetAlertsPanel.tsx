@@ -119,8 +119,8 @@ export function FleetAlertsPanel({
               onClick={onOpenAlertPolicies}
               title={
                 canManageAlertLifecycle
-                  ? "Open threshold policy configuration. Operational alerts are system-generated."
-                  : "View threshold policies. Alert lifecycle changes require Operator or Admin role with fleet:read, backups:read, and integrations:write."
+                  ? "Open Alert Policies to tune every alert's trigger, confirmation, and automatic resolution conditions."
+                  : "View Alert Policies. Alert lifecycle changes require Operator or Admin role with fleet:read, backups:read, and integrations:write."
               }
               type="button"
             >
@@ -814,7 +814,7 @@ function FleetAlertList({
               )}
               {!policyNameFromAlert(alert) && (
                 <span className="fleetAlertPolicyHint">
-                  Source: <strong>System operational detection</strong>
+                  Policy: <strong>Policy metadata unavailable</strong>
                 </span>
               )}
               <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
@@ -1103,8 +1103,6 @@ function alertSourceStatusLabel(alert: FleetAlertRecord): string {
       return "Tunnel adapter degraded";
     case "stale":
       return "Agent stale";
-    case "policy_reached":
-      return "Policy threshold reached";
     default:
       return readableAlertToken(alert.status);
   }
@@ -1121,7 +1119,6 @@ function alertTargetScopeLabel(alert: FleetAlertRecord): string {
       return "Configuration preset";
     case "configuration_source":
       return "Configuration source";
-    case "policy_alert":
     case "policy_rule":
       return "Policy alert";
     default:

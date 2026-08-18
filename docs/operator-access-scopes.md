@@ -68,8 +68,18 @@ an active bearer URL with **Copy URL**. The same scope already authorizes share
 creation and its returned bearer URL; `sharing:read` remains the separate scope
 for listing management records and target evidence.
 
-Config > Rules writes require `config:write`. Alert policy group and notification
-channel writes require `integrations:write`.
+Config > Rules writes require `config:write`. Alert Policy mutations require
+`integrations:write`, `fleet:read`, and `backups:read`, because one policy can
+own agent, job, backup, and capability evidence. Notification-channel writes
+require `integrations:write`.
+
+Cron schedule mutations use the existing schedule/job authority. Alert-event
+schedule create, edit, enable, target refresh, and server-authoritative argv
+preview additionally require `fleet:read` and `backups:read` alongside
+`schedules:write` and `jobs:write`. The worker rechecks the captured actor's
+same scopes before dispatch, so a saved definition cannot outlive revoked alert
+visibility. Event expressions cannot read mutable VPS fields; their fixed
+reviewed targets remain separate from the policy evidence subject.
 
 Per-VPS override replacement/reset and reviewed bulk incremental runtime-config
 apply require `config:write`. Reading live agent evidence additionally dispatches

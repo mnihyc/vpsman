@@ -27,7 +27,7 @@ pub(crate) async fn try_auto_record_backup_artifact(
     };
     let Some(backup_request) = state
         .repo
-        .find_open_backup_request_for_artifact(client_id, command_hash)
+        .find_open_backup_request_for_job_artifact(client_id, command_hash, job_id)
         .await?
     else {
         return Ok(None);

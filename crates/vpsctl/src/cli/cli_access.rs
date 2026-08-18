@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+
+use crate::commands_schedules::ScheduleTriggerKindArg;
+
 #[derive(Debug, Args)]
 pub(crate) struct BootstrapCommand {
     #[arg(long)]
@@ -358,14 +361,8 @@ pub(crate) struct AlertPolicyPreviewCommand {
     pub(crate) name: String,
     #[arg(long)]
     pub(crate) selector: String,
-    #[arg(long = "rule")]
-    pub(crate) rules: Vec<String>,
-    #[arg(long, default_value_t = 0)]
-    pub(crate) window_secs: i64,
-    #[arg(long, default_value = "warning")]
-    pub(crate) severity: String,
-    #[arg(long)]
-    pub(crate) traffic_selector: Option<String>,
+    #[arg(long = "rule-json", value_name = "POLICY_RULE_REQUEST_JSON")]
+    pub(crate) rule_json: Vec<String>,
     #[arg(long, default_value_t = true)]
     pub(crate) enabled: bool,
     #[arg(long)]
@@ -378,14 +375,8 @@ pub(crate) struct AlertPolicyUpsertCommand {
     pub(crate) name: String,
     #[arg(long)]
     pub(crate) selector: Option<String>,
-    #[arg(long = "rule")]
-    pub(crate) rules: Vec<String>,
-    #[arg(long, default_value_t = 0)]
-    pub(crate) window_secs: i64,
-    #[arg(long, default_value = "warning")]
-    pub(crate) severity: String,
-    #[arg(long)]
-    pub(crate) traffic_selector: Option<String>,
+    #[arg(long = "rule-json", value_name = "POLICY_RULE_REQUEST_JSON")]
+    pub(crate) rule_json: Vec<String>,
     #[arg(long, default_value_t = true)]
     pub(crate) enabled: bool,
     #[arg(long)]
@@ -689,29 +680,63 @@ pub(crate) struct BulkResolveCommand {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Examples:\n  vpsctl schedule-create --name hourly --command /bin/true --tags edge --confirmed\n  vpsctl schedule-create --name traffic-guard --trigger-kind event --event-expression 'alert.triggered && alert.category:traffic' --event-argv-template /usr/local/bin/limit-traffic --event-argv-template '{event.kind}' --event-argv-template '{alert.target_id}' --tags edge --confirmed\n\nOmit every --event-argv-template to dispatch the safe /bin/true no-op. Use a separate alert.resolved expression when recovery needs a different fixed argv program. The Schedule web UI provides authoritative per-edge server preview before saving."
+)]
 pub(crate) struct ScheduleCreateCommand {
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cron",
+        help = "Dispatch by five-field cron cadence or by a policy-owned alert lifecycle edge"
+    )]
+    pub(crate) trigger_kind: ScheduleTriggerKindArg,
+    #[arg(
+        long,
+        help = "Cron schedule executable or command label; omit for event schedules"
+    )]
+    pub(crate) command: Option<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Exact cron job argv; omit for event schedules"
+    )]
+    pub(crate) argv: Vec<String>,
+    #[arg(long, default_value_t = false, help = "Allocate a PTY for a cron job")]
+    pub(crate) pty: bool,
+    #[arg(
+        long,
+        help = "Alert-only filter; every OR branch needs alert.triggered/resolved (requires schedules:write, jobs:write, fleet:read, backups:read)"
+    )]
+    pub(crate) event_expression: Option<String>,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        allow_hyphen_values = true,
+        help = "One exact event argv element; repeat in order. Omit all elements for /bin/true"
+    )]
+    pub(crate) event_argv_template: Vec<String>,
     #[arg(long)]
     pub(crate) name: String,
-    #[arg(long)]
-    pub(crate) command: String,
-    #[arg(long, value_delimiter = ',')]
-    pub(crate) argv: Vec<String>,
-    #[arg(long, default_value_t = false)]
-    pub(crate) pty: bool,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
-    #[arg(long, default_value = "0 * * * *")]
-    pub(crate) cron_expr: String,
+    #[arg(
+        long,
+        help = "Five-field cron cadence; defaults to '0 * * * *' for cron"
+    )]
+    pub(crate) cron_expr: Option<String>,
+    #[arg(long, help = "Cron timezone; only UTC is accepted")]
+    pub(crate) timezone: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) disabled: bool,
-    #[arg(long, default_value = "skip_missed")]
-    pub(crate) catch_up_policy: String,
-    #[arg(long, default_value_t = 1)]
-    pub(crate) catch_up_limit: i32,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) retry_delay_secs: i64,
+    #[arg(long, help = "Cron catch-up policy; defaults to skip_missed")]
+    pub(crate) catch_up_policy: Option<String>,
+    #[arg(long, help = "Cron catch-up bound; defaults to 1")]
+    pub(crate) catch_up_limit: Option<i32>,
+    #[arg(long, help = "Cron retry delay in seconds; defaults to 300")]
+    pub(crate) retry_delay_secs: Option<i64>,
     #[arg(long, default_value_t = 3)]
     pub(crate) max_failures: i32,
     #[arg(long, default_value_t = false)]
@@ -719,31 +744,65 @@ pub(crate) struct ScheduleCreateCommand {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "Event updates require --trigger-kind event and the complete replacement definition. The command fetches and submits the current definition revision, so concurrent changes fail closed. Use the Schedule web UI when you need authoritative per-edge server preview before saving."
+)]
 pub(crate) struct ScheduleUpdateCommand {
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cron",
+        help = "Dispatch by five-field cron cadence or by a policy-owned alert lifecycle edge"
+    )]
+    pub(crate) trigger_kind: ScheduleTriggerKindArg,
     #[arg(long)]
     pub(crate) schedule_id: String,
     #[arg(long)]
     pub(crate) name: String,
-    #[arg(long)]
-    pub(crate) command: String,
-    #[arg(long, value_delimiter = ',')]
+    #[arg(
+        long,
+        help = "Cron schedule executable or command label; omit for event schedules"
+    )]
+    pub(crate) command: Option<String>,
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Exact cron job argv; omit for event schedules"
+    )]
     pub(crate) argv: Vec<String>,
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, help = "Allocate a PTY for a cron job")]
     pub(crate) pty: bool,
+    #[arg(
+        long,
+        help = "Alert-only filter; every OR branch needs alert.triggered/resolved (requires schedules:write, jobs:write, fleet:read, backups:read)"
+    )]
+    pub(crate) event_expression: Option<String>,
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        allow_hyphen_values = true,
+        help = "One exact event argv element; repeat in order. Omit all elements for /bin/true"
+    )]
+    pub(crate) event_argv_template: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) clients: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub(crate) tags: Vec<String>,
-    #[arg(long, default_value = "0 * * * *")]
-    pub(crate) cron_expr: String,
+    #[arg(
+        long,
+        help = "Five-field cron cadence; defaults to '0 * * * *' for cron"
+    )]
+    pub(crate) cron_expr: Option<String>,
+    #[arg(long, help = "Cron timezone; only UTC is accepted")]
+    pub(crate) timezone: Option<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) disabled: bool,
-    #[arg(long, default_value = "skip_missed")]
-    pub(crate) catch_up_policy: String,
-    #[arg(long, default_value_t = 1)]
-    pub(crate) catch_up_limit: i32,
-    #[arg(long, default_value_t = 300)]
-    pub(crate) retry_delay_secs: i64,
+    #[arg(long, help = "Cron catch-up policy; defaults to skip_missed")]
+    pub(crate) catch_up_policy: Option<String>,
+    #[arg(long, help = "Cron catch-up bound; defaults to 1")]
+    pub(crate) catch_up_limit: Option<i32>,
+    #[arg(long, help = "Cron retry delay in seconds; defaults to 300")]
+    pub(crate) retry_delay_secs: Option<i64>,
     #[arg(long, default_value_t = 3)]
     pub(crate) max_failures: i32,
     #[arg(long, default_value_t = false)]

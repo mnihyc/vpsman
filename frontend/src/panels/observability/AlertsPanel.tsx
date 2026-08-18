@@ -33,6 +33,7 @@ type AlertConfigTab = "policies" | "destinations" | "deliveries";
 type AlertsPanelProps = {
   agents: AgentView[];
   apiError: string | null;
+  canManageAlertPolicies: boolean;
   currentPolicyAlerts: PolicyAlertRecord[];
   currentPolicyAlertsEvidenceAvailable: boolean;
   currentPolicyAlertsTruncated: boolean;
@@ -78,6 +79,7 @@ type AlertsPanelProps = {
 export function AlertsPanel({
   agents,
   apiError,
+  canManageAlertPolicies,
   currentPolicyAlerts,
   currentPolicyAlertsEvidenceAvailable,
   currentPolicyAlertsTruncated,
@@ -156,8 +158,9 @@ export function AlertsPanel({
             <div>
               <h2>Alerts</h2>
               <span>
-                Enabled policy groups issue threshold alerts. System operational
-                alerts and live triage stay in Fleet / Alerts.
+                Alert Policies own every alert's trigger, confirmation, and
+                automatic resolution. Live lifecycle and triage stay in Fleet /
+                Alerts.
               </span>
             </div>
             <div className="sectionActions" aria-label="Alert action links">
@@ -274,7 +277,7 @@ export function AlertsPanel({
                 [
                   "policies",
                   "Policies",
-                  "Threshold rules and matched policy alerts",
+                  "Typed evidence rules and matched alert history",
                 ],
                 ["destinations", "Destinations", "Alert notification channels"],
                 [
@@ -314,8 +317,9 @@ export function AlertsPanel({
               <div>
                 <h2 id="observability-alert-policies-title">Alert policies</h2>
                 <span>
-                  Author thresholds, selectors, dry-run previews, and reviewed
-                  saves without mixing live triage into this workflow.
+                  Author state, metric, and occurrence rules with selectors,
+                  dry-run previews, and reviewed saves without mixing live
+                  triage into this workflow.
                 </span>
               </div>
               <AlertTriangle size={18} />
@@ -326,23 +330,24 @@ export function AlertsPanel({
             >
               <strong>Policy alert lifecycle</strong>
               <small>
-                The predefined traffic-quota starter is an ordinary disabled
-                policy. Conditions enter Triggered on first qualifying evidence,
-                advance to Persisting on confirmation without another Triggered
-                edge, become Unknown when current evidence is unavailable or
-                incomplete, and become Resolved on recovery or scope change.
-                Unknown neither resolves nor re-arms an episode; a later
-                recurrence starts a new generation. Terminal occurrences are
-                Triggered or Persisting until an operator explicitly resolves
-                the incident; they never become Unknown or resolve
-                automatically. Operator triage is independent: resetting triage
-                to Open does not resolve either lifecycle.
+                Every raw metric, status, and occurrence is typed policy
+                evidence. A rule emits Triggered only after its Trigger
+                condition and optional Trigger meta condition pass; further
+                confirming evidence is Persisting without another edge.
+                Incomplete evidence is Unknown. Conditions resolve through the
+                inverse Trigger or a separate hysteresis expression plus their
+                Resolve meta condition. Occurrences resolve after their
+                configured elapsed duration and may be reviewed earlier. Only
+                Triggered and Resolved are durable automation edges. Operator
+                triage is independent: resetting triage to Open never resolves
+                the lifecycle.
               </small>
             </div>
             <FleetAlertPolicyManager
               agents={agents}
               alertsEvidenceAvailable={policyAlertsEvidenceAvailable}
               alertsTruncated={policyAlertHistoryTruncated}
+              canManagePolicies={canManageAlertPolicies}
               onDelete={onDeleteFleetAlertPolicy}
               onDryRun={onDryRunFleetAlertPolicy}
               onEditorOpenChange={setPolicyEditorOpen}

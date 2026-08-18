@@ -1097,13 +1097,17 @@ export function JobDispatchPanel({
     selectorParse.error,
   ]);
 
-  const parsedArgv = useMemo(() => {
+  const parsedCommand = useMemo(() => {
     try {
-      return parseCommandArgv(commandText);
-    } catch {
-      return [];
+      return { argv: parseCommandArgv(commandText), error: null };
+    } catch (error) {
+      return {
+        argv: [],
+        error: error instanceof Error ? error.message : "Invalid command argv",
+      };
     }
   }, [commandText]);
+  const parsedArgv = parsedCommand.argv;
 
   const filePullReady = filePath.startsWith("/");
   const filePushReady = filePushPath.startsWith("/") && !!filePushSource;
@@ -2246,6 +2250,8 @@ export function JobDispatchPanel({
           </>
         )}
         <JobOperationEditor
+          commandArgv={parsedArgv}
+          commandArgvError={parsedCommand.error}
           commandText={commandText}
           shellPty={shellPty}
           fileFollowSymlinks={fileFollowSymlinks}

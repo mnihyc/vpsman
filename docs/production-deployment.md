@@ -296,9 +296,10 @@ docker compose ps
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
 The exact v0.4.4 `0001`–`0009` migration files and checksums may apply
-`0010_disabled_resource_alert_policies.sql` and then
-`0011_operational_alert_lifecycle.sql` in place. The exact v0.3.5
-`0001`–`0008` baseline may apply `0009`, `0010`, and then `0011`. Keep any
+`0010_disabled_resource_alert_policies.sql`,
+`0011_operational_alert_lifecycle.sql`, and then
+`0012_policy_owned_alerts_event_schedules.sql` in place. The exact v0.3.5
+`0001`–`0008` baseline may apply `0009`, `0010`, `0011`, and then `0012`. Keep any
 earlier or different database with its matching application release, or move
 reviewed data through a separate export/import procedure into a fresh database.
 
@@ -309,12 +310,17 @@ Before every production upgrade:
 1. Read the target release notes, this runbook, `SECURITY.md`, and
    [Migration Compatibility](migration-compatibility.md).
 2. Take and test a control-plane backup.
-3. Download the exact-tag target deployment bundle.
-4. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`, and
+3. Before an upgrade that applies `0012`, let the existing webhook worker drain
+   every `queued`, `in_progress`, and retryable `failed` delivery. Verify the
+   read-only zero-count preflight in
+   [Migration Compatibility](migration-compatibility.md); do not discard
+   deliveries to make the check pass.
+4. Download the exact-tag target deployment bundle.
+5. Compare its `.env.example`, `compose.yml`, `nginx.conf`, `update.sh`, and
    `config/vpsman.toml` with the installed deployment.
    Merge reviewed deployment changes without overwriting `.env`,
    `config/secrets/`, or `runtime/`.
-5. Run `./update.sh vX.Y.Z`, then check `/health`, `docker compose ps`, recent
+6. Run `./update.sh vX.Y.Z`, then check `/health`, `docker compose ps`, recent
    service logs, operator sign-in, and a canary agent before wider operations.
 
 Use `latest` only for disposable environments; it makes change review and

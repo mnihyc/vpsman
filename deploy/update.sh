@@ -514,6 +514,56 @@ verify_database_compatible_with() {
   done <"$rows_file"
 }
 
+database_relation_exists() {
+  local relation="$1"
+  local exists
+  [[ "$relation" =~ ^[a-z_][a-z0-9_]*$ ]] ||
+    fail "database relation preflight name is invalid"
+  exists="$(
+    compose exec -T postgres sh -ceu \
+      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT to_regclass('\''public.$1'\'') IS NOT NULL"' \
+      sh "$relation" |
+      tr -d '\r'
+  )"
+  case "$exists" in
+    t | f)
+      printf '%s\n' "$exists"
+      ;;
+    *)
+      fail "database returned an invalid relation preflight status"
+      ;;
+  esac
+}
+
+require_alert_expression_cutover_ready() {
+  local migrations_dir="$1"
+  local completed pending
+
+  [[ -f "$migrations_dir/0012_policy_owned_alerts_event_schedules.sql" ]] || return 0
+  if [[ "$(database_relation_exists alert_expression_migration_meta)" == "t" ]]; then
+    completed="$(
+      compose exec -T postgres sh -ceu \
+        'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT completed_at IS NOT NULL FROM alert_expression_migration_meta WHERE singleton"' |
+        tr -d '\r'
+    )"
+    case "$completed" in
+      t) return 0 ;;
+      f) ;;
+      *) fail "database returned an invalid alert-expression migration status" ;;
+    esac
+  fi
+  [[ "$(database_relation_exists webhook_rule_deliveries)" == "t" ]] || return 0
+  pending="$(
+    compose exec -T postgres sh -ceu \
+      'exec psql -v ON_ERROR_STOP=1 -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) FROM webhook_rule_deliveries WHERE status IN ('\''queued'\'', '\''in_progress'\'', '\''failed'\'')"' |
+      tr -d '\r'
+  )"
+  [[ "$pending" =~ ^(0|[1-9][0-9]*)$ ]] ||
+    fail "database returned an invalid nonterminal webhook-delivery count"
+  [[ "$pending" == "0" ]] ||
+    fail "0012 requires webhook deliveries to drain before upgrade; $pending queued, in-progress, or retryable failed deliveries remain. Keep the current worker running, repair the destination or retry policy, and rerun only after the migration-compatibility preflight returns zero"
+}
+
 database_backup_is_valid() {
   local input="$1"
   [[ -f "$input" && ! -L "$input" && -s "$input" ]] || return 1
@@ -1200,10 +1250,6 @@ if [[ "$mode" == "update" && "$active_release_tag" == "$resolved_tag" ]]; then
   exit 0
 fi
 
-mkdir -p "$runtime_dir/downloads"
-cp "$transaction/downloads/version.json" \
-  "$runtime_dir/downloads/version-$resolved_tag.json"
-
 if [[ "$mode" == "first-start" ]]; then
   prepare_first_start_secrets "$transaction/staged-cli/vpsctl"
   operator_privilege_salt="$(read_operator_privilege_salt)"
@@ -1214,6 +1260,10 @@ if [[ "$mode" == "first-start" ]]; then
       "$transaction/staged-server/migrations" \
       "$transaction/migration-rows.txt"
   fi
+  require_alert_expression_cutover_ready "$transaction/staged-server/migrations"
+  mkdir -p "$runtime_dir/downloads"
+  cp "$transaction/downloads/version.json" \
+    "$runtime_dir/downloads/version-$resolved_tag.json"
   # Even a fresh PostgreSQL instance is snapshotted before API migrations.
   # This also makes the documented restore-then-first-start path reversible.
   write_transaction_value "$transaction" state stopping
@@ -1228,6 +1278,10 @@ else
   verify_database_compatible_with \
     "$transaction/staged-server/migrations" \
     "$transaction/migration-rows.txt"
+  require_alert_expression_cutover_ready "$transaction/staged-server/migrations"
+  mkdir -p "$runtime_dir/downloads"
+  cp "$transaction/downloads/version.json" \
+    "$runtime_dir/downloads/version-$resolved_tag.json"
   write_transaction_value "$transaction" state stopping
   transaction_can_cleanup=0
   stop_application_services

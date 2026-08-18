@@ -406,6 +406,8 @@ pub(crate) struct JobHistoryView {
     pub(crate) actor_id: Option<Uuid>,
     pub(crate) command_type: String,
     pub(crate) source_schedule_id: Option<Uuid>,
+    pub(crate) causation_id: Option<Uuid>,
+    pub(crate) schedule_lineage: Vec<Uuid>,
     pub(crate) privileged: bool,
     pub(crate) status: String,
     pub(crate) target_count: i32,
@@ -1048,21 +1050,20 @@ pub(crate) struct TelemetryTunnelQuery {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateScheduleRequest {
     pub(crate) name: String,
-    pub(crate) operation: JobCommand,
+    pub(crate) operation: Option<JobCommand>,
+    pub(crate) event_argv_template: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
-    pub(crate) cron_expr: String,
-    #[serde(default = "default_schedule_timezone")]
-    pub(crate) timezone: String,
+    pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) cron_expr: Option<String>,
+    pub(crate) timezone: Option<String>,
+    pub(crate) event_expression: Option<String>,
     #[serde(default = "default_schedule_enabled")]
     pub(crate) enabled: bool,
-    #[serde(default = "default_schedule_catch_up_policy")]
-    pub(crate) catch_up_policy: String,
-    #[serde(default = "default_schedule_catch_up_limit")]
-    pub(crate) catch_up_limit: i32,
-    #[serde(default = "default_schedule_retry_delay_secs")]
-    pub(crate) retry_delay_secs: i64,
+    pub(crate) catch_up_policy: Option<String>,
+    pub(crate) catch_up_limit: Option<i32>,
+    pub(crate) retry_delay_secs: Option<i64>,
     #[serde(default = "default_schedule_max_failures")]
     pub(crate) max_failures: i32,
     #[serde(default)]
@@ -1075,23 +1076,23 @@ pub(crate) struct CreateScheduleRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateScheduleRequest {
     pub(crate) name: String,
-    pub(crate) operation: JobCommand,
+    pub(crate) operation: Option<JobCommand>,
+    pub(crate) event_argv_template: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
     pub(crate) expected_selector_expression: String,
     pub(crate) expected_target_client_ids: Vec<String>,
-    pub(crate) cron_expr: String,
-    #[serde(default = "default_schedule_timezone")]
-    pub(crate) timezone: String,
+    pub(crate) expected_definition_revision: i64,
+    pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) cron_expr: Option<String>,
+    pub(crate) timezone: Option<String>,
+    pub(crate) event_expression: Option<String>,
     #[serde(default = "default_schedule_enabled")]
     pub(crate) enabled: bool,
-    #[serde(default = "default_schedule_catch_up_policy")]
-    pub(crate) catch_up_policy: String,
-    #[serde(default = "default_schedule_catch_up_limit")]
-    pub(crate) catch_up_limit: i32,
-    #[serde(default = "default_schedule_retry_delay_secs")]
-    pub(crate) retry_delay_secs: i64,
+    pub(crate) catch_up_policy: Option<String>,
+    pub(crate) catch_up_limit: Option<i32>,
+    pub(crate) retry_delay_secs: Option<i64>,
     #[serde(default = "default_schedule_max_failures")]
     pub(crate) max_failures: i32,
     #[serde(default)]
@@ -1104,6 +1105,7 @@ pub(crate) struct UpdateScheduleRequest {
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeferScheduleRequest {
     pub(crate) deferred_until: String,
+    pub(crate) expected_definition_revision: i64,
     #[serde(default)]
     pub(crate) reason: Option<String>,
     #[serde(default)]
@@ -1115,6 +1117,7 @@ pub(crate) struct DeferScheduleRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SchedulePrivilegeMutationRequest {
+    pub(crate) expected_definition_revision: i64,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
     #[serde(default)]
@@ -1124,6 +1127,7 @@ pub(crate) struct SchedulePrivilegeMutationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateScheduleTargetsRequest {
+    pub(crate) expected_definition_revision: i64,
     #[serde(default)]
     pub(crate) privilege_assertion: Option<PrivilegeAssertion>,
     #[serde(default)]
@@ -1135,23 +1139,28 @@ pub(crate) struct ScheduleView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) enabled: bool,
+    pub(crate) trigger_kind: ScheduleTriggerKind,
+    pub(crate) definition_revision: i64,
     pub(crate) command_type: String,
     pub(crate) operation: Option<JobCommand>,
+    pub(crate) event_argv_template: Option<Vec<String>>,
     pub(crate) operation_error: Option<String>,
     pub(crate) operation_payload_hash: String,
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,
-    pub(crate) cron_expr: String,
-    pub(crate) timezone: String,
+    pub(crate) cron_expr: Option<String>,
+    pub(crate) event_expression: Option<String>,
+    pub(crate) event_armed_at: Option<String>,
+    pub(crate) timezone: Option<String>,
     pub(crate) next_runs: Vec<String>,
     pub(crate) cadence_error: Option<String>,
-    pub(crate) catch_up_policy: String,
-    pub(crate) catch_up_limit: i32,
-    pub(crate) retry_delay_secs: i64,
+    pub(crate) catch_up_policy: Option<String>,
+    pub(crate) catch_up_limit: Option<i32>,
+    pub(crate) retry_delay_secs: Option<i64>,
     pub(crate) max_failures: i32,
     pub(crate) failure_count: i32,
     pub(crate) last_error: Option<String>,
-    pub(crate) next_run_at: String,
+    pub(crate) next_run_at: Option<String>,
     pub(crate) last_run_at: Option<String>,
     pub(crate) deferred_until: Option<String>,
     pub(crate) deleted_at: Option<String>,
@@ -1159,24 +1168,57 @@ pub(crate) struct ScheduleView {
     pub(crate) updated_at: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ScheduleTriggerKind {
+    Cron,
+    Event,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PreviewEventScheduleTemplateRequest {
+    pub(crate) event_expression: String,
+    pub(crate) event_argv_template: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EventScheduleTemplatePreviewContext {
+    pub(crate) event_kind: String,
+    pub(crate) alert_title: String,
+    pub(crate) alert_category: String,
+    pub(crate) alert_severity: String,
+    pub(crate) policy_name: String,
+    pub(crate) policy_rule_name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EventScheduleTemplateElementPreview {
+    pub(crate) index: usize,
+    pub(crate) template: String,
+    pub(crate) rendered: Option<String>,
+    pub(crate) error_code: Option<String>,
+    pub(crate) error_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EventScheduleTemplateEdgePreview {
+    pub(crate) rendered_argv: Option<Vec<String>>,
+    pub(crate) context: EventScheduleTemplatePreviewContext,
+    pub(crate) elements: Vec<EventScheduleTemplateElementPreview>,
+    pub(crate) rendered_hash: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct EventScheduleTemplatePreviewResponse {
+    pub(crate) uses_default_noop: bool,
+    pub(crate) template_argv: Vec<String>,
+    pub(crate) previews: Vec<EventScheduleTemplateEdgePreview>,
+    pub(crate) template_hash: String,
+}
+
 fn default_schedule_enabled() -> bool {
     true
-}
-
-fn default_schedule_timezone() -> String {
-    "UTC".to_string()
-}
-
-fn default_schedule_catch_up_policy() -> String {
-    "skip_missed".to_string()
-}
-
-fn default_schedule_catch_up_limit() -> i32 {
-    1
-}
-
-fn default_schedule_retry_delay_secs() -> i64 {
-    300
 }
 
 fn default_schedule_max_failures() -> i32 {

@@ -2,25 +2,28 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{TimeZone, Utc};
 use serde_json::json;
-use vpsman_common::AgentCapabilitySnapshot;
+use vpsman_common::{AgentCapabilitySnapshot, ExpressionTruth};
 
 use crate::{
     model::AgentView,
+    model_alert_policies::{
+        AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
+    },
     repository::{MemoryState, Repository},
 };
 
 use super::{
     aggregate_memory_raw_traffic_history, aggregate_memory_traffic_counter_usage,
     aggregate_memory_traffic_history, claim_traffic_selector_directions, derive_cycle_usage,
-    evaluate_rule_for_client, network_rate_selector_spec_from_rule, next_policy_rule_state,
-    parse_billing_cycle, parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
-    parse_persisted_traffic_selector_list, parse_port_speed, parse_traffic_selector,
-    parse_traffic_selector_list, parse_vps_rule_value, policy_alert_for_evaluation,
-    policy_alert_resolution_timestamp, policy_alert_resolved_webhook_event,
-    policy_identifier_value, policy_state_is_alert_eligible, policy_vps_rule_inputs,
-    policy_webhook_repair_is_recent, resolve_memory_policy_alerts_for_rules,
-    resolve_memory_policy_states_outside_scope, resolve_network_rate_interface_selection,
-    resolve_policy_alert, traffic_accounting_for_client,
+    evaluate_rule_for_client, metric_policy_expression_truth, network_rate_selector_spec_from_rule,
+    next_policy_rule_state, parse_billing_cycle, parse_billing_price, parse_byte_size,
+    parse_network_rate_interfaces, parse_persisted_traffic_selector_list, parse_port_speed,
+    parse_traffic_selector, parse_traffic_selector_list, parse_vps_rule_value,
+    policy_alert_for_evaluation, policy_alert_resolution_timestamp,
+    policy_alert_resolved_webhook_event, policy_identifier_value, policy_state_is_alert_eligible,
+    policy_vps_rule_inputs, policy_webhook_repair_is_recent,
+    resolve_memory_policy_alerts_for_rules, resolve_memory_policy_states_outside_scope,
+    resolve_network_rate_interface_selection, resolve_policy_alert, traffic_accounting_for_client,
     traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
     validate_billing_rule_group, NetworkRateSelectorReference, NetworkRateSelectorSpec,
     PolicyAlertQuery, PolicyEvaluation, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
@@ -30,6 +33,46 @@ use super::{
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
     VPS_RULE_KEY_TRAFFIC_RESET_DAY, VPS_RULE_KEY_TRAFFIC_SELECTORS,
 };
+
+#[test]
+fn metric_policy_runtime_uses_arithmetic_kleene_truth() {
+    let evidence = json!({
+        "cpu": {"utilization_ratio": 0.91},
+        "memory": {"available_ratio": null},
+        "traffic": {"cycle_percent": 82.0}
+    });
+    assert_eq!(
+        metric_policy_expression_truth(
+            "cpu.utilization_ratio * 100 >= 90 && traffic.cycle_percent > 80",
+            &evidence,
+            true,
+        )
+        .unwrap(),
+        ExpressionTruth::True
+    );
+    assert_eq!(
+        metric_policy_expression_truth(
+            "cpu.utilization_ratio > 0.95 || memory.available_ratio < 0.1",
+            &evidence,
+            true,
+        )
+        .unwrap(),
+        ExpressionTruth::Unknown
+    );
+    assert_eq!(
+        metric_policy_expression_truth(
+            "cpu.utilization_ratio < 0.95 || memory.available_ratio < 0.1",
+            &evidence,
+            true,
+        )
+        .unwrap(),
+        ExpressionTruth::True
+    );
+    assert_eq!(
+        metric_policy_expression_truth("cpu.utilization_ratio > 0.5", &evidence, false).unwrap(),
+        ExpressionTruth::Unknown
+    );
+}
 
 #[test]
 fn api_vps_rule_constants_follow_the_common_registry() {
@@ -851,10 +894,18 @@ fn cpu_utilization_policy_uses_rollup_max_and_missing_is_incomplete() {
         id: None,
         name: "cpu busy".to_string(),
         enabled: true,
+        rule_kind: AlertPolicyRuleKind::Metric,
+        evidence_source: "telemetry.combined".to_string(),
+        correlation_mode: AlertPolicyCorrelationMode::NaturalKey,
         traffic_selector: None,
-        condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
-        window_secs: 0,
+        trigger_condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
+        trigger_meta_condition: None,
+        resolve_condition_expression: None,
+        resolve_meta_condition: None,
         severity: "warning".to_string(),
+        category: "resource".to_string(),
+        title_template: "CPU busy".to_string(),
+        detail_template: "CPU utilization is high".to_string(),
     };
     let evaluation = evaluate_rule_for_client(&rule, None, Some(&rollup));
 
@@ -975,7 +1026,7 @@ fn sustained_true_policy_state_remains_eligible_for_outbox_repair_without_refiri
 #[test]
 fn unknown_policy_evidence_pauses_dwell_without_resolving_or_rearming() {
     let mut rule = policy_rule(1);
-    rule.window_secs = 300;
+    rule.trigger_meta_condition = Some(AlertPolicyMetaCondition::Sustained { seconds: 300 });
     let started_at = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
     let started = next_policy_rule_state(
         &rule,
@@ -1076,7 +1127,7 @@ fn unknown_policy_evidence_pauses_dwell_without_resolving_or_rearming() {
 #[test]
 fn repeated_fractional_unknown_intervals_do_not_leak_into_policy_dwell() {
     let mut rule = policy_rule(1);
-    rule.window_secs = 300;
+    rule.trigger_meta_condition = Some(AlertPolicyMetaCondition::Sustained { seconds: 300 });
     let started_at = Utc
         .timestamp_opt(2_000_000_000, 100_000_000)
         .single()
@@ -1543,10 +1594,21 @@ fn policy_rule(rule_version: i32) -> PolicyRuleRecord {
         sort_order: 0,
         name: "quota".to_string(),
         enabled: true,
+        rule_kind: AlertPolicyRuleKind::Metric,
+        evidence_source: "telemetry.combined".to_string(),
+        correlation_mode: AlertPolicyCorrelationMode::NaturalKey,
         traffic_selector: None,
-        condition_expression: "cpu.load_1 > 1".to_string(),
-        window_secs: 0,
+        trigger_condition_expression: "cpu.load_1 > 1".to_string(),
+        trigger_meta_condition: None,
+        resolve_condition_expression: None,
+        resolve_meta_condition: None,
         severity: "warning".to_string(),
+        category: "resource".to_string(),
+        title_template: "Resource threshold reached".to_string(),
+        detail_template: "CPU load is high".to_string(),
+        system_seed_key: None,
+        armed_after_evidence_seq: 0,
+        armed_at: "test".to_string(),
         created_at: "test".to_string(),
         updated_at: "test".to_string(),
     }

@@ -5,6 +5,114 @@ export const COMMAND_PROTOCOL_VERSION = 5 as const;
 export const MIN_TERMINAL_COLS = 20 as const;
 export const MIN_TERMINAL_ROWS = 5 as const;
 export const MAX_TERMINAL_INPUT_BYTES = 8192 as const;
+export const ALERT_EVENT_ARGV_MAX_ELEMENTS = 128 as const;
+export const ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES = 16384 as const;
+export const ALERT_EVENT_ARGV_MAX_BYTES = 65536 as const;
+
+export const ALERT_EVENT_IMMUTABLE_FIELDS = [
+  "event.id",
+  "event.kind",
+  "event.occurred_at",
+  "event.recorded_at",
+  "alert.id",
+  "alert.public_id",
+  "alert.episode_id",
+  "alert.record_kind",
+  "alert.category",
+  "alert.severity",
+  "alert.lifecycle_state",
+  "alert.trigger_generation",
+  "alert.source_status",
+  "alert.resolution_reason",
+  "alert.title",
+  "alert.detail",
+  "alert.client_id",
+  "alert.target_kind",
+  "alert.target_id",
+  "policy.id",
+  "policy.name",
+  "policy_rule.id",
+  "policy_rule.name",
+  "policy_rule.rule_version",
+  "policy_rule.rule_kind",
+  "policy_rule.evidence_source",
+  "policy_rule.system_seed_key",
+  "policy_rule.trigger_meta_condition.kind",
+  "policy_rule.trigger_meta_condition.window_seconds",
+  "policy_rule.resolve_meta_condition.kind",
+  "policy_rule.resolve_meta_condition.window_seconds",
+] as const;
+
+export const ALERT_EVENT_ARGV_SCALAR_PATHS = [
+  "event.id",
+  "event.kind",
+  "event.occurred_at",
+  "event.recorded_at",
+  "alert.id",
+  "alert.public_id",
+  "alert.episode_id",
+  "alert.title",
+  "alert.detail",
+  "alert.category",
+  "alert.severity",
+  "alert.record_kind",
+  "alert.lifecycle_state",
+  "alert.trigger_generation",
+  "alert.source_status",
+  "alert.resolution_reason",
+  "alert.target_kind",
+  "alert.target_id",
+  "policy.id",
+  "policy.name",
+  "policy_rule.id",
+  "policy_rule.name",
+  "policy_rule.rule_version",
+  "policy_rule.rule_kind",
+  "policy_rule.evidence_source",
+  "policy_rule.trigger_meta_condition.kind",
+  "policy_rule.trigger_meta_condition.window_seconds",
+  "policy_rule.resolve_meta_condition.kind",
+  "policy_rule.resolve_meta_condition.window_seconds",
+  "schedule.id",
+  "schedule.name",
+  "schedule.definition_revision",
+  "schedule.fixed_target_count",
+  "schedule.matched_subject_count",
+] as const;
+
+export const ALERT_EVENT_ARGV_CONTROL_TOKENS = [
+  "[if",
+  "[elseif",
+  "[else",
+  "[for",
+  "[end",
+  "[endif",
+  "[endfor",
+] as const;
+
+export const ALERT_EVENT_ARGV_HELPER_TOKENS = [
+  ".filter",
+  ".where",
+  ".count",
+  ".map",
+] as const;
+
+export const ALERT_EVENT_CATEGORIES = [
+  "agent_status",
+  "network",
+  "backup",
+  "agent_update",
+  "job",
+  "capability_degraded",
+  "traffic",
+  "resource",
+] as const;
+
+export const ALERT_EVENT_SEVERITIES = [
+  "info",
+  "warning",
+  "critical",
+] as const;
 
 export const JOB_OPERATION_TYPES = [
   "shell",
@@ -505,13 +613,16 @@ export const SCHEDULE_PRIVILEGE_INTENT_FIELDS = [
   "version",
   "action",
   "schedule_id",
+  "definition_revision",
   "name",
   "command_type",
   "operation_payload_hash",
   "selector_expression",
   "resolved_targets",
+  "trigger_kind",
   "cron_expr",
   "timezone",
+  "event_expression",
   "enabled",
   "catch_up_policy",
   "catch_up_limit",
@@ -1003,6 +1114,16 @@ export type TrafficAccountingRecord = {
   selector_breakdown: TrafficAccountingSelectorBreakdown[];
 };
 
+export type AlertPolicyRuleKind = "metric" | "state" | "occurrence";
+
+export type AlertPolicyCorrelationMode = "natural_key" | "subject" | "global";
+
+export type AlertPolicyMetaCondition =
+  | { kind: "immediate" }
+  | { kind: "sustained"; seconds: number }
+  | { kind: "count"; confirmations: number; within_seconds: number }
+  | { kind: "elapsed_since_trigger"; seconds: number };
+
 export type PolicyRuleRecord = {
   id: string;
   group_id: string;
@@ -1010,10 +1131,21 @@ export type PolicyRuleRecord = {
   sort_order: number;
   name: string;
   enabled: boolean;
+  rule_kind: AlertPolicyRuleKind;
+  evidence_source: string;
+  correlation_mode: AlertPolicyCorrelationMode;
   traffic_selector: string | null;
-  condition_expression: string;
-  window_secs: number;
+  trigger_condition_expression: string;
+  trigger_meta_condition: AlertPolicyMetaCondition | null;
+  resolve_condition_expression: string | null;
+  resolve_meta_condition: AlertPolicyMetaCondition | null;
   severity: "info" | "warning" | "critical" | string;
+  category: string;
+  title_template: string;
+  detail_template: string;
+  system_seed_key: string | null;
+  armed_after_evidence_seq: number;
+  armed_at: string;
   created_at: string;
   updated_at: string;
 };
@@ -1043,10 +1175,18 @@ export type PolicyRuleRequest = {
   id?: string;
   name: string;
   enabled?: boolean;
+  rule_kind: AlertPolicyRuleKind;
+  evidence_source: string;
+  correlation_mode: AlertPolicyCorrelationMode;
   traffic_selector?: string | null;
-  condition_expression: string;
-  window_secs?: number;
+  trigger_condition_expression: string;
+  trigger_meta_condition?: AlertPolicyMetaCondition | null;
+  resolve_condition_expression?: string | null;
+  resolve_meta_condition?: AlertPolicyMetaCondition | null;
   severity: string;
+  category: string;
+  title_template: string;
+  detail_template: string;
 };
 
 export type PolicyGroupRequest = {
@@ -1071,7 +1211,11 @@ export type PolicyDryRunRequest = {
 
 export type PolicyDryRunRulePreview = {
   rule_name: string;
-  condition_expression: string;
+  preview_mode: string;
+  trigger_condition_expression: string;
+  trigger_meta_condition: AlertPolicyMetaCondition | null;
+  resolve_condition_expression: string | null;
+  resolve_meta_condition: AlertPolicyMetaCondition | null;
   category: string;
   severity: string;
   true_count: number;

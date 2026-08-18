@@ -438,6 +438,8 @@ impl Repository {
                     actor_id: Some(operator.operator.id),
                     command_type: command_type.clone(),
                     source_schedule_id: None,
+                    causation_id: None,
+                    schedule_lineage: Vec::new(),
                     privileged: job_request.privileged,
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,

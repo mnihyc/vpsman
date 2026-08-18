@@ -131,6 +131,8 @@ async fn fleet_alerts_derive_actionable_current_status() {
             actor_id: None,
             command_type: "backup".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "failed".to_string(),
             target_count: 1,
@@ -596,135 +598,30 @@ async fn tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
 }
 
 #[tokio::test]
-async fn fleet_alert_policy_groups_issue_resource_alerts() {
+async fn memory_policy_lifecycle_is_explicitly_postgres_only() {
     let repo = Repository::Memory(MemoryState::default());
-    let operator = test_operator();
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.extend([
-            AgentView {
-                id: "edge-a".to_string(),
-                display_name: "Edge A".to_string(),
-                status: "online".to_string(),
-                tags: vec!["edge".to_string(), "provider:provider-a".to_string()],
-                registration_ip: None,
-                last_ip: None,
-                last_seen_at: None,
-                arch: None,
-                internal_build_number: 1,
-                process_incarnation_id: None,
-                stale_since: None,
-                stale_reason: None,
-                capabilities: AgentCapabilitySnapshot::default(),
-            },
-            AgentView {
-                id: "edge-b".to_string(),
-                display_name: "Edge B".to_string(),
-                status: "online".to_string(),
-                tags: Vec::new(),
-                registration_ip: None,
-                last_ip: None,
-                last_seen_at: None,
-                arch: None,
-                internal_build_number: 1,
-                process_incarnation_id: None,
-                stale_since: None,
-                stale_reason: None,
-                capabilities: AgentCapabilitySnapshot::default(),
-            },
-        ]);
-        memory.telemetry_rollups.write().await.extend([
-            alert_test_rollup("edge-a", 1.2, 300, 800),
-            alert_test_rollup("edge-b", 1.2, 300, 800),
-        ]);
-    }
-    let policy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "edge-cpu".to_string(),
-                enabled: true,
-                selector_expression: "tag:edge".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "cpu over one".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 0.5 + 0.5".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: Some("edge hosts".to_string()),
-                confirmed: true,
-                preview_hash: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-
-    let dry_run = repo
-        .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
-            id: Some(policy.id),
-            name: String::new(),
-            enabled: true,
-            selector_expression: "tag:edge".to_string(),
-            rules: vec![PolicyRuleRequest {
-                id: None,
-                name: String::new(),
-                enabled: true,
-                traffic_selector: None,
-                condition_expression: "cpu.load_1 >= (0.25 + 0.75) * 1".to_string(),
-                window_secs: 0,
-                severity: "warning".to_string(),
-            }],
-            notes: Some("edge hosts".to_string()),
-        })
-        .await
-        .unwrap();
-    assert_eq!(dry_run.matched_vps, vec!["edge-a".to_string()]);
-    assert_eq!(dry_run.rule_previews[0].true_count, 1);
-    assert_eq!(dry_run.rule_previews[0].false_count, 0);
-
-    let alerts = repo
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    repo.reconcile_operational_alerts().await.unwrap();
+    assert!(repo
         .list_policy_alerts(&PolicyAlertQuery {
             limit: Some(20),
-            client_id: Some("edge-a".to_string()),
-            severity: Some("warning".to_string()),
-            category: Some("resource".to_string()),
-            policy_group_id: Some(policy.id),
+            client_id: None,
+            severity: None,
+            category: None,
+            policy_group_id: None,
         })
         .await
-        .unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0].category, "resource");
-    assert_eq!(alerts[0].actual_value, Some(1.2));
-    assert_eq!(alerts[0].threshold_value, Some(1.0));
-
-    let state = alert_test_state(repo);
-    let fleet_alerts = state
-        .list_fleet_alerts(FleetAlertQuery {
-            limit: Some(100),
-            client_id: Some("edge-a".to_string()),
-            severity: Some("warning".to_string()),
-            category: Some("resource".to_string()),
-            operator_state: None,
-            include_muted: None,
-        })
-        .await
-        .unwrap();
-    assert!(fleet_alerts
-        .iter()
-        .any(|alert| alert.id.starts_with("policy-alert:")));
-
-    let policies = state
-        .repo
-        .list_fleet_alert_policies(20, Some(true), Some("id:edge-a"), None, true)
-        .await
-        .unwrap();
-    assert_eq!(policies.len(), 1);
-    assert_eq!(policies[0].name, "edge-cpu");
-    assert_eq!(policies[0].matched_vps_count, 1);
-    assert_eq!(policies[0].active_warning_count, 1);
+        .unwrap()
+        .is_empty());
+    if let Repository::Memory(memory) = &repo {
+        assert!(memory.policy_alerts.read().await.is_empty());
+        assert!(memory
+            .webhook_events
+            .read()
+            .await
+            .iter()
+            .all(|event| { event.kind != "alert.triggered" && event.kind != "alert.resolved" }));
+    }
 }
 
 #[tokio::test]
@@ -736,15 +633,7 @@ async fn fleet_alert_policy_regression_upsert_by_name_preserves_identity_past_li
         name: "repeatable-cli-policy".to_string(),
         enabled: true,
         selector_expression: "*".to_string(),
-        rules: vec![PolicyRuleRequest {
-            id: None,
-            name: "rule-1".to_string(),
-            enabled: true,
-            traffic_selector: None,
-            condition_expression: "cpu.load_1 >= 1".to_string(),
-            window_secs: 0,
-            severity: "warning".to_string(),
-        }],
+        rules: vec![metric_policy_rule_request(None, "rule-1", "warning")],
         notes: None,
         confirmed: true,
         preview_hash: None,
@@ -800,15 +689,7 @@ async fn fleet_alert_policy_regression_upsert_by_name_preserves_identity_past_li
         name: request.name.clone(),
         enabled: request.enabled,
         selector_expression: request.selector_expression.clone(),
-        rules: vec![PolicyRuleRequest {
-            id: None,
-            name: "rule-1".to_string(),
-            enabled: true,
-            traffic_selector: None,
-            condition_expression: "cpu.load_1 >= 1".to_string(),
-            window_secs: 0,
-            severity: "warning".to_string(),
-        }],
+        rules: vec![metric_policy_rule_request(None, "rule-1", "warning")],
         notes: None,
         confirmed: true,
         preview_hash: None,
@@ -832,15 +713,7 @@ async fn policy_live_enrichment_requires_rule_capability_only_for_rule_selectors
                 name: "ordinary-policy".to_string(),
                 enabled: true,
                 selector_expression: "status:online".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "load".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
+                rules: vec![metric_policy_rule_request(None, "load", "warning")],
                 notes: None,
                 confirmed: true,
                 preview_hash: None,
@@ -866,15 +739,7 @@ async fn policy_live_enrichment_requires_rule_capability_only_for_rule_selectors
                 name: "rule-policy".to_string(),
                 enabled: true,
                 selector_expression: "vps.rules:traffic.reset_day >= 15".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "load".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
+                rules: vec![metric_policy_rule_request(None, "load", "warning")],
                 notes: None,
                 confirmed: true,
                 preview_hash: None,
@@ -909,15 +774,11 @@ async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_l
         name: name.to_string(),
         enabled: true,
         selector_expression: "*".to_string(),
-        rules: vec![PolicyRuleRequest {
-            id: Some(rule_id),
-            name: "cpu threshold".to_string(),
-            enabled: true,
-            traffic_selector: None,
-            condition_expression: "cpu.load_1 >= 1".to_string(),
-            window_secs: 0,
-            severity: "warning".to_string(),
-        }],
+        rules: vec![metric_policy_rule_request(
+            Some(rule_id),
+            "cpu threshold",
+            "warning",
+        )],
         notes: None,
         confirmed: true,
         preview_hash: None,
@@ -980,120 +841,6 @@ async fn fleet_alert_policy_delete_review_regression_checks_name_inside_delete_l
                 .count(),
             1
         );
-    }
-}
-
-#[tokio::test]
-async fn fleet_alert_policy_regression_reordering_keeps_rule_state_and_alert_identity() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = test_operator();
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: "reorder-edge".to_string(),
-            display_name: "Reorder Edge".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        memory
-            .telemetry_rollups
-            .write()
-            .await
-            .push(alert_test_rollup("reorder-edge", 2.0, 500, 1500));
-    }
-    let first_rule_id = Uuid::new_v4();
-    let retained_rule_id = Uuid::new_v4();
-    let initial = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "reorder-policy".to_string(),
-                enabled: true,
-                selector_expression: "id:reorder-edge".to_string(),
-                rules: vec![
-                    PolicyRuleRequest {
-                        id: Some(first_rule_id),
-                        name: "first".to_string(),
-                        enabled: true,
-                        traffic_selector: None,
-                        condition_expression: "cpu.load_1 >= 1".to_string(),
-                        window_secs: 0,
-                        severity: "warning".to_string(),
-                    },
-                    PolicyRuleRequest {
-                        id: Some(retained_rule_id),
-                        name: "retained".to_string(),
-                        enabled: true,
-                        traffic_selector: None,
-                        condition_expression: "cpu.load_1 >= 1".to_string(),
-                        window_secs: 0,
-                        severity: "critical".to_string(),
-                    },
-                ],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-    let retained_version = initial
-        .rules
-        .iter()
-        .find(|rule| rule.id == retained_rule_id)
-        .unwrap()
-        .rule_version;
-    let (alerts_before, events_before) = if let Repository::Memory(memory) = &repo {
-        (
-            memory.policy_alerts.read().await.len(),
-            memory.webhook_events.read().await.len(),
-        )
-    } else {
-        unreachable!()
-    };
-
-    let reordered = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: Some(initial.id),
-                name: initial.name.clone(),
-                enabled: true,
-                selector_expression: initial.selector_expression.clone(),
-                rules: vec![PolicyRuleRequest {
-                    id: Some(retained_rule_id),
-                    name: "retained".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "critical".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(reordered.rules[0].id, retained_rule_id);
-    assert_eq!(reordered.rules[0].rule_version, retained_version);
-    if let Repository::Memory(memory) = &repo {
-        assert_eq!(memory.policy_alerts.read().await.len(), alerts_before);
-        assert_eq!(memory.webhook_events.read().await.len(), events_before);
-        assert!(memory.policy_rule_states.read().await.iter().any(|state| {
-            state.policy_rule_id == retained_rule_id && state.rule_version == retained_version
-        }));
     }
 }
 
@@ -1714,292 +1461,6 @@ async fn configured_traffic_without_a_quota_remains_healthy() {
     assert_eq!(accounting.tx_bytes, 200);
 }
 
-#[tokio::test]
-async fn filter_limit_regression_policy_evaluator_is_unbounded() {
-    let repo = Repository::Memory(MemoryState::default());
-    let operator = test_operator();
-    let target = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "zzz-evaluated-policy".to_string(),
-                enabled: true,
-                selector_expression: "id:zzz-policy-target".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "target threshold".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &operator,
-        )
-        .await
-        .unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: "zzz-policy-target".to_string(),
-            display_name: "Policy Target".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        memory
-            .telemetry_rollups
-            .write()
-            .await
-            .push(alert_test_rollup("zzz-policy-target", 2.0, 500, 1500));
-        let mut groups = (0..1000)
-            .map(|index| {
-                let mut filler = target.clone();
-                filler.id = Uuid::new_v4();
-                filler.name = format!("aaa-filler-policy-{index:04}");
-                filler.selector_expression = "id:not-present".to_string();
-                for rule in &mut filler.rules {
-                    rule.id = Uuid::new_v4();
-                    rule.group_id = filler.id;
-                }
-                filler
-            })
-            .collect::<Vec<_>>();
-        groups.push(target);
-        *memory.policy_groups.write().await = groups;
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
-    if let Repository::Memory(memory) = &repo {
-        assert_eq!(memory.policy_alerts.read().await.len(), 1);
-        assert_eq!(
-            memory.policy_alerts.read().await[0].client_id,
-            "zzz-policy-target"
-        );
-    }
-}
-
-#[tokio::test]
-async fn policy_alert_lifecycle_triggers_persists_unknown_resolves_and_recurs_once() {
-    let repo = Repository::Memory(MemoryState::default());
-    let client_id = "policy-lifecycle-edge";
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: client_id.to_string(),
-            display_name: "Policy lifecycle edge".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        let mut rollup = alert_test_rollup(client_id, 0.1, 900, 1800);
-        rollup.cpu_usage_sample_count = 3;
-        rollup.cpu_usage_avg = Some(0.8);
-        rollup.cpu_usage_max = Some(0.9);
-        memory.telemetry_rollups.write().await.push(rollup);
-    }
-
-    let policy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "explicit-policy-lifecycle".to_string(),
-                enabled: true,
-                selector_expression: "status:online".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "CPU utilization".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &test_operator(),
-        )
-        .await
-        .unwrap();
-
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].lifecycle_state, "triggered");
-        assert_eq!(alerts[0].trigger_generation, 1);
-        assert!(alerts[0].last_confirmed_at.is_some());
-        let events = memory.webhook_events.read().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].kind, "alert.policy_reached");
-        assert!(events[0]
-            .event_predicates
-            .contains(&"alert.policy_triggered".to_string()));
-        assert_eq!(events[0].payload["alert"]["id"], json!(alerts[0].id));
-        assert_eq!(events[0].payload["alert"]["trigger_generation"], json!(1));
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        assert_eq!(
-            memory.policy_alerts.read().await[0].lifecycle_state,
-            "persisting"
-        );
-        assert_eq!(memory.webhook_events.read().await.len(), 1);
-        let rollup = &mut memory.telemetry_rollups.write().await[0];
-        rollup.cpu_usage_sample_count = 0;
-        rollup.cpu_usage_avg = None;
-        rollup.cpu_usage_max = None;
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    let (unknown_alert_id, unknown_last_confirmed_at) = if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts[0].lifecycle_state, "unknown");
-        assert_eq!(alerts[0].trigger_generation, 1);
-        assert!(alerts[0].resolved_at.is_none());
-        assert_eq!(memory.webhook_events.read().await.len(), 1);
-        let unknown_alert_id = alerts[0].id;
-        let unknown_last_confirmed_at = alerts[0].last_confirmed_at.clone();
-        drop(alerts);
-        let rollup = &mut memory.telemetry_rollups.write().await[0];
-        rollup.cpu_usage_sample_count = 3;
-        rollup.cpu_usage_avg = Some(0.8);
-        rollup.cpu_usage_max = Some(0.9);
-        (unknown_alert_id, unknown_last_confirmed_at)
-    } else {
-        unreachable!()
-    };
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].id, unknown_alert_id);
-        assert_eq!(alerts[0].trigger_generation, 1);
-        assert_eq!(alerts[0].lifecycle_state, "persisting");
-        assert!(unknown_last_confirmed_at.is_some());
-        assert!(alerts[0].last_confirmed_at.is_some());
-        assert!(alerts[0].resolved_at.is_none());
-        assert_eq!(memory.webhook_events.read().await.len(), 1);
-        drop(alerts);
-        let rollup = &mut memory.telemetry_rollups.write().await[0];
-        rollup.cpu_usage_avg = Some(0.4);
-        rollup.cpu_usage_max = Some(0.5);
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts[0].lifecycle_state, "resolved");
-        assert_eq!(
-            alerts[0].resolution_reason.as_deref(),
-            Some("condition_recovered")
-        );
-        assert!(alerts[0].resolved_at.is_some());
-        let events = memory.webhook_events.read().await;
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].kind, "alert.policy_resolved");
-        assert!(events[1]
-            .event_predicates
-            .contains(&"alert.resolved".to_string()));
-        assert_eq!(events[1].payload["alert"]["id"], json!(alerts[0].id));
-        assert_eq!(events[1].payload["alert"]["trigger_generation"], json!(1));
-        assert_eq!(
-            events[1].payload["event"]["occurred_at"],
-            json!(alerts[0].resolved_at.as_deref())
-        );
-        let rollup = &mut memory.telemetry_rollups.write().await[0];
-        rollup.cpu_usage_avg = Some(0.8);
-        rollup.cpu_usage_max = Some(0.9);
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 2);
-        assert_eq!(alerts[1].lifecycle_state, "triggered");
-        assert_eq!(alerts[1].trigger_generation, 2);
-        assert_eq!(memory.webhook_events.read().await.len(), 3);
-        memory.agents.write().await[0].status = "offline".to_string();
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts[1].lifecycle_state, "resolved");
-        assert_eq!(
-            alerts[1].resolution_reason.as_deref(),
-            Some("policy_scope_exited")
-        );
-        assert_eq!(memory.webhook_events.read().await.len(), 4);
-        assert!(memory.policy_rule_states.read().await.iter().all(|state| {
-            state.policy_rule_id != policy.rules[0].id || state.client_id != client_id
-        }));
-        memory.agents.write().await[0].status = "online".to_string();
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
-    repo.upsert_fleet_alert_policy(
-        &CreateFleetAlertPolicyRequest {
-            id: Some(policy.id),
-            name: policy.name.clone(),
-            enabled: false,
-            selector_expression: policy.selector_expression.clone(),
-            rules: policy
-                .rules
-                .iter()
-                .map(|rule| PolicyRuleRequest {
-                    id: Some(rule.id),
-                    name: rule.name.clone(),
-                    enabled: rule.enabled,
-                    traffic_selector: rule.traffic_selector.clone(),
-                    condition_expression: rule.condition_expression.clone(),
-                    window_secs: rule.window_secs,
-                    severity: rule.severity.clone(),
-                })
-                .collect(),
-            notes: policy.notes.clone(),
-            confirmed: true,
-            preview_hash: None,
-        },
-        &test_operator(),
-    )
-    .await
-    .unwrap();
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 3);
-        assert_eq!(alerts[2].lifecycle_state, "resolved");
-        assert_eq!(
-            alerts[2].resolution_reason.as_deref(),
-            Some("policy_disabled")
-        );
-        assert_eq!(memory.webhook_events.read().await.len(), 6);
-        assert!(memory.policy_rule_states.read().await.is_empty());
-    }
-}
-
 #[test]
 fn policy_alert_activity_requires_confirmed_trigger_or_persistence() {
     let mut record = PolicyAlertRecord {
@@ -2044,455 +1505,6 @@ fn policy_alert_activity_requires_confirmed_trigger_or_persistence() {
     assert!(crate::fleet_alerts::fleet_alert_is_confirmed_active(
         &operational
     ));
-}
-
-#[tokio::test]
-async fn unconfirmed_legacy_policy_history_neither_resolves_nor_refires() {
-    let repo = Repository::Memory(MemoryState::default());
-    let client_id = "legacy-policy-lifecycle";
-    let policy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "legacy lifecycle compatibility".to_string(),
-                enabled: true,
-                selector_expression: format!("id:{client_id}"),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "CPU utilization".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &test_operator(),
-        )
-        .await
-        .unwrap();
-    let rule = &policy.rules[0];
-    let legacy_alert_id = Uuid::new_v4();
-    let now = Utc::now().to_rfc3339();
-
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: client_id.to_string(),
-            display_name: "Legacy lifecycle".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        let mut rollup = alert_test_rollup(client_id, 0.1, 900, 1800);
-        rollup.cpu_usage_sample_count = 3;
-        rollup.cpu_usage_avg = Some(0.4);
-        rollup.cpu_usage_max = Some(0.5);
-        memory.telemetry_rollups.write().await.push(rollup);
-        memory
-            .policy_rule_states
-            .write()
-            .await
-            .push(PolicyRuleStateRecord {
-                policy_rule_id: rule.id,
-                client_id: client_id.to_string(),
-                rule_version: rule.rule_version,
-                condition_true: true,
-                previous_condition_true: false,
-                window_satisfied: true,
-                first_true_at: Some(now.clone()),
-                last_true_at: Some(now.clone()),
-                last_false_at: None,
-                last_evaluated_at: now.clone(),
-                incomplete: false,
-                incomplete_reasons: Vec::new(),
-                last_actual_value: Some(0.8),
-                last_threshold_value: Some(0.75),
-                last_fired_at: Some(now.clone()),
-                trigger_generation: 1,
-                updated_at: now.clone(),
-            });
-        memory.policy_alerts.write().await.push(PolicyAlertRecord {
-            id: legacy_alert_id,
-            policy_group_id: policy.id,
-            policy_rule_id: rule.id,
-            client_id: client_id.to_string(),
-            trigger_generation: 1,
-            severity: "warning".to_string(),
-            category: "resource".to_string(),
-            title: "Legacy alert history".to_string(),
-            detail: "No post-upgrade confirmation exists".to_string(),
-            actual_value: Some(0.8),
-            threshold_value: Some(0.75),
-            payload: json!({}),
-            lifecycle_state: "unknown".to_string(),
-            last_confirmed_at: None,
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: now.clone(),
-            created_at: now,
-        });
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].lifecycle_state, "unknown");
-        assert!(alerts[0].last_confirmed_at.is_none());
-        assert!(alerts[0].resolved_at.is_none());
-        assert!(memory.webhook_events.read().await.is_empty());
-        let rollup = &mut memory.telemetry_rollups.write().await[0];
-        rollup.cpu_usage_avg = Some(0.8);
-        rollup.cpu_usage_max = Some(0.9);
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 2);
-        assert_eq!(alerts[0].id, legacy_alert_id);
-        assert_eq!(alerts[0].lifecycle_state, "unknown");
-        assert!(alerts[0].last_confirmed_at.is_none());
-        assert_eq!(alerts[1].trigger_generation, 2);
-        assert_eq!(alerts[1].lifecycle_state, "triggered");
-        let events = memory.webhook_events.read().await;
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_id, format!("policy-alert:{}", alerts[1].id));
-    }
-}
-
-#[tokio::test]
-async fn policy_evaluator_isolates_malformed_persisted_group_selector() {
-    let repo = Repository::Memory(MemoryState::default());
-    let healthy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "healthy-policy".to_string(),
-                enabled: true,
-                selector_expression: "id:healthy-policy-target".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "healthy threshold".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &test_operator(),
-        )
-        .await
-        .unwrap();
-    let malformed_id = Uuid::new_v4();
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: "healthy-policy-target".to_string(),
-            display_name: "Healthy policy target".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        memory
-            .telemetry_rollups
-            .write()
-            .await
-            .push(alert_test_rollup("healthy-policy-target", 2.0, 500, 1500));
-        let mut malformed = healthy.clone();
-        malformed.id = malformed_id;
-        malformed.name = "malformed-persisted-policy".to_string();
-        malformed.selector_expression = "(id:broken".to_string();
-        for rule in &mut malformed.rules {
-            rule.id = Uuid::new_v4();
-            rule.group_id = malformed_id;
-        }
-        memory.policy_groups.write().await.insert(0, malformed);
-    }
-
-    let error = repo.evaluate_policy_rules().await.unwrap_err();
-    let message = format!("{error:#}");
-    assert!(message.contains("fleet_alert_policy_evaluation_partial_failure"));
-    assert!(message.contains(&malformed_id.to_string()));
-    assert!(message.contains("malformed-persisted-policy"));
-    if let Repository::Memory(memory) = &repo {
-        let alerts = memory.policy_alerts.read().await;
-        assert_eq!(alerts.len(), 1);
-        assert_eq!(alerts[0].policy_group_id, healthy.id);
-        assert_eq!(alerts[0].client_id, "healthy-policy-target");
-    }
-}
-
-#[tokio::test]
-async fn policy_evaluator_rejects_malformed_persisted_traffic_selector_without_fallback() {
-    let repo = Repository::Memory(MemoryState::default());
-    let policy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "malformed-traffic-selector-policy".to_string(),
-                enabled: true,
-                selector_expression: "id:traffic-policy-target".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "traffic threshold".to_string(),
-                    enabled: true,
-                    traffic_selector: Some("eth1".to_string()),
-                    condition_expression: "traffic.cycle.total >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &test_operator(),
-        )
-        .await
-        .unwrap();
-    let client_id = "traffic-policy-target";
-    let now_unix = i64::try_from(unix_now()).unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory.agents.write().await.push(AgentView {
-            id: client_id.to_string(),
-            display_name: "Traffic policy target".to_string(),
-            status: "online".to_string(),
-            tags: Vec::new(),
-            registration_ip: None,
-            last_ip: None,
-            last_seen_at: None,
-            arch: None,
-            internal_build_number: 1,
-            process_incarnation_id: None,
-            stale_since: None,
-            stale_reason: None,
-            capabilities: AgentCapabilitySnapshot::default(),
-        });
-        let stored_rule =
-            |key: &str, value_raw: &str, value_json: serde_json::Value| VpsRuleValueRecord {
-                client_id: client_id.to_string(),
-                key: key.to_string(),
-                value_raw: value_raw.to_string(),
-                stored_value_raw: None,
-                value_json,
-                parsed_display: value_raw.to_string(),
-                state: "ok".to_string(),
-                validation_errors: Vec::new(),
-                source_kind: "test".to_string(),
-                source_id: None,
-                updated_by: None,
-                updated_at: now_unix.to_string(),
-            };
-        memory.vps_rule_values.write().await.extend([
-            stored_rule(VPS_RULE_KEY_TRAFFIC_RESET_DAY, "1", json!({"day": 1})),
-            stored_rule(
-                VPS_RULE_KEY_TRAFFIC_SELECTORS,
-                "eth0",
-                json!({
-                    "selectors": [{
-                        "source": "host",
-                        "interface": "eth0",
-                        "direction": "total",
-                        "canonical": "eth0"
-                    }]
-                }),
-            ),
-            stored_rule(
-                VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
-                "1GB",
-                json!({"bytes": 1_000_000_000_i64}),
-            ),
-        ]);
-        memory.traffic_counter_samples.write().await.extend([
-            TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "host".to_string(),
-                interface: "eth0".to_string(),
-                observed_at: (now_unix - 60).to_string(),
-                observed_unix: now_unix - 60,
-                rx_bytes: 100,
-                tx_bytes: 100,
-                rx_counter_epoch: 1,
-                tx_counter_epoch: 1,
-                sample_source: "test".to_string(),
-            },
-            TrafficCounterSampleRecord {
-                client_id: client_id.to_string(),
-                source_kind: "host".to_string(),
-                interface: "eth0".to_string(),
-                observed_at: (now_unix - 1).to_string(),
-                observed_unix: now_unix - 1,
-                rx_bytes: 1_000,
-                tx_bytes: 1_000,
-                rx_counter_epoch: 1,
-                tx_counter_epoch: 1,
-                sample_source: "test".to_string(),
-            },
-        ]);
-        let mut groups = memory.policy_groups.write().await;
-        let stored = groups
-            .iter_mut()
-            .find(|group| group.id == policy.id)
-            .unwrap();
-        stored.rules[0].traffic_selector = Some("host:".to_string());
-    }
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
-    if let Repository::Memory(memory) = &repo {
-        assert!(memory.policy_alerts.read().await.is_empty());
-        let states = memory.policy_rule_states.read().await;
-        let state = states
-            .iter()
-            .find(|state| {
-                state.policy_rule_id == policy.rules[0].id && state.client_id == client_id
-            })
-            .unwrap();
-        assert!(state.incomplete);
-        assert!(!state.condition_true);
-        assert!(state.incomplete_reasons.iter().any(|reason| {
-            reason == "traffic.policy_selector invalid: traffic_selector_interface_required"
-        }));
-    }
-}
-
-#[tokio::test]
-async fn policy_rollups_exceed_public_page_without_truncating_preview_or_evaluation() {
-    const CLIENT_COUNT: usize = 5_001;
-    const PUBLIC_PAGE_SIZE: i64 = 5_000;
-
-    let repo = Repository::Memory(MemoryState::default());
-    let policy = repo
-        .upsert_fleet_alert_policy(
-            &CreateFleetAlertPolicyRequest {
-                id: None,
-                name: "large-fleet-policy".to_string(),
-                enabled: true,
-                selector_expression: "*".to_string(),
-                rules: vec![PolicyRuleRequest {
-                    id: None,
-                    name: "all-client threshold".to_string(),
-                    enabled: true,
-                    traffic_selector: None,
-                    condition_expression: "cpu.load_1 >= 1".to_string(),
-                    window_secs: 0,
-                    severity: "warning".to_string(),
-                }],
-                notes: None,
-                confirmed: true,
-                preview_hash: None,
-            },
-            &test_operator(),
-        )
-        .await
-        .unwrap();
-    if let Repository::Memory(memory) = &repo {
-        memory
-            .agents
-            .write()
-            .await
-            .extend((0..CLIENT_COUNT).map(|index| {
-                let client_id = format!("scale-client-{index:05}");
-                AgentView {
-                    id: client_id.clone(),
-                    display_name: client_id,
-                    status: "online".to_string(),
-                    tags: Vec::new(),
-                    registration_ip: None,
-                    last_ip: None,
-                    last_seen_at: None,
-                    arch: None,
-                    internal_build_number: 1,
-                    process_incarnation_id: None,
-                    stale_since: None,
-                    stale_reason: None,
-                    capabilities: AgentCapabilitySnapshot::default(),
-                }
-            }));
-        memory.telemetry_rollups.write().await.extend(
-            (0..CLIENT_COUNT).map(|index| {
-                alert_test_rollup(&format!("scale-client-{index:05}"), 2.0, 500, 1500)
-            }),
-        );
-    }
-
-    let public_page = repo
-        .list_latest_telemetry_rollups(PUBLIC_PAGE_SIZE, None, None)
-        .await
-        .unwrap();
-    assert_eq!(public_page.len(), PUBLIC_PAGE_SIZE as usize);
-
-    let preview = repo
-        .dry_run_fleet_alert_policy(&PolicyDryRunRequest {
-            id: Some(policy.id),
-            name: policy.name.clone(),
-            enabled: true,
-            selector_expression: "*".to_string(),
-            rules: vec![PolicyRuleRequest {
-                id: Some(policy.rules[0].id),
-                name: policy.rules[0].name.clone(),
-                enabled: true,
-                traffic_selector: None,
-                condition_expression: "cpu.load_1 >= 1".to_string(),
-                window_secs: 0,
-                severity: "warning".to_string(),
-            }],
-            notes: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(preview.matched_vps_count, CLIENT_COUNT);
-    assert_eq!(
-        preview.rule_previews[0].true_count,
-        i64::try_from(CLIENT_COUNT).unwrap()
-    );
-    assert_eq!(preview.rule_previews[0].false_count, 0);
-    assert_eq!(preview.rule_previews[0].incomplete_count, 0);
-
-    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), CLIENT_COUNT);
-    if let Repository::Memory(memory) = &repo {
-        assert_eq!(
-            memory
-                .policy_rule_states
-                .read()
-                .await
-                .iter()
-                .filter(|state| state.policy_rule_id == policy.rules[0].id)
-                .count(),
-            CLIENT_COUNT
-        );
-        assert_eq!(
-            memory
-                .policy_alerts
-                .read()
-                .await
-                .iter()
-                .filter(|alert| alert.policy_rule_id == policy.rules[0].id)
-                .count(),
-            CLIENT_COUNT
-        );
-    }
 }
 
 #[tokio::test]
@@ -2620,6 +1632,8 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 artifact_id: None,
                 source_job_id: None,
                 source_schedule_id: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
                 note: None,
                 created_at: "00000".to_string(),
             });
@@ -2641,6 +1655,8 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 artifact_id: None,
                 source_job_id: None,
                 source_schedule_id: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
                 note: None,
                 created_at: format!("{index:05}"),
             }));
@@ -2650,6 +1666,8 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
             actor_id: None,
             command_type: "shell".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: false,
             status: "failed".to_string(),
             target_count: 1,
@@ -2667,6 +1685,8 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 actor_id: None,
                 command_type: "shell".to_string(),
                 source_schedule_id: None,
+                causation_id: None,
+                schedule_lineage: Vec::new(),
                 privileged: false,
                 status: "completed".to_string(),
                 target_count: 1,
@@ -4533,6 +3553,26 @@ fn alert_test_tunnel_telemetry(plan: &TunnelPlanView, accepted_at: &str) -> Tele
         packet_loss_ratio: None,
         latency_healthy_windows: None,
         latency_missed_windows: None,
+    }
+}
+
+fn metric_policy_rule_request(id: Option<Uuid>, name: &str, severity: &str) -> PolicyRuleRequest {
+    PolicyRuleRequest {
+        id,
+        name: name.to_string(),
+        enabled: true,
+        rule_kind: crate::model_alert_policies::AlertPolicyRuleKind::Metric,
+        evidence_source: "telemetry.combined".to_string(),
+        correlation_mode: crate::model_alert_policies::AlertPolicyCorrelationMode::NaturalKey,
+        traffic_selector: None,
+        trigger_condition_expression: "cpu.load_1 >= 1".to_string(),
+        trigger_meta_condition: None,
+        resolve_condition_expression: None,
+        resolve_meta_condition: None,
+        severity: severity.to_string(),
+        category: "resource".to_string(),
+        title_template: "Resource threshold reached".to_string(),
+        detail_template: "CPU load is above the configured threshold".to_string(),
     }
 }
 

@@ -15,8 +15,10 @@ use crate::{
     },
     model::{
         BulkResolveRequest, CreateJobRequest, CreateScheduleRequest, DeferScheduleRequest,
-        ListQuery, SchedulePrivilegeMutationRequest, ScheduleView, UpdateScheduleRequest,
-        UpdateScheduleTargetsRequest,
+        EventScheduleTemplateEdgePreview, EventScheduleTemplateElementPreview,
+        EventScheduleTemplatePreviewContext, EventScheduleTemplatePreviewResponse, ListQuery,
+        PreviewEventScheduleTemplateRequest, SchedulePrivilegeMutationRequest, ScheduleTriggerKind,
+        ScheduleView, UpdateScheduleRequest, UpdateScheduleTargetsRequest,
     },
     privilege::{verify_privilege_intent, SchedulePrivilegeIntent, SchedulePrivilegeIntentInput},
     repository_schedules::next_cron_runs,
@@ -27,7 +29,12 @@ use crate::{
     state::AppState,
     util::limit_or_default,
 };
-use vpsman_common::{encode_json, payload_hash, JobCommand, PrivilegeAssertion};
+use vpsman_common::{
+    alert_event_argv_template_hash, alert_event_argv_template_uses_path,
+    alert_event_expression_anchor_kinds, encode_json, parse_and_validate_alert_event_expression,
+    payload_hash, render_alert_event_argv_template, render_alert_event_job_command,
+    validate_alert_event_argv_template, JobCommand, PrivilegeAssertion, ALERT_EVENT_NOOP_ARGV,
+};
 
 #[derive(Clone, Copy)]
 enum ScheduleTargetResolutionMode {
@@ -82,6 +89,7 @@ pub(crate) async fn create_schedule(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
+    require_event_schedule_read_scopes(&operator.operator.scopes, request.trigger_kind)?;
     validate_schedule_request(&request)?;
     if let Some(expression) = parse_selector_expression(&request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
@@ -123,6 +131,167 @@ pub(crate) async fn create_schedule(
     ))
 }
 
+pub(crate) async fn preview_event_schedule_template(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PreviewEventScheduleTemplateRequest>,
+) -> Result<Json<EventScheduleTemplatePreviewResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", "schedules:write")
+        .await?;
+    require_event_schedule_read_scopes(&operator.operator.scopes, ScheduleTriggerKind::Event)?;
+    let expression = parse_alert_event_schedule_expression(&request.event_expression)?;
+
+    let template_argv = request.event_argv_template.clone().unwrap_or_else(|| {
+        ALERT_EVENT_NOOP_ARGV
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    });
+    let validation = validate_alert_event_argv_template(request.event_argv_template.as_deref());
+    let (triggered, resolved) = alert_event_expression_anchor_kinds(&expression);
+    let previews = [(triggered, "alert.triggered"), (resolved, "alert.resolved")]
+        .into_iter()
+        .filter(|(eligible, _)| *eligible)
+        .map(|(_, event_kind)| {
+            event_schedule_edge_preview(
+                event_kind,
+                &template_argv,
+                request.event_argv_template.as_deref(),
+                validation.as_ref().err(),
+            )
+        })
+        .collect();
+    Ok(Json(EventScheduleTemplatePreviewResponse {
+        uses_default_noop: request.event_argv_template.is_none(),
+        template_argv: template_argv.clone(),
+        previews,
+        template_hash: alert_event_argv_template_hash(request.event_argv_template.as_deref())
+            .unwrap_or_else(|_| {
+                encode_json(&template_argv)
+                    .map(|bytes| payload_hash(&bytes))
+                    .unwrap_or_else(|_| payload_hash(b"invalid-event-template"))
+            }),
+    }))
+}
+
+fn event_schedule_edge_preview(
+    event_kind: &str,
+    template_argv: &[String],
+    template: Option<&[String]>,
+    validation_error: Option<&String>,
+) -> EventScheduleTemplateEdgePreview {
+    let fixture = canonical_event_schedule_preview_context(event_kind);
+    let rendered = validation_error
+        .is_none()
+        .then(|| render_alert_event_argv_template(template, &fixture))
+        .transpose()
+        .ok()
+        .flatten();
+    let rendered_hash = validation_error.is_none().then(|| {
+        render_alert_event_job_command(template, &fixture)
+            .ok()
+            .map(|(_, hash)| hash)
+    });
+    let rendered_hash = rendered_hash.flatten();
+    let elements = template_argv
+        .iter()
+        .enumerate()
+        .map(|(index, template_element)| {
+            if let Some(value) = rendered.as_ref().and_then(|argv| argv.get(index)) {
+                return EventScheduleTemplateElementPreview {
+                    index,
+                    template: template_element.clone(),
+                    rendered: Some(value.clone()),
+                    error_code: None,
+                    error_message: None,
+                };
+            }
+            let message = validation_error
+                .cloned()
+                .or_else(|| render_alert_event_argv_template(template, &fixture).err());
+            EventScheduleTemplateElementPreview {
+                index,
+                template: template_element.clone(),
+                rendered: None,
+                error_code: Some("event_template_render_failed".to_string()),
+                error_message: Some(
+                    message.unwrap_or_else(|| "event argv could not be rendered".to_string()),
+                ),
+            }
+        })
+        .collect();
+    EventScheduleTemplateEdgePreview {
+        rendered_argv: rendered,
+        context: EventScheduleTemplatePreviewContext {
+            event_kind: event_kind.to_string(),
+            alert_title: "Canonical lifecycle preview".to_string(),
+            alert_category: "job".to_string(),
+            alert_severity: "critical".to_string(),
+            policy_name: "Preview policy".to_string(),
+            policy_rule_name: "Preview rule".to_string(),
+        },
+        elements,
+        rendered_hash,
+    }
+}
+
+fn canonical_event_schedule_preview_context(event_kind: &str) -> serde_json::Value {
+    let resolved = event_kind == "alert.resolved";
+    serde_json::json!({
+        "event": {
+            "id": "fleet-alert:00000000-0000-4000-8000-000000000001:preview",
+            "kind": event_kind,
+            "occurred_at": "2026-08-18T00:00:00Z",
+            "recorded_at": "2026-08-18T00:00:01Z"
+        },
+        "alert": {
+            "id": "fleet-alert:preview",
+            "public_id": "fleet-alert:preview",
+            "episode_id": "00000000-0000-4000-8000-000000000001",
+            "title": "Canonical lifecycle preview",
+            "detail": "Preview rule matched canonical evidence.",
+            "category": "job",
+            "severity": "critical",
+            "record_kind": "event",
+            "lifecycle_state": if resolved { "resolved" } else { "triggered" },
+            "trigger_generation": 1,
+            "source_status": "failed",
+            "resolution_reason": if resolved { Some("policy_time_elapsed") } else { None },
+            "client_id": "preview-client",
+            "target_kind": "job",
+            "target_id": "00000000-0000-4000-8000-000000000002"
+        },
+        "policy": {
+            "id": "00000000-0000-4000-8000-000000000003",
+            "name": "Preview policy"
+        },
+        "policy_rule": {
+            "id": "00000000-0000-4000-8000-000000000004",
+            "name": "Preview rule",
+            "rule_version": 1,
+            "rule_kind": "occurrence",
+            "evidence_source": "job.terminal",
+            "system_seed_key": "job.general_hard_failure",
+            "trigger_meta_condition": {
+                "kind": "immediate",
+                "window_seconds": 0
+            },
+            "resolve_meta_condition": {
+                "kind": "elapsed_since_trigger",
+                "window_seconds": 604800
+            }
+        },
+        "schedule": {
+            "id": "00000000-0000-4000-8000-000000000005",
+            "name": "Preview schedule",
+            "definition_revision": 1,
+            "fixed_target_count": 1,
+            "matched_subject_count": 1
+        }
+    })
+}
+
 pub(crate) async fn update_schedule(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -132,6 +301,7 @@ pub(crate) async fn update_schedule(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", "schedules:write")
         .await?;
+    require_event_schedule_read_scopes(&operator.operator.scopes, request.trigger_kind)?;
     validate_update_schedule_request(&request)?;
     require_schedule_confirmed(request.confirmed)?;
     request.target_client_ids =
@@ -141,6 +311,7 @@ pub(crate) async fn update_schedule(
     let expectation = ScheduleSnapshotExpectation {
         selector_expression: request.expected_selector_expression.clone(),
         target_client_ids: request.expected_target_client_ids.clone(),
+        definition_revision: request.expected_definition_revision,
     };
     let current = state
         .repo
@@ -208,7 +379,9 @@ pub(crate) async fn update_schedule_targets(
         .schedule_by_id(schedule_id)
         .await
         .map_err(map_schedule_lookup_error)?;
-    require_valid_schedule_operation(&schedule)?;
+    require_event_schedule_read_scopes(&operator.operator.scopes, schedule.trigger_kind)?;
+    require_schedule_revision(&schedule, request.expected_definition_revision)?;
+    require_valid_schedule_definition(&schedule)?;
     let selector_expression = schedule.selector_expression.trim().to_string();
     if selector_expression.is_empty() {
         return Err(ApiError::conflict("schedule_selector_missing"));
@@ -236,6 +409,7 @@ pub(crate) async fn update_schedule_targets(
     let expectation = ScheduleSnapshotExpectation {
         selector_expression: schedule.selector_expression.clone(),
         target_client_ids: schedule.target_client_ids.clone(),
+        definition_revision: request.expected_definition_revision,
     };
     let mut current_target_client_ids = schedule.target_client_ids.clone();
     current_target_client_ids.sort();
@@ -303,7 +477,8 @@ pub(crate) async fn defer_schedule(
         .schedule_by_id(schedule_id)
         .await
         .map_err(map_schedule_lookup_error)?;
-    require_valid_schedule_operation(&schedule)?;
+    require_schedule_revision(&schedule, request.expected_definition_revision)?;
+    require_valid_schedule_definition(&schedule)?;
     verify_schedule_privilege_for_view(
         &state,
         "schedule.defer",
@@ -321,13 +496,11 @@ pub(crate) async fn defer_schedule(
                 schedule_id,
                 &request.deferred_until,
                 request.reason.as_deref(),
+                request.expected_definition_revision,
                 &operator,
             )
             .await
-            .map_err(ApiError::internal_mapper(
-                "schedule_defer_failed",
-                "The schedule could not be deferred.",
-            ))?,
+            .map_err(map_schedule_snapshot_error)?,
     ))
 }
 
@@ -349,6 +522,10 @@ pub(crate) async fn apply_schedule_now(
         .schedule_by_id(schedule_id)
         .await
         .map_err(map_schedule_lookup_error)?;
+    require_schedule_revision(&schedule, request.expected_definition_revision)?;
+    if schedule.trigger_kind == ScheduleTriggerKind::Event {
+        return Err(ApiError::conflict("event_schedule_apply_now_unsupported"));
+    }
     let operation = require_valid_schedule_operation(&schedule)?.clone();
     verify_schedule_privilege_for_view(
         &state,
@@ -393,6 +570,7 @@ pub(crate) async fn delete_schedule(
         .schedule_by_id(schedule_id)
         .await
         .map_err(map_schedule_lookup_error)?;
+    require_schedule_revision(&schedule, request.expected_definition_revision)?;
     verify_schedule_privilege_for_view(
         &state,
         "schedule.delete",
@@ -405,12 +583,9 @@ pub(crate) async fn delete_schedule(
     .await?;
     state
         .repo
-        .soft_delete_schedule(schedule_id, &operator)
+        .soft_delete_schedule(schedule_id, request.expected_definition_revision, &operator)
         .await
-        .map_err(ApiError::internal_mapper(
-            "schedule_delete_failed",
-            "The schedule could not be deleted.",
-        ))?;
+        .map_err(map_schedule_snapshot_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -430,8 +605,12 @@ async fn mutate_schedule_enabled(
         .schedule_by_id(schedule_id)
         .await
         .map_err(map_schedule_lookup_error)?;
+    require_schedule_revision(&schedule, request.expected_definition_revision)?;
     if enabled {
-        require_valid_schedule_operation(&schedule)?;
+        require_event_schedule_read_scopes(&operator.operator.scopes, schedule.trigger_kind)?;
+    }
+    if enabled {
+        require_valid_schedule_definition(&schedule)?;
     }
     if enabled && schedule.cadence_error.is_some() {
         return Err(ApiError::bad_request("schedule_cron_invalid"));
@@ -453,12 +632,14 @@ async fn mutate_schedule_enabled(
     Ok(Json(
         state
             .repo
-            .set_schedule_enabled(schedule_id, enabled, &operator)
+            .set_schedule_enabled(
+                schedule_id,
+                enabled,
+                request.expected_definition_revision,
+                &operator,
+            )
             .await
-            .map_err(ApiError::internal_mapper(
-                "schedule_enabled_state_update_failed",
-                "The schedule enabled state could not be changed.",
-            ))?,
+            .map_err(map_schedule_snapshot_error)?,
     ))
 }
 
@@ -469,6 +650,32 @@ fn require_schedule_confirmed(confirmed: bool) -> Result<(), ApiError> {
         Err(ApiError::conflict(
             "schedule_mutation_requires_confirmation",
         ))
+    }
+}
+
+fn require_schedule_revision(
+    schedule: &ScheduleView,
+    expected_definition_revision: i64,
+) -> Result<(), ApiError> {
+    if schedule.definition_revision == expected_definition_revision {
+        Ok(())
+    } else {
+        Err(ApiError::conflict("schedule_snapshot_stale"))
+    }
+}
+
+fn require_event_schedule_read_scopes(
+    scopes: &[String],
+    trigger_kind: ScheduleTriggerKind,
+) -> Result<(), ApiError> {
+    if trigger_kind == ScheduleTriggerKind::Cron
+        || (operator_has_scope(scopes, "jobs:write")
+            && operator_has_scope(scopes, "fleet:read")
+            && operator_has_scope(scopes, "backups:read"))
+    {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("operator_scope_insufficient"))
     }
 }
 
@@ -492,15 +699,6 @@ fn validate_schedule_definition(
     if request.name.len() > 120 {
         return Err(ApiError::bad_request("schedule_name_too_long"));
     }
-    if request.timezone != "UTC" {
-        return Err(ApiError::bad_request("schedule_timezone_must_be_utc"));
-    }
-    if request.cron_expr.split_whitespace().count() != 5 {
-        return Err(ApiError::bad_request("schedule_cron_must_be_5_field"));
-    }
-    if next_cron_runs(request.cron_expr, 1).is_err() {
-        return Err(ApiError::bad_request("schedule_cron_invalid"));
-    }
     if allow_empty_targets {
         normalized_target_client_ids_allow_empty(request.target_client_ids)?;
     } else {
@@ -510,25 +708,98 @@ fn validate_schedule_definition(
         parse_selector_expression(request.selector_expression)
             .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?;
     }
-    if !matches!(
-        request.catch_up_policy,
-        "skip_missed" | "run_once" | "run_all_limited"
-    ) {
-        return Err(ApiError::bad_request("schedule_catch_up_policy_invalid"));
-    }
-    if !(1..=25).contains(&request.catch_up_limit) {
-        return Err(ApiError::bad_request(
-            "schedule_catch_up_limit_out_of_range",
-        ));
-    }
-    if !(1..=86_400).contains(&request.retry_delay_secs) {
-        return Err(ApiError::bad_request("schedule_retry_delay_out_of_range"));
-    }
     if !(1..=100).contains(&request.max_failures) {
         return Err(ApiError::bad_request("schedule_max_failures_out_of_range"));
     }
-    validate_job_command(request.operation)?;
-    validate_schedulable_job_command(request.operation)
+    match request.trigger_kind {
+        ScheduleTriggerKind::Cron => {
+            if request.event_expression.is_some() || request.event_argv_template.is_some() {
+                return Err(ApiError::bad_request("schedule_trigger_shape_invalid"));
+            }
+            let operation = request
+                .operation
+                .ok_or_else(|| ApiError::bad_request("schedule_operation_required"))?;
+            let cron_expr = request
+                .cron_expr
+                .ok_or_else(|| ApiError::bad_request("schedule_cron_required"))?;
+            if request.timezone != Some("UTC") {
+                return Err(ApiError::bad_request("schedule_timezone_must_be_utc"));
+            }
+            if cron_expr.split_whitespace().count() != 5 {
+                return Err(ApiError::bad_request("schedule_cron_must_be_5_field"));
+            }
+            if next_cron_runs(cron_expr, 1).is_err() {
+                return Err(ApiError::bad_request("schedule_cron_invalid"));
+            }
+            if !matches!(
+                request.catch_up_policy,
+                Some("skip_missed" | "run_once" | "run_all_limited")
+            ) {
+                return Err(ApiError::bad_request("schedule_catch_up_policy_invalid"));
+            }
+            if !request
+                .catch_up_limit
+                .is_some_and(|value| (1..=25).contains(&value))
+            {
+                return Err(ApiError::bad_request(
+                    "schedule_catch_up_limit_out_of_range",
+                ));
+            }
+            if !request
+                .retry_delay_secs
+                .is_some_and(|value| (1..=86_400).contains(&value))
+            {
+                return Err(ApiError::bad_request("schedule_retry_delay_out_of_range"));
+            }
+            validate_job_command(operation)?;
+            validate_schedulable_job_command(operation)
+        }
+        ScheduleTriggerKind::Event => {
+            if request.operation.is_some()
+                || request.cron_expr.is_some()
+                || request.timezone.is_some()
+                || request.catch_up_policy.is_some()
+                || request.catch_up_limit.is_some()
+                || request.retry_delay_secs.is_some()
+            {
+                return Err(ApiError::bad_request("schedule_trigger_shape_invalid"));
+            }
+            let expression = request
+                .event_expression
+                .ok_or_else(|| ApiError::bad_request("schedule_event_expression_required"))?;
+            let expression = parse_alert_event_schedule_expression(expression)?;
+            validate_alert_event_argv_template(request.event_argv_template)
+                .map_err(|_| ApiError::bad_request("schedule_event_argv_template_invalid"))?;
+            let (triggered, _) = alert_event_expression_anchor_kinds(&expression);
+            if triggered
+                && alert_event_argv_template_uses_path(
+                    request.event_argv_template,
+                    "alert.resolution_reason",
+                )
+                .map_err(|_| ApiError::bad_request("schedule_event_argv_template_invalid"))?
+            {
+                return Err(ApiError::bad_request(
+                    "schedule_event_argv_resolution_reason_not_guaranteed",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn parse_alert_event_schedule_expression(
+    expression: &str,
+) -> Result<vpsman_common::Expression, ApiError> {
+    parse_and_validate_alert_event_expression(expression).map_err(|error| match error.as_str() {
+        "event expression is empty" => ApiError::bad_request("schedule_event_expression_required"),
+        "event_expression_missing_lifecycle_anchor" => {
+            ApiError::bad_request("schedule_event_expression_requires_alert_edge")
+        }
+        "event_expression_not_alert_only" => {
+            ApiError::bad_request("schedule_event_expression_source_not_allowed")
+        }
+        _ => ApiError::bad_request("schedule_event_expression_invalid"),
+    })
 }
 
 fn validate_schedulable_job_command(command: &JobCommand) -> Result<(), ApiError> {
@@ -580,26 +851,51 @@ async fn verify_schedule_privilege_for_definition(
             resolved_schedule_targets(state, request.target_client_ids).await?
         }
     };
-    let operation_payload = encode_json(request.operation).map_err(|error| {
-        ApiError::internal(
-            "schedule_privilege_intent_failed",
-            "The schedule privilege request could not be prepared.",
-            anyhow::Error::from(error),
-        )
-    })?;
-    let operation_payload_hash = payload_hash(&operation_payload);
-    let command_type = job_command_type_label(request.operation);
+    let (operation_payload_hash, command_type) = match request.trigger_kind {
+        ScheduleTriggerKind::Cron => {
+            let operation_payload = encode_json(
+                request
+                    .operation
+                    .ok_or_else(|| ApiError::bad_request("schedule_operation_required"))?,
+            )
+            .map_err(|error| {
+                ApiError::internal(
+                    "schedule_privilege_intent_failed",
+                    "The schedule privilege request could not be prepared.",
+                    anyhow::Error::from(error),
+                )
+            })?;
+            (
+                payload_hash(&operation_payload),
+                request
+                    .operation
+                    .map(job_command_type_label)
+                    .unwrap_or("invalid"),
+            )
+        }
+        ScheduleTriggerKind::Event => (
+            alert_event_argv_template_hash(request.event_argv_template)
+                .map_err(|_| ApiError::bad_request("schedule_event_argv_template_invalid"))?,
+            "shell",
+        ),
+    };
     let schedule_id = schedule_id.map(|id| id.to_string());
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
         action,
         schedule_id: schedule_id.as_deref(),
+        definition_revision: request.definition_revision,
         name: request.name,
         command_type,
         operation_payload_hash: &operation_payload_hash,
         selector_expression: request.selector_expression,
         resolved_targets: &resolved_targets,
+        trigger_kind: match request.trigger_kind {
+            ScheduleTriggerKind::Cron => "cron",
+            ScheduleTriggerKind::Event => "event",
+        },
         cron_expr: request.cron_expr,
         timezone: request.timezone,
+        event_expression: request.event_expression,
         enabled: request.enabled,
         catch_up_policy: request.catch_up_policy,
         catch_up_limit: request.catch_up_limit,
@@ -655,15 +951,21 @@ async fn verify_schedule_privilege_for_stored_view(
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
         action,
         schedule_id: Some(&schedule_id),
+        definition_revision: Some(schedule.definition_revision),
         name: &schedule.name,
         command_type: &schedule.command_type,
         operation_payload_hash: &schedule.operation_payload_hash,
         selector_expression,
         resolved_targets: &resolved_targets,
-        cron_expr: &schedule.cron_expr,
-        timezone: &schedule.timezone,
+        trigger_kind: match schedule.trigger_kind {
+            ScheduleTriggerKind::Cron => "cron",
+            ScheduleTriggerKind::Event => "event",
+        },
+        cron_expr: schedule.cron_expr.as_deref(),
+        timezone: schedule.timezone.as_deref(),
+        event_expression: schedule.event_expression.as_deref(),
         enabled,
-        catch_up_policy: &schedule.catch_up_policy,
+        catch_up_policy: schedule.catch_up_policy.as_deref(),
         catch_up_limit: schedule.catch_up_limit,
         retry_delay_secs: schedule.retry_delay_secs,
         max_failures: schedule.max_failures,
@@ -681,6 +983,21 @@ fn require_valid_schedule_operation(schedule: &ScheduleView) -> Result<&JobComma
         .operation
         .as_ref()
         .ok_or_else(|| ApiError::conflict("schedule_operation_invalid"))
+}
+
+fn require_valid_schedule_definition(schedule: &ScheduleView) -> Result<(), ApiError> {
+    if schedule.operation_error.is_some() {
+        return Err(ApiError::conflict("schedule_operation_invalid"));
+    }
+    match schedule.trigger_kind {
+        ScheduleTriggerKind::Cron if schedule.operation.is_some() => Ok(()),
+        ScheduleTriggerKind::Event
+            if schedule.operation.is_none() && schedule.event_expression.is_some() =>
+        {
+            Ok(())
+        }
+        _ => Err(ApiError::conflict("schedule_operation_invalid")),
+    }
 }
 
 async fn resolved_schedule_targets(
@@ -750,15 +1067,19 @@ pub(crate) async fn require_selector_target_snapshot(
 
 struct ScheduleDefinitionRef<'a> {
     name: &'a str,
-    operation: &'a vpsman_common::JobCommand,
+    operation: Option<&'a vpsman_common::JobCommand>,
+    event_argv_template: Option<&'a [String]>,
     selector_expression: &'a str,
     target_client_ids: &'a [String],
-    cron_expr: &'a str,
-    timezone: &'a str,
+    trigger_kind: ScheduleTriggerKind,
+    definition_revision: Option<i64>,
+    cron_expr: Option<&'a str>,
+    timezone: Option<&'a str>,
+    event_expression: Option<&'a str>,
     enabled: bool,
-    catch_up_policy: &'a str,
-    catch_up_limit: i32,
-    retry_delay_secs: i64,
+    catch_up_policy: Option<&'a str>,
+    catch_up_limit: Option<i32>,
+    retry_delay_secs: Option<i64>,
     max_failures: i32,
 }
 
@@ -766,13 +1087,17 @@ impl<'a> ScheduleDefinitionRef<'a> {
     fn from_create(request: &'a CreateScheduleRequest) -> Self {
         Self {
             name: &request.name,
-            operation: &request.operation,
+            operation: request.operation.as_ref(),
+            event_argv_template: request.event_argv_template.as_deref(),
             selector_expression: &request.selector_expression,
             target_client_ids: &request.target_client_ids,
-            cron_expr: &request.cron_expr,
-            timezone: &request.timezone,
+            trigger_kind: request.trigger_kind,
+            definition_revision: None,
+            cron_expr: request.cron_expr.as_deref(),
+            timezone: request.timezone.as_deref(),
+            event_expression: request.event_expression.as_deref(),
             enabled: request.enabled,
-            catch_up_policy: &request.catch_up_policy,
+            catch_up_policy: request.catch_up_policy.as_deref(),
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
@@ -782,13 +1107,17 @@ impl<'a> ScheduleDefinitionRef<'a> {
     fn from_update(request: &'a UpdateScheduleRequest) -> Self {
         Self {
             name: &request.name,
-            operation: &request.operation,
+            operation: request.operation.as_ref(),
+            event_argv_template: request.event_argv_template.as_deref(),
             selector_expression: &request.selector_expression,
             target_client_ids: &request.target_client_ids,
-            cron_expr: &request.cron_expr,
-            timezone: &request.timezone,
+            trigger_kind: request.trigger_kind,
+            definition_revision: Some(request.expected_definition_revision),
+            cron_expr: request.cron_expr.as_deref(),
+            timezone: request.timezone.as_deref(),
+            event_expression: request.event_expression.as_deref(),
             enabled: request.enabled,
-            catch_up_policy: &request.catch_up_policy,
+            catch_up_policy: request.catch_up_policy.as_deref(),
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
@@ -801,15 +1130,19 @@ impl From<UpdateScheduleRequest> for crate::repository_schedules::ScheduleCreate
         Self {
             name: request.name,
             operation: request.operation,
+            event_argv_template: request.event_argv_template,
             selector_expression: request.selector_expression,
             target_client_ids: request.target_client_ids,
+            trigger_kind: request.trigger_kind,
             cron_expr: request.cron_expr,
             timezone: request.timezone,
+            event_expression: request.event_expression,
             enabled: request.enabled,
             catch_up_policy: request.catch_up_policy,
             catch_up_limit: request.catch_up_limit,
             retry_delay_secs: request.retry_delay_secs,
             max_failures: request.max_failures,
+            expected_definition_revision: Some(request.expected_definition_revision),
         }
     }
 }
@@ -826,6 +1159,7 @@ pub(crate) fn require_schedule_snapshot(
     expected_targets.dedup();
     if schedule.selector_expression.trim() != expectation.selector_expression.trim()
         || stored_targets != expected_targets
+        || schedule.definition_revision != expectation.definition_revision
     {
         return Err(ApiError::conflict("schedule_snapshot_stale"));
     }

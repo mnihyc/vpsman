@@ -124,7 +124,8 @@ use crate::{
     },
     routes_schedules::{
         apply_schedule_now, create_schedule, defer_schedule, delete_schedule, disable_schedule,
-        enable_schedule, get_schedule, list_schedules, update_schedule, update_schedule_targets,
+        enable_schedule, get_schedule, list_schedules, preview_event_schedule_template,
+        update_schedule, update_schedule_targets,
     },
     routes_server_jobs::{
         cancel_server_job, create_artifact_cleanup_job, list_server_jobs, preview_artifact_cleanup,
@@ -659,6 +660,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/schedules",
             get(list_schedules).post(create_schedule),
+        )
+        .route(
+            "/api/v1/schedules/preview-event-template",
+            post(preview_event_schedule_template),
         )
         .route(
             "/api/v1/schedules/{schedule_id}",

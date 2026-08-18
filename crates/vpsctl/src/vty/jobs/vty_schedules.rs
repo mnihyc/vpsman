@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
-use vpsman_common::JobCommand;
+use vpsman_common::{
+    parse_and_validate_alert_event_expression, validate_alert_event_argv_template, JobCommand,
+};
 
 use crate::{
     commands_schedules::{resolve_schedule_target_ids, selector_expression_from_targets},
     http::http_post_json,
-    privilege::{build_privilege_for_schedule, SchedulePrivilegeRequest},
+    privilege::{build_privilege_for_schedule, SchedulePrivilegePayload, SchedulePrivilegeRequest},
     vty_jobs::{VtyJobSelection, VtyPrivilegeContext},
 };
 
@@ -46,17 +48,20 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
         SchedulePrivilegeRequest {
             action: "schedule.create",
             schedule_id: None,
+            definition_revision: None,
             name: request.name,
-            command: &operation,
+            payload: SchedulePrivilegePayload::Operation(&operation),
             command_type: "shell_argv",
             selector_expression: &selector_expression,
             resolved_targets: &target_ids,
-            cron_expr: request.cron_expr,
-            timezone: "UTC",
-            enabled: true,
-            catch_up_policy: &request.options.catch_up_policy,
-            catch_up_limit: request.options.catch_up_limit,
-            retry_delay_secs: request.options.retry_delay_secs,
+            trigger_kind: "cron",
+            cron_expr: Some(request.cron_expr),
+            timezone: Some("UTC"),
+            event_expression: None,
+            enabled: !request.options.disabled,
+            catch_up_policy: Some(&request.options.catch_up_policy),
+            catch_up_limit: Some(request.options.catch_up_limit),
+            retry_delay_secs: Some(request.options.retry_delay_secs),
             max_failures: request.options.max_failures,
             deferred_until: None,
             deleted: false,
@@ -72,14 +77,112 @@ pub(crate) fn submit_vty_schedule_create(request: VtyScheduleCreateRequest<'_>) 
         &serde_json::json!({
             "name": request.name,
             "operation": operation,
+            "event_argv_template": null,
             "selector_expression": selector_expression,
             "target_client_ids": target_ids,
+            "trigger_kind": "cron",
             "cron_expr": request.cron_expr,
             "timezone": "UTC",
-            "enabled": true,
+            "event_expression": null,
+            "enabled": !request.options.disabled,
             "catch_up_policy": &request.options.catch_up_policy,
             "catch_up_limit": request.options.catch_up_limit,
             "retry_delay_secs": request.options.retry_delay_secs,
+            "max_failures": request.options.max_failures,
+            "confirmed": request.options.confirmed,
+            "privilege_assertion": privilege_assertion,
+        }),
+    )
+}
+
+pub(crate) struct VtyEventScheduleCreateRequest<'a> {
+    pub(crate) api_url: &'a str,
+    pub(crate) token: Option<&'a str>,
+    pub(crate) name: &'a str,
+    pub(crate) event_expression: &'a str,
+    pub(crate) selection: VtyJobSelection,
+    pub(crate) options: &'a VtyEventScheduleCreateOptions,
+    pub(crate) privilege_context: &'a VtyPrivilegeContext,
+}
+
+pub(crate) fn submit_vty_event_schedule_create(
+    request: VtyEventScheduleCreateRequest<'_>,
+) -> Result<String> {
+    anyhow::ensure!(
+        request.options.confirmed,
+        "schedule-event-create requires --confirmed"
+    );
+    parse_and_validate_alert_event_expression(request.event_expression)
+        .map_err(anyhow::Error::msg)
+        .context(
+            "invalid alert event expression; use the Schedule web UI for per-edge server preview",
+        )?;
+    anyhow::ensure!(
+        (1..=100).contains(&request.options.max_failures),
+        "max failures must be between 1 and 100"
+    );
+    let event_argv_template = if request.options.event_argv_template.is_empty() {
+        None
+    } else {
+        Some(request.options.event_argv_template.as_slice())
+    };
+    validate_alert_event_argv_template(event_argv_template)
+        .map_err(anyhow::Error::msg)
+        .context(
+            "invalid event argv template; use the Schedule web UI for per-edge server preview",
+        )?;
+    let selector_expression =
+        selector_expression_from_targets(&request.selection.clients, &request.selection.tags);
+    anyhow::ensure!(
+        !selector_expression.is_empty(),
+        "schedule-event-create requires at least one target selector"
+    );
+    let target_ids =
+        resolve_schedule_target_ids(request.api_url, request.token, &selector_expression)?;
+    let privilege_assertion = build_privilege_for_schedule(
+        SchedulePrivilegeRequest {
+            action: "schedule.create",
+            schedule_id: None,
+            definition_revision: None,
+            name: request.name,
+            payload: SchedulePrivilegePayload::AlertEventArgv(event_argv_template),
+            command_type: "shell",
+            selector_expression: &selector_expression,
+            resolved_targets: &target_ids,
+            trigger_kind: "event",
+            cron_expr: None,
+            timezone: None,
+            event_expression: Some(request.event_expression),
+            enabled: !request.options.disabled,
+            catch_up_policy: None,
+            catch_up_limit: None,
+            retry_delay_secs: None,
+            max_failures: request.options.max_failures,
+            deferred_until: None,
+            deleted: false,
+        },
+        &request.privilege_context.password,
+        &request.privilege_context.salt_hex,
+        300,
+    )?;
+    http_post_json(
+        request.api_url,
+        "/api/v1/schedules",
+        request.token,
+        &serde_json::json!({
+            "name": request.name,
+            "operation": null,
+            "event_argv_template": event_argv_template,
+            "selector_expression": selector_expression,
+            "target_client_ids": target_ids,
+            "trigger_kind": "event",
+            "cron_expr": null,
+            "timezone": null,
+            "event_expression": request.event_expression,
+            "enabled": !request.options.disabled,
+            "catch_up_policy": null,
+            "catch_up_limit": null,
+            "retry_delay_secs": null,
             "max_failures": request.options.max_failures,
             "confirmed": request.options.confirmed,
             "privilege_assertion": privilege_assertion,
@@ -93,6 +196,7 @@ pub(crate) struct VtyScheduleCreateOptions {
     pub(crate) catch_up_limit: i32,
     pub(crate) retry_delay_secs: i64,
     pub(crate) max_failures: i32,
+    pub(crate) disabled: bool,
     pub(crate) confirmed: bool,
     pub(crate) target_tokens: Vec<String>,
 }
@@ -104,6 +208,7 @@ impl Default for VtyScheduleCreateOptions {
             catch_up_limit: 1,
             retry_delay_secs: 300,
             max_failures: 3,
+            disabled: false,
             confirmed: false,
             target_tokens: Vec::new(),
         }
@@ -193,6 +298,10 @@ pub(crate) fn parse_vty_schedule_create_options(
                 options.confirmed = true;
                 index += 1;
             }
+            "--disabled" => {
+                options.disabled = true;
+                index += 1;
+            }
             value => {
                 options.target_tokens.push(value.to_string());
                 index += 1;
@@ -205,6 +314,96 @@ pub(crate) fn parse_vty_schedule_create_options(
         options.retry_delay_secs,
         options.max_failures,
     )?;
+    Ok(options)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct VtyEventScheduleCreateOptions {
+    pub(crate) event_argv_template: Vec<String>,
+    pub(crate) max_failures: i32,
+    pub(crate) disabled: bool,
+    pub(crate) confirmed: bool,
+    pub(crate) target_tokens: Vec<String>,
+}
+
+impl Default for VtyEventScheduleCreateOptions {
+    fn default() -> Self {
+        Self {
+            event_argv_template: Vec::new(),
+            max_failures: 3,
+            disabled: false,
+            confirmed: false,
+            target_tokens: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn parse_vty_event_schedule_create_options(
+    tokens: &[&str],
+) -> Result<VtyEventScheduleCreateOptions> {
+    let mut options = VtyEventScheduleCreateOptions::default();
+    let mut index = 0;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--event-argv-template" => {
+                options.event_argv_template.push(
+                    tokens
+                        .get(index + 1)
+                        .context("--event-argv-template requires one argv element")?
+                        .to_string(),
+                );
+                index += 2;
+            }
+            value if value.starts_with("--event-argv-template=") => {
+                options.event_argv_template.push(
+                    value
+                        .trim_start_matches("--event-argv-template=")
+                        .to_string(),
+                );
+                index += 1;
+            }
+            "--max-failures" => {
+                options.max_failures = parse_bounded_i32(
+                    tokens
+                        .get(index + 1)
+                        .context("--max-failures requires a value")?,
+                    "--max-failures",
+                    1,
+                    100,
+                )?;
+                index += 2;
+            }
+            value if value.starts_with("--max-failures=") => {
+                options.max_failures = parse_bounded_i32(
+                    value.trim_start_matches("--max-failures="),
+                    "--max-failures",
+                    1,
+                    100,
+                )?;
+                index += 1;
+            }
+            "--disabled" => {
+                options.disabled = true;
+                index += 1;
+            }
+            "--confirmed" => {
+                options.confirmed = true;
+                index += 1;
+            }
+            value if value.starts_with("--") => {
+                anyhow::bail!("unsupported schedule-event-create option {value}")
+            }
+            value => {
+                options.target_tokens.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    validate_alert_event_argv_template(
+        (!options.event_argv_template.is_empty()).then_some(options.event_argv_template.as_slice()),
+    )
+    .map_err(anyhow::Error::msg)
+    .context("invalid event argv template; use the Schedule web UI for per-edge server preview")?;
     Ok(options)
 }
 

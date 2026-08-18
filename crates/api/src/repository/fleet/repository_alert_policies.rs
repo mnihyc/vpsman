@@ -9,17 +9,15 @@ use uuid::Uuid;
 use vpsman_common::{
     expression_references_vps_rules,
     parse_persisted_vps_rule_value as parse_common_persisted_vps_rule_value,
-    parse_vps_rule_value as parse_common_vps_rule_value, Expression, ParsedVpsRuleValue,
-    VpsRuleContext,
+    parse_vps_rule_value as parse_common_vps_rule_value, Expression, ExpressionTruth,
+    ParsedVpsRuleValue, VpsRuleContext,
 };
 
 use crate::{
-    model::{
-        AgentView, AuditLogView, AuthContext, FleetAlertView, TelemetryRollupView,
-        TelemetrySampleView,
-    },
+    model::{AgentView, AuditLogView, AuthContext, TelemetryRollupView, TelemetrySampleView},
     model_alert_notifications::FleetAlertNotificationMatchRule,
     model_alert_policies::{
+        AlertPolicyCorrelationMode, AlertPolicyMetaCondition, AlertPolicyRuleKind,
         CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
         PolicyAlertRecord, PolicyDryRunRequest, PolicyDryRunResponse, PolicyDryRunRulePreview,
         PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest, PolicyRuleStateRecord,
@@ -43,7 +41,7 @@ use crate::{
         is_intentional_vnstat_import_boundary, is_vnstat_import_source,
     },
     repository_operational_alerts::notification_rule_matches_alert,
-    repository_webhook_rules::{record_webhook_event_in_tx, webhook_event_row},
+    repository_webhook_rules::webhook_event_row,
     selector_expression::{
         agent_matches_selector_expression_with_rules, parse_selector_expression,
         vps_rule_contexts_by_client,
@@ -54,6 +52,9 @@ use crate::{
         timestamp_in_optional_bounds,
     },
 };
+
+#[cfg(test)]
+use crate::model::FleetAlertView;
 
 const MAX_POLICY_NAME_BYTES: usize = 128;
 const MAX_POLICY_NOTES_BYTES: usize = 1024;
@@ -367,24 +368,104 @@ struct PolicyEvaluation {
     payload: Value,
 }
 
-impl Repository {
-    pub(crate) async fn policy_alert_exists(&self, alert_id: Uuid) -> Result<bool> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .policy_alerts
-                .read()
-                .await
-                .iter()
-                .any(|alert| alert.id == alert_id)),
-            Self::Postgres(pool) => Ok(sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM policy_alerts WHERE id = $1)",
-            )
-            .bind(alert_id)
-            .fetch_one(pool)
-            .await?),
+async fn preview_current_policy_rule(
+    pool: &sqlx::PgPool,
+    rule: &PolicyRuleRequest,
+    matched_client_ids: &[String],
+) -> Result<(i64, i64, i64, Vec<String>)> {
+    if matched_client_ids.is_empty() {
+        return Ok((0, 0, 0, Vec::new()));
+    }
+    let rows = sqlx::query(
+        r#"
+        WITH latest AS (
+            SELECT DISTINCT ON (evidence.source_kind, evidence.natural_key)
+                   evidence.subject_client_id, evidence.completeness,
+                   evidence.payload, evidence.subject_snapshot
+            FROM alert_policy_evidence evidence
+            WHERE evidence.source_kind=$1
+              AND evidence.subject_client_id=ANY($2::text[])
+            ORDER BY evidence.source_kind, evidence.natural_key,
+                     evidence.observed_at DESC, evidence.evidence_seq DESC
+        )
+        SELECT subject_client_id, completeness, payload, subject_snapshot
+        FROM latest
+        WHERE payload->>'source_present' IS DISTINCT FROM 'false'
+        ORDER BY subject_client_id
+        "#,
+    )
+    .bind(&rule.evidence_source)
+    .bind(matched_client_ids)
+    .fetch_all(pool)
+    .await?;
+    let mut true_count = 0_i64;
+    let mut false_count = 0_i64;
+    let mut incomplete_count = 0_i64;
+    let mut seen_subjects = HashSet::new();
+    let mut incomplete_subjects = BTreeSet::new();
+    for row in rows {
+        let subject_client_id: String = row.try_get("subject_client_id")?;
+        let complete = row.try_get::<String, _>("completeness")? == "complete";
+        let payload = row.try_get::<SqlJson<Value>, _>("payload")?.0;
+        let subject = row.try_get::<SqlJson<Value>, _>("subject_snapshot")?.0;
+        seen_subjects.insert(subject_client_id.clone());
+        match crate::repository_policy_lifecycle::policy_expression_truth_for_preview(
+            rule.rule_kind,
+            &rule.trigger_condition_expression,
+            &payload,
+            &subject,
+            complete,
+        )? {
+            ExpressionTruth::True => true_count += 1,
+            ExpressionTruth::False => false_count += 1,
+            ExpressionTruth::Unknown => {
+                incomplete_count += 1;
+                incomplete_subjects.insert(subject_client_id);
+            }
         }
     }
+    if matches!(
+        rule.evidence_source.as_str(),
+        "telemetry.combined" | "agent.status" | "agent.access"
+    ) {
+        for client_id in matched_client_ids {
+            if !seen_subjects.contains(client_id) {
+                incomplete_count += 1;
+                incomplete_subjects.insert(client_id.clone());
+            }
+        }
+    }
+    Ok((
+        true_count,
+        false_count,
+        incomplete_count,
+        incomplete_subjects.into_iter().collect(),
+    ))
+}
 
+fn normalized_policy_preview_rule(rule: &PolicyRuleRequest) -> Value {
+    json!({
+        "id": rule.id,
+        "name": rule.name.trim(),
+        "enabled": rule.enabled,
+        "rule_kind": rule.rule_kind,
+        "evidence_source": rule.evidence_source.trim(),
+        "correlation_mode": rule.correlation_mode,
+        "traffic_selector": clean_optional_text(rule.traffic_selector.as_deref()),
+        "trigger_condition_expression": rule.trigger_condition_expression.trim(),
+        "trigger_meta_condition": canonical_policy_meta(rule.trigger_meta_condition.as_ref()),
+        "resolve_condition_expression": clean_optional_text(
+            rule.resolve_condition_expression.as_deref()
+        ),
+        "resolve_meta_condition": canonical_policy_meta(rule.resolve_meta_condition.as_ref()),
+        "severity": rule.severity.trim(),
+        "category": rule.category.trim(),
+        "title_template": rule.title_template.trim(),
+        "detail_template": rule.detail_template.trim(),
+    })
+}
+
+impl Repository {
     pub(crate) async fn list_vps_rules(
         &self,
         query: &VpsRuleQuery,
@@ -1638,7 +1719,6 @@ impl Repository {
             false,
         )?;
         let agents = self.list_agents().await?;
-        let now = Utc::now();
         let mut validation_errors = Vec::new();
         let rules = self
             .list_vps_rules_matching(
@@ -1658,41 +1738,11 @@ impl Repository {
             &request.selector_expression,
             &rule_contexts,
         )?;
-        let cycle_starts = traffic_cycle_starts_for_clients(
-            matched.iter().map(|agent| agent.id.as_str()),
-            &rules,
-            now,
-        );
-        let mut stream_requests = traffic_stream_requests_from_rules(&cycle_starts, &rules);
-        for rule in &request.rules {
-            if policy_condition_uses_traffic(&rule.condition_expression).unwrap_or(false) {
-                if let Some(selector) = rule.traffic_selector.as_deref() {
-                    add_traffic_selector_requests(
-                        &mut stream_requests,
-                        matched.iter().map(|agent| agent.id.as_str()),
-                        &cycle_starts,
-                        selector,
-                    );
-                }
-            }
-        }
-        let stream_requests = stream_requests.into_iter().collect::<Vec<_>>();
-        let traffic_usage = self
-            .list_traffic_counter_usage_for_streams(&stream_requests, now.timestamp())
-            .await?;
-        let traffic = traffic_accounting_for_agents(&matched, &rules, &traffic_usage, now);
-        let rollup_client_ids = matched
+        let mut matched_client_ids = matched
             .iter()
             .map(|agent| agent.id.clone())
             .collect::<Vec<_>>();
-        let rollups = latest_rollups(
-            self.list_latest_telemetry_rollups_for_clients(&rollup_client_ids, None)
-                .await?,
-        );
-        let traffic_by_client = traffic
-            .iter()
-            .map(|record| (record.client_id.clone(), record))
-            .collect::<HashMap<_, _>>();
+        matched_client_ids.sort();
         let mut rule_previews = Vec::new();
         let mut incomplete_clients = BTreeSet::new();
         for rule in &request.rules {
@@ -1703,29 +1753,35 @@ impl Repository {
                     continue;
                 }
             }
-            let mut true_count = 0;
-            let mut false_count = 0;
-            let mut incomplete_count = 0;
-            for agent in &matched {
-                let override_traffic =
-                    traffic_override_for_rule(&agent.id, rule, &rules, &traffic_usage, now);
-                let traffic_record = override_traffic
-                    .as_ref()
-                    .or_else(|| traffic_by_client.get(&agent.id).copied());
-                let evaluation =
-                    evaluate_rule_for_client(rule, traffic_record, rollups.get(&agent.id));
-                if evaluation.incomplete {
-                    incomplete_count += 1;
-                    incomplete_clients.insert(agent.id.clone());
-                } else if evaluation.condition_true {
-                    true_count += 1;
+            let preview_mode = if rule.rule_kind == AlertPolicyRuleKind::Occurrence {
+                "prospective"
+            } else {
+                "current"
+            };
+            let (true_count, false_count, incomplete_count, incomplete_subjects) =
+                if rule.rule_kind == AlertPolicyRuleKind::Occurrence {
+                    (0, 0, 0, Vec::new())
+                } else if let Self::Postgres(pool) = self {
+                    preview_current_policy_rule(pool, rule, &matched_client_ids).await?
                 } else {
-                    false_count += 1;
-                }
-            }
+                    // Memory does not own the durable neutral evidence stream.
+                    // Report unavailable current facts as incomplete rather
+                    // than fabricating false metric/state evaluations.
+                    (
+                        0,
+                        0,
+                        matched_client_ids.len() as i64,
+                        matched_client_ids.clone(),
+                    )
+                };
+            incomplete_clients.extend(incomplete_subjects);
             rule_previews.push(PolicyDryRunRulePreview {
                 rule_name: rule.name.clone(),
-                condition_expression: rule.condition_expression.clone(),
+                preview_mode: preview_mode.to_string(),
+                trigger_condition_expression: rule.trigger_condition_expression.clone(),
+                trigger_meta_condition: canonical_policy_meta(rule.trigger_meta_condition.as_ref()),
+                resolve_condition_expression: rule.resolve_condition_expression.clone(),
+                resolve_meta_condition: canonical_policy_meta(rule.resolve_meta_condition.as_ref()),
                 category: policy_rule_category(rule),
                 severity: rule.severity.clone(),
                 true_count,
@@ -1734,12 +1790,13 @@ impl Repository {
             });
         }
         let preview_payload = json!({
-            "name": request.name,
+            "id": request.id,
+            "name": request.name.trim(),
             "enabled": request.enabled,
-            "selector_expression": request.selector_expression,
-            "rules": request.rules,
-            "matched": matched.iter().map(|agent| &agent.id).collect::<Vec<_>>(),
-            "validation_errors": validation_errors,
+            "selector_expression": request.selector_expression.trim(),
+            "notes": clean_optional_text(request.notes.as_deref()),
+            "rules": request.rules.iter().map(normalized_policy_preview_rule).collect::<Vec<_>>(),
+            "matched": &matched_client_ids,
         });
         Ok(PolicyDryRunResponse {
             matched_vps_count: matched.len(),
@@ -1900,10 +1957,21 @@ impl Repository {
                             sort_order,
                             name,
                             enabled,
+                            rule_kind,
+                            evidence_source,
+                            correlation_mode,
                             traffic_selector,
-                            condition_expression,
-                            window_secs,
+                            trigger_condition_expression,
+                            trigger_meta_condition,
+                            resolve_condition_expression,
+                            resolve_meta_condition,
                             severity,
+                            category,
+                            title_template,
+                            detail_template,
+                            system_seed_key,
+                            armed_after_evidence_seq,
+                            armed_at::text AS armed_at,
                             created_at::text AS created_at,
                             updated_at::text AS updated_at
                         FROM policy_rules
@@ -1985,10 +2053,21 @@ impl Repository {
                         sort_order,
                         name,
                         enabled,
+                        rule_kind,
+                        evidence_source,
+                        correlation_mode,
                         traffic_selector,
-                        condition_expression,
-                        window_secs,
+                        trigger_condition_expression,
+                        trigger_meta_condition,
+                        resolve_condition_expression,
+                        resolve_meta_condition,
                         severity,
+                        category,
+                        title_template,
+                        detail_template,
+                        system_seed_key,
+                        armed_after_evidence_seq,
+                        armed_at::text AS armed_at,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
                     FROM policy_rules
@@ -2104,6 +2183,18 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 lock_policy_group_identity_upserts_in_tx(&mut tx).await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+                    .bind("vpsman.alert_policy_evidence_arm")
+                    .execute(&mut *tx)
+                    .await?;
+                let armed_after_evidence_seq: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(max(evidence_seq), 0) FROM alert_policy_evidence",
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                let armed_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                    .fetch_one(&mut *tx)
+                    .await?;
                 let existing_groups =
                     policy_groups_for_identity_in_tx(&mut tx, request.id, request.name.trim())
                         .await?;
@@ -2112,7 +2203,7 @@ impl Repository {
                     request.id,
                     request.name.trim(),
                 )?;
-                let group = policy_group_from_request(
+                let mut group = policy_group_from_request(
                     request,
                     &dry_run,
                     &now,
@@ -2120,10 +2211,34 @@ impl Repository {
                     operator,
                 )?;
                 let scope_changed = policy_group_scope_changed(existing_group.as_ref(), &group);
+                for rule in &mut group.rules {
+                    let previous = existing_group
+                        .as_ref()
+                        .and_then(|existing| existing.rules.iter().find(|old| old.id == rule.id));
+                    if scope_changed {
+                        if let Some(previous) = previous {
+                            if rule.rule_version == previous.rule_version {
+                                rule.rule_version = rule.rule_version.saturating_add(1);
+                            }
+                        }
+                    }
+                    if scope_changed
+                        || previous.is_none_or(|old| old.rule_version != rule.rule_version)
+                    {
+                        rule.armed_after_evidence_seq = armed_after_evidence_seq;
+                        rule.armed_at = armed_at.to_rfc3339();
+                    }
+                }
                 let invalidated_rule_ids =
                     invalidated_policy_rule_ids(existing_group.as_ref(), &group);
+                let invalidated_rule_ids = invalidated_rule_ids.into_iter().collect::<Vec<_>>();
                 let resolution_reason =
                     policy_change_resolution_reason(existing_group.as_ref(), &group);
+                crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
+                    &mut tx,
+                    &invalidated_rule_ids,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO policy_groups (
@@ -2149,7 +2264,7 @@ impl Repository {
                 .await?;
                 resolve_policy_alerts_for_rules_in_tx(
                     &mut tx,
-                    &invalidated_rule_ids.iter().copied().collect::<Vec<_>>(),
+                    &invalidated_rule_ids,
                     resolution_reason,
                 )
                 .await?;
@@ -2170,18 +2285,37 @@ impl Repository {
                         r#"
                         INSERT INTO policy_rules (
                             id, group_id, rule_version, sort_order, name, enabled,
-                            traffic_selector, condition_expression, window_secs, severity
+                            rule_kind, evidence_source, correlation_mode,
+                            traffic_selector, trigger_condition_expression,
+                            trigger_meta_condition, resolve_condition_expression,
+                            resolve_meta_condition, severity, category,
+                            title_template, detail_template, system_seed_key,
+                            armed_after_evidence_seq, armed_at
                         )
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                        VALUES (
+                            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+                            $15,$16,$17,$18,$19,$20,$21::timestamptz
+                        )
                         ON CONFLICT (id) DO UPDATE SET
                             rule_version = EXCLUDED.rule_version,
                             sort_order = EXCLUDED.sort_order,
                             name = EXCLUDED.name,
                             enabled = EXCLUDED.enabled,
+                            rule_kind = EXCLUDED.rule_kind,
+                            evidence_source = EXCLUDED.evidence_source,
+                            correlation_mode = EXCLUDED.correlation_mode,
                             traffic_selector = EXCLUDED.traffic_selector,
-                            condition_expression = EXCLUDED.condition_expression,
-                            window_secs = EXCLUDED.window_secs,
+                            trigger_condition_expression = EXCLUDED.trigger_condition_expression,
+                            trigger_meta_condition = EXCLUDED.trigger_meta_condition,
+                            resolve_condition_expression = EXCLUDED.resolve_condition_expression,
+                            resolve_meta_condition = EXCLUDED.resolve_meta_condition,
                             severity = EXCLUDED.severity,
+                            category = EXCLUDED.category,
+                            title_template = EXCLUDED.title_template,
+                            detail_template = EXCLUDED.detail_template,
+                            system_seed_key = EXCLUDED.system_seed_key,
+                            armed_after_evidence_seq = EXCLUDED.armed_after_evidence_seq,
+                            armed_at = EXCLUDED.armed_at,
                             updated_at = now()
                         WHERE policy_rules.group_id = EXCLUDED.group_id
                         "#,
@@ -2192,10 +2326,21 @@ impl Repository {
                     .bind(rule.sort_order)
                     .bind(&rule.name)
                     .bind(rule.enabled)
+                    .bind(policy_rule_kind_storage(rule.rule_kind))
+                    .bind(&rule.evidence_source)
+                    .bind(policy_correlation_mode_storage(rule.correlation_mode))
                     .bind(&rule.traffic_selector)
-                    .bind(&rule.condition_expression)
-                    .bind(rule.window_secs)
+                    .bind(&rule.trigger_condition_expression)
+                    .bind(rule.trigger_meta_condition.as_ref().map(SqlJson))
+                    .bind(&rule.resolve_condition_expression)
+                    .bind(rule.resolve_meta_condition.as_ref().map(SqlJson))
                     .bind(&rule.severity)
+                    .bind(&rule.category)
+                    .bind(&rule.title_template)
+                    .bind(&rule.detail_template)
+                    .bind(&rule.system_seed_key)
+                    .bind(rule.armed_after_evidence_seq)
+                    .bind(&rule.armed_at)
                     .execute(&mut *tx)
                     .await?;
                     anyhow::ensure!(
@@ -2205,7 +2350,17 @@ impl Repository {
                     );
                     sqlx::query(
                         r#"
-                        DELETE FROM policy_rule_states
+                        DELETE FROM alert_policy_evaluation_states
+                        WHERE policy_rule_id = $1 AND rule_version <> $2
+                        "#,
+                    )
+                    .bind(rule.id)
+                    .bind(rule.rule_version)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        r#"
+                        DELETE FROM alert_policy_confirmations
                         WHERE policy_rule_id = $1 AND rule_version <> $2
                         "#,
                     )
@@ -2216,12 +2371,23 @@ impl Repository {
                 }
                 if scope_changed && !retained_rule_ids.is_empty() {
                     sqlx::query(
-                        "DELETE FROM policy_rule_states WHERE policy_rule_id = ANY($1::uuid[])",
+                        "DELETE FROM alert_policy_evaluation_states WHERE policy_rule_id = ANY($1::uuid[])",
+                    )
+                    .bind(&retained_rule_ids)
+                    .execute(&mut *tx)
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM alert_policy_confirmations WHERE policy_rule_id = ANY($1::uuid[])",
                     )
                     .bind(&retained_rule_ids)
                     .execute(&mut *tx)
                     .await?;
                 }
+                crate::repository_policy_lifecycle::evaluate_policy_rule_baselines_in_tx(
+                    &mut tx,
+                    &retained_rule_ids,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -2239,7 +2405,9 @@ impl Repository {
                 group
             }
         };
-        if let Err(error) = self.evaluate_policy_rules().await {
+        if let Self::Postgres(pool) = self {
+            crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200).await?;
+        } else if let Err(error) = self.evaluate_policy_rules().await {
             tracing::warn!(%error, "deferred policy evaluation after policy update");
         }
         self.get_fleet_alert_policy(group.id, true).await
@@ -2286,6 +2454,10 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+                    .bind("vpsman.alert_policy_evidence_arm")
+                    .execute(&mut *tx)
+                    .await?;
                 let row = sqlx::query(
                     r#"
                     SELECT
@@ -2321,10 +2493,21 @@ impl Repository {
                         sort_order,
                         name,
                         enabled,
+                        rule_kind,
+                        evidence_source,
+                        correlation_mode,
                         traffic_selector,
-                        condition_expression,
-                        window_secs,
+                        trigger_condition_expression,
+                        trigger_meta_condition,
+                        resolve_condition_expression,
+                        resolve_meta_condition,
                         severity,
+                        category,
+                        title_template,
+                        detail_template,
+                        system_seed_key,
+                        armed_after_evidence_seq,
+                        armed_at::text AS armed_at,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
                     FROM policy_rules
@@ -2339,12 +2522,12 @@ impl Repository {
                 .map(policy_rule_from_row)
                 .collect::<Result<Vec<_>>>()?;
                 let policy = policy_group_from_row(row, rules)?;
-                resolve_policy_alerts_for_rules_in_tx(
-                    &mut tx,
-                    &policy.rules.iter().map(|rule| rule.id).collect::<Vec<_>>(),
-                    "policy_deleted",
+                let rule_ids = policy.rules.iter().map(|rule| rule.id).collect::<Vec<_>>();
+                crate::repository_policy_lifecycle::drain_policy_rule_pending_evidence_in_tx(
+                    &mut tx, &rule_ids,
                 )
                 .await?;
+                resolve_policy_alerts_for_rules_in_tx(&mut tx, &rule_ids, "policy_deleted").await?;
                 let deleted = sqlx::query("DELETE FROM policy_groups WHERE id = $1")
                     .bind(policy_id)
                     .execute(&mut *tx)
@@ -2414,6 +2597,7 @@ impl Repository {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_policy_alert_notification_candidates(
         &self,
         query: &PolicyAlertQuery,
@@ -2437,61 +2621,6 @@ impl Repository {
         .await
     }
 
-    pub(crate) async fn list_policy_alert_fleet_candidates(
-        &self,
-        query: &PolicyAlertQuery,
-        limit: usize,
-        confirmed_active_only: bool,
-        allowed_client_ids: Option<&HashSet<String>>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        operator_state: Option<&str>,
-        include_muted: bool,
-        notification_rules: Option<&[FleetAlertNotificationMatchRule]>,
-    ) -> Result<Vec<PolicyAlertRecord>> {
-        self.list_policy_alerts_matching(
-            query,
-            Some(limit.clamp(1, MAX_POLICY_ALERT_CANDIDATE_ROWS)),
-            true,
-            if confirmed_active_only {
-                PolicyAlertSelectionMode::ConfirmedActive
-            } else {
-                PolicyAlertSelectionMode::CurrentFleet
-            },
-            allowed_client_ids,
-            start_unix,
-            end_unix,
-            operator_state,
-            Some(include_muted),
-            notification_rules,
-        )
-        .await
-    }
-
-    pub(crate) async fn list_policy_alert_fleet_history(
-        &self,
-        query: &PolicyAlertQuery,
-        limit: usize,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        operator_state: Option<&str>,
-        include_muted: bool,
-    ) -> Result<Vec<PolicyAlertRecord>> {
-        self.list_policy_alerts_matching(
-            query,
-            Some(limit.clamp(1, MAX_POLICY_ALERT_CANDIDATE_ROWS)),
-            false,
-            PolicyAlertSelectionMode::History,
-            None,
-            start_unix,
-            end_unix,
-            operator_state,
-            Some(include_muted),
-            None,
-        )
-        .await
-    }
-
     async fn list_policy_alerts_matching(
         &self,
         query: &PolicyAlertQuery,
@@ -2505,9 +2634,28 @@ impl Repository {
         include_muted: Option<bool>,
         notification_rules: Option<&[FleetAlertNotificationMatchRule]>,
     ) -> Result<Vec<PolicyAlertRecord>> {
+        if matches!(self, Self::Memory(_)) {
+            return Ok(Vec::new());
+        }
         let allowed_client_id_values =
             allowed_client_ids.map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>());
-        let mut alerts = match self {
+        if let Self::Postgres(pool) = self {
+            return list_unified_policy_alerts_postgres(
+                pool,
+                query,
+                result_limit,
+                prioritize_severity,
+                selection_mode,
+                allowed_client_id_values.as_deref(),
+                start_unix,
+                end_unix,
+                operator_state,
+                include_muted.unwrap_or(true),
+                notification_rules,
+            )
+            .await;
+        }
+        let mut alerts: Vec<PolicyAlertRecord> = match self {
             Self::Memory(memory) => {
                 let hidden = memory.hidden_clients.read().await;
                 let states = memory.fleet_alert_states.read().await;
@@ -2550,229 +2698,7 @@ impl Repository {
                     .cloned()
                     .collect()
             }
-            Self::Postgres(pool) => {
-                let sql = if prioritize_severity {
-                    r#"
-                SELECT
-                    policy_alerts.id,
-                    policy_group_id,
-                    policy_rule_id,
-                    client_id,
-                    trigger_generation,
-                    severity,
-                    category,
-                    title,
-                    detail,
-                    actual_value,
-                    threshold_value,
-                    payload,
-                    lifecycle_state,
-                    last_confirmed_at::text AS last_confirmed_at,
-                    resolved_at::text AS resolved_at,
-                    resolution_reason,
-                    observed_at::text AS observed_at,
-                    policy_alerts.created_at::text AS created_at
-                FROM policy_alerts
-                LEFT JOIN fleet_alert_states triage
-                  ON triage.alert_id = 'policy-alert:' || policy_alerts.id::text
-                WHERE ($2::text IS NULL OR client_id = $2)
-                  AND (
-                    $14::boolean
-                    OR EXISTS (
-                        SELECT 1 FROM visible_clients
-                        WHERE visible_clients.id = policy_alerts.client_id
-                    )
-                  )
-                  AND ($3::text IS NULL OR severity = $3)
-                  AND ($4::text IS NULL OR category = $4)
-                  AND ($5::uuid IS NULL OR policy_group_id = $5)
-                  AND ($6::text[] IS NULL OR client_id = ANY($6))
-                  AND ($7::double precision IS NULL OR observed_at >= to_timestamp($7))
-                  AND ($8::double precision IS NULL OR observed_at <= to_timestamp($8))
-                  AND resolved_at IS NULL
-                  AND last_confirmed_at IS NOT NULL
-                  AND ($9::boolean = FALSE OR lifecycle_state IN ('triggered', 'persisting'))
-                  AND (
-                    $10::text IS NULL
-                    OR CASE
-                      WHEN triage.state = 'muted'
-                       AND triage.muted_until_unix IS NOT NULL
-                       AND triage.muted_until_unix <= $12
-                      THEN 'open'
-                      ELSE COALESCE(triage.state, 'open')
-                    END = $10
-                  )
-                  AND (
-                    $11::boolean
-                    OR CASE
-                      WHEN triage.state = 'muted'
-                       AND triage.muted_until_unix IS NOT NULL
-                       AND triage.muted_until_unix <= $12
-                      THEN 'open'
-                      ELSE COALESCE(triage.state, 'open')
-                    END <> 'muted'
-                  )
-                  AND (
-                    $13::jsonb IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM jsonb_array_elements($13::jsonb) rule
-                      WHERE CASE policy_alerts.severity
-                              WHEN 'critical' THEN 0
-                              WHEN 'warning' THEN 1
-                              WHEN 'info' THEN 2
-                              ELSE 3
-                            END <= (rule->>'min_severity_rank')::integer
-                        AND (
-                          jsonb_array_length(rule->'categories') = 0
-                          OR rule->'categories' ? policy_alerts.category
-                        )
-                        AND (
-                          jsonb_array_length(rule->'operator_states') = 0
-                          OR rule->'operator_states' ? CASE
-                            WHEN triage.state = 'muted'
-                             AND triage.muted_until_unix IS NOT NULL
-                             AND triage.muted_until_unix <= $12
-                            THEN 'open'
-                            ELSE COALESCE(triage.state, 'open')
-                          END
-                        )
-                        AND (
-                          rule->'client_ids' = 'null'::jsonb
-                          OR rule->'client_ids' ? policy_alerts.client_id
-                        )
-                    )
-                  )
-                ORDER BY
-                    CASE
-                        WHEN lifecycle_state IN ('triggered', 'persisting') THEN 0
-                        ELSE 1
-                    END ASC,
-                    CASE severity
-                        WHEN 'critical' THEN 0
-                        WHEN 'warning' THEN 1
-                        WHEN 'info' THEN 2
-                        ELSE 3
-                    END ASC,
-                    observed_at DESC,
-                    id DESC
-                LIMIT $1
-                "#
-                } else {
-                    r#"
-                SELECT
-                    policy_alerts.id,
-                    policy_group_id,
-                    policy_rule_id,
-                    client_id,
-                    trigger_generation,
-                    severity,
-                    category,
-                    title,
-                    detail,
-                    actual_value,
-                    threshold_value,
-                    payload,
-                    lifecycle_state,
-                    last_confirmed_at::text AS last_confirmed_at,
-                    resolved_at::text AS resolved_at,
-                    resolution_reason,
-                    observed_at::text AS observed_at,
-                    policy_alerts.created_at::text AS created_at
-                FROM policy_alerts
-                LEFT JOIN fleet_alert_states triage
-                  ON triage.alert_id = 'policy-alert:' || policy_alerts.id::text
-                WHERE ($2::text IS NULL OR client_id = $2)
-                  AND (
-                    $14::boolean
-                    OR EXISTS (
-                        SELECT 1 FROM visible_clients
-                        WHERE visible_clients.id = policy_alerts.client_id
-                    )
-                  )
-                  AND ($3::text IS NULL OR severity = $3)
-                  AND ($4::text IS NULL OR category = $4)
-                  AND ($5::uuid IS NULL OR policy_group_id = $5)
-                  AND ($6::text[] IS NULL OR client_id = ANY($6))
-                  AND ($7::double precision IS NULL OR created_at >= to_timestamp($7))
-                  AND ($8::double precision IS NULL OR created_at <= to_timestamp($8))
-                  AND ($9::boolean = FALSE OR lifecycle_state IN ('triggered', 'persisting'))
-                  AND (
-                    $10::text IS NULL
-                    OR CASE
-                      WHEN triage.state = 'muted'
-                       AND triage.muted_until_unix IS NOT NULL
-                       AND triage.muted_until_unix <= $12
-                      THEN 'open'
-                      ELSE COALESCE(triage.state, 'open')
-                    END = $10
-                  )
-                  AND (
-                    $11::boolean
-                    OR CASE
-                      WHEN triage.state = 'muted'
-                       AND triage.muted_until_unix IS NOT NULL
-                       AND triage.muted_until_unix <= $12
-                      THEN 'open'
-                      ELSE COALESCE(triage.state, 'open')
-                    END <> 'muted'
-                  )
-                  AND (
-                    $13::jsonb IS NULL
-                    OR EXISTS (
-                      SELECT 1
-                      FROM jsonb_array_elements($13::jsonb) rule
-                      WHERE CASE policy_alerts.severity
-                              WHEN 'critical' THEN 0
-                              WHEN 'warning' THEN 1
-                              WHEN 'info' THEN 2
-                              ELSE 3
-                            END <= (rule->>'min_severity_rank')::integer
-                        AND (
-                          jsonb_array_length(rule->'categories') = 0
-                          OR rule->'categories' ? policy_alerts.category
-                        )
-                        AND (
-                          jsonb_array_length(rule->'operator_states') = 0
-                          OR rule->'operator_states' ? CASE
-                            WHEN triage.state = 'muted'
-                             AND triage.muted_until_unix IS NOT NULL
-                             AND triage.muted_until_unix <= $12
-                            THEN 'open'
-                            ELSE COALESCE(triage.state, 'open')
-                          END
-                        )
-                        AND (
-                          rule->'client_ids' = 'null'::jsonb
-                          OR rule->'client_ids' ? policy_alerts.client_id
-                        )
-                    )
-                  )
-                ORDER BY created_at DESC, id DESC
-                LIMIT $1
-                "#
-                };
-                sqlx::query(sql)
-                    .bind(result_limit.map(|limit| limit as i64))
-                    .bind(query.client_id.as_deref())
-                    .bind(query.severity.as_deref())
-                    .bind(query.category.as_deref())
-                    .bind(query.policy_group_id)
-                    .bind(allowed_client_id_values.as_deref())
-                    .bind(start_unix.map(|value| value as f64))
-                    .bind(end_unix.map(|value| value as f64))
-                    .bind(selection_mode == PolicyAlertSelectionMode::ConfirmedActive)
-                    .bind(operator_state)
-                    .bind(include_muted.unwrap_or(true))
-                    .bind(crate::unix_now() as i64)
-                    .bind(notification_rules.map(serde_json::to_value).transpose()?)
-                    .bind(selection_mode == PolicyAlertSelectionMode::History)
-                    .fetch_all(pool)
-                    .await?
-                    .into_iter()
-                    .map(policy_alert_from_row)
-                    .collect::<Result<Vec<_>>>()?
-            }
+            Self::Postgres(_) => unreachable!("Postgres alerts use the unified lifecycle query"),
         };
         alerts.retain(|alert| {
             query
@@ -2824,6 +2750,18 @@ impl Repository {
     }
 
     pub(crate) async fn evaluate_policy_rules(&self) -> Result<usize> {
+        if let Self::Postgres(pool) = self {
+            crate::repository_policy_lifecycle::repair_missing_policy_evidence_receipts(pool, 500)
+                .await?;
+            return crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200)
+                .await;
+        }
+        // The Memory repository has no durable evidence/receipt/outbox owner.
+        // It is retained only for non-lifecycle unit fixtures and must never
+        // run the retired in-process alert state machine.
+        return Ok(0);
+
+        #[allow(unreachable_code)]
         // Configuration writes and the periodic evaluator can otherwise repeat
         // the same expensive fleet snapshot concurrently in one API process.
         let _evaluation_guard = POLICY_EVALUATION_LOCK.lock().await;
@@ -2869,7 +2807,9 @@ impl Repository {
         let mut stream_requests = traffic_stream_requests_from_rules(&cycle_starts, &rules);
         for (group, matched) in &matched_groups {
             for rule in group.rules.iter().filter(|rule| rule.enabled) {
-                if policy_condition_uses_traffic(&rule.condition_expression).unwrap_or(false) {
+                if policy_condition_uses_traffic(&rule.trigger_condition_expression)
+                    .unwrap_or(false)
+                {
                     if let Some(selector) = rule.traffic_selector.as_deref() {
                         add_traffic_selector_requests(
                             &mut stream_requests,
@@ -2903,22 +2843,26 @@ impl Repository {
         let mut fired = 0_usize;
         for (group, matched) in matched_groups {
             for rule in group.rules.iter().filter(|rule| rule.enabled) {
-                match self {
-                    Self::Memory(memory) => {
-                        resolve_memory_policy_states_outside_scope(memory, &group, rule).await?;
-                    }
-                    Self::Postgres(pool) => {
-                        resolve_postgres_policy_states_outside_scope(pool, &group, rule).await?;
-                    }
-                }
+                let Self::Memory(memory) = self else {
+                    unreachable!("Postgres policy evaluation uses the unified lifecycle engine");
+                };
+                resolve_memory_policy_states_outside_scope(memory, &group, rule).await?;
                 let request = PolicyRuleRequest {
                     id: Some(rule.id),
                     name: rule.name.clone(),
                     enabled: rule.enabled,
+                    rule_kind: rule.rule_kind,
+                    evidence_source: rule.evidence_source.clone(),
+                    correlation_mode: rule.correlation_mode,
                     traffic_selector: rule.traffic_selector.clone(),
-                    condition_expression: rule.condition_expression.clone(),
-                    window_secs: rule.window_secs,
+                    trigger_condition_expression: rule.trigger_condition_expression.clone(),
+                    trigger_meta_condition: rule.trigger_meta_condition.clone(),
+                    resolve_condition_expression: rule.resolve_condition_expression.clone(),
+                    resolve_meta_condition: rule.resolve_meta_condition.clone(),
                     severity: rule.severity.clone(),
+                    category: rule.category.clone(),
+                    title_template: rule.title_template.clone(),
+                    detail_template: rule.detail_template.clone(),
                 };
                 for agent in &matched {
                     let override_traffic =
@@ -3375,25 +3319,31 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        policy_rule_id,
-                        client_id,
-                        rule_version,
-                        condition_true,
-                        previous_condition_true,
-                        window_satisfied,
-                        first_true_at::text AS first_true_at,
-                        last_true_at::text AS last_true_at,
-                        last_false_at::text AS last_false_at,
-                        last_evaluated_at::text AS last_evaluated_at,
-                        incomplete,
-                        incomplete_reasons,
-                        last_actual_value,
-                        last_threshold_value,
-                        last_fired_at::text AS last_fired_at,
-                        trigger_generation,
-                        updated_at::text AS updated_at
-                    FROM policy_rule_states
-                    WHERE policy_rule_id = ANY($1)
+                        state.policy_rule_id,
+                        state.subject_client_id AS client_id,
+                        state.rule_version,
+                        state.truth_state = 'matched' AS condition_true,
+                        FALSE AS previous_condition_true,
+                        state.active_episode_id IS NOT NULL AS window_satisfied,
+                        state.trigger_segment_started_at::text AS first_true_at,
+                        CASE WHEN state.truth_state = 'matched'
+                            THEN state.last_evidence_observed_at::text END AS last_true_at,
+                        CASE WHEN state.truth_state = 'not_matched'
+                            THEN state.last_evidence_observed_at::text END AS last_false_at,
+                        state.last_evaluated_at::text AS last_evaluated_at,
+                        state.truth_state = 'unknown' AS incomplete,
+                        CASE WHEN state.truth_state = 'unknown'
+                            THEN ARRAY['evidence_unknown']::text[]
+                            ELSE ARRAY[]::text[] END AS incomplete_reasons,
+                        NULL::double precision AS last_actual_value,
+                        NULL::double precision AS last_threshold_value,
+                        episode.last_confirmed_at::text AS last_fired_at,
+                        state.trigger_generation,
+                        state.updated_at::text AS updated_at
+                    FROM alert_policy_evaluation_states state
+                    LEFT JOIN alert_episodes episode ON episode.id = state.active_episode_id
+                    WHERE state.policy_rule_id = ANY($1)
+                      AND state.subject_client_id IS NOT NULL
                     "#,
                 )
                 .bind(rule_ids)
@@ -3440,8 +3390,9 @@ impl Repository {
             Self::Postgres(pool) => Ok(sqlx::query(
                 r#"
                 SELECT policy_rule_id, client_id, trigger_generation
-                FROM policy_alerts
+                FROM alert_episodes
                 WHERE policy_rule_id = ANY($1)
+                  AND client_id IS NOT NULL
                   AND lifecycle_state IN ('triggered', 'persisting')
                   AND resolved_at IS NULL
                   AND last_confirmed_at IS NOT NULL
@@ -3631,230 +3582,8 @@ impl Repository {
                 }
                 Ok(inserted)
             }
-            Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
-                let visible = lock_postgres_visible_policy_clients_in_tx(
-                    &mut tx,
-                    std::slice::from_ref(&agent.id),
-                )
-                .await?;
-                if visible.is_empty() {
-                    tx.commit().await?;
-                    return Ok(false);
-                }
-                lock_postgres_policy_state_advisories_in_tx(
-                    &mut tx,
-                    rule.id,
-                    std::slice::from_ref(&agent.id),
-                )
-                .await?;
-
-                // Lock group before rule, matching the editor's group -> rule
-                // order. A join can lock the rule first and deadlock with an
-                // editor that already updated the group and is deleting rules.
-                if !lock_postgres_current_policy_snapshot_in_tx(&mut tx, group, rule).await? {
-                    tx.commit().await?;
-                    return Ok(false);
-                }
-                let (mut current_agents, current_vps_rules) =
-                    matching_postgres_policy_agents_in_tx(&mut tx, &visible, &selector).await?;
-                if evaluated_vps_rule_inputs
-                    != policy_vps_rule_inputs(&current_vps_rules, &agent.id).as_slice()
-                {
-                    tx.commit().await?;
-                    return Ok(false);
-                }
-                let Some(current_agent) = current_agents.remove(&agent.id) else {
-                    tx.commit().await?;
-                    return Ok(false);
-                };
-
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        policy_rule_id,
-                        client_id,
-                        rule_version,
-                        condition_true,
-                        previous_condition_true,
-                        window_satisfied,
-                        first_true_at::text AS first_true_at,
-                        last_true_at::text AS last_true_at,
-                        last_false_at::text AS last_false_at,
-                        last_evaluated_at::text AS last_evaluated_at,
-                        incomplete,
-                        incomplete_reasons,
-                        last_actual_value,
-                        last_threshold_value,
-                        last_fired_at::text AS last_fired_at,
-                        trigger_generation,
-                        updated_at::text AS updated_at,
-                        last_evaluated_at > $4::timestamptz AS evaluation_is_stale
-                    FROM policy_rule_states
-                    WHERE policy_rule_id = $1 AND client_id = $2 AND rule_version = $3
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(rule.id)
-                .bind(&agent.id)
-                .bind(rule.rule_version)
-                .bind(&now_text)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let evaluation_is_stale = row
-                    .as_ref()
-                    .map(|row| row.try_get::<bool, _>("evaluation_is_stale"))
-                    .transpose()?
-                    .unwrap_or(false);
-                if evaluation_is_stale {
-                    tx.commit().await?;
-                    return Ok(false);
-                }
-                let existing = row.map(policy_rule_state_from_row).transpose()?;
-                let max_generation = sqlx::query_scalar::<_, i64>(
-                    r#"
-                    SELECT COALESCE(MAX(trigger_generation), 0)::bigint
-                    FROM policy_alerts
-                    WHERE policy_rule_id = $1 AND client_id = $2
-                    "#,
-                )
-                .bind(rule.id)
-                .bind(&agent.id)
-                .fetch_one(&mut *tx)
-                .await?;
-                let mut state = next_policy_rule_state(
-                    rule,
-                    &agent.id,
-                    &evaluation,
-                    existing.as_ref(),
-                    max_generation,
-                    now,
-                )?;
-                let mut alert = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        policy_group_id,
-                        policy_rule_id,
-                        client_id,
-                        trigger_generation,
-                        severity,
-                        category,
-                        title,
-                        detail,
-                        actual_value,
-                        threshold_value,
-                        payload,
-                        lifecycle_state,
-                        last_confirmed_at::text AS last_confirmed_at,
-                        resolved_at::text AS resolved_at,
-                        resolution_reason,
-                        observed_at::text AS observed_at,
-                        created_at::text AS created_at
-                    FROM policy_alerts
-                    WHERE policy_rule_id = $1
-                      AND client_id = $2
-                      AND trigger_generation = $3
-                      AND resolved_at IS NULL
-                    FOR UPDATE
-                    "#,
-                )
-                .bind(rule.id)
-                .bind(&agent.id)
-                .bind(state.trigger_generation)
-                .fetch_optional(&mut *tx)
-                .await?
-                .map(policy_alert_from_row)
-                .transpose()?;
-                let mut inserted = false;
-                let mut resolved = false;
-                if evaluation.incomplete {
-                    if let Some(alert) = alert.as_mut() {
-                        mark_policy_alert_unknown(alert);
-                        update_policy_alert_lifecycle_in_tx(&mut tx, alert).await?;
-                    }
-                } else if !evaluation.condition_true {
-                    if let Some(alert) = alert
-                        .as_mut()
-                        .filter(|alert| alert.last_confirmed_at.is_some())
-                    {
-                        let state_last_evaluated_at = parse_policy_lifecycle_timestamp(
-                            &state.last_evaluated_at,
-                            "policy state last_evaluated_at",
-                        )?;
-                        resolve_policy_alert(
-                            alert,
-                            Utc::now(),
-                            Some(state_last_evaluated_at),
-                            "condition_recovered",
-                        )?;
-                        update_policy_alert_lifecycle_in_tx(&mut tx, alert).await?;
-                        resolved = true;
-                    }
-                } else if policy_state_is_alert_eligible(&state) {
-                    if let Some(alert) = alert.as_mut() {
-                        mark_policy_alert_persisting(alert, &now_text);
-                        update_policy_alert_lifecycle_in_tx(&mut tx, alert).await?;
-                    } else {
-                        let triggered = policy_alert_for_evaluation(
-                            group,
-                            rule,
-                            &current_agent,
-                            &state,
-                            &evaluation,
-                            &now_text,
-                        );
-                        insert_policy_alert_in_tx(&mut tx, &triggered).await?;
-                        alert = Some(triggered);
-                        inserted = true;
-                    }
-                }
-                if let Some(alert) = alert.as_ref() {
-                    state.last_fired_at = Some(alert.observed_at.clone());
-                }
-                upsert_policy_rule_state_in_tx(&mut tx, &state).await?;
-                let event = if resolved {
-                    alert.as_ref().map(policy_alert_resolved_webhook_event)
-                } else {
-                    alert
-                        .as_ref()
-                        .filter(|alert| {
-                            alert.last_confirmed_at.is_some()
-                                && (inserted
-                                    || policy_webhook_repair_is_recent(&alert.observed_at, now))
-                        })
-                        .map(policy_alert_webhook_event)
-                };
-                if let Some(event) = event {
-                    let event_occurred_at = if resolved {
-                        alert
-                            .as_ref()
-                            .map(policy_alert_resolution_timestamp)
-                            .transpose()?
-                            .context("resolved policy alert is missing")?
-                    } else {
-                        now
-                    };
-                    let event_exists = sqlx::query_scalar::<_, bool>(
-                        r#"
-                        SELECT EXISTS (
-                            SELECT 1
-                            FROM webhook_events
-                            WHERE kind = $1 AND event_id = $2
-                        )
-                        "#,
-                    )
-                    .bind(&event.kind)
-                    .bind(&event.event_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    if !event_exists {
-                        record_webhook_event_in_tx(&mut tx, event, event_occurred_at).await?;
-                    }
-                }
-                tx.commit().await?;
-                Ok(inserted)
+            Self::Postgres(_) => {
+                unreachable!("Postgres policy evaluation uses the unified lifecycle engine")
             }
         }
     }
@@ -4243,6 +3972,11 @@ async fn apply_vps_rule_changes_postgres_in_tx(
             .await?;
         }
     }
+    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+        tx,
+        &target_client_ids,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -4305,124 +4039,6 @@ fn validate_billing_rule_group(price: Option<&str>, cycle: Option<&str>) -> Resu
         }
         _ => anyhow::bail!("billing_plan_period_invalid"),
     }
-    Ok(())
-}
-
-async fn upsert_policy_rule_state_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    state: &PolicyRuleStateRecord,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO policy_rule_states (
-            policy_rule_id, client_id, rule_version, condition_true,
-            previous_condition_true, window_satisfied, first_true_at, last_true_at,
-            last_false_at, last_evaluated_at, incomplete, incomplete_reasons,
-            last_actual_value, last_threshold_value, last_fired_at,
-            trigger_generation
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11,$12,$13,$14,$15::timestamptz,$16)
-        ON CONFLICT (policy_rule_id, client_id, rule_version) DO UPDATE SET
-            condition_true = EXCLUDED.condition_true,
-            previous_condition_true = EXCLUDED.previous_condition_true,
-            window_satisfied = EXCLUDED.window_satisfied,
-            first_true_at = EXCLUDED.first_true_at,
-            last_true_at = EXCLUDED.last_true_at,
-            last_false_at = EXCLUDED.last_false_at,
-            last_evaluated_at = EXCLUDED.last_evaluated_at,
-            incomplete = EXCLUDED.incomplete,
-            incomplete_reasons = EXCLUDED.incomplete_reasons,
-            last_actual_value = EXCLUDED.last_actual_value,
-            last_threshold_value = EXCLUDED.last_threshold_value,
-            last_fired_at = EXCLUDED.last_fired_at,
-            trigger_generation = EXCLUDED.trigger_generation,
-            updated_at = now()
-        "#,
-    )
-    .bind(state.policy_rule_id)
-    .bind(&state.client_id)
-    .bind(state.rule_version)
-    .bind(state.condition_true)
-    .bind(state.previous_condition_true)
-    .bind(state.window_satisfied)
-    .bind(state.first_true_at.as_deref())
-    .bind(state.last_true_at.as_deref())
-    .bind(state.last_false_at.as_deref())
-    .bind(&state.last_evaluated_at)
-    .bind(state.incomplete)
-    .bind(&state.incomplete_reasons)
-    .bind(state.last_actual_value)
-    .bind(state.last_threshold_value)
-    .bind(state.last_fired_at.as_deref())
-    .bind(state.trigger_generation)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn insert_policy_alert_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    alert: &PolicyAlertRecord,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO policy_alerts (
-            id, policy_group_id, policy_rule_id, client_id, trigger_generation,
-            severity, category, title, detail, actual_value, threshold_value,
-            payload, lifecycle_state, last_confirmed_at, resolved_at,
-            resolution_reason, observed_at, created_at
-        )
-        VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-            $14::timestamptz,$15::timestamptz,$16,$17::timestamptz,$18::timestamptz
-        )
-        "#,
-    )
-    .bind(alert.id)
-    .bind(alert.policy_group_id)
-    .bind(alert.policy_rule_id)
-    .bind(&alert.client_id)
-    .bind(alert.trigger_generation)
-    .bind(&alert.severity)
-    .bind(&alert.category)
-    .bind(&alert.title)
-    .bind(&alert.detail)
-    .bind(alert.actual_value)
-    .bind(alert.threshold_value)
-    .bind(SqlJson(&alert.payload))
-    .bind(&alert.lifecycle_state)
-    .bind(alert.last_confirmed_at.as_deref())
-    .bind(alert.resolved_at.as_deref())
-    .bind(alert.resolution_reason.as_deref())
-    .bind(&alert.observed_at)
-    .bind(&alert.created_at)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn update_policy_alert_lifecycle_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    alert: &PolicyAlertRecord,
-) -> Result<()> {
-    let updated = sqlx::query(
-        r#"
-        UPDATE policy_alerts
-        SET lifecycle_state = $2,
-            last_confirmed_at = $3::timestamptz,
-            resolved_at = $4::timestamptz,
-            resolution_reason = $5
-        WHERE id = $1
-        "#,
-    )
-    .bind(alert.id)
-    .bind(&alert.lifecycle_state)
-    .bind(alert.last_confirmed_at.as_deref())
-    .bind(alert.resolved_at.as_deref())
-    .bind(alert.resolution_reason.as_deref())
-    .execute(&mut **tx)
-    .await?;
-    anyhow::ensure!(updated.rows_affected() == 1, "policy_alert_not_found");
     Ok(())
 }
 
@@ -4494,117 +4110,10 @@ async fn resolve_policy_alerts_for_rules_in_tx(
     rule_ids: &[Uuid],
     reason: &str,
 ) -> Result<()> {
-    if rule_ids.is_empty() {
-        return Ok(());
-    }
-    let rows = sqlx::query(
-        r#"
-        UPDATE policy_alerts
-        SET lifecycle_state = 'resolved',
-            resolved_at = GREATEST(
-                clock_timestamp(),
-                policy_alerts.last_confirmed_at,
-                COALESCE((
-                    SELECT MAX(state.last_evaluated_at)
-                    FROM policy_rule_states AS state
-                    WHERE state.policy_rule_id = policy_alerts.policy_rule_id
-                      AND state.client_id = policy_alerts.client_id
-                      AND state.trigger_generation = policy_alerts.trigger_generation
-                ), '-infinity'::timestamptz)
-            ),
-            resolution_reason = $2
-        WHERE policy_rule_id = ANY($1::uuid[])
-          AND resolved_at IS NULL
-          AND last_confirmed_at IS NOT NULL
-        RETURNING
-            id,
-            policy_group_id,
-            policy_rule_id,
-            client_id,
-            trigger_generation,
-            severity,
-            category,
-            title,
-            detail,
-            actual_value,
-            threshold_value,
-            payload,
-            lifecycle_state,
-            last_confirmed_at::text AS last_confirmed_at,
-            resolved_at::text AS resolved_at,
-            resolution_reason,
-            observed_at::text AS observed_at,
-            created_at::text AS created_at
-        "#,
+    crate::repository_policy_lifecycle::resolve_policy_rules_for_definition_change_in_tx(
+        tx, rule_ids, reason,
     )
-    .bind(rule_ids)
-    .bind(reason)
-    .fetch_all(&mut **tx)
-    .await?;
-    for row in rows {
-        let alert = policy_alert_from_row(row)?;
-        let resolved_at = policy_alert_resolution_timestamp(&alert)?;
-        record_webhook_event_in_tx(tx, policy_alert_resolved_webhook_event(&alert), resolved_at)
-            .await?;
-    }
-    Ok(())
-}
-
-async fn resolve_policy_alert_for_state_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    state: &PolicyRuleStateRecord,
-    reason: &str,
-) -> Result<()> {
-    let row = sqlx::query(
-        r#"
-        UPDATE policy_alerts
-        SET lifecycle_state = 'resolved',
-            resolved_at = GREATEST(
-                clock_timestamp(),
-                policy_alerts.last_confirmed_at,
-                $4::timestamptz
-            ),
-            resolution_reason = $5
-        WHERE policy_rule_id = $1
-          AND client_id = $2
-          AND trigger_generation = $3
-          AND resolved_at IS NULL
-          AND last_confirmed_at IS NOT NULL
-        RETURNING
-            id,
-            policy_group_id,
-            policy_rule_id,
-            client_id,
-            trigger_generation,
-            severity,
-            category,
-            title,
-            detail,
-            actual_value,
-            threshold_value,
-            payload,
-            lifecycle_state,
-            last_confirmed_at::text AS last_confirmed_at,
-            resolved_at::text AS resolved_at,
-            resolution_reason,
-            observed_at::text AS observed_at,
-            created_at::text AS created_at
-        "#,
-    )
-    .bind(state.policy_rule_id)
-    .bind(&state.client_id)
-    .bind(state.trigger_generation)
-    .bind(&state.last_evaluated_at)
-    .bind(reason)
-    .fetch_optional(&mut **tx)
-    .await?;
-    if let Some(row) = row {
-        let alert = policy_alert_from_row(row)?;
-        let resolved_at = policy_alert_resolution_timestamp(&alert)?;
-        record_webhook_event_in_tx(tx, policy_alert_resolved_webhook_event(&alert), resolved_at)
-            .await?;
-    }
-    Ok(())
+    .await
 }
 
 fn memory_policy_snapshot_is_current(
@@ -4658,209 +4167,6 @@ async fn matching_memory_policy_agents(
         .filter(|row| candidates.contains(row.client_id.as_str()))
         .cloned()
         .map(canonicalize_vps_rule_record)
-        .collect::<Result<Vec<_>>>()?;
-    Ok((matching_policy_agents(&agents, &rules, selector), rules))
-}
-
-async fn lock_postgres_visible_policy_clients_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    candidate_client_ids: &[String],
-) -> Result<Vec<String>> {
-    let candidates = candidate_client_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT id
-        FROM visible_clients
-        WHERE id = ANY($1::text[])
-        ORDER BY id
-        FOR UPDATE
-        "#,
-    )
-    .bind(&candidates)
-    .fetch_all(&mut **tx)
-    .await?)
-}
-
-async fn lock_postgres_policy_state_advisories_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    policy_rule_id: Uuid,
-    candidate_client_ids: &[String],
-) -> Result<()> {
-    let lock_names = candidate_client_ids
-        .iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(|client_id| format!("vpsman:policy-rule-state:{policy_rule_id}:{client_id}"))
-        .collect::<Vec<_>>();
-    if lock_names.is_empty() {
-        return Ok(());
-    }
-    sqlx::query(
-        r#"
-        SELECT pg_advisory_xact_lock(hashtextextended(lock_name, 0))
-        FROM unnest($1::text[]) AS locks(lock_name)
-        ORDER BY lock_name
-        "#,
-    )
-    .bind(&lock_names)
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
-
-async fn lock_postgres_current_policy_snapshot_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    group: &PolicyGroupRecord,
-    rule: &PolicyRuleRecord,
-) -> Result<bool> {
-    // Keep group before rule, matching the policy editor's row-lock order.
-    let group_is_current = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT id
-        FROM policy_groups
-        WHERE id = $1
-          AND enabled = TRUE
-          AND name = $2
-          AND selector_expression = $3
-          AND updated_at = $4::timestamptz
-        FOR SHARE
-        "#,
-    )
-    .bind(group.id)
-    .bind(&group.name)
-    .bind(&group.selector_expression)
-    .bind(&group.updated_at)
-    .fetch_optional(&mut **tx)
-    .await?
-    .is_some();
-    if !group_is_current {
-        return Ok(false);
-    }
-    Ok(sqlx::query_scalar::<_, i32>(
-        r#"
-        SELECT rule_version
-        FROM policy_rules
-        WHERE id = $1
-          AND group_id = $2
-          AND rule_version = $3
-          AND enabled = TRUE
-        FOR SHARE
-        "#,
-    )
-    .bind(rule.id)
-    .bind(group.id)
-    .bind(rule.rule_version)
-    .fetch_optional(&mut **tx)
-    .await?
-    .is_some())
-}
-
-async fn matching_postgres_policy_agents_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    candidate_client_ids: &[String],
-    selector: &Expression,
-) -> Result<(HashMap<String, AgentView>, Vec<VpsRuleValueRecord>)> {
-    if candidate_client_ids.is_empty() {
-        return Ok((HashMap::new(), Vec::new()));
-    }
-    let agent_rows = sqlx::query(
-        r#"
-        SELECT
-            c.id,
-            c.display_name,
-            c.status,
-            host(c.registration_ip) AS registration_ip,
-            host(c.last_ip) AS last_ip,
-            c.last_seen_at::text AS last_seen_at,
-            c.arch,
-            c.internal_build_number,
-            c.process_incarnation_id,
-            c.stale_since::text AS stale_since,
-            c.stale_reason,
-            c.capabilities,
-            COALESCE(
-                array_remove(
-                    array_agg(t.name ORDER BY t.display_order, t.created_at, t.name),
-                    NULL
-                ),
-                ARRAY[]::TEXT[]
-            ) AS tags
-        FROM visible_clients c
-        LEFT JOIN client_tags ct ON ct.client_id = c.id
-        LEFT JOIN tags t ON t.id = ct.tag_id
-        WHERE c.id = ANY($1::text[])
-        GROUP BY
-            c.id,
-            c.display_name,
-            c.status,
-            c.registration_ip,
-            c.last_ip,
-            c.last_seen_at,
-            c.arch,
-            c.internal_build_number,
-            c.process_incarnation_id,
-            c.stale_since,
-            c.stale_reason,
-            c.capabilities
-        ORDER BY c.id
-        "#,
-    )
-    .bind(candidate_client_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    let agents = agent_rows
-        .into_iter()
-        .map(|row| {
-            Ok(AgentView {
-                id: row.try_get("id")?,
-                display_name: row.try_get("display_name")?,
-                status: row.try_get("status")?,
-                tags: row.try_get("tags")?,
-                registration_ip: row.try_get("registration_ip")?,
-                last_ip: row.try_get("last_ip")?,
-                last_seen_at: row.try_get("last_seen_at")?,
-                arch: row.try_get("arch")?,
-                internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1)
-                    as u64,
-                process_incarnation_id: row.try_get("process_incarnation_id")?,
-                stale_since: row.try_get("stale_since")?,
-                stale_reason: row.try_get("stale_reason")?,
-                capabilities: row
-                    .try_get::<SqlJson<vpsman_common::AgentCapabilitySnapshot>, _>("capabilities")?
-                    .0,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let rule_rows = sqlx::query(
-        r#"
-        SELECT
-            client_id,
-            key,
-            value_raw,
-            value_json,
-            source_kind,
-            source_id,
-            updated_by,
-            updated_at::text AS updated_at
-        FROM vps_rule_values
-        WHERE client_id = ANY($1::text[])
-        ORDER BY client_id, key
-        "#,
-    )
-    .bind(candidate_client_ids)
-    .fetch_all(&mut **tx)
-    .await?;
-    let rules = rule_rows
-        .into_iter()
-        .map(vps_rule_from_row)
         .collect::<Result<Vec<_>>>()?;
     Ok((matching_policy_agents(&agents, &rules, selector), rules))
 }
@@ -4961,90 +4267,6 @@ async fn resolve_memory_policy_states_outside_scope(
             events.push(event);
         }
     }
-    Ok(())
-}
-
-async fn resolve_postgres_policy_states_outside_scope(
-    pool: &sqlx::PgPool,
-    group: &PolicyGroupRecord,
-    rule: &PolicyRuleRecord,
-) -> Result<()> {
-    let selector = parse_policy_selector(&group.selector_expression)?;
-    let mut tx = pool.begin().await?;
-    lock_postgres_agent_identity_lifecycle(&mut tx).await?;
-    let candidate_client_ids = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT client_id
-        FROM policy_rule_states
-        WHERE policy_rule_id = $1 AND rule_version = $2
-        ORDER BY client_id
-        "#,
-    )
-    .bind(rule.id)
-    .bind(rule.rule_version)
-    .fetch_all(&mut *tx)
-    .await?;
-    if candidate_client_ids.is_empty() {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let visible_client_ids =
-        lock_postgres_visible_policy_clients_in_tx(&mut tx, &candidate_client_ids).await?;
-    lock_postgres_policy_state_advisories_in_tx(&mut tx, rule.id, &candidate_client_ids).await?;
-    if !lock_postgres_current_policy_snapshot_in_tx(&mut tx, group, rule).await? {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let matched_client_ids =
-        matching_postgres_policy_agents_in_tx(&mut tx, &visible_client_ids, &selector)
-            .await?
-            .0
-            .into_keys()
-            .collect::<HashSet<_>>();
-    let outside_client_ids = candidate_client_ids
-        .into_iter()
-        .filter(|client_id| !matched_client_ids.contains(client_id))
-        .collect::<Vec<_>>();
-    if outside_client_ids.is_empty() {
-        tx.commit().await?;
-        return Ok(());
-    }
-    let rows = sqlx::query(
-        r#"
-        DELETE FROM policy_rule_states
-        WHERE policy_rule_id = $1
-          AND rule_version = $2
-          AND client_id = ANY($3::text[])
-        RETURNING
-            policy_rule_id,
-            client_id,
-            rule_version,
-            condition_true,
-            previous_condition_true,
-            window_satisfied,
-            first_true_at::text AS first_true_at,
-            last_true_at::text AS last_true_at,
-            last_false_at::text AS last_false_at,
-            last_evaluated_at::text AS last_evaluated_at,
-            incomplete,
-            incomplete_reasons,
-            last_actual_value,
-            last_threshold_value,
-            last_fired_at::text AS last_fired_at,
-            trigger_generation,
-            updated_at::text AS updated_at
-        "#,
-    )
-    .bind(rule.id)
-    .bind(rule.rule_version)
-    .bind(&outside_client_ids)
-    .fetch_all(&mut *tx)
-    .await?;
-    for row in rows {
-        let state = policy_rule_state_from_row(row)?;
-        resolve_policy_alert_for_state_in_tx(&mut tx, &state, "policy_scope_exited").await?;
-    }
-    tx.commit().await?;
     Ok(())
 }
 
@@ -5151,14 +4373,16 @@ fn next_policy_rule_state(
             .unwrap_or(false)
     } else if !evaluation.condition_true {
         false
-    } else if rule.window_secs <= 0 {
+    } else if trigger_sustained_seconds(&rule.trigger_meta_condition).is_none() {
         true
     } else {
+        let sustained_seconds = trigger_sustained_seconds(&rule.trigger_meta_condition)
+            .expect("checked sustained trigger meta condition");
         first_true_at
             .as_deref()
             .and_then(parse_timestamp_utc)
             .map(|first| {
-                now.signed_duration_since(first) >= chrono::Duration::seconds(rule.window_secs)
+                now.signed_duration_since(first) >= chrono::Duration::seconds(sustained_seconds)
             })
             .unwrap_or(false)
     };
@@ -5228,14 +4452,14 @@ fn policy_alert_for_evaluation(
     .to_string();
     let detail = format!(
         "{} matched policy condition {}",
-        agent.display_name, rule.condition_expression
+        agent.display_name, rule.trigger_condition_expression
     );
     let mut payload = evaluation.payload.clone();
     if let Some(object) = payload.as_object_mut() {
         object.insert(
             "event".to_string(),
             json!({
-                "kind": "alert.policy_reached",
+                "kind": "alert.triggered",
                 "id": format!("policy-alert:{alert_id}"),
                 "occurred_at": now_text,
             }),
@@ -5282,14 +4506,22 @@ fn policy_alert_for_evaluation(
             }),
         );
         object.insert(
-            "rule".to_string(),
+            "policy_rule".to_string(),
             json!({
                 "id": rule.id,
                 "name": rule.name,
                 "rule_version": rule.rule_version,
-                "condition_expression": rule.condition_expression,
+                "trigger_condition_expression": rule.trigger_condition_expression,
                 "traffic_selector": rule.traffic_selector,
-                "window_secs": rule.window_secs,
+                "rule_kind": rule.rule_kind,
+                "evidence_source": rule.evidence_source,
+                "system_seed_key": rule.system_seed_key,
+                "trigger_meta_condition": normalized_meta_condition_payload(
+                    rule.trigger_meta_condition.as_ref()
+                ),
+                "resolve_meta_condition": normalized_meta_condition_payload(
+                    rule.resolve_meta_condition.as_ref()
+                ),
             }),
         );
     }
@@ -5317,13 +4549,10 @@ fn policy_alert_for_evaluation(
 
 fn policy_alert_webhook_event(alert: &PolicyAlertRecord) -> WebhookEventCandidate {
     WebhookEventCandidate {
-        kind: "alert.policy_reached".to_string(),
+        kind: "alert.triggered".to_string(),
         event_id: format!("policy-alert:{}", alert.id),
         event_predicates: vec![
-            "alert.policy_reached".to_string(),
-            "alert.policy_triggered".to_string(),
             "alert.triggered".to_string(),
-            "alert.open".to_string(),
             format!("alert.category:{}", alert.category),
             format!("alert.severity:{}", alert.severity),
         ],
@@ -5339,7 +4568,7 @@ fn policy_alert_resolved_webhook_event(alert: &PolicyAlertRecord) -> WebhookEven
         object.insert(
             "event".to_string(),
             json!({
-                "kind": "alert.policy_resolved",
+                "kind": "alert.resolved",
                 "id": format!("policy-alert:{}:resolved", alert.id),
                 "occurred_at": alert.resolved_at,
             }),
@@ -5372,10 +4601,9 @@ fn policy_alert_resolved_webhook_event(alert: &PolicyAlertRecord) -> WebhookEven
         );
     }
     WebhookEventCandidate {
-        kind: "alert.policy_resolved".to_string(),
+        kind: "alert.resolved".to_string(),
         event_id: format!("policy-alert:{}:resolved", alert.id),
         event_predicates: vec![
-            "alert.policy_resolved".to_string(),
             "alert.resolved".to_string(),
             format!("alert.category:{}", alert.category),
             format!("alert.severity:{}", alert.severity),
@@ -5419,6 +4647,250 @@ fn traffic_cycle_starts_for_clients<'a>(
             )
         })
         .collect()
+}
+
+/// Builds the traffic portion of a telemetry policy fact from the same
+/// PostgreSQL transaction that accepted the telemetry sample. The ingest path
+/// already holds the client row and every traffic stream lock, so neither VPS
+/// rule context nor a later packet can leak into this snapshot.
+pub(crate) async fn postgres_traffic_accounting_snapshot_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    client_id: &str,
+    as_of: DateTime<Utc>,
+) -> Result<TrafficAccountingRecord> {
+    let rule_rows = sqlx::query(
+        r#"
+        SELECT client_id, key, value_raw, value_json, source_kind, source_id,
+               updated_by, updated_at::text AS updated_at
+        FROM vps_rule_values
+        WHERE client_id=$1
+        ORDER BY key
+        "#,
+    )
+    .bind(client_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let rules = rule_rows
+        .into_iter()
+        .map(vps_rule_from_row)
+        .collect::<Result<Vec<_>>>()?;
+    let cycle_starts = traffic_cycle_starts_for_clients([client_id], &rules, as_of);
+    let requests = traffic_stream_requests_from_rules(&cycle_starts, &rules)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let usage =
+        postgres_traffic_counter_usage_snapshot_in_tx(tx, &requests, as_of.timestamp()).await?;
+    Ok(traffic_accounting_for_client(
+        client_id, &rules, &usage, as_of,
+    ))
+}
+
+async fn postgres_traffic_counter_usage_snapshot_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    requests: &[TrafficStreamRequest],
+    now_unix: i64,
+) -> Result<Vec<TrafficCounterStreamUsage>> {
+    if requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (no_reset_requests, monthly_requests): (Vec<_>, Vec<_>) = requests
+        .iter()
+        .partition(|request| request.cycle_start_unix == NO_RESET_TRAFFIC_START_UNIX);
+    let mut usages = Vec::with_capacity(requests.len());
+
+    if !monthly_requests.is_empty() {
+        let client_ids = monthly_requests
+            .iter()
+            .map(|request| request.client_id.clone())
+            .collect::<Vec<_>>();
+        let source_kinds = monthly_requests
+            .iter()
+            .map(|request| request.source_kind.clone())
+            .collect::<Vec<_>>();
+        let interfaces = monthly_requests
+            .iter()
+            .map(|request| request.interface.clone())
+            .collect::<Vec<_>>();
+        let cycle_start_values = monthly_requests
+            .iter()
+            .map(|request| request.cycle_start_unix)
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(
+            r#"
+            WITH requested AS (
+                SELECT client_id, source_kind, interface, cycle_start_unix
+                FROM UNNEST(
+                    $1::text[], $2::text[], $3::text[], $4::bigint[]
+                ) AS request(
+                    client_id, source_kind, interface, cycle_start_unix
+                )
+            ),
+            cycle_samples AS (
+                SELECT
+                    sample.client_id, sample.source_kind, sample.interface,
+                    sample.observed_at, sample.rx_bytes, sample.tx_bytes,
+                    sample.rx_counter_epoch, sample.tx_counter_epoch,
+                    sample.sample_source, requested.cycle_start_unix
+                FROM traffic_counter_samples sample
+                JOIN requested
+                  ON requested.client_id = sample.client_id
+                 AND requested.source_kind = sample.source_kind
+                 AND requested.interface = sample.interface
+                WHERE sample.observed_at >= to_timestamp(requested.cycle_start_unix)
+                  AND sample.observed_at <= to_timestamp($5)
+            ),
+            baseline_samples AS (
+                SELECT
+                    requested.client_id, requested.source_kind,
+                    requested.interface, sample.observed_at, sample.rx_bytes,
+                    sample.tx_bytes, sample.rx_counter_epoch,
+                    sample.tx_counter_epoch, sample.sample_source,
+                    requested.cycle_start_unix
+                FROM requested
+                JOIN LATERAL (
+                    SELECT
+                        sample.observed_at, sample.rx_bytes, sample.tx_bytes,
+                        sample.rx_counter_epoch, sample.tx_counter_epoch,
+                        sample.sample_source
+                    FROM traffic_counter_samples sample
+                    WHERE sample.client_id = requested.client_id
+                      AND sample.source_kind = requested.source_kind
+                      AND sample.interface = requested.interface
+                      AND sample.observed_at < to_timestamp(requested.cycle_start_unix)
+                      AND sample.observed_at <= to_timestamp($5)
+                    ORDER BY sample.observed_at DESC
+                    LIMIT 1
+                ) sample ON TRUE
+            ),
+            selected_samples AS (
+                SELECT * FROM cycle_samples
+                UNION ALL
+                SELECT * FROM baseline_samples
+            ),
+            sequenced_samples AS (
+                SELECT
+                    selected_samples.*,
+                    LAG(observed_at) OVER stream AS previous_observed_at,
+                    LAG(rx_bytes) OVER stream AS previous_rx_bytes,
+                    LAG(tx_bytes) OVER stream AS previous_tx_bytes,
+                    LAG(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+                    LAG(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+                    LAG(sample_source) OVER stream AS previous_sample_source
+                FROM selected_samples
+                WINDOW stream AS (
+                    PARTITION BY client_id, source_kind, interface
+                    ORDER BY observed_at ASC
+                )
+            ),
+            usage AS (
+                SELECT
+                    client_id, source_kind, interface,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN observed_at >= to_timestamp(cycle_start_unix)
+                             AND previous_observed_at IS NOT NULL
+                             AND rx_counter_epoch = previous_rx_counter_epoch
+                             AND rx_bytes >= previous_rx_bytes
+                            THEN rx_bytes - previous_rx_bytes ELSE 0
+                        END
+                    ), 0)::bigint AS cycle_rx,
+                    COALESCE(SUM(
+                        CASE
+                            WHEN observed_at >= to_timestamp(cycle_start_unix)
+                             AND previous_observed_at IS NOT NULL
+                             AND tx_counter_epoch = previous_tx_counter_epoch
+                             AND tx_bytes >= previous_tx_bytes
+                            THEN tx_bytes - previous_tx_bytes ELSE 0
+                        END
+                    ), 0)::bigint AS cycle_tx,
+                    (1 + COUNT(*) FILTER (
+                        WHERE previous_rx_counter_epoch IS NOT NULL
+                          AND rx_counter_epoch <> previous_rx_counter_epoch
+                          AND NOT (
+                            previous_sample_source LIKE 'vnstat_import:%'
+                            AND sample_source NOT LIKE 'vnstat_import:%'
+                          )
+                    ))::bigint AS rx_counter_epochs_seen,
+                    (1 + COUNT(*) FILTER (
+                        WHERE previous_tx_counter_epoch IS NOT NULL
+                          AND tx_counter_epoch <> previous_tx_counter_epoch
+                          AND NOT (
+                            previous_sample_source LIKE 'vnstat_import:%'
+                            AND sample_source NOT LIKE 'vnstat_import:%'
+                          )
+                    ))::bigint AS tx_counter_epochs_seen
+                FROM sequenced_samples
+                GROUP BY client_id, source_kind, interface
+            ),
+            latest AS (
+                SELECT DISTINCT ON (client_id, source_kind, interface)
+                    client_id, source_kind, interface,
+                    rx_bytes AS latest_rx, tx_bytes AS latest_tx,
+                    EXTRACT(EPOCH FROM observed_at)::bigint AS last_sample_unix
+                FROM sequenced_samples
+                ORDER BY client_id, source_kind, interface, observed_at DESC
+            )
+            SELECT
+                usage.client_id, usage.source_kind, usage.interface,
+                usage.cycle_rx, usage.cycle_tx, latest.latest_rx,
+                latest.latest_tx, latest.last_sample_unix,
+                usage.rx_counter_epochs_seen, usage.tx_counter_epochs_seen
+            FROM usage
+            JOIN latest
+              ON latest.client_id = usage.client_id
+             AND latest.source_kind = usage.source_kind
+             AND latest.interface = usage.interface
+            ORDER BY usage.client_id, usage.source_kind, usage.interface
+            "#,
+        )
+        .bind(client_ids)
+        .bind(source_kinds)
+        .bind(interfaces)
+        .bind(cycle_start_values)
+        .bind(now_unix)
+        .fetch_all(&mut **tx)
+        .await?;
+        usages.extend(
+            rows.into_iter()
+                .map(traffic_counter_stream_usage_from_row)
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+
+    if !no_reset_requests.is_empty() {
+        let client_ids = no_reset_requests
+            .iter()
+            .map(|request| request.client_id.clone())
+            .collect::<Vec<_>>();
+        let source_kinds = no_reset_requests
+            .iter()
+            .map(|request| request.source_kind.clone())
+            .collect::<Vec<_>>();
+        let interfaces = no_reset_requests
+            .iter()
+            .map(|request| request.interface.clone())
+            .collect::<Vec<_>>();
+        let rows = sqlx::query(NO_RESET_TRAFFIC_COUNTER_USAGE_SQL)
+            .bind(client_ids)
+            .bind(source_kinds)
+            .bind(interfaces)
+            .bind(now_unix)
+            .fetch_all(&mut **tx)
+            .await?;
+        usages.extend(
+            rows.into_iter()
+                .map(traffic_counter_stream_usage_from_row)
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
+
+    usages.sort_by(|left, right| {
+        left.client_id
+            .cmp(&right.client_id)
+            .then_with(|| left.source_kind.cmp(&right.source_kind))
+            .then_with(|| left.interface.cmp(&right.interface))
+    });
+    Ok(usages)
 }
 
 fn traffic_stream_requests_from_rules(
@@ -6466,7 +5938,7 @@ fn traffic_override_for_rule(
     traffic_usage: &[TrafficCounterStreamUsage],
     now: DateTime<Utc>,
 ) -> Option<TrafficAccountingRecord> {
-    if !policy_condition_uses_traffic(&rule.condition_expression).unwrap_or(false) {
+    if !policy_condition_uses_traffic(&rule.trigger_condition_expression).unwrap_or(false) {
         return None;
     }
     let selector = rule
@@ -6906,10 +6378,21 @@ async fn policy_groups_for_identity_in_tx(
                 sort_order,
                 name,
                 enabled,
+                rule_kind,
+                evidence_source,
+                correlation_mode,
                 traffic_selector,
-                condition_expression,
-                window_secs,
+                trigger_condition_expression,
+                trigger_meta_condition,
+                resolve_condition_expression,
+                resolve_meta_condition,
                 severity,
+                category,
+                title_template,
+                detail_template,
+                system_seed_key,
+                armed_after_evidence_seq,
+                armed_at::text AS armed_at,
                 created_at::text AS created_at,
                 updated_at::text AS updated_at
             FROM policy_rules
@@ -6962,6 +6445,23 @@ fn policy_group_from_request(
         .map(|group| group.id)
         .or(request.id)
         .unwrap_or_else(Uuid::new_v4);
+    let existing_rule_ids = existing_group
+        .map(|group| {
+            group
+                .rules
+                .iter()
+                .map(|rule| rule.id)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    for rule in &request.rules {
+        if let Some(id) = rule.id {
+            anyhow::ensure!(
+                existing_group.is_some() && existing_rule_ids.contains(&id),
+                "fleet_alert_policy_rule_id_unknown:{id}"
+            );
+        }
+    }
     let rules = request
         .rules
         .iter()
@@ -7102,6 +6602,14 @@ fn validate_policy_group_request(
             validate_policy_rule_request_for_preview(rule)?;
         }
     }
+    anyhow::ensure!(
+        request.selector_expression.trim() == "*"
+            || !request
+                .rules
+                .iter()
+                .any(|rule| rule.enabled && rule.evidence_source == "job.terminal"),
+        "fleet_alert_policy_subjectless_source_requires_global_scope"
+    );
     Ok(())
 }
 
@@ -7119,17 +6627,26 @@ fn validate_policy_rule_request_for_preview(rule: &PolicyRuleRequest) -> Result<
         matches!(rule.severity.as_str(), "info" | "warning" | "critical"),
         "fleet_alert_policy_severity_invalid"
     );
+    validate_policy_rule_source_shape(rule)?;
+    validate_policy_meta_condition(rule.trigger_meta_condition.as_ref(), false)?;
+    validate_policy_meta_condition(rule.resolve_meta_condition.as_ref(), true)?;
     anyhow::ensure!(
-        matches!(rule.window_secs, 0 | 60 | 300 | 900),
-        "fleet_alert_policy_window_invalid"
-    );
-    anyhow::ensure!(
-        !rule.condition_expression.trim().is_empty()
-            && rule.condition_expression.len() <= MAX_CONDITION_EXPRESSION_BYTES,
+        !rule.trigger_condition_expression.trim().is_empty()
+            && rule.trigger_condition_expression.len() <= MAX_CONDITION_EXPRESSION_BYTES,
         "fleet_alert_policy_condition_invalid"
     );
-    parse_policy_condition_expression(&rule.condition_expression)
-        .map_err(|error| anyhow::anyhow!("fleet_alert_policy_condition_invalid: {error}"))?;
+    validate_policy_expression_for_source(
+        rule.rule_kind,
+        &rule.evidence_source,
+        &rule.trigger_condition_expression,
+    )?;
+    if let Some(expression) = rule.resolve_condition_expression.as_deref() {
+        anyhow::ensure!(
+            !expression.trim().is_empty() && expression.len() <= MAX_CONDITION_EXPRESSION_BYTES,
+            "fleet_alert_policy_resolve_condition_invalid"
+        );
+        validate_policy_expression_for_source(rule.rule_kind, &rule.evidence_source, expression)?;
+    }
     if let Some(selector) = rule
         .traffic_selector
         .as_deref()
@@ -7137,7 +6654,9 @@ fn validate_policy_rule_request_for_preview(rule: &PolicyRuleRequest) -> Result<
     {
         parse_traffic_selector_list(selector)?;
     }
-    if !policy_condition_uses_traffic(&rule.condition_expression)? {
+    if rule.rule_kind != AlertPolicyRuleKind::Metric
+        || !policy_condition_uses_traffic(&rule.trigger_condition_expression)?
+    {
         anyhow::ensure!(
             rule.traffic_selector
                 .as_deref()
@@ -7145,7 +6664,289 @@ fn validate_policy_rule_request_for_preview(rule: &PolicyRuleRequest) -> Result<
             "fleet_alert_policy_traffic_selector_requires_traffic_metric"
         );
     }
+    anyhow::ensure!(
+        matches!(
+            rule.category.as_str(),
+            "agent_status"
+                | "network"
+                | "backup"
+                | "agent_update"
+                | "job"
+                | "capability_degraded"
+                | "traffic"
+                | "resource"
+        ),
+        "fleet_alert_policy_category_invalid"
+    );
+    validate_policy_presentation_template(
+        rule,
+        &rule.title_template,
+        256,
+        "fleet_alert_policy_title_template_invalid",
+    )?;
+    validate_policy_presentation_template(
+        rule,
+        &rule.detail_template,
+        4096,
+        "fleet_alert_policy_detail_template_invalid",
+    )?;
     Ok(())
+}
+
+fn validate_policy_presentation_template(
+    rule: &PolicyRuleRequest,
+    template: &str,
+    max_bytes: usize,
+    error_code: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        !template.trim().is_empty() && template.len() <= max_bytes && !template.contains('\0'),
+        "{error_code}"
+    );
+    let mut remaining = template;
+    while let Some(open) = remaining.find('{') {
+        anyhow::ensure!(!remaining[..open].contains('}'), "{error_code}");
+        let after = &remaining[open + 1..];
+        let close = after.find('}').context(error_code.to_string())?;
+        let path = after[..close].trim();
+        anyhow::ensure!(
+            !path.is_empty()
+                && !path.contains(['{', '[', ']', '(', ')', '|'])
+                && policy_template_path_allowed(rule, path),
+            "{error_code}:{path}"
+        );
+        remaining = &after[close + 1..];
+    }
+    anyhow::ensure!(!remaining.contains('}'), "{error_code}");
+    Ok(())
+}
+
+fn policy_template_path_allowed(rule: &PolicyRuleRequest, path: &str) -> bool {
+    if matches!(
+        path,
+        "policy.id"
+            | "policy.name"
+            | "policy_rule.id"
+            | "policy_rule.name"
+            | "policy_rule.rule_version"
+            | "policy_rule.rule_kind"
+            | "policy_rule.trigger_condition_expression"
+    ) {
+        return true;
+    }
+    if path.starts_with("subject.") {
+        return rule.correlation_mode != AlertPolicyCorrelationMode::Global
+            && rule.evidence_source != "job.terminal"
+            && matches!(
+                path,
+                "subject.client_id" | "subject.display_name" | "subject.status"
+            );
+    }
+    if let Some(field) = path.strip_prefix("evidence.") {
+        if rule.correlation_mode == AlertPolicyCorrelationMode::Global && field == "client_id" {
+            return false;
+        }
+        if rule.evidence_source == "telemetry.combined" {
+            return matches!(
+                field,
+                "traffic.quota.total"
+                    | "traffic.quota.rx"
+                    | "traffic.quota.tx"
+                    | "traffic.cycle.total"
+                    | "traffic.cycle.rx"
+                    | "traffic.cycle.tx"
+                    | "traffic.cycle_percent"
+                    | "cpu.utilization_ratio"
+                    | "cpu.load_1"
+                    | "cpu.load_saturation"
+                    | "memory.available_ratio"
+                    | "disk.available_ratio"
+            );
+        }
+        return policy_source_field_allowed(&rule.evidence_source, path);
+    }
+    false
+}
+
+fn validate_policy_rule_source_shape(rule: &PolicyRuleRequest) -> Result<()> {
+    let expected_kind = match rule.evidence_source.as_str() {
+        "telemetry.combined" => AlertPolicyRuleKind::Metric,
+        "agent.status" | "agent.access" | "tunnel.adapter" | "tunnel.traffic" => {
+            AlertPolicyRuleKind::State
+        }
+        "job.terminal" | "backup.failure" | "job.capability" => AlertPolicyRuleKind::Occurrence,
+        _ => anyhow::bail!("fleet_alert_policy_evidence_source_unsupported"),
+    };
+    anyhow::ensure!(
+        rule.rule_kind == expected_kind,
+        "fleet_alert_policy_evidence_source_rule_kind_mismatch"
+    );
+    match rule.rule_kind {
+        AlertPolicyRuleKind::Metric | AlertPolicyRuleKind::State => {
+            anyhow::ensure!(
+                rule.correlation_mode == AlertPolicyCorrelationMode::NaturalKey,
+                "fleet_alert_policy_correlation_mode_invalid"
+            );
+            anyhow::ensure!(
+                !matches!(
+                    rule.trigger_meta_condition,
+                    Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { .. })
+                ),
+                "fleet_alert_policy_trigger_meta_invalid"
+            );
+            anyhow::ensure!(
+                !matches!(
+                    rule.resolve_meta_condition,
+                    Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { .. })
+                ),
+                "fleet_alert_policy_resolve_meta_invalid"
+            );
+        }
+        AlertPolicyRuleKind::Occurrence => {
+            let trigger_is_count = matches!(
+                rule.trigger_meta_condition,
+                Some(AlertPolicyMetaCondition::Count { .. })
+            );
+            anyhow::ensure!(
+                if trigger_is_count {
+                    matches!(
+                        rule.correlation_mode,
+                        AlertPolicyCorrelationMode::Subject | AlertPolicyCorrelationMode::Global
+                    )
+                } else {
+                    rule.correlation_mode == AlertPolicyCorrelationMode::NaturalKey
+                        && rule
+                            .trigger_meta_condition
+                            .as_ref()
+                            .is_none_or(|meta| matches!(meta, AlertPolicyMetaCondition::Immediate))
+                },
+                "fleet_alert_policy_correlation_mode_invalid"
+            );
+            anyhow::ensure!(
+                !(rule.evidence_source == "job.terminal"
+                    && rule.correlation_mode == AlertPolicyCorrelationMode::Subject),
+                "fleet_alert_policy_subject_correlation_unavailable"
+            );
+            anyhow::ensure!(
+                rule.resolve_condition_expression.is_none()
+                    && matches!(
+                        rule.resolve_meta_condition,
+                        Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { .. })
+                    ),
+                "fleet_alert_policy_occurrence_resolution_invalid"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_meta_condition(
+    condition: Option<&AlertPolicyMetaCondition>,
+    allow_elapsed: bool,
+) -> Result<()> {
+    match condition {
+        None | Some(AlertPolicyMetaCondition::Immediate) => Ok(()),
+        Some(AlertPolicyMetaCondition::Sustained { seconds }) => {
+            anyhow::ensure!(
+                (1..=2_592_000).contains(seconds),
+                "fleet_alert_policy_sustained_seconds_invalid"
+            );
+            Ok(())
+        }
+        Some(AlertPolicyMetaCondition::Count {
+            confirmations,
+            within_seconds,
+        }) => {
+            anyhow::ensure!(
+                (1..=1000).contains(confirmations) && (1..=2_592_000).contains(within_seconds),
+                "fleet_alert_policy_count_invalid"
+            );
+            Ok(())
+        }
+        Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { seconds }) => {
+            anyhow::ensure!(
+                allow_elapsed && (1..=31_536_000).contains(seconds),
+                "fleet_alert_policy_elapsed_invalid"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn validate_policy_expression_for_source(
+    rule_kind: AlertPolicyRuleKind,
+    evidence_source: &str,
+    expression: &str,
+) -> Result<()> {
+    if rule_kind == AlertPolicyRuleKind::Metric {
+        parse_policy_trigger_condition_expression(expression)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!("fleet_alert_policy_condition_invalid: {error}"))
+    } else {
+        let parsed = vpsman_common::parse_expression(expression)
+            .map_err(|error| anyhow::anyhow!("fleet_alert_policy_condition_invalid: {error}"))?
+            .context("fleet_alert_policy_condition_invalid")?;
+        validate_policy_expression_fields(&parsed, evidence_source)
+    }
+}
+
+fn validate_policy_expression_fields(expression: &Expression, evidence_source: &str) -> Result<()> {
+    use vpsman_common::Predicate;
+    match expression {
+        Expression::Predicate(Predicate::Comparison { field, .. })
+        | Expression::Predicate(Predicate::Membership { field, .. }) => {
+            anyhow::ensure!(
+                policy_source_field_allowed(evidence_source, field),
+                "fleet_alert_policy_evidence_field_unsupported:{field}"
+            );
+            Ok(())
+        }
+        Expression::Predicate(_) => anyhow::bail!("fleet_alert_policy_predicate_unsupported"),
+        Expression::Not(inner) => validate_policy_expression_fields(inner, evidence_source),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            validate_policy_expression_fields(left, evidence_source)?;
+            validate_policy_expression_fields(right, evidence_source)
+        }
+    }
+}
+
+fn policy_source_field_allowed(evidence_source: &str, field: &str) -> bool {
+    let allowed: &[&str] = match evidence_source {
+        "agent.status" | "agent.access" => &["evidence.status"],
+        "tunnel.adapter" => &[
+            "evidence.adapter.success",
+            "evidence.interface",
+            "evidence.reason",
+        ],
+        "tunnel.traffic" => &[
+            "evidence.traffic.status",
+            "evidence.interface",
+            "evidence.reason",
+        ],
+        "job.terminal" => &[
+            "evidence.status",
+            "evidence.command_type",
+            "evidence.job_id",
+            "evidence.target_count",
+        ],
+        "backup.failure" => &[
+            "evidence.status",
+            "evidence.backup_request_id",
+            "evidence.client_id",
+        ],
+        "job.capability" => &[
+            "evidence.status",
+            "evidence.reason",
+            "evidence.hint",
+            "evidence.job_id",
+            "evidence.command_type",
+            "evidence.client_id",
+        ],
+        _ => &[],
+    };
+    allowed
+        .iter()
+        .any(|allowed| field.eq_ignore_ascii_case(allowed))
 }
 
 fn validate_name(value: &str, max_bytes: usize, field: &str) -> Result<()> {
@@ -7179,16 +6980,6 @@ fn policy_rule_from_request(
         request
             .id
             .and_then(|id| group.rules.iter().find(|rule| rule.id == id))
-            .or_else(|| {
-                if request.id.is_none() {
-                    group
-                        .rules
-                        .iter()
-                        .find(|rule| rule.sort_order == sort_order)
-                } else {
-                    None
-                }
-            })
     });
     let rule_version = existing_rule
         .map(|existing| {
@@ -7209,15 +7000,32 @@ fn policy_rule_from_request(
         sort_order,
         name: request.name.trim().to_string(),
         enabled: request.enabled,
+        rule_kind: request.rule_kind,
+        evidence_source: request.evidence_source.trim().to_string(),
+        correlation_mode: request.correlation_mode,
         traffic_selector: request
             .traffic_selector
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned),
-        condition_expression: request.condition_expression.trim().to_string(),
-        window_secs: request.window_secs,
+        trigger_condition_expression: request.trigger_condition_expression.trim().to_string(),
+        trigger_meta_condition: canonical_policy_meta(request.trigger_meta_condition.as_ref()),
+        resolve_condition_expression: clean_optional_text(
+            request.resolve_condition_expression.as_deref(),
+        ),
+        resolve_meta_condition: canonical_policy_meta(request.resolve_meta_condition.as_ref()),
         severity: request.severity.trim().to_string(),
+        category: request.category.trim().to_string(),
+        title_template: request.title_template.trim().to_string(),
+        detail_template: request.detail_template.trim().to_string(),
+        system_seed_key: existing_rule.and_then(|rule| rule.system_seed_key.clone()),
+        armed_after_evidence_seq: existing_rule
+            .map(|rule| rule.armed_after_evidence_seq)
+            .unwrap_or(0),
+        armed_at: existing_rule
+            .map(|rule| rule.armed_at.clone())
+            .unwrap_or_else(|| now.to_string()),
         created_at: existing_rule
             .map(|rule| rule.created_at.clone())
             .unwrap_or_else(|| now.to_string()),
@@ -7234,9 +7042,33 @@ fn policy_rule_material_matches(existing: &PolicyRuleRecord, request: &PolicyRul
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-        && existing.condition_expression == request.condition_expression.trim()
-        && existing.window_secs == request.window_secs
+        && existing.trigger_condition_expression == request.trigger_condition_expression.trim()
+        && existing.rule_kind == request.rule_kind
+        && existing.evidence_source == request.evidence_source.trim()
+        && existing.correlation_mode == request.correlation_mode
+        && existing.trigger_meta_condition
+            == canonical_policy_meta(request.trigger_meta_condition.as_ref())
+        && existing.resolve_condition_expression.as_deref()
+            == request
+                .resolve_condition_expression
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        && existing.resolve_meta_condition
+            == canonical_policy_meta(request.resolve_meta_condition.as_ref())
         && existing.severity == request.severity.trim()
+        && existing.category == request.category.trim()
+        && existing.title_template == request.title_template.trim()
+        && existing.detail_template == request.detail_template.trim()
+}
+
+fn canonical_policy_meta(
+    value: Option<&AlertPolicyMetaCondition>,
+) -> Option<AlertPolicyMetaCondition> {
+    match value {
+        None | Some(AlertPolicyMetaCondition::Immediate) => None,
+        Some(value) => Some(value.clone()),
+    }
 }
 
 fn evaluate_rule_for_client(
@@ -7245,7 +7077,8 @@ fn evaluate_rule_for_client(
     rollup: Option<&TelemetryRollupView>,
 ) -> PolicyEvaluation {
     let mut incomplete_reasons = Vec::new();
-    let parsed = match parse_policy_condition_expression(&rule.condition_expression) {
+    let parsed = match parse_policy_trigger_condition_expression(&rule.trigger_condition_expression)
+    {
         Ok(parsed) => parsed,
         Err(error) => {
             incomplete_reasons.push(format!("condition expression invalid: {error}"));
@@ -7265,7 +7098,7 @@ fn evaluate_rule_for_client(
         Err(error) => {
             incomplete_reasons.push(format!("condition expression invalid: {error}"));
             ConditionEvaluation {
-                condition_true: false,
+                truth: ExpressionTruth::Unknown,
                 actual_value: None,
                 threshold_value: None,
             }
@@ -7276,7 +7109,12 @@ fn evaluate_rule_for_client(
     } else {
         "resource"
     };
-    let condition_true = result.condition_true && incomplete_reasons.is_empty();
+    let condition_true = result.truth == ExpressionTruth::True;
+    if result.truth != ExpressionTruth::Unknown {
+        incomplete_reasons.clear();
+    } else if incomplete_reasons.is_empty() {
+        incomplete_reasons.push("condition evidence is incomplete".to_string());
+    }
     policy_evaluation_from_parts(
         condition_true,
         incomplete_reasons,
@@ -7380,7 +7218,7 @@ struct PolicyConditionExpression {
 
 #[derive(Clone, Debug)]
 struct ConditionEvaluation {
-    condition_true: bool,
+    truth: ExpressionTruth,
     actual_value: Option<f64>,
     threshold_value: Option<f64>,
 }
@@ -7404,7 +7242,9 @@ struct PolicyConditionParser {
     position: usize,
 }
 
-fn parse_policy_condition_expression(expression: &str) -> Result<PolicyConditionExpression> {
+fn parse_policy_trigger_condition_expression(
+    expression: &str,
+) -> Result<PolicyConditionExpression> {
     let tokens = tokenize_policy_condition(expression)?;
     anyhow::ensure!(!tokens.is_empty(), "condition expression is empty");
     let mut parser = PolicyConditionParser {
@@ -7421,13 +7261,167 @@ fn parse_policy_condition_expression(expression: &str) -> Result<PolicyCondition
 }
 
 fn policy_condition_uses_traffic(expression: &str) -> Result<bool> {
-    Ok(parse_policy_condition_expression(expression)?.uses_traffic)
+    Ok(parse_policy_trigger_condition_expression(expression)?.uses_traffic)
+}
+
+/// Canonical runtime evaluator for persisted metric-policy evidence. Save,
+/// preview, source evaluation, and timer rechecks all parse the same arithmetic
+/// AST; missing/null/non-numeric evidence is Kleene Unknown.
+pub(crate) fn metric_policy_expression_truth(
+    expression: &str,
+    evidence: &Value,
+    complete: bool,
+) -> Result<ExpressionTruth> {
+    if !complete {
+        return Ok(ExpressionTruth::Unknown);
+    }
+    let expression = parse_policy_trigger_condition_expression(expression)?;
+    evaluate_metric_condition_node(&expression.root, evidence)
+}
+
+fn evaluate_metric_condition_node(
+    node: &PolicyConditionNode,
+    evidence: &Value,
+) -> Result<ExpressionTruth> {
+    Ok(match node {
+        PolicyConditionNode::Not(inner) => match evaluate_metric_condition_node(inner, evidence)? {
+            ExpressionTruth::True => ExpressionTruth::False,
+            ExpressionTruth::False => ExpressionTruth::True,
+            ExpressionTruth::Unknown => ExpressionTruth::Unknown,
+        },
+        PolicyConditionNode::And(left, right) => match (
+            evaluate_metric_condition_node(left, evidence)?,
+            evaluate_metric_condition_node(right, evidence)?,
+        ) {
+            (ExpressionTruth::False, _) | (_, ExpressionTruth::False) => ExpressionTruth::False,
+            (ExpressionTruth::True, ExpressionTruth::True) => ExpressionTruth::True,
+            _ => ExpressionTruth::Unknown,
+        },
+        PolicyConditionNode::Or(left, right) => match (
+            evaluate_metric_condition_node(left, evidence)?,
+            evaluate_metric_condition_node(right, evidence)?,
+        ) {
+            (ExpressionTruth::True, _) | (_, ExpressionTruth::True) => ExpressionTruth::True,
+            (ExpressionTruth::False, ExpressionTruth::False) => ExpressionTruth::False,
+            _ => ExpressionTruth::Unknown,
+        },
+        PolicyConditionNode::Comparison {
+            left,
+            operator,
+            right,
+        } => match (
+            evaluate_metric_numeric_node(left, evidence)?,
+            evaluate_metric_numeric_node(right, evidence)?,
+        ) {
+            (Some(left), Some(right)) => {
+                if compare_policy_values(left, right, *operator) {
+                    ExpressionTruth::True
+                } else {
+                    ExpressionTruth::False
+                }
+            }
+            _ => ExpressionTruth::Unknown,
+        },
+    })
+}
+
+fn evaluate_metric_numeric_node(node: &PolicyNumericNode, evidence: &Value) -> Result<Option<f64>> {
+    let value = match node {
+        PolicyNumericNode::Number(value) => Some(*value),
+        PolicyNumericNode::Identifier(identifier) => metric_evidence_number(evidence, identifier),
+        PolicyNumericNode::Unary { operator, operand } => {
+            evaluate_metric_numeric_node(operand, evidence)?.map(|value| match operator {
+                ArithmeticOperator::UnaryPlus => value,
+                ArithmeticOperator::UnaryMinus => -value,
+                _ => value,
+            })
+        }
+        PolicyNumericNode::Binary {
+            left,
+            operator,
+            right,
+        } => match (
+            evaluate_metric_numeric_node(left, evidence)?,
+            evaluate_metric_numeric_node(right, evidence)?,
+        ) {
+            (Some(left), Some(right)) => {
+                let result = match operator {
+                    ArithmeticOperator::Add => left + right,
+                    ArithmeticOperator::Subtract => left - right,
+                    ArithmeticOperator::Multiply => left * right,
+                    ArithmeticOperator::Divide => {
+                        anyhow::ensure!(right != 0.0, "condition division by zero");
+                        left / right
+                    }
+                    ArithmeticOperator::UnaryPlus | ArithmeticOperator::UnaryMinus => {
+                        anyhow::bail!("invalid unary operator placement")
+                    }
+                };
+                anyhow::ensure!(
+                    result.is_finite(),
+                    "condition numeric result must be finite"
+                );
+                Some(result)
+            }
+            _ => None,
+        },
+    };
+    Ok(value)
+}
+
+fn metric_evidence_number(evidence: &Value, path: &str) -> Option<f64> {
+    path.split('.')
+        .try_fold(evidence, |value, segment| value.get(segment))?
+        .as_f64()
+        .filter(|value| value.is_finite())
 }
 
 fn policy_rule_category(rule: &PolicyRuleRequest) -> String {
-    match parse_policy_condition_expression(&rule.condition_expression) {
-        Ok(parsed) if parsed.uses_traffic => "traffic".to_string(),
-        _ => "resource".to_string(),
+    rule.category.clone()
+}
+
+fn policy_rule_kind_storage(kind: AlertPolicyRuleKind) -> &'static str {
+    match kind {
+        AlertPolicyRuleKind::Metric => "metric",
+        AlertPolicyRuleKind::State => "state",
+        AlertPolicyRuleKind::Occurrence => "occurrence",
+    }
+}
+
+fn policy_correlation_mode_storage(mode: AlertPolicyCorrelationMode) -> &'static str {
+    match mode {
+        AlertPolicyCorrelationMode::NaturalKey => "natural_key",
+        AlertPolicyCorrelationMode::Subject => "subject",
+        AlertPolicyCorrelationMode::Global => "global",
+    }
+}
+
+fn trigger_sustained_seconds(condition: &Option<AlertPolicyMetaCondition>) -> Option<i64> {
+    match condition {
+        Some(AlertPolicyMetaCondition::Sustained { seconds }) => Some(*seconds),
+        _ => None,
+    }
+}
+
+fn normalized_meta_condition_payload(condition: Option<&AlertPolicyMetaCondition>) -> Value {
+    match condition {
+        None | Some(AlertPolicyMetaCondition::Immediate) => {
+            json!({"kind": "immediate", "window_seconds": 0})
+        }
+        Some(AlertPolicyMetaCondition::Sustained { seconds }) => {
+            json!({"kind": "sustained", "window_seconds": seconds})
+        }
+        Some(AlertPolicyMetaCondition::Count {
+            confirmations,
+            within_seconds,
+        }) => json!({
+            "kind": "count",
+            "confirmations": confirmations,
+            "window_seconds": within_seconds,
+        }),
+        Some(AlertPolicyMetaCondition::ElapsedSinceTrigger { seconds }) => {
+            json!({"kind": "elapsed_since_trigger", "window_seconds": seconds})
+        }
     }
 }
 
@@ -7438,7 +7432,7 @@ fn evaluate_policy_condition(
     incomplete: &mut Vec<String>,
 ) -> Result<ConditionEvaluation> {
     let mut first_pair = None;
-    let condition_true = evaluate_condition_node(
+    let truth = evaluate_condition_node(
         &expression.root,
         traffic,
         rollup,
@@ -7447,7 +7441,7 @@ fn evaluate_policy_condition(
     )?;
     let (actual_value, threshold_value) = first_pair.unwrap_or((None, None));
     Ok(ConditionEvaluation {
-        condition_true,
+        truth,
         actual_value,
         threshold_value,
     })
@@ -7459,24 +7453,36 @@ fn evaluate_condition_node(
     rollup: Option<&TelemetryRollupView>,
     incomplete: &mut Vec<String>,
     first_pair: &mut Option<(Option<f64>, Option<f64>)>,
-) -> Result<bool> {
+) -> Result<ExpressionTruth> {
     match node {
-        PolicyConditionNode::Not(inner) => Ok(!evaluate_condition_node(
-            inner, traffic, rollup, incomplete, first_pair,
-        )?),
+        PolicyConditionNode::Not(inner) => Ok(
+            match evaluate_condition_node(inner, traffic, rollup, incomplete, first_pair)? {
+                ExpressionTruth::True => ExpressionTruth::False,
+                ExpressionTruth::False => ExpressionTruth::True,
+                ExpressionTruth::Unknown => ExpressionTruth::Unknown,
+            },
+        ),
         PolicyConditionNode::And(left, right) => {
             let left_value =
                 evaluate_condition_node(left, traffic, rollup, incomplete, first_pair)?;
             let right_value =
                 evaluate_condition_node(right, traffic, rollup, incomplete, first_pair)?;
-            Ok(left_value && right_value)
+            Ok(match (left_value, right_value) {
+                (ExpressionTruth::False, _) | (_, ExpressionTruth::False) => ExpressionTruth::False,
+                (ExpressionTruth::True, ExpressionTruth::True) => ExpressionTruth::True,
+                _ => ExpressionTruth::Unknown,
+            })
         }
         PolicyConditionNode::Or(left, right) => {
             let left_value =
                 evaluate_condition_node(left, traffic, rollup, incomplete, first_pair)?;
             let right_value =
                 evaluate_condition_node(right, traffic, rollup, incomplete, first_pair)?;
-            Ok(left_value || right_value)
+            Ok(match (left_value, right_value) {
+                (ExpressionTruth::True, _) | (_, ExpressionTruth::True) => ExpressionTruth::True,
+                (ExpressionTruth::False, ExpressionTruth::False) => ExpressionTruth::False,
+                _ => ExpressionTruth::Unknown,
+            })
         }
         PolicyConditionNode::Comparison {
             left,
@@ -7490,8 +7496,14 @@ fn evaluate_condition_node(
             }
             Ok(left_value
                 .zip(right_value)
-                .map(|(left, right)| compare_policy_values(left, right, *operator))
-                .unwrap_or(false))
+                .map(|(left, right)| {
+                    if compare_policy_values(left, right, *operator) {
+                        ExpressionTruth::True
+                    } else {
+                        ExpressionTruth::False
+                    }
+                })
+                .unwrap_or(ExpressionTruth::Unknown))
         }
     }
 }
@@ -8072,6 +8084,18 @@ fn policy_group_from_row(
 }
 
 fn policy_rule_from_row(row: sqlx::postgres::PgRow) -> Result<PolicyRuleRecord> {
+    let rule_kind = match row.try_get::<String, _>("rule_kind")?.as_str() {
+        "metric" => AlertPolicyRuleKind::Metric,
+        "state" => AlertPolicyRuleKind::State,
+        "occurrence" => AlertPolicyRuleKind::Occurrence,
+        value => anyhow::bail!("invalid alert policy rule kind: {value}"),
+    };
+    let correlation_mode = match row.try_get::<String, _>("correlation_mode")?.as_str() {
+        "natural_key" => AlertPolicyCorrelationMode::NaturalKey,
+        "subject" => AlertPolicyCorrelationMode::Subject,
+        "global" => AlertPolicyCorrelationMode::Global,
+        value => anyhow::bail!("invalid alert policy correlation mode: {value}"),
+    };
     Ok(PolicyRuleRecord {
         id: row.try_get("id")?,
         group_id: row.try_get("group_id")?,
@@ -8079,10 +8103,25 @@ fn policy_rule_from_row(row: sqlx::postgres::PgRow) -> Result<PolicyRuleRecord> 
         sort_order: row.try_get("sort_order")?,
         name: row.try_get("name")?,
         enabled: row.try_get("enabled")?,
+        rule_kind,
+        evidence_source: row.try_get("evidence_source")?,
+        correlation_mode,
         traffic_selector: row.try_get("traffic_selector")?,
-        condition_expression: row.try_get("condition_expression")?,
-        window_secs: row.try_get("window_secs")?,
+        trigger_condition_expression: row.try_get("trigger_condition_expression")?,
+        trigger_meta_condition: row
+            .try_get::<Option<SqlJson<AlertPolicyMetaCondition>>, _>("trigger_meta_condition")?
+            .map(|value| value.0),
+        resolve_condition_expression: row.try_get("resolve_condition_expression")?,
+        resolve_meta_condition: row
+            .try_get::<Option<SqlJson<AlertPolicyMetaCondition>>, _>("resolve_meta_condition")?
+            .map(|value| value.0),
         severity: row.try_get("severity")?,
+        category: row.try_get("category")?,
+        title_template: row.try_get("title_template")?,
+        detail_template: row.try_get("detail_template")?,
+        system_seed_key: row.try_get("system_seed_key")?,
+        armed_after_evidence_seq: row.try_get("armed_after_evidence_seq")?,
+        armed_at: row.try_get("armed_at")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -8131,6 +8170,113 @@ fn policy_alert_from_row(row: sqlx::postgres::PgRow) -> Result<PolicyAlertRecord
         observed_at: row.try_get("observed_at")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn list_unified_policy_alerts_postgres(
+    pool: &sqlx::PgPool,
+    query: &PolicyAlertQuery,
+    result_limit: Option<usize>,
+    prioritize_severity: bool,
+    selection_mode: PolicyAlertSelectionMode,
+    allowed_client_ids: Option<&[String]>,
+    start_unix: Option<u64>,
+    end_unix: Option<u64>,
+    operator_state: Option<&str>,
+    include_muted: bool,
+    notification_rules: Option<&[FleetAlertNotificationMatchRule]>,
+) -> Result<Vec<PolicyAlertRecord>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            e.id, e.policy_group_id, e.policy_rule_id, e.client_id,
+            e.trigger_generation, e.severity, e.category, e.title, e.detail,
+            NULLIF(e.evidence #>> '{source,actual_value}', '')::double precision
+                AS actual_value,
+            NULLIF(e.evidence #>> '{source,threshold_value}', '')::double precision
+                AS threshold_value,
+            e.evidence AS payload, e.lifecycle_state,
+            e.last_confirmed_at::text AS last_confirmed_at,
+            e.resolved_at::text AS resolved_at, e.resolution_reason,
+            COALESCE(e.last_confirmed_at,e.triggered_at)::text AS observed_at,
+            e.created_at::text AS created_at
+        FROM alert_episodes e
+        LEFT JOIN fleet_alert_states triage ON triage.alert_id=e.public_id
+        WHERE e.policy_rule_id IS NOT NULL AND e.client_id IS NOT NULL
+          AND ($2::text IS NULL OR e.client_id=$2)
+          AND ($14::boolean OR EXISTS (
+              SELECT 1 FROM visible_clients visible WHERE visible.id=e.client_id
+          ))
+          AND ($3::text IS NULL OR e.severity=$3)
+          AND ($4::text IS NULL OR e.category=$4)
+          AND ($5::uuid IS NULL OR e.policy_group_id=$5)
+          AND ($6::text[] IS NULL OR e.client_id=ANY($6))
+          AND ($7::double precision IS NULL OR e.triggered_at>=to_timestamp($7))
+          AND ($8::double precision IS NULL OR e.triggered_at<=to_timestamp($8))
+          AND ($14::boolean OR (
+              e.resolved_at IS NULL AND e.last_confirmed_at IS NOT NULL
+          ))
+          AND ($9::boolean=FALSE OR (
+              e.lifecycle_state IN ('triggered','persisting')
+              AND e.last_confirmed_at IS NOT NULL
+          ))
+          AND (
+            $10::text IS NULL OR CASE
+              WHEN triage.state='muted' AND triage.muted_until_unix IS NOT NULL
+                   AND triage.muted_until_unix <= $12 THEN 'open'
+              ELSE COALESCE(triage.state,'open') END = $10
+          )
+          AND (
+            $11::boolean OR CASE
+              WHEN triage.state='muted' AND triage.muted_until_unix IS NOT NULL
+                   AND triage.muted_until_unix <= $12 THEN 'open'
+              ELSE COALESCE(triage.state,'open') END <> 'muted'
+          )
+          AND (
+            $13::jsonb IS NULL OR EXISTS (
+              SELECT 1 FROM jsonb_array_elements($13::jsonb) rule
+              WHERE CASE e.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1
+                        WHEN 'info' THEN 2 ELSE 3 END
+                    <= (rule->>'min_severity_rank')::integer
+                AND (jsonb_array_length(rule->'categories')=0
+                     OR rule->'categories' ? e.category)
+                AND (jsonb_array_length(rule->'operator_states')=0
+                     OR rule->'operator_states' ? CASE
+                       WHEN triage.state='muted' AND triage.muted_until_unix IS NOT NULL
+                            AND triage.muted_until_unix <= $12 THEN 'open'
+                       ELSE COALESCE(triage.state,'open') END)
+                AND (rule->'client_ids'='null'::jsonb
+                     OR rule->'client_ids' ? e.client_id)
+            )
+          )
+        ORDER BY
+          CASE WHEN $15::boolean AND e.lifecycle_state IN ('triggered','persisting')
+               THEN 0 ELSE 1 END,
+          CASE WHEN $15::boolean THEN CASE e.severity
+               WHEN 'critical' THEN 0 WHEN 'warning' THEN 1
+               WHEN 'info' THEN 2 ELSE 3 END ELSE 0 END,
+          e.triggered_at DESC, e.id DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(result_limit.map(|value| value as i64))
+    .bind(query.client_id.as_deref())
+    .bind(query.severity.as_deref())
+    .bind(query.category.as_deref())
+    .bind(query.policy_group_id)
+    .bind(allowed_client_ids)
+    .bind(start_unix.map(|value| value as f64))
+    .bind(end_unix.map(|value| value as f64))
+    .bind(selection_mode == PolicyAlertSelectionMode::ConfirmedActive)
+    .bind(operator_state)
+    .bind(include_muted)
+    .bind(crate::unix_now() as i64)
+    .bind(notification_rules.map(serde_json::to_value).transpose()?)
+    .bind(selection_mode == PolicyAlertSelectionMode::History)
+    .bind(prioritize_severity)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(policy_alert_from_row).collect()
 }
 
 fn policy_group_audit(
@@ -8191,6 +8337,7 @@ fn vps_rules_audit(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn policy_alert_to_fleet_alert(alert: &PolicyAlertRecord) -> FleetAlertView {
     let mut evidence = alert.payload.clone();
     if let Some(object) = evidence.as_object_mut() {

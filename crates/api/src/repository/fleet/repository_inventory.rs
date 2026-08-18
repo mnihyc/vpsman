@@ -636,6 +636,11 @@ impl Repository {
                 .bind(tag)
                 .execute(&mut *tx)
                 .await?;
+                crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                )
+                .await?;
                 tx.commit().await?;
                 let display_order: i64 =
                     sqlx::query_scalar("SELECT display_order FROM tags WHERE name = $1")
@@ -800,6 +805,13 @@ impl Repository {
                         }
                     }
                 }
+                if changed > 0 {
+                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                        &mut tx,
+                        &target_client_ids,
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 let changed = changed as usize;
                 if changed > 0 {
@@ -895,6 +907,17 @@ impl Repository {
                     .bind(tag)
                     .execute(&mut *tx)
                     .await?;
+                if result.rows_affected() > 0 {
+                    let affected_client_ids = affected
+                        .iter()
+                        .map(|agent| agent.id.clone())
+                        .collect::<Vec<_>>();
+                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                        &mut tx,
+                        &affected_client_ids,
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 let changed = if result.rows_affected() > 0 {
                     affected.len()

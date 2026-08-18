@@ -27,7 +27,7 @@ const baseAlert: FleetAlertRecord = {
   state_actor_id: null,
   state_reason: null,
   state_updated_at: null,
-  status: "policy_reached",
+  status: "policy_condition",
   target_id: "fixture-policy-rule-01",
   target_kind: "policy_rule",
   title: "Fixture policy condition",
@@ -77,6 +77,16 @@ test("presents lifecycle and operator triage as independent state machines", () 
     resolvableIncident: false,
   });
 
+  const hysteresisRecovered = withLifecycle({
+    resolution_reason: "recovery_expression_matched",
+    resolved_at: "2026-08-18T10:02:00Z",
+    state: "resolved",
+  });
+  expect(presentFleetAlert(hysteresisRecovered)).toMatchObject({
+    current: false,
+    malformed: false,
+  });
+
   const occurrence: FleetAlertRecord = {
     ...baseAlert,
     id: "operational-alert:fixture-event-01",
@@ -107,6 +117,36 @@ test("presents lifecycle and operator triage as independent state machines", () 
     active: false,
     current: false,
     lifecycleLabel: "Resolved",
+    malformed: false,
+    resolvableIncident: false,
+  });
+
+  const elapsed: FleetAlertRecord = {
+    ...occurrence,
+    lifecycle: {
+      ...occurrence.lifecycle,
+      resolution_reason: "policy_time_elapsed",
+      resolved_at: "2026-08-25T10:00:00Z",
+      state: "resolved",
+    },
+  };
+  expect(presentFleetAlert(elapsed)).toMatchObject({
+    current: false,
+    malformed: false,
+    resolvableIncident: false,
+  });
+
+  const deletedByPolicy: FleetAlertRecord = {
+    ...occurrence,
+    lifecycle: {
+      ...occurrence.lifecycle,
+      resolution_reason: "policy_deleted",
+      resolved_at: "2026-08-18T10:03:00Z",
+      state: "resolved",
+    },
+  };
+  expect(presentFleetAlert(deletedByPolicy)).toMatchObject({
+    current: false,
     malformed: false,
     resolvableIncident: false,
   });
@@ -177,6 +217,19 @@ test("fails closed for impossible lifecycle shape, causality, or provenance", ()
     {
       ...withLifecycle({
         resolution_reason: "condition_recovered",
+        resolved_at: "2026-08-18T10:02:00Z",
+        state: "resolved",
+      }),
+      record_kind: "event",
+    },
+    withLifecycle({
+      resolution_reason: "policy_time_elapsed",
+      resolved_at: "2026-08-18T10:02:00Z",
+      state: "resolved",
+    }),
+    {
+      ...withLifecycle({
+        resolution_reason: "recovery_expression_matched",
         resolved_at: "2026-08-18T10:02:00Z",
         state: "resolved",
       }),

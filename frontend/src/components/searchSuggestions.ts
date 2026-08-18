@@ -159,18 +159,14 @@ function collectEventTerm(events: string[], rawTerm: string) {
     term.startsWith("schedule.name:") ||
     term.startsWith("alert.severity:") ||
     term.startsWith("alert.category:") ||
-    term.startsWith("alert.state:") ||
     [
       "server.on_start",
       "schedule.due",
-      "schedule.dispatched",
+      "schedule.job_finished",
       "schedule.failed",
       "vps.tag_changed",
       "job.created",
-      "alert.open",
-      "alert.policy_triggered",
-      "alert.policy_resolved",
-      "alert.policy_reached",
+      "alert.triggered",
       "alert.resolved",
       "telemetry.rollup",
       "telemetry.network_rate",

@@ -1,8 +1,11 @@
 use super::*;
 use crate::test_support::PgWorkerTestDb;
+use serde_json::{json, Value};
+use sqlx::{types::Json as SqlJson, PgPool, Row};
+use uuid::Uuid;
 
 #[tokio::test]
-async fn postgres_offline_transition_persists_edges_and_marks_tunnels_unknown() {
+async fn postgres_offline_transition_records_neutral_policy_evidence() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
@@ -61,187 +64,242 @@ async fn postgres_offline_transition_persists_edges_and_marks_tunnels_unknown() 
     .unwrap();
     let runtime_identity =
         vpsman_common::tunnel_runtime_evidence_identity_hash(plan_id, &plan, None);
-    let tunnel_episode_id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        INSERT INTO operational_alert_episodes (
-            id, public_id, producer_kind, natural_key, record_kind,
-            trigger_generation, trigger_severity, trigger_category,
-            severity, category, target_kind, target_id, client_id,
-            title, detail, source_status, evidence, lifecycle_state,
-            triggered_at, last_confirmed_at
-        ) VALUES (
-            $1, $2, 'tunnel_traffic', $3, 'condition',
-            1, 'warning', 'network', 'warning', 'network', 'tunnel',
-            'edge-offline:gre-offline', 'edge-offline',
-            'Tunnel interface counters are degraded', 'counter read failed',
-            'tunnel_traffic_degraded', '{}'::jsonb, 'triggered',
-            clock_timestamp(), clock_timestamp()
-        )
-        "#,
-    )
-    .bind(tunnel_episode_id)
-    .bind(format!("operational-alert:{tunnel_episode_id}"))
-    .bind(format!("{plan_id}:{runtime_identity}:left"))
-    .execute(&db.pool)
-    .await
-    .unwrap();
-    let retained_episode_id = Uuid::new_v4();
-    let retained_public_id = "network:tunnel:retained-worker";
-    sqlx::query(
-        r#"
-        INSERT INTO operational_alert_episodes (
-            id, public_id, producer_kind, natural_key, record_kind,
-            trigger_generation, trigger_severity, trigger_category,
-            severity, category, target_kind, target_id, client_id,
-            title, detail, source_status, evidence, lifecycle_state,
-            triggered_at, last_confirmed_at, backfilled
-        ) VALUES (
-            $1, $2, 'tunnel_adapter', $3, 'condition',
-            1, 'critical', 'network', 'critical', 'network', 'tunnel',
-            'edge-offline:gre-offline', 'edge-offline',
-            'Tunnel adapter status failed', 'retained adapter failure',
-            'tunnel_adapter_degraded',
-            '{"retain_unknown_backfill":true,"status_boundary_at":"2000-01-01T00:00:00Z","runtime_boundary_at":"2000-01-01T00:00:00Z"}'::jsonb,
-            'unknown', '2000-01-01T00:00:00Z', '2000-01-01T00:00:00Z', TRUE
-        )
-        "#,
-    )
-    .bind(retained_episode_id)
-    .bind(retained_public_id)
-    .bind(format!("{plan_id}:{runtime_identity}:left"))
-    .execute(&db.pool)
-    .await
-    .unwrap();
 
     assert_eq!(detect_offline_agents(&db.pool, 60).await.unwrap(), 1);
-    let agent = sqlx::query(
+    let agent_status = sqlx::query(
         r#"
-        SELECT id, lifecycle_state, trigger_generation, source_status
-        FROM operational_alert_episodes
-        WHERE producer_kind = 'agent_status' AND client_id = 'edge-offline'
-          AND resolved_at IS NULL
+        SELECT evidence_seq, source_event_id, observed_at, fact_kind, natural_key, confirmation_bucket_key,
+               subject_client_id, target_kind, target_id, source_status,
+               completeness, subject_snapshot, payload,
+               state_started_at = observed_at AS state_boundary_matches
+        FROM alert_policy_evidence
+        WHERE source_kind = 'agent.status'
+          AND natural_key = 'edge-offline:connectivity'
         "#,
     )
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    let agent_episode_id: Uuid = agent.try_get("id").unwrap();
     assert_eq!(
-        agent.try_get::<String, _>("lifecycle_state").unwrap(),
-        "triggered"
+        agent_status.try_get::<String, _>("fact_kind").unwrap(),
+        "state"
     );
-    assert_eq!(agent.try_get::<i64, _>("trigger_generation").unwrap(), 1);
     assert_eq!(
-        agent.try_get::<String, _>("source_status").unwrap(),
+        agent_status.try_get::<String, _>("natural_key").unwrap(),
+        "edge-offline:connectivity"
+    );
+    assert_eq!(
+        agent_status
+            .try_get::<String, _>("confirmation_bucket_key")
+            .unwrap(),
+        "edge-offline:connectivity"
+    );
+    assert_eq!(
+        agent_status
+            .try_get::<Option<String>, _>("subject_client_id")
+            .unwrap()
+            .as_deref(),
+        Some("edge-offline")
+    );
+    assert_eq!(
+        agent_status.try_get::<String, _>("target_kind").unwrap(),
+        "agent"
+    );
+    assert_eq!(
+        agent_status.try_get::<String, _>("target_id").unwrap(),
+        "edge-offline"
+    );
+    assert_eq!(
+        agent_status.try_get::<String, _>("source_status").unwrap(),
         "offline"
     );
+    assert_eq!(
+        agent_status.try_get::<String, _>("completeness").unwrap(),
+        "complete"
+    );
+    assert!(agent_status
+        .try_get::<bool, _>("state_boundary_matches")
+        .unwrap());
+    let agent_subject: Value = agent_status.try_get("subject_snapshot").unwrap();
+    assert_eq!(agent_subject["client_id"], "edge-offline");
+    assert_eq!(agent_subject["display_name"], "edge-offline");
+    assert_eq!(agent_subject["status"], "offline");
+    assert_eq!(agent_subject["tags"], json!([]));
+    assert_eq!(agent_subject["scope_complete"], true);
+    let agent_payload: Value = agent_status.try_get("payload").unwrap();
+    assert_eq!(agent_payload["status"], "offline");
+    assert_eq!(agent_payload["source_status"], "offline");
+    assert_eq!(agent_payload["client_id"], "edge-offline");
+    assert_eq!(
+        agent_payload["reason"],
+        "edge-offline currently reports offline"
+    );
+    let status_boundary = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+        "SELECT operational_alert_status_at FROM clients WHERE id='edge-offline'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        agent_status
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("observed_at")
+            .unwrap(),
+        status_boundary
+    );
+    assert_eq!(
+        agent_status
+            .try_get::<String, _>("source_event_id")
+            .unwrap(),
+        vpsman_common::alert_policy_state_source_event_id(
+            "agent.status",
+            "edge-offline:connectivity",
+            status_boundary.timestamp_nanos_opt().unwrap(),
+            &agent_payload,
+        )
+    );
+    let offline_agent_status_seq = agent_status.try_get::<i64, _>("evidence_seq").unwrap();
 
-    let tunnel = sqlx::query(
+    let agent_access = sqlx::query(
         r#"
-        SELECT lifecycle_state, source_status, evidence
-        FROM operational_alert_episodes
-        WHERE id = $1
+        SELECT fact_kind, subject_client_id, target_kind, target_id,
+               source_status, completeness, subject_snapshot, payload,
+               state_started_at = observed_at AS state_boundary_matches
+        FROM alert_policy_evidence
+        WHERE source_kind = 'agent.access'
+          AND natural_key = 'edge-offline:access'
         "#,
     )
-    .bind(tunnel_episode_id)
     .fetch_one(&db.pool)
     .await
     .unwrap();
     assert_eq!(
-        tunnel.try_get::<String, _>("lifecycle_state").unwrap(),
-        "unknown"
+        agent_access.try_get::<String, _>("fact_kind").unwrap(),
+        "state"
     );
     assert_eq!(
-        tunnel.try_get::<String, _>("source_status").unwrap(),
-        "tunnel_traffic_evidence_missing"
-    );
-    let tunnel_evidence: Value = tunnel.try_get("evidence").unwrap();
-    assert!(tunnel_evidence["status_boundary_at"].is_string());
-    assert_eq!(
-        tunnel_evidence["topology_identity_validation"],
-        "unavailable"
-    );
-    let retained = sqlx::query(
-        r#"
-        SELECT public_id, lifecycle_state, title, detail, source_status, evidence
-        FROM operational_alert_episodes
-        WHERE id = $1
-        "#,
-    )
-    .bind(retained_episode_id)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        retained.try_get::<String, _>("public_id").unwrap(),
-        retained_public_id
+        agent_access
+            .try_get::<Option<String>, _>("subject_client_id")
+            .unwrap()
+            .as_deref(),
+        Some("edge-offline")
     );
     assert_eq!(
-        retained.try_get::<String, _>("lifecycle_state").unwrap(),
-        "unknown"
+        agent_access.try_get::<String, _>("target_kind").unwrap(),
+        "agent"
     );
     assert_eq!(
-        retained.try_get::<String, _>("title").unwrap(),
-        "Tunnel adapter status failed"
+        agent_access.try_get::<String, _>("target_id").unwrap(),
+        "edge-offline"
     );
     assert_eq!(
-        retained.try_get::<String, _>("detail").unwrap(),
-        "retained adapter failure"
+        agent_access.try_get::<String, _>("source_status").unwrap(),
+        "offline"
     );
     assert_eq!(
-        retained.try_get::<String, _>("source_status").unwrap(),
-        "tunnel_adapter_degraded"
+        agent_access.try_get::<String, _>("completeness").unwrap(),
+        "complete"
     );
-    let retained_evidence: Value = retained.try_get("evidence").unwrap();
-    assert_eq!(retained_evidence["retain_unknown_backfill"], true);
-    assert_ne!(
-        retained_evidence["status_boundary_at"],
-        "2000-01-01T00:00:00Z"
-    );
-    assert_ne!(
-        retained_evidence["runtime_boundary_at"],
-        "2000-01-01T00:00:00Z"
-    );
+    assert!(agent_access
+        .try_get::<bool, _>("state_boundary_matches")
+        .unwrap());
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE event_id LIKE $1",)
-            .bind(format!("fleet-alert:{retained_episode_id}:%"))
-            .fetch_one(&db.pool)
-            .await
+        agent_access
+            .try_get::<Value, _>("subject_snapshot")
             .unwrap(),
-        0,
-        "marking retained tunnel evidence Unknown must not synthesize an edge"
+        agent_subject
+    );
+    let access_payload: Value = agent_access.try_get("payload").unwrap();
+    assert_eq!(access_payload["status"], "offline");
+    assert_eq!(access_payload["source_status"], "offline");
+    assert_eq!(access_payload["client_id"], "edge-offline");
+    assert_eq!(
+        access_payload["reason"],
+        "edge-offline cannot reconnect until an operator assigns a new key"
     );
 
-    let trigger = lifecycle_event(&db.pool, agent_episode_id, "triggered").await;
-    assert_eq!(trigger["alert"]["producer_kind"], "agent_status");
-    assert_eq!(trigger["alert"]["lifecycle_state"], "triggered");
-    assert_eq!(trigger["alert"]["trigger_generation"], 1);
-    assert_eq!(trigger["alert"]["source_status"], "offline");
-    let trigger_contract = sqlx::query(
-        "SELECT event_predicates, subject_client_ids FROM webhook_events WHERE event_id = $1",
-    )
-    .bind(format!("fleet-alert:{agent_episode_id}:triggered"))
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        trigger_contract
-            .try_get::<Vec<String>, _>("event_predicates")
-            .unwrap(),
-        vec![
-            "alert.category:agent_status",
-            "alert.open",
-            "alert.severity:critical",
-            "alert.triggered",
-        ]
-    );
-    assert_eq!(
-        trigger_contract
-            .try_get::<Vec<String>, _>("subject_client_ids")
-            .unwrap(),
-        vec!["edge-offline"]
-    );
+    let tunnel_natural_key = format!("{plan_id}:{runtime_identity}:left");
+    for (source_kind, expected_source_status) in [
+        ("tunnel.adapter", "tunnel_adapter_evidence_missing"),
+        ("tunnel.traffic", "tunnel_traffic_evidence_missing"),
+    ] {
+        let evidence = sqlx::query(
+            r#"
+            SELECT fact_kind, natural_key, confirmation_bucket_key,
+                   subject_client_id, target_kind, target_id, source_status,
+                   completeness, subject_snapshot, payload,
+                   state_started_at = observed_at AS state_boundary_matches
+            FROM alert_policy_evidence
+            WHERE source_kind = $1 AND natural_key = $2
+            "#,
+        )
+        .bind(source_kind)
+        .bind(&tunnel_natural_key)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(evidence.try_get::<String, _>("fact_kind").unwrap(), "state");
+        assert_eq!(
+            evidence.try_get::<String, _>("natural_key").unwrap(),
+            tunnel_natural_key
+        );
+        assert_eq!(
+            evidence
+                .try_get::<String, _>("confirmation_bucket_key")
+                .unwrap(),
+            tunnel_natural_key
+        );
+        assert_eq!(
+            evidence
+                .try_get::<Option<String>, _>("subject_client_id")
+                .unwrap()
+                .as_deref(),
+            Some("edge-offline")
+        );
+        assert_eq!(
+            evidence.try_get::<String, _>("target_kind").unwrap(),
+            "tunnel"
+        );
+        assert_eq!(
+            evidence.try_get::<String, _>("target_id").unwrap(),
+            "edge-offline:gre-offline"
+        );
+        assert_eq!(
+            evidence.try_get::<String, _>("source_status").unwrap(),
+            expected_source_status
+        );
+        assert_eq!(
+            evidence.try_get::<String, _>("completeness").unwrap(),
+            "unknown"
+        );
+        assert!(evidence
+            .try_get::<bool, _>("state_boundary_matches")
+            .unwrap());
+        assert_eq!(
+            evidence.try_get::<Value, _>("subject_snapshot").unwrap(),
+            agent_subject
+        );
+
+        let payload: Value = evidence.try_get("payload").unwrap();
+        assert_eq!(payload["status"], expected_source_status);
+        assert_eq!(payload["source_status"], expected_source_status);
+        assert_eq!(payload["client_id"], "edge-offline");
+        assert_eq!(payload["interface"], "gre-offline");
+        assert_eq!(payload["plan"]["interface"], "gre-offline");
+        assert!(payload["status_boundary_at"].is_string());
+        assert!(payload["runtime_boundary_at"].is_string());
+        assert_eq!(payload["topology_identity_validation"], "unavailable");
+        match source_kind {
+            "tunnel.adapter" => {
+                assert!(payload["adapter"].is_null());
+                assert!(payload["adapter_health"].is_null());
+            }
+            "tunnel.traffic" => {
+                assert_eq!(payload["traffic"], json!({"status": null}));
+                assert!(payload["traffic_status"].is_null());
+            }
+            _ => unreachable!(),
+        }
+    }
 
     let mut online = db.pool.begin().await.unwrap();
     sqlx::query(
@@ -256,77 +314,81 @@ async fn postgres_offline_transition_persists_edges_and_marks_tunnels_unknown() 
         .unwrap();
     online.commit().await.unwrap();
 
-    let resolved = sqlx::query(
+    let online_agent_status = sqlx::query(
         r#"
-        SELECT lifecycle_state, resolution_reason, resolved_at IS NOT NULL AS resolved
-        FROM operational_alert_episodes
-        WHERE id = $1
+        SELECT evidence_seq, fact_kind, source_status, completeness, payload,
+               state_started_at = observed_at AS state_boundary_matches
+        FROM alert_policy_evidence
+        WHERE source_kind = 'agent.status'
+          AND natural_key = 'edge-offline:connectivity'
+        ORDER BY evidence_seq DESC
+        LIMIT 1
         "#,
     )
-    .bind(agent_episode_id)
     .fetch_one(&db.pool)
     .await
     .unwrap();
     assert_eq!(
-        resolved.try_get::<String, _>("lifecycle_state").unwrap(),
-        "resolved"
+        online_agent_status
+            .try_get::<String, _>("fact_kind")
+            .unwrap(),
+        "state"
     );
     assert_eq!(
-        resolved
-            .try_get::<Option<String>, _>("resolution_reason")
+        online_agent_status
+            .try_get::<String, _>("source_status")
+            .unwrap(),
+        "online"
+    );
+    assert_eq!(
+        online_agent_status
+            .try_get::<String, _>("completeness")
+            .unwrap(),
+        "complete"
+    );
+    assert!(online_agent_status
+        .try_get::<bool, _>("state_boundary_matches")
+        .unwrap());
+    assert!(
+        online_agent_status
+            .try_get::<i64, _>("evidence_seq")
             .unwrap()
-            .as_deref(),
-        Some("condition_recovered")
+            > offline_agent_status_seq,
+        "the recovery fact must follow the offline fact in durable evidence order"
     );
-    assert!(resolved.try_get::<bool, _>("resolved").unwrap());
-    let resolution = lifecycle_event(&db.pool, agent_episode_id, "resolved").await;
-    assert_eq!(resolution["alert"]["lifecycle_state"], "resolved");
+    let online_payload: Value = online_agent_status.try_get("payload").unwrap();
+    assert_eq!(online_payload["status"], "online");
+    assert_eq!(online_payload["source_status"], "online");
     assert_eq!(
-        resolution["alert"]["resolution_reason"],
-        "condition_recovered"
-    );
-    let resolution_contract = sqlx::query(
-        "SELECT event_predicates, subject_client_ids FROM webhook_events WHERE event_id = $1",
-    )
-    .bind(format!("fleet-alert:{agent_episode_id}:resolved"))
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        resolution_contract
-            .try_get::<Vec<String>, _>("event_predicates")
-            .unwrap(),
-        vec![
-            "alert.category:agent_status",
-            "alert.resolved",
-            "alert.severity:critical",
-        ]
-    );
-    assert_eq!(
-        resolution_contract
-            .try_get::<Vec<String>, _>("subject_client_ids")
-            .unwrap(),
-        vec!["edge-offline"]
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, String>(
-            "SELECT lifecycle_state FROM operational_alert_episodes WHERE id = $1",
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM alert_policy_evidence
+            WHERE source_kind = 'agent.status'
+              AND natural_key = 'edge-offline:connectivity'
+            "#,
         )
-        .bind(tunnel_episode_id)
         .fetch_one(&db.pool)
         .await
         .unwrap(),
-        "unknown",
-        "reconnect does not manufacture fresh tunnel evidence"
-    );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE event_id LIKE $1",)
-            .bind(format!("fleet-alert:{agent_episode_id}:%"))
-            .fetch_one(&db.pool)
-            .await
-            .unwrap(),
         2,
-        "offline and immediate recovery must retain both durable lifecycle edges"
+        "offline and online transitions must remain distinct durable facts"
+    );
+
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM webhook_events
+            WHERE kind IN ('alert.triggered', 'alert.resolved')
+               OR event_predicates && ARRAY['alert.triggered', 'alert.resolved']::text[]
+            "#,
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "worker source transitions must not publish retired alert lifecycle aliases"
     );
 
     db.cleanup().await;
@@ -349,16 +411,4 @@ async fn insert_lifecycle_client(pool: &PgPool, client_id: &str, status: &str, s
     .execute(pool)
     .await
     .unwrap();
-}
-
-async fn lifecycle_event(pool: &PgPool, episode_id: Uuid, state: &str) -> Value {
-    sqlx::query_scalar::<_, SqlJson<Value>>(
-        "SELECT payload FROM webhook_events WHERE kind = $1 AND event_id = $2",
-    )
-    .bind(format!("alert.{state}"))
-    .bind(format!("fleet-alert:{episode_id}:{state}"))
-    .fetch_one(pool)
-    .await
-    .unwrap()
-    .0
 }

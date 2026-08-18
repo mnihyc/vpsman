@@ -1,5 +1,12 @@
 import { useCallback, useRef, useState } from "react";
-import { apiDelete, apiGet, apiPost, apiPut, buildListPath, isApiUnauthorized } from "../api";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPut,
+  buildListPath,
+  isApiUnauthorized,
+} from "../api";
 import { HISTORY_DETAIL_LIMIT } from "../constants";
 import {
   snapshotSourceAvailable,
@@ -10,6 +17,8 @@ import type {
   CreateJobResponse,
   CreateScheduleRequest,
   DeferScheduleRequest,
+  EventScheduleTemplatePreviewRequest,
+  EventScheduleTemplatePreviewResponse,
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
   UpdateScheduleRequest,
@@ -41,7 +50,11 @@ export function useSchedulesData(
     setSchedulesError(null);
     try {
       const records = await apiGet<ScheduleRecord[]>(
-        buildListPath("/api/v1/schedules", { limit: HISTORY_DETAIL_LIMIT, sort: "next_run_at", dir: "asc" }),
+        buildListPath("/api/v1/schedules", {
+          limit: HISTORY_DETAIL_LIMIT,
+          sort: "next_run_at",
+          dir: "asc",
+        }),
         apiToken,
       );
       if (
@@ -69,7 +82,9 @@ export function useSchedulesData(
         return;
       }
       setSchedulesEvidenceAvailable(false);
-      setSchedulesError(error instanceof Error ? error.message : "Schedules unavailable");
+      setSchedulesError(
+        error instanceof Error ? error.message : "Schedules unavailable",
+      );
     } finally {
       if (
         schedulesLoadGeneration.current === generation &&
@@ -80,13 +95,10 @@ export function useSchedulesData(
     }
   }, [apiToken, onUnauthorized]);
 
-  const beginHomeSchedulesHydration = useCallback(
-    () => {
-      setSchedulesLoading(true);
-      return ++schedulesLoadGeneration.current;
-    },
-    [],
-  );
+  const beginHomeSchedulesHydration = useCallback(() => {
+    setSchedulesLoading(true);
+    return ++schedulesLoadGeneration.current;
+  }, []);
 
   const hydrateHomeSchedules = useCallback(
     (generation: number, source: SnapshotSource<ScheduleRecord[]>) => {
@@ -118,9 +130,23 @@ export function useSchedulesData(
     [apiToken, loadSchedules, onAuditChanged],
   );
 
+  const previewEventScheduleTemplate = useCallback(
+    async (request: EventScheduleTemplatePreviewRequest) =>
+      apiPost<EventScheduleTemplatePreviewResponse>(
+        "/api/v1/schedules/preview-event-template",
+        apiToken,
+        request,
+      ),
+    [apiToken],
+  );
+
   const updateSchedule = useCallback(
     async (scheduleId: string, request: UpdateScheduleRequest) => {
-      await apiPut<ScheduleRecord>(`/api/v1/schedules/${scheduleId}`, apiToken, request);
+      await apiPut<ScheduleRecord>(
+        `/api/v1/schedules/${scheduleId}`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -131,7 +157,11 @@ export function useSchedulesData(
 
   const updateScheduleTargets = useCallback(
     async (scheduleId: string, request: UpdateScheduleTargetsRequest) => {
-      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/targets`, apiToken, request);
+      await apiPost<ScheduleRecord>(
+        `/api/v1/schedules/${scheduleId}/targets`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -142,7 +172,11 @@ export function useSchedulesData(
 
   const enableSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
-      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/enable`, apiToken, request);
+      await apiPost<ScheduleRecord>(
+        `/api/v1/schedules/${scheduleId}/enable`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -153,7 +187,11 @@ export function useSchedulesData(
 
   const disableSchedule = useCallback(
     async (scheduleId: string, request: SchedulePrivilegeMutationRequest) => {
-      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/disable`, apiToken, request);
+      await apiPost<ScheduleRecord>(
+        `/api/v1/schedules/${scheduleId}/disable`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -164,7 +202,11 @@ export function useSchedulesData(
 
   const deferSchedule = useCallback(
     async (scheduleId: string, request: DeferScheduleRequest) => {
-      await apiPost<ScheduleRecord>(`/api/v1/schedules/${scheduleId}/defer`, apiToken, request);
+      await apiPost<ScheduleRecord>(
+        `/api/v1/schedules/${scheduleId}/defer`,
+        apiToken,
+        request,
+      );
       if (currentApiToken.current !== apiToken) {
         return;
       }
@@ -212,6 +254,7 @@ export function useSchedulesData(
 
   return {
     createSchedule,
+    previewEventScheduleTemplate,
     beginHomeSchedulesHydration,
     clearSchedules,
     updateSchedule,

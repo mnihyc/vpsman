@@ -1,6 +1,169 @@
 use clap::Parser;
 
 use super::{Args, Command};
+use crate::commands_schedules::ScheduleTriggerKindArg;
+
+const TYPED_ALERT_RULE_JSON: &str = r#"{"name":"offline","enabled":true,"rule_kind":"state","evidence_source":"agent.status","correlation_mode":"natural_key","trigger_condition_expression":"evidence.status = offline","resolve_condition_expression":"evidence.status = online","resolve_meta_condition":{"kind":"sustained","seconds":60},"severity":"critical","category":"agent_status","title_template":"Agent offline","detail_template":"{subject.display_name} is offline"}"#;
+
+#[test]
+fn alert_policy_cli_accepts_typed_rule_json_and_full_policy_files() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "alert-policy",
+                "preview",
+                "--name",
+                "offline-agents",
+                "--selector",
+                "tag:edge",
+                "--rule-json",
+                TYPED_ALERT_RULE_JSON,
+            ])
+            .unwrap();
+            let Command::AlertPolicy(command) = parsed.command else {
+                panic!("expected alert-policy command");
+            };
+            let crate::cli_access::AlertPolicySubcommand::Preview(request) = command.command else {
+                panic!("expected alert-policy preview command");
+            };
+            assert_eq!(request.selector, "tag:edge");
+            assert_eq!(request.rule_json, vec![TYPED_ALERT_RULE_JSON.to_string()]);
+
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "alert-policy",
+                "upsert",
+                "--name",
+                "offline-agents",
+                "--file",
+                "./offline-policy.json",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::AlertPolicy(command) = parsed.command else {
+                panic!("expected alert-policy command");
+            };
+            let crate::cli_access::AlertPolicySubcommand::Upsert(request) = command.command else {
+                panic!("expected alert-policy upsert command");
+            };
+            assert_eq!(
+                request.file.as_deref(),
+                Some(std::path::Path::new("./offline-policy.json"))
+            );
+            assert!(request.rule_json.is_empty());
+            assert!(request.confirmed);
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
+
+#[test]
+fn alert_policy_cli_rejects_removed_shorthand_flags() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            for (flag, value) in [
+                ("--rule", "evidence.status = offline"),
+                ("--window-secs", "60"),
+                ("--severity", "critical"),
+                ("--traffic-selector", "eth0"),
+            ] {
+                let mut args = vec![
+                    "vpsctl",
+                    "alert-policy",
+                    "preview",
+                    "--name",
+                    "offline-agents",
+                    "--selector",
+                    "tag:edge",
+                    "--rule-json",
+                    TYPED_ALERT_RULE_JSON,
+                ];
+                args.extend([flag, value]);
+                assert!(Args::try_parse_from(args).is_err(), "accepted {flag}");
+            }
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
+
+#[test]
+fn schedule_create_preserves_cron_defaults_without_compatibility_flags() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "schedule-create",
+                "--name",
+                "hourly",
+                "--command",
+                "/bin/true",
+                "--clients",
+                "edge-a",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::ScheduleCreate(request) = parsed.command else {
+                panic!("expected schedule-create command");
+            };
+            assert_eq!(request.trigger_kind, ScheduleTriggerKindArg::Cron);
+            assert_eq!(request.command.as_deref(), Some("/bin/true"));
+            assert!(request.cron_expr.is_none());
+            assert!(request.catch_up_policy.is_none());
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
+
+#[test]
+fn schedule_create_accepts_an_explicit_alert_event_shape() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let parsed = Args::try_parse_from([
+                "vpsctl",
+                "schedule-create",
+                "--name",
+                "traffic-limit",
+                "--trigger-kind",
+                "event",
+                "--event-expression",
+                "alert.triggered && alert.category:traffic",
+                "--event-argv-template",
+                "/usr/local/bin/limit-traffic",
+                "--event-argv-template",
+                "{event.kind}",
+                "--event-argv-template",
+                "{alert.target_id}",
+                "--tags",
+                "edge",
+                "--confirmed",
+            ])
+            .unwrap();
+            let Command::ScheduleCreate(request) = parsed.command else {
+                panic!("expected schedule-create command");
+            };
+            assert_eq!(request.trigger_kind, ScheduleTriggerKindArg::Event);
+            assert!(request.command.is_none());
+            assert_eq!(
+                request.event_argv_template,
+                vec![
+                    "/usr/local/bin/limit-traffic",
+                    "{event.kind}",
+                    "{alert.target_id}"
+                ]
+            );
+        })
+        .expect("spawn CLI parser test")
+        .join()
+        .expect("CLI parser test panicked");
+}
 
 #[test]
 fn backup_policy_upsert_accepts_an_explicit_update_target() {

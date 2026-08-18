@@ -1221,6 +1221,14 @@ fn job_matches_search(job: &JobHistoryView, needle: &str) -> bool {
         || job.command_type.to_ascii_lowercase().contains(needle)
         || job.status.to_ascii_lowercase().contains(needle)
         || job.payload_hash.to_ascii_lowercase().contains(needle)
+        || job
+            .causation_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || job
+            .schedule_lineage
+            .iter()
+            .any(|id| id.to_string().to_ascii_lowercase().contains(needle))
 }
 
 fn compare_job_approval(
@@ -1434,8 +1442,8 @@ struct ScheduleJobOutcome {
     enabled: bool,
     failure_count: i32,
     max_failures: i32,
-    retry_delay_secs: i64,
-    next_run_at: String,
+    retry_delay_secs: Option<i64>,
+    next_run_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1449,6 +1457,8 @@ pub(crate) struct ClaimedJobTarget {
     pub(crate) process_incarnation_id: Uuid,
     pub(crate) operation: JobCommand,
     pub(crate) source_schedule_id: Option<Uuid>,
+    pub(crate) causation_id: Option<Uuid>,
+    pub(crate) schedule_lineage: Vec<Uuid>,
     pub(crate) max_timeout_secs: u64,
 }
 
@@ -1606,6 +1616,8 @@ impl Repository {
                         actor_id,
                         command_type,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         privileged,
                         status,
                         target_count,
@@ -1628,6 +1640,8 @@ impl Repository {
                     actor_id: row.try_get("actor_id")?,
                     command_type: row.try_get("command_type")?,
                     source_schedule_id: row.try_get("source_schedule_id")?,
+                    causation_id: row.try_get("causation_id")?,
+                    schedule_lineage: row.try_get("schedule_lineage")?,
                     privileged: row.try_get("privileged")?,
                     status: row.try_get("status")?,
                     target_count: row.try_get("target_count")?,
@@ -2130,6 +2144,8 @@ impl Repository {
                         actor_id,
                         command_type,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         privileged,
                         status,
                         target_count,
@@ -2152,6 +2168,8 @@ impl Repository {
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
                             source_schedule_id: row.try_get("source_schedule_id")?,
+                            causation_id: row.try_get("causation_id")?,
+                            schedule_lineage: row.try_get("schedule_lineage")?,
                             privileged: row.try_get("privileged")?,
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
@@ -2218,6 +2236,8 @@ impl Repository {
                         j.actor_id,
                         j.command_type,
                         j.source_schedule_id,
+                        j.causation_id,
+                        j.schedule_lineage,
                         j.privileged,
                         j.status,
                         j.target_count,
@@ -2248,6 +2268,8 @@ impl Repository {
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
                             source_schedule_id: row.try_get("source_schedule_id")?,
+                            causation_id: row.try_get("causation_id")?,
+                            schedule_lineage: row.try_get("schedule_lineage")?,
                             privileged: row.try_get("privileged")?,
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
@@ -2309,6 +2331,8 @@ impl Repository {
                         actor_id,
                         command_type,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         privileged,
                         status,
                         target_count,
@@ -2324,6 +2348,8 @@ impl Repository {
                         OR command_type ILIKE $3 ESCAPE '\'
                         OR status ILIKE $3 ESCAPE '\'
                         OR payload_hash ILIKE $3 ESCAPE '\'
+                        OR causation_id::text ILIKE $3 ESCAPE '\'
+                        OR array_to_string(schedule_lineage, ' ') ILIKE $3 ESCAPE '\'
                     )
                     ORDER BY {order_by}
                     LIMIT $1
@@ -2342,6 +2368,8 @@ impl Repository {
                             actor_id: row.try_get("actor_id")?,
                             command_type: row.try_get("command_type")?,
                             source_schedule_id: row.try_get("source_schedule_id")?,
+                            causation_id: row.try_get("causation_id")?,
+                            schedule_lineage: row.try_get("schedule_lineage")?,
                             privileged: row.try_get("privileged")?,
                             status: row.try_get("status")?,
                             target_count: row.try_get("target_count")?,
@@ -2695,6 +2723,8 @@ impl Repository {
                     actor_id,
                     command_type: "api_job_request".to_string(),
                     source_schedule_id: None,
+                    causation_id: None,
+                    schedule_lineage: Vec::new(),
                     privileged: request.privileged,
                     status: status.to_string(),
                     target_count: resolved_targets.len() as i32,
@@ -3041,6 +3071,8 @@ impl Repository {
                     actor_id,
                     command_type: command_type.clone(),
                     source_schedule_id,
+                    causation_id: None,
+                    schedule_lineage: Vec::new(),
                     privileged: request.privileged,
                     status: JOB_STATUS_QUEUED.to_string(),
                     target_count: resolved_targets.len() as i32,
@@ -3490,7 +3522,6 @@ impl Repository {
                         .collect::<HashSet<_>>()
                 };
                 let operations = memory.job_operations.read().await.clone();
-                let source_schedule_ids = memory.job_source_schedule_ids.read().await.clone();
                 let timeouts = memory.job_timeouts.read().await.clone();
                 let jobs = memory.jobs.read().await.clone();
                 let approvals = memory.job_approvals.read().await.clone();
@@ -3630,7 +3661,9 @@ impl Repository {
                         payload_hash: job.payload_hash.clone(),
                         process_incarnation_id: Uuid::nil(),
                         operation,
-                        source_schedule_id: source_schedule_ids.get(&target.job_id).copied(),
+                        source_schedule_id: job.source_schedule_id,
+                        causation_id: job.causation_id,
+                        schedule_lineage: job.schedule_lineage.clone(),
                         max_timeout_secs,
                     });
                 }
@@ -3762,6 +3795,8 @@ impl Repository {
                             job.payload_hash,
                             job.operation,
                             job.source_schedule_id,
+                            job.causation_id,
+                            job.schedule_lineage,
                             job.max_timeout_secs,
                             clients.process_incarnation_id AS client_process_incarnation_id
                         FROM job_targets target
@@ -4028,6 +4063,8 @@ impl Repository {
                             ) AS process_incarnation_id,
                             due.operation,
                             due.source_schedule_id,
+                            due.causation_id,
+                            due.schedule_lineage,
                             due.max_timeout_secs
                     ),
                     promoted_jobs AS (
@@ -4051,6 +4088,8 @@ impl Repository {
                         updated_targets.process_incarnation_id,
                         updated_targets.operation,
                         updated_targets.source_schedule_id,
+                        updated_targets.causation_id,
+                        updated_targets.schedule_lineage,
                         updated_targets.max_timeout_secs,
                         (SELECT count(*) FROM promoted_jobs) AS promoted_jobs
                     FROM updated_targets
@@ -4113,6 +4152,8 @@ impl Repository {
                         process_incarnation_id,
                         operation,
                         source_schedule_id: row.try_get("source_schedule_id")?,
+                        causation_id: row.try_get("causation_id")?,
+                        schedule_lineage: row.try_get("schedule_lineage")?,
                         max_timeout_secs,
                     });
                 }
@@ -6384,10 +6425,11 @@ impl Repository {
                         schedule.last_error = Some(error.to_string());
                         if schedule.failure_count >= schedule.max_failures {
                             schedule.enabled = false;
-                        } else {
-                            schedule.next_run_at = (Utc::now()
-                                + Duration::seconds(schedule.retry_delay_secs.max(0)))
-                            .to_rfc3339();
+                        } else if let Some(retry_delay_secs) = schedule.retry_delay_secs {
+                            schedule.next_run_at = Some(
+                                (Utc::now() + Duration::seconds(retry_delay_secs.max(0)))
+                                    .to_rfc3339(),
+                            );
                         }
                     } else if status == JOB_STATUS_COMPLETED {
                         schedule.failure_count = 0;
@@ -6420,6 +6462,12 @@ impl Repository {
                             last_job_error = NULL,
                             updated_at = now()
                         WHERE id = $1
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM schedule_event_receipts receipt
+                              WHERE receipt.job_id = $2
+                                AND receipt.definition_revision <> schedules.definition_revision
+                          )
                           AND (
                               last_job_id IS NULL
                               OR last_job_id = $2
@@ -6468,6 +6516,12 @@ impl Repository {
                             END,
                             updated_at = now()
                         WHERE id = $1
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM schedule_event_receipts receipt
+                              WHERE receipt.job_id = $2
+                                AND receipt.definition_revision <> schedules.definition_revision
+                          )
                           AND (
                               last_job_id IS NULL
                               OR last_job_id = $2
@@ -6504,6 +6558,12 @@ impl Repository {
                             last_error = NULL,
                             updated_at = now()
                         WHERE id = $1
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM schedule_event_receipts receipt
+                              WHERE receipt.job_id = $2
+                                AND receipt.definition_revision <> schedules.definition_revision
+                          )
                           AND (
                               last_job_id IS NULL
                               OR last_job_id = $2

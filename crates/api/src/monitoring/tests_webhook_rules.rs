@@ -56,7 +56,7 @@ fn policy_alert_candidate_exposes_event_roots_without_webhook_rule_collision() {
         id: Uuid::nil(),
         name: "delivery-rule".to_string(),
         enabled: true,
-        expression: "alert.policy_reached && alert.category:traffic && traffic.cycle_percent >= 80 && policy.name = monthly && rule.name = quota-80 && policy_rule.window_secs = 0".to_string(),
+        expression: "alert.triggered && alert.category:traffic && traffic.cycle_percent >= 80 && policy.name = monthly && policy_rule.name = quota-80 && policy_rule.trigger_meta_condition.window_seconds = 0".to_string(),
         target: "https://hooks.acme.com/vpsman".to_string(),
         body_template:
             "{rule.name} {policy.name} {policy_rule.name} {traffic.cycle_percent}".to_string(),
@@ -69,19 +69,22 @@ fn policy_alert_candidate_exposes_event_roots_without_webhook_rule_collision() {
         updated_at: "0".to_string(),
     };
     let event_payload = json!({
-        "event": {"kind": "alert.policy_reached"},
+        "event": {"kind": "alert.triggered"},
         "alert": {"category": "traffic"},
         "policy": {"name": "monthly"},
-        "rule": {"name": "quota-80", "window_secs": 0},
+        "policy_rule": {
+            "name": "quota-80",
+            "trigger_meta_condition": {"kind": "immediate", "window_seconds": 0}
+        },
         "traffic": {"cycle_percent": 82.0},
     });
 
     let candidate = webhook_candidate_for_event(
         &rule,
-        "alert.policy_reached",
+        "alert.triggered",
         "policy-alert:test",
         &[
-            "alert.policy_reached".to_string(),
+            "alert.triggered".to_string(),
             "alert.category:traffic".to_string(),
         ],
         &event_payload,

@@ -41,7 +41,10 @@ use vpsman_common::{
     FilePushChunk, HostPackageProvider, HostServiceAction, HostServiceProvider, JobCommand,
     ProcessResourceLimits, ProcessRestartPolicy, ProcessRunPolicy, RestoreRollbackFile,
     RoutingCostAdapterCommands, RuntimeTunnelCommand, TerminalUserPolicy, TunnelAddressPair,
-    TunnelEndpointSide, TunnelKind, TunnelPlanInput, CURRENT_COMMAND_PROTOCOL_VERSION,
+    TunnelEndpointSide, TunnelKind, TunnelPlanInput, ALERT_EVENT_ARGV_CONTROL_TOKENS,
+    ALERT_EVENT_ARGV_HELPER_TOKENS, ALERT_EVENT_ARGV_MAX_BYTES, ALERT_EVENT_ARGV_MAX_ELEMENTS,
+    ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES, ALERT_EVENT_ARGV_SCALAR_PATHS, ALERT_EVENT_CATEGORIES,
+    ALERT_EVENT_IMMUTABLE_FIELDS, ALERT_EVENT_SEVERITIES, CURRENT_COMMAND_PROTOCOL_VERSION,
     MAX_TERMINAL_INPUT_BYTES, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS,
 };
 
@@ -78,6 +81,51 @@ fn main() -> io::Result<()> {
         output,
         "export const MAX_TERMINAL_INPUT_BYTES = {} as const;",
         MAX_TERMINAL_INPUT_BYTES
+    )?;
+    writeln!(
+        output,
+        "export const ALERT_EVENT_ARGV_MAX_ELEMENTS = {} as const;",
+        ALERT_EVENT_ARGV_MAX_ELEMENTS
+    )?;
+    writeln!(
+        output,
+        "export const ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES = {} as const;",
+        ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES
+    )?;
+    writeln!(
+        output,
+        "export const ALERT_EVENT_ARGV_MAX_BYTES = {} as const;",
+        ALERT_EVENT_ARGV_MAX_BYTES
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_IMMUTABLE_FIELDS",
+        ALERT_EVENT_IMMUTABLE_FIELDS,
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_ARGV_SCALAR_PATHS",
+        ALERT_EVENT_ARGV_SCALAR_PATHS,
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_ARGV_CONTROL_TOKENS",
+        ALERT_EVENT_ARGV_CONTROL_TOKENS,
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_ARGV_HELPER_TOKENS",
+        ALERT_EVENT_ARGV_HELPER_TOKENS,
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_CATEGORIES",
+        ALERT_EVENT_CATEGORIES,
+    )?;
+    write_string_array(
+        &mut output,
+        "ALERT_EVENT_SEVERITIES",
+        ALERT_EVENT_SEVERITIES,
     )?;
     write_string_array(
         &mut output,
@@ -658,6 +706,16 @@ export type TrafficAccountingRecord = {{
   selector_breakdown: TrafficAccountingSelectorBreakdown[];
 }};
 
+export type AlertPolicyRuleKind = "metric" | "state" | "occurrence";
+
+export type AlertPolicyCorrelationMode = "natural_key" | "subject" | "global";
+
+export type AlertPolicyMetaCondition =
+  | {{ kind: "immediate" }}
+  | {{ kind: "sustained"; seconds: number }}
+  | {{ kind: "count"; confirmations: number; within_seconds: number }}
+  | {{ kind: "elapsed_since_trigger"; seconds: number }};
+
 export type PolicyRuleRecord = {{
   id: string;
   group_id: string;
@@ -665,10 +723,21 @@ export type PolicyRuleRecord = {{
   sort_order: number;
   name: string;
   enabled: boolean;
+  rule_kind: AlertPolicyRuleKind;
+  evidence_source: string;
+  correlation_mode: AlertPolicyCorrelationMode;
   traffic_selector: string | null;
-  condition_expression: string;
-  window_secs: number;
+  trigger_condition_expression: string;
+  trigger_meta_condition: AlertPolicyMetaCondition | null;
+  resolve_condition_expression: string | null;
+  resolve_meta_condition: AlertPolicyMetaCondition | null;
   severity: "info" | "warning" | "critical" | string;
+  category: string;
+  title_template: string;
+  detail_template: string;
+  system_seed_key: string | null;
+  armed_after_evidence_seq: number;
+  armed_at: string;
   created_at: string;
   updated_at: string;
 }};
@@ -698,10 +767,18 @@ export type PolicyRuleRequest = {{
   id?: string;
   name: string;
   enabled?: boolean;
+  rule_kind: AlertPolicyRuleKind;
+  evidence_source: string;
+  correlation_mode: AlertPolicyCorrelationMode;
   traffic_selector?: string | null;
-  condition_expression: string;
-  window_secs?: number;
+  trigger_condition_expression: string;
+  trigger_meta_condition?: AlertPolicyMetaCondition | null;
+  resolve_condition_expression?: string | null;
+  resolve_meta_condition?: AlertPolicyMetaCondition | null;
   severity: string;
+  category: string;
+  title_template: string;
+  detail_template: string;
 }};
 
 export type PolicyGroupRequest = {{
@@ -726,7 +803,11 @@ export type PolicyDryRunRequest = {{
 
 export type PolicyDryRunRulePreview = {{
   rule_name: string;
-  condition_expression: string;
+  preview_mode: string;
+  trigger_condition_expression: string;
+  trigger_meta_condition: AlertPolicyMetaCondition | null;
+  resolve_condition_expression: string | null;
+  resolve_meta_condition: AlertPolicyMetaCondition | null;
   category: string;
   severity: string;
   true_count: number;

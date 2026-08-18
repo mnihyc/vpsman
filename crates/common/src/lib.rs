@@ -1,3 +1,9 @@
+#[path = "selection/alert_event_argv.rs"]
+pub mod alert_event_argv;
+#[path = "selection/alert_event_expression.rs"]
+pub mod alert_event_expression;
+#[path = "selection/alert_policy_evidence.rs"]
+pub mod alert_policy_evidence;
 #[path = "security/auth.rs"]
 pub mod auth;
 #[path = "config/config.rs"]
@@ -43,6 +49,9 @@ pub mod vps_rules;
 
 pub use port_forwarding::*;
 
+pub use alert_event_argv::*;
+pub use alert_event_expression::*;
+pub use alert_policy_evidence::*;
 pub use auth::*;
 pub use config::*;
 pub use expression::*;

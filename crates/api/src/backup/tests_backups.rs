@@ -28,8 +28,8 @@ use crate::{
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
         BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
         CreateBackupRequest, CreateJobRequest, JobHistoryView, JobOutputView, JobTargetView,
-        ListQuery, OperatorView, RecordBackupArtifactMetadataRequest, UpdateBackupPolicyRequest,
-        UpdateScheduleTargetsRequest, UploadBackupArtifactRequest,
+        ListQuery, OperatorView, RecordBackupArtifactMetadataRequest, ScheduleTriggerKind,
+        UpdateBackupPolicyRequest, UpdateScheduleTargetsRequest, UploadBackupArtifactRequest,
     },
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
@@ -177,6 +177,7 @@ fn backup_policy_validation_requires_targets_retention_and_confirmation() {
 #[test]
 fn backup_policy_update_wire_contract_requires_complete_definition() {
     let full = serde_json::json!({
+        "expected_definition_revision": 1,
         "name": "nightly",
         "selector_expression": "id:client-a",
         "target_client_ids": ["client-a"],
@@ -202,6 +203,7 @@ fn backup_policy_update_wire_contract_requires_complete_definition() {
     assert!(parsed.rotation_generation.is_none());
 
     for required in [
+        "expected_definition_revision",
         "name",
         "selector_expression",
         "target_client_ids",
@@ -464,6 +466,7 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
             BackupRequestSourceLink {
                 job_id: Some(source_job_id),
                 schedule_id: None,
+                ..BackupRequestSourceLink::default()
             },
         )
         .await
@@ -558,6 +561,7 @@ async fn async_backup_final_failure_marks_backup_request_failed() {
         BackupRequestSourceLink {
             job_id: Some(job_id),
             schedule_id: None,
+            ..BackupRequestSourceLink::default()
         },
     )
     .await
@@ -602,7 +606,7 @@ async fn async_backup_final_failure_marks_backup_request_failed() {
 }
 
 #[tokio::test]
-async fn backup_job_dispatch_reuses_existing_open_backup_request() {
+async fn backup_job_dispatch_does_not_reuse_request_with_different_source() {
     let repo = Repository::Memory(MemoryState::default());
     seed_backup_agent(&repo).await;
     let request_state = test_state(repo.clone());
@@ -664,10 +668,226 @@ async fn backup_job_dispatch_reuses_existing_open_backup_request() {
     wait_for_job_status(&repo, response.job_id, "completed").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
 
-    assert_eq!(backups.len(), 1);
-    assert_eq!(backups[0].id, manual_backup.id);
-    assert_eq!(backups[0].note.as_deref(), Some("operator-requested"));
-    assert_eq!(backups[0].status, "requested_metadata_only");
+    assert_eq!(backups.len(), 2);
+    let manual = backups
+        .iter()
+        .find(|backup| backup.id == manual_backup.id)
+        .unwrap();
+    assert_eq!(manual.note.as_deref(), Some("operator-requested"));
+    assert_eq!(manual.source_job_id, None);
+    let dispatched = backups
+        .iter()
+        .find(|backup| backup.source_job_id == Some(response.job_id))
+        .unwrap();
+    assert_ne!(dispatched.id, manual.id);
+    assert!(dispatched
+        .note
+        .as_deref()
+        .is_some_and(|note| note.contains(&response.job_id.to_string())));
+}
+
+#[tokio::test]
+async fn backup_source_reuse_is_exact_and_failure_preserves_schedule_cycle_ancestry() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let operator = backup_test_operator();
+    let schedule_a = Uuid::new_v4();
+    let schedule_b = Uuid::new_v4();
+    let causation_a = Uuid::new_v4();
+    let job_a = Uuid::new_v4();
+    let job_b = Uuid::new_v4();
+    let payload = "exact-backup-source-payload";
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+        confirmed: true,
+        note: None,
+        privilege_assertion: None,
+    };
+    let source_a = BackupRequestSourceLink {
+        job_id: Some(job_a),
+        schedule_id: Some(schedule_a),
+        causation_id: Some(causation_a),
+        schedule_lineage: vec![schedule_a],
+    };
+    let first = repo
+        .record_backup_request_with_source(
+            &request,
+            payload,
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            source_a.clone(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.find_open_backup_request_for_source("client-a", payload, &source_a)
+            .await
+            .unwrap()
+            .map(|request| request.id),
+        Some(first.id)
+    );
+    let source_b = BackupRequestSourceLink {
+        job_id: Some(job_b),
+        ..source_a.clone()
+    };
+    let mismatched_sources = [
+        source_b.clone(),
+        BackupRequestSourceLink {
+            schedule_id: Some(schedule_b),
+            ..source_a.clone()
+        },
+        BackupRequestSourceLink {
+            causation_id: Some(Uuid::new_v4()),
+            ..source_a.clone()
+        },
+        BackupRequestSourceLink {
+            schedule_lineage: Vec::new(),
+            ..source_a.clone()
+        },
+    ];
+    for mismatched in &mismatched_sources {
+        assert!(repo
+            .find_open_backup_request_for_source("client-a", payload, mismatched)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .attach_backup_request_source(first.id, mismatched)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    let second = repo
+        .record_backup_request_with_source(
+            &request,
+            payload,
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            source_b,
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.id, second.id);
+    let requests = repo.list_backup_requests(10).await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .iter()
+            .find(|request| request.id == first.id)
+            .unwrap()
+            .source_job_id,
+        Some(job_a)
+    );
+    assert_eq!(
+        repo.find_open_backup_request_for_job_artifact("client-a", payload, job_a)
+            .await
+            .unwrap()
+            .map(|request| request.id),
+        Some(first.id)
+    );
+    assert_eq!(
+        repo.find_open_backup_request_for_job_artifact("client-a", payload, job_b)
+            .await
+            .unwrap()
+            .map(|request| request.id),
+        Some(second.id)
+    );
+
+    repo.mark_open_backup_request_execution_terminal(
+        job_a,
+        "client-a",
+        BackupRequestStatus::ExecutionFailed,
+        Some(&operator),
+    )
+    .await
+    .unwrap();
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let episodes = memory.operational_alert_episodes.read().await;
+    let failure = episodes
+        .iter()
+        .find(|episode| episode.natural_key == first.id.to_string())
+        .unwrap();
+    assert_eq!(
+        failure.evidence["causation_id"],
+        serde_json::json!(causation_a)
+    );
+    assert_eq!(
+        failure.evidence["schedule_lineage"],
+        serde_json::json!([schedule_a])
+    );
+    assert!(failure.evidence["schedule_lineage"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!(schedule_a)));
+}
+
+#[tokio::test]
+async fn backup_source_lineage_rejects_duplicates_and_overflow_without_truncation() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let operator = backup_test_operator();
+    let request = CreateBackupRequest {
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: false,
+        follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+        confirmed: true,
+        note: None,
+        privilege_assertion: None,
+    };
+    let repeated = Uuid::new_v4();
+    let duplicate = repo
+        .record_backup_request_with_source(
+            &request,
+            "duplicate-lineage",
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            BackupRequestSourceLink {
+                job_id: Some(Uuid::new_v4()),
+                schedule_id: None,
+                causation_id: Some(Uuid::new_v4()),
+                schedule_lineage: vec![repeated, repeated],
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(duplicate
+        .to_string()
+        .contains("backup_schedule_lineage_duplicate"));
+
+    let overflow_lineage = (0..17).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
+    let overflow = repo
+        .record_backup_request_with_source(
+            &request,
+            "overflow-lineage",
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            BackupRequestSourceLink {
+                job_id: Some(Uuid::new_v4()),
+                schedule_id: None,
+                causation_id: Some(Uuid::new_v4()),
+                schedule_lineage: overflow_lineage,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(overflow
+        .to_string()
+        .contains("backup_schedule_lineage_overflow"));
+    assert!(repo.list_backup_requests(10).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -776,21 +996,25 @@ async fn backup_policy_upsert_records_schedule_metadata_and_audit() {
     repo.create_schedule_record(
         ScheduleCreateInput {
             name: "000-generic-backup-schedule".to_string(),
-            operation: JobCommand::Backup {
+            operation: Some(JobCommand::Backup {
                 paths: vec!["/var/lib/generic".to_string()],
                 include_config: false,
                 follow_symlinks: false,
                 missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
-            },
+            }),
+            event_argv_template: None,
             selector_expression: "id:client-a".to_string(),
             target_client_ids: vec!["client-a".to_string()],
-            cron_expr: "0 3 * * *".to_string(),
-            timezone: "UTC".to_string(),
+            trigger_kind: ScheduleTriggerKind::Cron,
+            cron_expr: Some("0 3 * * *".to_string()),
+            timezone: Some("UTC".to_string()),
+            event_expression: None,
             enabled: true,
-            catch_up_policy: "skip_missed".to_string(),
-            catch_up_limit: 1,
-            retry_delay_secs: 300,
+            catch_up_policy: Some("skip_missed".to_string()),
+            catch_up_limit: Some(1),
+            retry_delay_secs: Some(300),
             max_failures: 3,
+            expected_definition_revision: None,
         },
         &backup_test_operator(),
     )
@@ -932,6 +1156,7 @@ async fn backup_policy_update_rejects_stale_selector_snapshot_without_mutation()
         headers,
         Path(created.schedule_id),
         Json(UpdateBackupPolicyRequest {
+            expected_definition_revision: created.definition_revision,
             name: "nightly-stale-update".to_string(),
             selector_expression: "id:client-b".to_string(),
             target_client_ids: vec!["client-a".to_string()],
@@ -1031,6 +1256,7 @@ async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged(
         headers.clone(),
         Path(created.schedule_id),
         Json(UpdateBackupPolicyRequest {
+            expected_definition_revision: created.definition_revision,
             name: "nightly-edge-renamed".to_string(),
             selector_expression: created.selector_expression.clone(),
             target_client_ids: created.target_client_ids.clone(),
@@ -1074,6 +1300,7 @@ async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged(
         headers.clone(),
         Path(created.schedule_id),
         Json(UpdateScheduleTargetsRequest {
+            expected_definition_revision: updated.definition_revision,
             privilege_assertion: None,
             confirmed: true,
         }),
@@ -1087,6 +1314,7 @@ async fn backup_policy_edit_preserves_frozen_targets_when_selector_is_unchanged(
         headers,
         Path(created.schedule_id),
         Json(UpdateBackupPolicyRequest {
+            expected_definition_revision: retargeted.definition_revision,
             name: "nightly-edge-empty".to_string(),
             selector_expression: updated.selector_expression.clone(),
             target_client_ids: Vec::new(),
@@ -1155,13 +1383,15 @@ async fn backup_policy_query_preserves_requested_order_after_filter_and_limit() 
     if let Repository::Memory(memory) = &repo {
         let mut schedules = memory.schedules.write().await;
         for schedule in schedules.iter_mut() {
-            schedule.next_run_at = match schedule.name.as_str() {
-                "zeta-kept-policy" => "9999",
-                "middle-kept-policy" => "1",
-                "alpha-kept-policy" => "5000",
-                _ => "0",
-            }
-            .to_string();
+            schedule.next_run_at = Some(
+                match schedule.name.as_str() {
+                    "zeta-kept-policy" => "9999",
+                    "middle-kept-policy" => "1",
+                    "alpha-kept-policy" => "5000",
+                    _ => "0",
+                }
+                .to_string(),
+            );
         }
     }
 
@@ -1229,7 +1459,7 @@ async fn backup_policy_update_repairs_cadence_without_replacing_schedule() {
             .iter_mut()
             .find(|schedule| schedule.id == created.schedule_id)
             .unwrap();
-        legacy.cron_expr = "0 0 31 2 *".to_string();
+        legacy.cron_expr = Some("0 0 31 2 *".to_string());
         legacy.next_runs.clear();
         legacy.cadence_error = Some("schedule_cron_no_future_occurrence".to_string());
     }
@@ -1239,6 +1469,7 @@ async fn backup_policy_update_repairs_cadence_without_replacing_schedule() {
         headers,
         Path(created.schedule_id),
         Json(UpdateBackupPolicyRequest {
+            expected_definition_revision: created.definition_revision,
             name: "repaired-backup".to_string(),
             selector_expression: "id:client-a".to_string(),
             target_client_ids: vec!["client-a".to_string()],
@@ -2024,6 +2255,8 @@ async fn backup_artifact_handoff_promotes_retained_backup_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "completed".to_string(),
             target_count: 1,
@@ -2130,6 +2363,8 @@ async fn backup_artifact_handoff_streams_object_store_backed_output() {
             actor_id: None,
             command_type: "backup".to_string(),
             source_schedule_id: None,
+            causation_id: None,
+            schedule_lineage: Vec::new(),
             privileged: true,
             status: "completed".to_string(),
             target_count: 1,
@@ -2408,6 +2643,7 @@ async fn seed_policy_backup_artifact(
             BackupRequestSourceLink {
                 job_id: Some(Uuid::new_v4()),
                 schedule_id: Some(schedule_id),
+                ..BackupRequestSourceLink::default()
             },
         )
         .await

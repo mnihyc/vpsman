@@ -25,10 +25,40 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Debug, Default)]
+const MAX_BACKUP_SCHEDULE_LINEAGE: usize = 16;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct BackupRequestSourceLink {
     pub(crate) job_id: Option<Uuid>,
     pub(crate) schedule_id: Option<Uuid>,
+    pub(crate) causation_id: Option<Uuid>,
+    pub(crate) schedule_lineage: Vec<Uuid>,
+}
+
+impl BackupRequestSourceLink {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.schedule_lineage.len() <= MAX_BACKUP_SCHEDULE_LINEAGE,
+            "backup_schedule_lineage_overflow"
+        );
+        let unique = self
+            .schedule_lineage
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        anyhow::ensure!(
+            unique.len() == self.schedule_lineage.len(),
+            "backup_schedule_lineage_duplicate"
+        );
+        Ok(())
+    }
+
+    fn matches(&self, request: &BackupRequestView) -> bool {
+        request.source_job_id == self.job_id
+            && request.source_schedule_id == self.schedule_id
+            && request.causation_id == self.causation_id
+            && request.schedule_lineage == self.schedule_lineage
+    }
 }
 
 fn compare_text_or_number(left: &str, right: &str) -> Ordering {
@@ -77,6 +107,14 @@ fn backup_request_matches_search(request: &BackupRequestView, needle: &str) -> b
             .source_schedule_id
             .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
             .unwrap_or(false)
+        || request
+            .causation_id
+            .map(|id| id.to_string().to_ascii_lowercase().contains(needle))
+            .unwrap_or(false)
+        || request
+            .schedule_lineage
+            .iter()
+            .any(|id| id.to_string().to_ascii_lowercase().contains(needle))
         || request
             .note
             .as_deref()
@@ -139,6 +177,8 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
                     FROM backup_requests
@@ -212,6 +252,8 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
                     FROM backup_requests
@@ -225,92 +267,6 @@ impl Repository {
                 .bind(client_ids)
                 .bind(start_unix as f64)
                 .bind(end_unix as f64)
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter().map(backup_request_from_row).collect()
-            }
-        }
-    }
-
-    pub(crate) async fn list_failed_backup_request_candidates(
-        &self,
-        client_id: Option<&str>,
-        allowed_client_ids: Option<&HashSet<String>>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        limit: i64,
-    ) -> Result<Vec<BackupRequestView>> {
-        let limit = limit.clamp(1, 200);
-        match self {
-            Self::Memory(memory) => {
-                let mut requests = memory
-                    .backup_requests
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|request| {
-                        client_id.is_none_or(|client_id| request.client_id == client_id)
-                            && allowed_client_ids
-                                .is_none_or(|client_ids| client_ids.contains(&request.client_id))
-                            && request.status == "execution_failed"
-                            && timestamp_in_optional_bounds(
-                                &request.created_at,
-                                start_unix,
-                                end_unix,
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                requests.sort_by(|left, right| {
-                    compare_timestamps_desc(&left.created_at, &right.created_at)
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                requests.truncate(limit as usize);
-                Ok(requests)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        client_id,
-                        paths,
-                        include_config,
-                        follow_symlinks,
-                        missing_path_policy,
-                        status,
-                        payload_hash,
-                        command_scope,
-                        artifact_id,
-                        source_job_id,
-                        source_schedule_id,
-                        note,
-                        created_at::text AS created_at
-                    FROM backup_requests
-                    WHERE ($1::TEXT IS NULL OR client_id = $1)
-                      AND ($2::TEXT[] IS NULL OR client_id = ANY($2::TEXT[]))
-                      AND status = 'execution_failed'
-                      AND (
-                        $3::DOUBLE PRECISION IS NULL
-                        OR created_at >= to_timestamp($3::DOUBLE PRECISION)
-                      )
-                      AND (
-                        $4::DOUBLE PRECISION IS NULL
-                        OR created_at <= to_timestamp($4::DOUBLE PRECISION)
-                      )
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT $5
-                    "#,
-                )
-                .bind(client_id)
-                .bind(
-                    allowed_client_ids
-                        .map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>()),
-                )
-                .bind(start_unix.map(|value| value as f64))
-                .bind(end_unix.map(|value| value as f64))
                 .bind(limit)
                 .fetch_all(pool)
                 .await?;
@@ -377,6 +333,8 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
                     FROM backup_requests
@@ -392,6 +350,8 @@ impl Repository {
                         OR artifact_id::text ILIKE $3 ESCAPE '\'
                         OR source_job_id::text ILIKE $3 ESCAPE '\'
                         OR source_schedule_id::text ILIKE $3 ESCAPE '\'
+                        OR causation_id::text ILIKE $3 ESCAPE '\'
+                        OR array_to_string(schedule_lineage, ' ') ILIKE $3 ESCAPE '\'
                         OR note ILIKE $3 ESCAPE '\'
                     )
                     ORDER BY {order_by}
@@ -437,6 +397,7 @@ impl Repository {
         status: BackupRequestStatus,
         source: BackupRequestSourceLink,
     ) -> Result<BackupRequestView> {
+        source.validate()?;
         let view = BackupRequestView {
             id: Uuid::new_v4(),
             actor_id: Some(operator.operator.id),
@@ -451,6 +412,8 @@ impl Repository {
             artifact_id: None,
             source_job_id: source.job_id,
             source_schedule_id: source.schedule_id,
+            causation_id: source.causation_id,
+            schedule_lineage: source.schedule_lineage.clone(),
             note: request.note.clone(),
             created_at: unix_now().to_string(),
         };
@@ -500,9 +463,14 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13)
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL,
+                        $11, $12, $13, $14, $15
+                    )
                     RETURNING created_at::text AS created_at
                     "#,
                 )
@@ -518,6 +486,8 @@ impl Repository {
                 .bind(&view.command_scope)
                 .bind(source.job_id)
                 .bind(source.schedule_id)
+                .bind(source.causation_id)
+                .bind(&source.schedule_lineage)
                 .bind(&view.note)
                 .fetch_one(&mut *tx)
                 .await?;
@@ -555,46 +525,21 @@ impl Repository {
     pub(crate) async fn attach_backup_request_source(
         &self,
         backup_request_id: Uuid,
-        source_job_id: Option<Uuid>,
-        source_schedule_id: Option<Uuid>,
-        operator: &AuthContext,
+        source: &BackupRequestSourceLink,
     ) -> Result<Option<BackupRequestView>> {
+        source.validate()?;
         match self {
-            Self::Memory(memory) => {
-                let mut requests = memory.backup_requests.write().await;
-                let Some(request) = requests
-                    .iter_mut()
-                    .find(|request| request.id == backup_request_id)
-                else {
-                    return Ok(None);
-                };
-                let changed = request.source_job_id != source_job_id
-                    || request.source_schedule_id != source_schedule_id;
-                if changed {
-                    request.source_job_id = source_job_id;
-                    request.source_schedule_id = source_schedule_id;
-                    memory
-                        .audits
-                        .write()
-                        .await
-                        .push(backup_request_source_audit(
-                            request,
-                            operator,
-                            unix_now().to_string(),
-                        ));
-                }
-                Ok(Some(request.clone()))
-            }
+            Self::Memory(memory) => Ok(memory
+                .backup_requests
+                .read()
+                .await
+                .iter()
+                .find(|request| request.id == backup_request_id && source.matches(request))
+                .cloned()),
             Self::Postgres(pool) => {
-                let mut tx = pool.begin().await?;
-                let Some(row) = sqlx::query(
+                let row = sqlx::query(
                     r#"
-                    UPDATE backup_requests
-                    SET
-                        source_job_id = COALESCE(source_job_id, $2),
-                        source_schedule_id = COALESCE(source_schedule_id, $3)
-                    WHERE id = $1
-                    RETURNING
+                    SELECT
                         id,
                         actor_id,
                         client_id,
@@ -608,38 +553,157 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE id = $1
+                      AND source_job_id IS NOT DISTINCT FROM $2
+                      AND source_schedule_id IS NOT DISTINCT FROM $3
+                      AND causation_id IS NOT DISTINCT FROM $4
+                      AND schedule_lineage = $5
                     "#,
                 )
                 .bind(backup_request_id)
-                .bind(source_job_id)
-                .bind(source_schedule_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                else {
-                    tx.commit().await?;
-                    return Ok(None);
-                };
-                let request = backup_request_from_row(row)?;
-                sqlx::query(
+                .bind(source.job_id)
+                .bind(source.schedule_id)
+                .bind(source.causation_id)
+                .bind(&source.schedule_lineage)
+                .fetch_optional(pool)
+                .await?;
+                row.map(backup_request_from_row).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn find_open_backup_request_for_source(
+        &self,
+        client_id: &str,
+        payload_hash: &str,
+        source: &BackupRequestSourceLink,
+    ) -> Result<Option<BackupRequestView>> {
+        source.validate()?;
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .backup_requests
+                .read()
+                .await
+                .iter()
+                .rev()
+                .find(|request| {
+                    request.client_id == client_id
+                        && request.payload_hash == payload_hash
+                        && request.artifact_id.is_none()
+                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
+                        && source.matches(request)
+                })
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
                     r#"
-                    INSERT INTO audit_logs (
-                        id, actor_id, action, target, command_hash, metadata
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    SELECT
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        follow_symlinks,
+                        missing_path_policy,
+                        status,
+                        payload_hash,
+                        command_scope,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
+                        note,
+                        created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE client_id = $1
+                      AND payload_hash = $2
+                      AND artifact_id IS NULL
+                      AND status = 'requested_metadata_only'
+                      AND source_job_id IS NOT DISTINCT FROM $3
+                      AND source_schedule_id IS NOT DISTINCT FROM $4
+                      AND causation_id IS NOT DISTINCT FROM $5
+                      AND schedule_lineage = $6
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
                     "#,
                 )
-                .bind(Uuid::new_v4())
-                .bind(operator.operator.id)
-                .bind("backup.request_source_linked")
-                .bind(format!("backup_request:{}", request.id))
-                .bind(&request.payload_hash)
-                .bind(backup_request_source_metadata(&request, operator))
-                .execute(&mut *tx)
+                .bind(client_id)
+                .bind(payload_hash)
+                .bind(source.job_id)
+                .bind(source.schedule_id)
+                .bind(source.causation_id)
+                .bind(&source.schedule_lineage)
+                .fetch_optional(pool)
                 .await?;
-                tx.commit().await?;
-                Ok(Some(request))
+                row.map(backup_request_from_row).transpose()
+            }
+        }
+    }
+
+    pub(crate) async fn find_open_backup_request_for_job_artifact(
+        &self,
+        client_id: &str,
+        payload_hash: &str,
+        source_job_id: Uuid,
+    ) -> Result<Option<BackupRequestView>> {
+        match self {
+            Self::Memory(memory) => Ok(memory
+                .backup_requests
+                .read()
+                .await
+                .iter()
+                .rev()
+                .find(|request| {
+                    request.client_id == client_id
+                        && request.payload_hash == payload_hash
+                        && request.source_job_id == Some(source_job_id)
+                        && request.artifact_id.is_none()
+                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
+                })
+                .cloned()),
+            Self::Postgres(pool) => {
+                let row = sqlx::query(
+                    r#"
+                    SELECT
+                        id,
+                        actor_id,
+                        client_id,
+                        paths,
+                        include_config,
+                        follow_symlinks,
+                        missing_path_policy,
+                        status,
+                        payload_hash,
+                        command_scope,
+                        artifact_id,
+                        source_job_id,
+                        source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
+                        note,
+                        created_at::text AS created_at
+                    FROM backup_requests
+                    WHERE client_id = $1
+                      AND payload_hash = $2
+                      AND source_job_id = $3
+                      AND artifact_id IS NULL
+                      AND status = 'requested_metadata_only'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(client_id)
+                .bind(payload_hash)
+                .bind(source_job_id)
+                .fetch_optional(pool)
+                .await?;
+                row.map(backup_request_from_row).transpose()
             }
         }
     }
@@ -684,62 +748,6 @@ impl Repository {
             }
         }
         Ok(())
-    }
-
-    pub(crate) async fn find_open_backup_request_for_artifact(
-        &self,
-        client_id: &str,
-        payload_hash: &str,
-    ) -> Result<Option<BackupRequestView>> {
-        match self {
-            Self::Memory(memory) => Ok(memory
-                .backup_requests
-                .read()
-                .await
-                .iter()
-                .rev()
-                .find(|request| {
-                    request.client_id == client_id
-                        && request.payload_hash == payload_hash
-                        && request.artifact_id.is_none()
-                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
-                })
-                .cloned()),
-            Self::Postgres(pool) => {
-                let row = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        client_id,
-                        paths,
-                        include_config,
-                        follow_symlinks,
-                        missing_path_policy,
-                        status,
-                        payload_hash,
-                        command_scope,
-                        artifact_id,
-                        source_job_id,
-                        source_schedule_id,
-                        note,
-                        created_at::text AS created_at
-                    FROM backup_requests
-                    WHERE client_id = $1
-                      AND payload_hash = $2
-                      AND artifact_id IS NULL
-                      AND status = 'requested_metadata_only'
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT 1
-                    "#,
-                )
-                .bind(client_id)
-                .bind(payload_hash)
-                .fetch_optional(pool)
-                .await?;
-                row.map(backup_request_from_row).transpose()
-            }
-        }
     }
 
     pub(crate) async fn mark_open_backup_request_execution_terminal(
@@ -809,6 +817,8 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
                     "#,
@@ -1015,6 +1025,8 @@ pub(crate) fn backup_request_from_row(row: sqlx::postgres::PgRow) -> Result<Back
         artifact_id: row.try_get("artifact_id")?,
         source_job_id: row.try_get("source_job_id")?,
         source_schedule_id: row.try_get("source_schedule_id")?,
+        causation_id: row.try_get("causation_id")?,
+        schedule_lineage: row.try_get("schedule_lineage")?,
         note: row.try_get("note")?,
         created_at: row.try_get("created_at")?,
     })
@@ -1054,50 +1066,14 @@ fn backup_request_metadata(
         "artifact_id": view.artifact_id,
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
+        "causation_id": view.causation_id,
+        "schedule_lineage": &view.schedule_lineage,
         "confirmed": confirmed,
         "operator_id": operator.operator.id,
         "operator_username": &operator.operator.username,
         "operator_role": &operator.operator.role,
         "operator_session_id": operator.audit_session_id(),
         "result": "requested",
-        "origin_kind": "operator_request",
-        "component": "backup-controller",
-        "metadata_only": true,
-    })
-}
-
-fn backup_request_source_audit(
-    view: &BackupRequestView,
-    operator: &AuthContext,
-    created_at: String,
-) -> AuditLogView {
-    AuditLogView {
-        id: Uuid::new_v4(),
-        actor_id: Some(operator.operator.id),
-        action: "backup.request_source_linked".to_string(),
-        target: format!("backup_request:{}", view.id),
-        command_hash: Some(view.payload_hash.clone()),
-        metadata: backup_request_source_metadata(view, operator),
-        created_at,
-    }
-}
-
-fn backup_request_source_metadata(
-    view: &BackupRequestView,
-    operator: &AuthContext,
-) -> serde_json::Value {
-    json!({
-        "client_id": &view.client_id,
-        "payload_hash": &view.payload_hash,
-        "follow_symlinks": view.follow_symlinks,
-        "missing_path_policy": view.missing_path_policy.as_str(),
-        "source_job_id": view.source_job_id,
-        "source_schedule_id": view.source_schedule_id,
-        "result": "succeeded",
-        "operator_id": operator.operator.id,
-        "operator_username": &operator.operator.username,
-        "operator_role": &operator.operator.role,
-        "operator_session_id": operator.audit_session_id(),
         "origin_kind": "operator_request",
         "component": "backup-controller",
         "metadata_only": true,
@@ -1143,6 +1119,8 @@ fn backup_request_execution_metadata(
         "artifact_id": view.artifact_id,
         "source_job_id": view.source_job_id,
         "source_schedule_id": view.source_schedule_id,
+        "causation_id": view.causation_id,
+        "schedule_lineage": &view.schedule_lineage,
         "operator_id": operator.map(|operator| operator.operator.id),
         "operator_username": operator.map(|operator| operator.operator.username.as_str()),
         "operator_role": operator.map(|operator| operator.operator.role.as_str()),

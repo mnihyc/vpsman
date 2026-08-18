@@ -19,6 +19,9 @@ use vpsman_common::{
 use vpsman_server_core::prepare_webhook_target;
 
 use crate::actor_authority::actor_authorized;
+use crate::alert_policy_retention::{
+    process_alert_policy_retention, AlertPolicyRetentionConfig, AlertPolicyRetentionRun,
+};
 
 const DEFAULT_WEBHOOK_TIMEOUT_SECS: u64 = 5;
 const MAX_ERROR_BYTES: usize = 1024;
@@ -37,16 +40,17 @@ const EVENT_EXPRESSION_ROOTS: [&str; 9] = [
     "telemetry",
     "event",
     "policy",
-    "rule",
+    "policy_rule",
     "traffic",
 ];
-const EVENT_DELIVERY_ROOTS: [&str; 7] = [
+const EVENT_DELIVERY_ROOTS: [&str; 8] = [
     "server",
     "job",
     "schedule",
     "alert",
     "telemetry",
     "policy",
+    "policy_rule",
     "traffic",
 ];
 const INTERVAL_EVENTS: &[(&str, i64)] = &[
@@ -107,6 +111,7 @@ pub(crate) struct WebhookRuleWorkerRun {
     pub(crate) delivered: usize,
     pub(crate) failed: usize,
     pub(crate) pruned: usize,
+    pub(crate) alert_policy_retention: AlertPolicyRetentionRun,
 }
 
 #[derive(Clone, Debug)]
@@ -214,6 +219,10 @@ pub(crate) async fn process_webhook_rules(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
 ) -> Result<WebhookRuleWorkerRun> {
+    if !alert_expression_migration_ready(pool).await? {
+        return Ok(WebhookRuleWorkerRun::default());
+    }
+    project_alert_lifecycle_events(pool, config.materialize_limit).await?;
     ensure_event_partitions(pool).await?;
     let materialized = materialize_interval_events(pool, config).await?;
     let (event_deliveries, legacy_manual_events_skipped) =
@@ -223,6 +232,11 @@ pub(crate) async fn process_webhook_rules(
         + drop_old_event_partitions(pool, config).await?
         + prune_default_partition_rows(pool, config).await?
         + prune_deliveries(pool, config).await?;
+    let alert_policy_retention = process_alert_policy_retention(
+        pool,
+        AlertPolicyRetentionConfig::new(config.retention_days, config.retention_prune_limit),
+    )
+    .await?;
     Ok(WebhookRuleWorkerRun {
         materialized: materialized + event_deliveries,
         legacy_manual_events_skipped,
@@ -230,7 +244,165 @@ pub(crate) async fn process_webhook_rules(
         delivered,
         failed,
         pruned,
+        alert_policy_retention,
     })
+}
+
+async fn alert_expression_migration_ready(pool: &PgPool) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT expression.completed_at IS NOT NULL
+           AND lifecycle.startup_reconciled_at IS NOT NULL
+        FROM alert_expression_migration_meta expression
+        CROSS JOIN alert_policy_lifecycle_meta lifecycle
+        WHERE expression.singleton AND lifecycle.singleton
+        "#,
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn lifecycle_projection_high_watermark(pool: &PgPool) -> Result<i64> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.alert_lifecycle_arm'))")
+        .execute(&mut *tx)
+        .await?;
+    let watermark: i64 =
+        sqlx::query_scalar("SELECT COALESCE(max(event_seq), 0) FROM alert_lifecycle_events")
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(watermark)
+}
+
+async fn project_alert_lifecycle_events(pool: &PgPool, limit: i64) -> Result<usize> {
+    let watermark = lifecycle_projection_high_watermark(pool).await?;
+    let mut tx = pool.begin().await?;
+    let cursor: i64 = sqlx::query_scalar(
+        r#"
+        SELECT last_event_seq FROM alert_lifecycle_consumer_cursors
+        WHERE consumer_kind='webhook'
+        FOR UPDATE
+        "#,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if watermark <= cursor {
+        tx.commit().await?;
+        return Ok(0);
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT event_seq, edge_kind, event_id, event_predicates,
+               subject_client_ids, payload, occurred_at, causation_id,
+               schedule_lineage
+        FROM alert_lifecycle_events
+        WHERE event_seq > $1 AND event_seq <= $2
+        ORDER BY event_seq
+        LIMIT $3
+        "#,
+    )
+    .bind(cursor)
+    .bind(watermark)
+    .bind(limit.clamp(1, 1000))
+    .fetch_all(&mut *tx)
+    .await?;
+    let mut last_seq = cursor;
+    for row in &rows {
+        let event_seq: i64 = row.try_get("event_seq")?;
+        let kind: String = row.try_get("edge_kind")?;
+        let event_id: String = row.try_get("event_id")?;
+        let predicates: Vec<String> = row.try_get("event_predicates")?;
+        let subjects: Vec<String> = row.try_get("subject_client_ids")?;
+        let payload: Value = row.try_get::<SqlJson<Value>, _>("payload")?.0;
+        let occurred_at: DateTime<Utc> = row.try_get("occurred_at")?;
+        let causation_id: Option<Uuid> = row.try_get("causation_id")?;
+        let lineage: Vec<Uuid> = row.try_get("schedule_lineage")?;
+        insert_webhook_event_with_provenance_at_in_tx(
+            &mut tx,
+            &kind,
+            &event_id,
+            &predicates,
+            &subjects,
+            payload,
+            occurred_at,
+            Some(event_seq),
+            causation_id,
+            &lineage,
+        )
+        .await?;
+        let projected = sqlx::query(
+            r#"
+            SELECT id, occurred_at
+            FROM webhook_events
+            WHERE alert_lifecycle_event_seq=$1
+               OR (kind=$2 AND event_id=$3)
+            ORDER BY (alert_lifecycle_event_seq=$1) DESC, occurred_at DESC, id DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(event_seq)
+        .bind(&kind)
+        .bind(&event_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let webhook_id: Uuid = projected.try_get("id")?;
+        let webhook_occurred_at: DateTime<Utc> = projected.try_get("occurred_at")?;
+        sqlx::query(
+            r#"
+            UPDATE webhook_events
+            SET alert_lifecycle_event_seq=$3,
+                causation_id=COALESCE(causation_id,$4),
+                schedule_lineage=$5
+            WHERE occurred_at=$1 AND id=$2
+              AND (alert_lifecycle_event_seq IS NULL OR alert_lifecycle_event_seq=$3)
+            "#,
+        )
+        .bind(webhook_occurred_at)
+        .bind(webhook_id)
+        .bind(event_seq)
+        .bind(causation_id)
+        .bind(&lineage)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO alert_lifecycle_webhook_receipts (
+                event_seq, webhook_event_id, webhook_event_occurred_at,
+                status, updated_at
+            ) VALUES ($1,$2,$3,'projected',clock_timestamp())
+            ON CONFLICT (event_seq) DO UPDATE SET
+                webhook_event_id=EXCLUDED.webhook_event_id,
+                webhook_event_occurred_at=EXCLUDED.webhook_event_occurred_at,
+                status='projected', error=NULL, updated_at=clock_timestamp()
+            "#,
+        )
+        .bind(event_seq)
+        .bind(webhook_id)
+        .bind(webhook_occurred_at)
+        .execute(&mut *tx)
+        .await?;
+        last_seq = event_seq;
+    }
+    if last_seq != cursor {
+        let updated = sqlx::query(
+            r#"
+            UPDATE alert_lifecycle_consumer_cursors
+            SET last_event_seq=$2, updated_at=clock_timestamp()
+            WHERE consumer_kind='webhook' AND last_event_seq=$1
+            "#,
+        )
+        .bind(cursor)
+        .bind(last_seq)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            updated.rows_affected() == 1,
+            "webhook_lifecycle_cursor_stale"
+        );
+    }
+    tx.commit().await?;
+    Ok(rows.len())
 }
 
 async fn prune_processed_telemetry_events(
@@ -604,6 +776,34 @@ pub(crate) async fn insert_webhook_event_at_in_tx(
     payload: Value,
     occurred_at: DateTime<Utc>,
 ) -> Result<bool> {
+    insert_webhook_event_with_provenance_at_in_tx(
+        tx,
+        kind,
+        event_id,
+        event_predicates,
+        subject_client_ids,
+        payload,
+        occurred_at,
+        None,
+        None,
+        &[],
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert_webhook_event_with_provenance_at_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: &str,
+    event_id: &str,
+    event_predicates: &[String],
+    subject_client_ids: &[String],
+    payload: Value,
+    occurred_at: DateTime<Utc>,
+    alert_lifecycle_event_seq: Option<i64>,
+    causation_id: Option<Uuid>,
+    schedule_lineage: &[Uuid],
+) -> Result<bool> {
     create_event_partition_in_tx(tx, occurred_at.date_naive()).await?;
     let predicate_refs = event_predicates
         .iter()
@@ -624,9 +824,12 @@ pub(crate) async fn insert_webhook_event_at_in_tx(
             event_predicates,
             subject_client_ids,
             payload,
-            occurred_at
+            occurred_at,
+            alert_lifecycle_event_seq,
+            causation_id,
+            schedule_lineage
         )
-        SELECT $1, $2, $3, $4, $5, $6, $7::timestamptz
+        SELECT $1, $2, $3, $4, $5, $6, $7::timestamptz, $8, $9, $10
         WHERE NOT EXISTS (
             SELECT 1 FROM webhook_events WHERE kind = $2 AND event_id = $3
         )
@@ -639,6 +842,9 @@ pub(crate) async fn insert_webhook_event_at_in_tx(
     .bind(subject_client_ids)
     .bind(SqlJson(payload))
     .bind(occurred_at.to_rfc3339())
+    .bind(alert_lifecycle_event_seq)
+    .bind(causation_id)
+    .bind(schedule_lineage)
     .execute(&mut **tx)
     .await?;
     if inserted.rows_affected() > 0 {
@@ -995,9 +1201,6 @@ fn expression_context_with_event(
             context = context.with_json_root(root, value);
         }
     }
-    if let Some(value) = event.payload.get("rule").cloned() {
-        context = context.with_json_root("policy_rule", value);
-    }
     context
 }
 
@@ -1009,9 +1212,6 @@ fn merge_event_payload_roots(payload: &mut Value, event_payload: &Value) {
         if let Some(value) = event_payload.get(root).cloned() {
             target.insert(root.to_string(), value);
         }
-    }
-    if let Some(value) = event_payload.get("rule").cloned() {
-        target.insert("policy_rule".to_string(), value);
     }
     if let Some(event) = event_payload.get("event").and_then(Value::as_object) {
         if let Some(target_event) = target.get_mut("event").and_then(Value::as_object_mut) {
@@ -1273,10 +1473,7 @@ fn delivery_candidate_is_suppressed(
 }
 
 fn alert_lifecycle_edge(event_kind: &str) -> bool {
-    matches!(
-        event_kind,
-        "alert.triggered" | "alert.resolved" | "alert.policy_reached" | "alert.policy_resolved"
-    )
+    matches!(event_kind, "alert.triggered" | "alert.resolved")
 }
 
 fn generic_alert_lifecycle_edge(event_kind: &str) -> bool {
@@ -1598,8 +1795,22 @@ async fn drop_old_event_partitions(
         if date >= cutoff {
             continue;
         }
+        let mut tx = pool.begin().await?;
+        let lock_name = format!("vpsman:webhook_events:{date}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(lock_name)
+            .execute(&mut *tx)
+            .await?;
+        let safe_sql =
+            format!("SELECT NOT EXISTS (SELECT 1 FROM {table_name} WHERE processed_at IS NULL)");
+        let safe: bool = sqlx::query_scalar(&safe_sql).fetch_one(&mut *tx).await?;
+        if !safe {
+            tx.commit().await?;
+            continue;
+        }
         let sql = format!("DROP TABLE IF EXISTS {table_name}");
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query(&sql).execute(&mut *tx).await?;
+        tx.commit().await?;
         dropped += 1;
     }
     Ok(dropped)

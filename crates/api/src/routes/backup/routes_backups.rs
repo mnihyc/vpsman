@@ -161,6 +161,7 @@ pub(crate) async fn create_backup_policy(
         request.privilege_assertion.clone(),
         "backup_policy.create",
         None,
+        None,
         BackupPolicyTargetResolutionMode::RequireLiveTargets,
     )
     .await?;
@@ -198,6 +199,7 @@ pub(crate) async fn update_backup_policy(
     let expectation = ScheduleSnapshotExpectation {
         selector_expression: request.expected_selector_expression.clone(),
         target_client_ids: request.expected_target_client_ids.clone(),
+        definition_revision: request.expected_definition_revision,
     };
     let mut request = CreateBackupPolicyRequest::from(request);
     validate_update_backup_policy_request(&request)?;
@@ -238,6 +240,7 @@ pub(crate) async fn update_backup_policy(
         request.privilege_assertion.clone(),
         "backup_policy.update",
         Some(schedule_id),
+        Some(expectation.definition_revision),
         if selector_unchanged {
             BackupPolicyTargetResolutionMode::PreserveFrozenTargets
         } else {
@@ -266,6 +269,7 @@ fn require_backup_policy_snapshot(
     expected_targets.dedup();
     if current.selector_expression.trim() != expectation.selector_expression.trim()
         || stored_targets != expected_targets
+        || current.definition_revision != expectation.definition_revision
     {
         return Err(ApiError::conflict("schedule_snapshot_stale"));
     }
@@ -278,6 +282,7 @@ async fn verify_backup_policy_privilege(
     assertion: Option<PrivilegeAssertion>,
     action: &'static str,
     schedule_id: Option<uuid::Uuid>,
+    definition_revision: Option<i64>,
     target_resolution_mode: BackupPolicyTargetResolutionMode,
 ) -> Result<(), ApiError> {
     let resolved_targets = match target_resolution_mode {
@@ -302,17 +307,20 @@ async fn verify_backup_policy_privilege(
     let privilege_intent = SchedulePrivilegeIntent::new(SchedulePrivilegeIntentInput {
         action,
         schedule_id: schedule_id.as_deref(),
+        definition_revision,
         name: &request.name,
         command_type,
         operation_payload_hash: &operation_payload_hash,
         selector_expression: &request.selector_expression,
         resolved_targets: &resolved_targets,
-        cron_expr: &request.cron_expr,
-        timezone: &request.timezone,
+        trigger_kind: "cron",
+        cron_expr: Some(&request.cron_expr),
+        timezone: Some(&request.timezone),
+        event_expression: None,
         enabled: request.enabled,
-        catch_up_policy: &request.catch_up_policy,
-        catch_up_limit: request.catch_up_limit,
-        retry_delay_secs: request.retry_delay_secs,
+        catch_up_policy: Some(&request.catch_up_policy),
+        catch_up_limit: Some(request.catch_up_limit),
+        retry_delay_secs: Some(request.retry_delay_secs),
         max_failures: request.max_failures,
         deferred_until: None,
         deleted: false,
@@ -1397,20 +1405,23 @@ fn validate_backup_policy_request(
     }
     let schedule_request = CreateScheduleRequest {
         name: request.name.clone(),
-        operation: JobCommand::Backup {
+        operation: Some(JobCommand::Backup {
             paths: request.paths.clone(),
             include_config: request.include_config,
             follow_symlinks: request.follow_symlinks,
             missing_path_policy: request.missing_path_policy,
-        },
+        }),
+        event_argv_template: None,
         selector_expression: request.selector_expression.clone(),
         target_client_ids: request.target_client_ids.clone(),
-        cron_expr: request.cron_expr.clone(),
-        timezone: request.timezone.clone(),
+        trigger_kind: crate::model::ScheduleTriggerKind::Cron,
+        cron_expr: Some(request.cron_expr.clone()),
+        timezone: Some(request.timezone.clone()),
+        event_expression: None,
         enabled: request.enabled,
-        catch_up_policy: request.catch_up_policy.clone(),
-        catch_up_limit: request.catch_up_limit,
-        retry_delay_secs: request.retry_delay_secs,
+        catch_up_policy: Some(request.catch_up_policy.clone()),
+        catch_up_limit: Some(request.catch_up_limit),
+        retry_delay_secs: Some(request.retry_delay_secs),
         max_failures: request.max_failures,
         privilege_assertion: None,
         confirmed: true,
@@ -1419,12 +1430,16 @@ fn validate_backup_policy_request(
         let update_request = UpdateScheduleRequest {
             name: schedule_request.name,
             operation: schedule_request.operation,
+            event_argv_template: schedule_request.event_argv_template,
             selector_expression: schedule_request.selector_expression.clone(),
             target_client_ids: schedule_request.target_client_ids.clone(),
             expected_selector_expression: schedule_request.selector_expression,
             expected_target_client_ids: schedule_request.target_client_ids,
+            expected_definition_revision: 1,
+            trigger_kind: schedule_request.trigger_kind,
             cron_expr: schedule_request.cron_expr,
             timezone: schedule_request.timezone,
+            event_expression: schedule_request.event_expression,
             enabled: schedule_request.enabled,
             catch_up_policy: schedule_request.catch_up_policy,
             catch_up_limit: schedule_request.catch_up_limit,

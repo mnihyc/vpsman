@@ -250,24 +250,6 @@ pub(crate) async fn resolve_fleet_alert(
             "fleet_alert_resolution_reason_invalid",
         ));
     }
-    if let Some(policy_alert_id) = alert_id
-        .strip_prefix("policy-alert:")
-        .and_then(|value| Uuid::parse_str(value).ok())
-    {
-        if state
-            .repo
-            .policy_alert_exists(policy_alert_id)
-            .await
-            .map_err(ApiError::internal_mapper(
-                "fleet_alert_resolution_failed",
-                "The Fleet alert could not be resolved.",
-            ))?
-        {
-            return Err(ApiError::conflict(
-                "fleet_alert_condition_not_operator_resolvable",
-            ));
-        }
-    }
     let episode = state
         .repo
         .resolve_operational_alert_event(&alert_id, reason, &operator)
@@ -443,6 +425,7 @@ pub(crate) async fn dry_run_fleet_alert_policy(
     let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
+    require_alert_policy_source_scopes(&operator.operator.scopes)?;
     let expression = parse_selector_expression(&request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
         .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
@@ -464,6 +447,7 @@ pub(crate) async fn upsert_fleet_alert_policy(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_alert_policy_source_scopes(&operator.operator.scopes)?;
     let expression = parse_selector_expression(&request.selector_expression)
         .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
         .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
@@ -486,6 +470,19 @@ pub(crate) async fn delete_fleet_alert_policy(
     let operator = state
         .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
         .await?;
+    require_alert_policy_source_scopes(&operator.operator.scopes)?;
+    let policy = state
+        .repo
+        .get_fleet_alert_policy(
+            policy_id,
+            operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
+        )
+        .await
+        .map_err(fleet_alert_policy_error)?;
+    let expression = parse_selector_expression(&policy.selector_expression)
+        .map_err(|_| ApiError::conflict("invalid_selector_expression"))?
+        .ok_or_else(|| ApiError::conflict("invalid_selector_expression"))?;
+    require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     validate_delete_confirmation(
         request.confirmed,
         &request.reviewed_name,
@@ -498,6 +495,16 @@ pub(crate) async fn delete_fleet_alert_policy(
         .await
         .map_err(fleet_alert_policy_error)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn require_alert_policy_source_scopes(scopes: &[String]) -> Result<(), ApiError> {
+    if operator_has_scope(scopes, SCOPE_FLEET_READ)
+        && operator_has_scope(scopes, SCOPE_BACKUPS_READ)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("operator_scope_insufficient"))
+    }
 }
 
 pub(crate) async fn list_vps_rules(

@@ -58,7 +58,9 @@ const explicitAllNetworkRateRule: VpsRuleValueRecord = {
   value_raw: "[]",
 };
 
-const bulkTargetUpdateSchedules: ScheduleRecord[] = [
+const bulkTargetUpdateSchedules: Array<
+  Partial<ScheduleRecord> & Pick<ScheduleRecord, "id" | "name">
+> = [
   {
     cadence_error: null,
     catch_up_limit: 1,
@@ -163,6 +165,10 @@ test.beforeEach(async ({ page }, testInfo) => {
     configurationSourceSyncFailure: testInfo.tags.includes(
       "@configuration-source-sync-failure",
     ),
+    policyAlertGlobalOccurrence: testInfo.tags.includes(
+      "@policy-global-occurrence",
+    ),
+    policyDryRunOccurrence: testInfo.tags.includes("@policy-meta-editor"),
     fleetAlertStateFailure: testInfo.tags.includes(
       "@fleet-alert-state-failure",
     ),
@@ -190,12 +196,22 @@ test.beforeEach(async ({ page }, testInfo) => {
     policyAlertHistorySaturated: testInfo.tags.includes(
       "@policy-alert-history-saturated",
     ),
-    operatorRoleOverride: testInfo.tags.includes("@alert-read-only")
-      ? "operator"
-      : undefined,
+    operatorRoleOverride:
+      testInfo.tags.includes("@alert-read-only") ||
+      testInfo.tags.includes("@alert-event-schedule-scope-denied")
+        ? "operator"
+        : undefined,
     operatorScopesOverride: testInfo.tags.includes("@alert-read-only")
       ? ["fleet:read", "backups:read"]
-      : undefined,
+      : testInfo.tags.includes("@alert-event-schedule-scope-denied")
+        ? [
+            "fleet:read",
+            "jobs:write",
+            "schedules:read",
+            "schedules:write",
+            "templates:read",
+          ]
+        : undefined,
     fleetSnapshotAfterDeleteDelayMs: testInfo.tags.includes(
       "@uptime-delete-refresh-delay",
     )
@@ -1620,12 +1636,12 @@ test("reviews notification and webhook queue mutations before commit", async ({
   });
   await webhookExpression.click();
   await webhookExpression.fill("");
-  await page.keyboard.type("interval.");
+  await page.keyboard.type("alert.");
   await expect(
-    page.getByRole("option", { name: /^interval\.30sec$/ }),
+    page.getByRole("option", { name: /^alert\.triggered$/ }),
   ).toBeVisible();
   await page.keyboard.press("Enter");
-  await expect(webhookExpression).toHaveValue("interval.30sec");
+  await expect(webhookExpression).toHaveValue("alert.triggered");
   await activate(webhooks.getByLabel("Close detail panel"));
 
   await activate(webhookRules.getByRole("button", { name: "Send test" }));
@@ -3238,7 +3254,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(lifecycle).toContainText("new generation");
 
   const grid = page.getByLabel("Policy groups data grid");
-  await expect(grid.getByText("1 of 1 policy")).toBeVisible();
+  await expect(grid.getByText("2 of 2 policies")).toBeVisible();
   await expect(grid.getByRole("columnheader", { name: "Actions" })).toHaveCount(
     0,
   );
@@ -3278,6 +3294,7 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(belowDetail).toContainText("edge-resource-policy");
   await expect(belowDetail).toContainText("traffic.cycle.total");
   await expect(belowDetail).toContainText("traffic.quota.total * 0.8");
+  await expect(belowDetail).toContainText("inverse Trigger");
   await expect(belowDetail).toContainText("Traffic quota threshold reached");
   await expect(belowDetail).toContainText("Recent policy alert history");
   await expect(belowDetail).toContainText("Persisting");
@@ -3285,6 +3302,18 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(belowDetail).toContainText("Condition Recovered");
   await page.getByLabel("Close detail panel").click();
   await expect(page.getByText("Alert policy details")).toHaveCount(0);
+
+  const defaultPolicyRow = grid
+    .locator(".gridBody [role=row]", { hasText: "Default agent connectivity" })
+    .first();
+  if (!testInfo.project.name.includes("mobile")) {
+    await defaultPolicyRow.getByLabel("Expand Policy groups row").click();
+    const defaultPolicyDetail = grid.locator(".gridExpandedRow");
+    await expect(defaultPolicyDetail).toContainText("System default");
+    await expect(defaultPolicyDetail).toContainText("default.agent.offline");
+    await expect(defaultPolicyDetail).toContainText("after evidence #40");
+    await defaultPolicyRow.getByLabel("Collapse Policy groups row").click();
+  }
   await expect(page).toHaveURL(/#\/observability\/alerts$/);
 
   await page.goBack();
@@ -3310,8 +3339,22 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(editor.getByLabel("Policy VPS selector expression")).toHaveValue(
     "tag:edge",
   );
-  await expect(editor.getByLabel("Rule condition expression")).toHaveValue(
-    "traffic.cycle.total >= traffic.quota.total * 0.8",
+  await expect(editor.getByLabel("Rule type", { exact: true })).toHaveValue(
+    "metric",
+  );
+  await expect(editor.getByLabel("Rule evidence source")).toHaveValue(
+    "telemetry.combined",
+  );
+  await expect(
+    editor.getByLabel("Rule Trigger condition expression"),
+  ).toHaveValue("traffic.cycle.total >= traffic.quota.total * 0.8");
+  await expect(editor).toContainText("Trigger condition");
+  await expect(editor).toContainText("Resolve condition");
+  await expect(editor.getByLabel("Trigger meta condition")).toHaveValue(
+    "immediate",
+  );
+  await expect(editor.getByLabel("Resolve meta condition")).toHaveValue(
+    "immediate",
   );
   await editor.getByRole("button", { name: "Preview matches" }).click();
   await expect(editor.getByText("Match preview")).toBeVisible();
@@ -3352,6 +3395,127 @@ test("keeps fleet alert policy actions selection-scoped", async ({
     await page.keyboard.press("Escape");
   }
 });
+
+test(
+  "authors policy Trigger and Resolve meta conditions with typed starters",
+  { tag: "@policy-meta-editor" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    await page
+      .getByLabel("Policy groups data grid")
+      .getByRole("button", { name: "Create policy" })
+      .click();
+
+    const editor = page.locator(".consoleDetailPanel", {
+      hasText: "Create alert policy",
+    });
+    await editor.getByRole("button", { name: "Agent offline" }).click();
+    const stateRule = editor.locator(".policyRuleCard").first();
+    await expect(stateRule.getByLabel("Rule name")).toHaveValue(
+      "Agent offline",
+    );
+    await expect(
+      stateRule.getByLabel("Rule type", { exact: true }),
+    ).toHaveValue("state");
+    await expect(stateRule.getByLabel("Rule evidence source")).toHaveValue(
+      "agent.status",
+    );
+    await expect(
+      stateRule.getByLabel("Trigger meta condition", { exact: true }),
+    ).toHaveValue("sustained");
+    await expect(
+      stateRule.getByLabel("Resolve meta condition", { exact: true }),
+    ).toHaveValue("sustained");
+    await expect(
+      stateRule.getByLabel("Rule Resolve condition expression"),
+    ).toHaveValue("evidence.status = online");
+    const ruleTypeHelp = stateRule.getByRole("button", {
+      name: "Rule type help",
+    });
+    await ruleTypeHelp.focus();
+    const ruleTypeTooltip = stateRule.getByRole("tooltip").filter({
+      hasText: "Metric and State rules own auto-recovering conditions",
+    });
+    await expect(ruleTypeTooltip).toBeVisible();
+    await expect(ruleTypeHelp).toHaveAttribute("aria-describedby", /.+/);
+    expect(await ruleTypeHelp.getAttribute("aria-describedby")).toBe(
+      await ruleTypeTooltip.getAttribute("id"),
+    );
+    await expect(stateRule.locator(".policyLifecyclePhases")).toHaveCSS(
+      "align-items",
+      "start",
+    );
+    await expect(
+      stateRule
+        .locator(".policyMetaConditionEditor > .consoleField:first-child")
+        .first(),
+    ).toHaveCSS("grid-column-end", "-1");
+
+    await editor.getByRole("button", { name: "Job failure" }).click();
+    await expect(
+      editor.getByLabel("Policy VPS selector expression"),
+    ).toHaveValue("*");
+    const occurrenceRule = editor.locator(".policyRuleCard").nth(1);
+    await expect(
+      occurrenceRule.getByLabel("Rule type", { exact: true }),
+    ).toHaveValue("occurrence");
+    await expect(occurrenceRule.getByLabel("Rule evidence source")).toHaveValue(
+      "job.terminal",
+    );
+    await occurrenceRule
+      .getByLabel("Trigger meta condition", { exact: true })
+      .selectOption("count");
+    await expect(
+      occurrenceRule.getByLabel("Occurrence count correlation"),
+    ).toHaveValue("global");
+    await expect(
+      occurrenceRule
+        .getByLabel("Occurrence count correlation")
+        .locator('option[value="subject"]'),
+    ).toHaveCount(0);
+    await expect(occurrenceRule).toContainText(
+      "Occurrence facts do not become false",
+    );
+    await expect(
+      occurrenceRule.getByLabel("Resolve meta condition", { exact: true }),
+    ).toHaveValue("elapsed_since_trigger");
+    await editor.getByRole("button", { name: "Preview matches" }).click();
+    await expect(editor.getByText("Match preview")).toBeVisible();
+    await expect(editor).toContainText(
+      "Resolve: no condition expression · elapsed since Triggered",
+    );
+  },
+);
+
+test(
+  "labels global occurrence history without inventing an agent",
+  { tag: "@policy-global-occurrence" },
+  async ({ page }, testInfo) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    const grid = page.getByLabel("Policy groups data grid");
+    const policyRow = testInfo.project.name.includes("mobile")
+      ? grid
+          .getByLabel(/Policy groups mobile card/)
+          .filter({ hasText: "edge-resource-policy" })
+          .first()
+      : grid
+          .locator(".gridBody [role=row]", {
+            hasText: "edge-resource-policy",
+          })
+          .first();
+    await checkControl(policyRow.getByLabel("Select Policy groups row"));
+    await grid.getByRole("button", { name: "Action" }).click();
+    await page.getByRole("menuitem", { name: "Details" }).click();
+    const detail = page.locator(".consoleDetailPanel", {
+      hasText: "Alert policy details",
+    });
+    await expect(detail).toContainText("Repeated terminal job failures");
+    await expect(detail).toContainText("Global · Job Terminal");
+    await expect(detail).not.toContainText("undefined");
+  },
+);
 
 test(
   "keeps current policy state independent from capped alert history",
@@ -4048,6 +4212,16 @@ test(
     );
     expect(mutationRequests.fleetAlertResolutions).toEqual([]);
     expect(mutationRequests.fleetAlertStates).toEqual([]);
+
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    await expect(
+      page.getByText("Alert Policies are read-only for this session"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByLabel("Policy groups data grid")
+        .getByRole("button", { name: "Create policy" }),
+    ).toBeDisabled();
   },
 );
 
@@ -4462,12 +4636,6 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
     "Private HTTP API bind address",
   );
   await page.getByRole("button", { name: "Advanced TOML" }).click();
-  await expect(
-    page.getByText(/Legacy resource alert threshold settings are ignored/),
-  ).toContainText("api.alert_cpu_load_warning");
-  await expect(
-    page.getByText(/Legacy resource alert threshold settings are ignored/),
-  ).toContainText("Observability / Alerts");
   await page.getByRole("button", { name: "Fields", exact: true }).click();
   await configSections.getByRole("button", { name: /Network/ }).click();
   await expect(page.getByLabel("Tunnel IPv4 allocation pool")).toHaveValue("");
@@ -4478,14 +4646,6 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
       .getByText("network.tunnel_ipv4_allocation_pool_cidr")
       .first(),
   ).toBeVisible();
-  await expect(
-    page.locator(".systemConfigReview").getByText("api.alert_cpu_load_warning"),
-  ).toHaveCount(0);
-  await expect(
-    page
-      .locator(".systemConfigReview")
-      .getByText("api.alert_cpu_load_critical"),
-  ).toHaveCount(0);
   await page.getByLabel("Tunnel IPv6 allocation pool").fill("fd42:250::/64");
   await expect(
     page
@@ -6794,6 +6954,96 @@ test("uses an exact VPS combobox for the desired-config workspace", async ({
   ).toBeEnabled();
 });
 
+test(
+  "previews exact cron argv while creating and editing schedules",
+  { tag: "@cron-argv-preview" },
+  async ({ page }) => {
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    await activate(
+      page.getByRole("button", { name: "Expand Create schedule" }),
+    );
+
+    const commandInput = page.getByLabel("Schedule job argv");
+    const directArgv = `/usr/bin/printf '%s %s' 'hello cron' tail`;
+    await commandInput.fill(directArgv);
+    const inspector = page.getByRole("region", {
+      name: "Cron schedule argv elements",
+      exact: true,
+    });
+    await expect(inspector).toContainText("4 ordered JSON elements");
+    await expect(inspector.getByLabel("Exact argv JSON value")).toHaveText(
+      JSON.stringify(["/usr/bin/printf", "%s %s", "hello cron", "tail"]),
+    );
+    await expect(inspector.getByLabel("argv[2] exact value")).toHaveText(
+      "hello cron",
+    );
+    const help = inspector.getByLabel("Parsed direct argv help");
+    await expect(help).toHaveAttribute("tabindex", "0");
+    await expect(help).toHaveAttribute("title", /without a shell/);
+    await expect
+      .poll(() =>
+        inspector.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+
+    await commandInput.fill(`/usr/bin/printf 'unfinished`);
+    await expect(inspector).toContainText(
+      "Parser error · Unterminated quoted argument",
+    );
+    await expect(
+      page.getByRole("button", { name: "Review save", exact: true }),
+    ).toBeDisabled();
+
+    await commandInput.fill(directArgv);
+    await page.getByLabel("Schedule name").fill("cron argv preview");
+    await page.getByLabel("Schedule target expression").fill("country:US");
+    await activate(
+      page.getByRole("button", { name: "Review save", exact: true }),
+    );
+    const confirmation = page.getByRole("region", {
+      name: "Confirm schedule",
+      exact: true,
+    });
+    await activate(confirmation.getByRole("button", { name: "Save schedule" }));
+    const created = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { schedules: Array<Record<string, unknown>> };
+        }
+      ).__vpsmanTestRequests;
+      return requests.schedules.at(-1);
+    });
+    expect(created).toMatchObject({
+      cron_expr: "0 * * * *",
+      operation: {
+        argv: ["/usr/bin/printf", "%s %s", "hello cron", "tail"],
+        pty: false,
+        type: "shell",
+      },
+      trigger_kind: "cron",
+    });
+
+    await selectGridRow(
+      page,
+      "Schedule records",
+      "51515151-6161-4717-8abc-defdefdefdef",
+    );
+    await runGridAction(page, "Schedule records", "Edit");
+    const editedInspector = page.getByRole("region", {
+      name: "Cron schedule argv elements",
+      exact: true,
+    });
+    await expect(page.getByLabel("Schedule job argv")).toBeDisabled();
+    await expect(editedInspector).toContainText("selected template");
+    await expect(
+      editedInspector.getByLabel("Exact argv JSON value"),
+    ).toHaveText(JSON.stringify(["uptime"]));
+  },
+);
+
 test("creates a cron schedule from a command template with target preview", async ({
   page,
 }, testInfo) => {
@@ -6824,7 +7074,7 @@ test("creates a cron schedule from a command template with target preview", asyn
   await expect(page.getByText("0 * * * * · UTC")).toBeVisible();
   const schedulesGrid = page.getByLabel("Schedule records data grid");
   await expect(page.getByLabel("Schedule execution policy")).toContainText(
-    "Enabled schedules with a valid cadence automatically dispatch future jobs",
+    "Enabled schedules dispatch jobs from their saved target snapshot",
   );
   await activate(
     schedulesGrid
@@ -6885,6 +7135,185 @@ test("creates a cron schedule from a command template with target preview", asyn
     timezone: "UTC",
   });
 });
+
+test(
+  "creates a policy-alert event schedule with strict argv rendering",
+  { tag: "@alert-event-schedule" },
+  async ({ page }) => {
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Automation", "Schedules");
+    await activate(
+      page.getByRole("button", { name: "Expand Create schedule" }),
+    );
+
+    await page.getByRole("radio", { name: /Alert event/ }).check();
+    await expect(page.getByLabel("Schedule cron expression")).toHaveCount(0);
+    await expect(
+      page.getByLabel("Schedule alert event expression"),
+    ).toBeVisible();
+    await expect(page.getByText("No raw-event flapping")).toBeVisible();
+    await expect(page.getByText("Default no-op · /bin/true")).toBeVisible();
+    await expect(page.getByLabel("Alert event argv elements")).toContainText(
+      "argv[0]",
+    );
+
+    await page.getByLabel("Schedule name").fill("traffic mitigation");
+    await page.getByLabel("Schedule target expression").fill("country:US");
+    const argv = page.getByLabel("Schedule job argv");
+    await argv.fill("[IF alert.triggered]");
+    await expect(
+      page.getByRole("alert").filter({
+        hasText: "argv[0] must be a literal executable path, not a template",
+      }),
+    ).toBeVisible();
+    await argv.fill("/bin/true literal.filter");
+    await expect(
+      page.getByRole("alert").filter({
+        hasText:
+          "argv[1] cannot use conditional, loop, or helper template syntax",
+      }),
+    ).toBeVisible();
+    await argv.fill(`/bin/sh -c 'printf %s "$1"' -- '{alert.title}'`);
+    await expect(page.getByText("argv[4]", { exact: true })).toBeVisible();
+    await activate(page.getByRole("button", { name: "Use alert summary" }));
+    await activate(
+      page.getByRole("button", { name: /Traffic alert triggered/ }),
+    );
+    await page
+      .getByText("Enabled and armed for future matching edges")
+      .locator("..")
+      .getByRole("checkbox")
+      .check();
+
+    const review = page.getByRole("button", {
+      name: "Review save",
+      exact: true,
+    });
+    await expect(review).toBeEnabled();
+    await activate(review);
+    const prompt = page.getByRole("region", { name: "Confirm schedule" });
+    await expect(prompt).toContainText("Alert lifecycle event");
+    await expect(prompt).toContainText(
+      "Prospective · one job per edge · deferred edges skipped",
+    );
+    await expect(prompt).toContainText(
+      "alert.triggered && alert.category:traffic",
+    );
+    await expect(prompt).toContainText("Saved argv JSON");
+    await expect(prompt).toContainText("Triggered rendered argv");
+    const savedArgv = prompt.getByLabel("Saved argv JSON value");
+    const renderedArgv = prompt.getByLabel(
+      "Triggered rendered argv sample value",
+    );
+    await expect(savedArgv).toHaveAttribute("tabindex", "0");
+    await expect(renderedArgv).toHaveAttribute("tabindex", "0");
+    await expect(savedArgv).toHaveCSS("white-space", "pre-wrap");
+    await expect(renderedArgv).toHaveCSS("white-space", "pre-wrap");
+    await expect(savedArgv.locator("xpath=ancestor::div[1]")).toHaveCSS(
+      "grid-column-start",
+      "1",
+    );
+    await expect(savedArgv.locator("xpath=ancestor::div[1]")).toHaveCSS(
+      "grid-column-end",
+      "-1",
+    );
+    await expect(renderedArgv.locator("xpath=ancestor::div[1]")).toHaveCSS(
+      "grid-column-start",
+      "1",
+    );
+    await expect(renderedArgv.locator("xpath=ancestor::div[1]")).toHaveCSS(
+      "grid-column-end",
+      "-1",
+    );
+    await expect(prompt).toContainText("Traffic policy threshold reached");
+    await expect(prompt).toContainText(
+      "alert.triggered] warning traffic · Edge traffic policy / 80% quota sustained",
+    );
+    await expect(prompt).toContainText("777777777777 → 888888888888");
+    await activate(prompt.getByRole("button", { name: "Save schedule" }));
+
+    const request = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: { schedules: Array<Record<string, unknown>> };
+        }
+      ).__vpsmanTestRequests;
+      return requests.schedules.at(-1);
+    });
+    expect(request).toMatchObject({
+      catch_up_limit: null,
+      catch_up_policy: null,
+      cron_expr: null,
+      enabled: true,
+      event_expression: "alert.triggered && alert.category:traffic",
+      max_failures: 3,
+      name: "traffic mitigation",
+      operation: null,
+      retry_delay_secs: null,
+      selector_expression: "country:US",
+      timezone: null,
+      trigger_kind: "event",
+    });
+    expect(request?.event_argv_template).toEqual([
+      "/usr/bin/printf",
+      "%s\\n",
+      "[{event.kind}] {alert.title} · {alert.category}/{alert.severity} · episode {alert.id} generation {alert.trigger_generation}",
+    ]);
+    const previewRequest = await page.evaluate(() => {
+      const requests = (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            scheduleEventPreviews: Array<Record<string, unknown>>;
+          };
+        }
+      ).__vpsmanTestRequests;
+      return requests.scheduleEventPreviews.at(-1);
+    });
+    expect(previewRequest).toMatchObject({
+      event_expression: "alert.triggered && alert.category:traffic",
+      event_argv_template: request?.event_argv_template,
+    });
+
+    const grid = page.getByLabel("Schedule records data grid");
+    await expect(grid).toContainText("Alert lifecycle edge");
+    await expect(grid).toContainText("Listening");
+    await selectGridRow(
+      page,
+      "Schedule records",
+      "52525252-6161-4717-8abc-defdefdefdef",
+    );
+    await grid
+      .locator(".gridToolbarActions")
+      .getByRole("button", { name: "Actions", exact: true })
+      .click();
+    await expect(
+      page.getByRole("menuitem", { name: "Review run now", exact: true }),
+    ).toBeDisabled();
+  },
+);
+
+test(
+  "keeps alert-event schedules unavailable without backup alert visibility",
+  { tag: "@alert-event-schedule-scope-denied" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Automation", "Schedules");
+    await activate(
+      page.getByRole("button", { name: "Expand Create schedule" }),
+    );
+    const eventTrigger = page.getByRole("radio", { name: /Alert event/ });
+    await expect(eventTrigger).toBeDisabled();
+    await expect(
+      page.getByText(
+        "Requires fleet:read, backups:read, jobs:write, and schedules:write.",
+      ),
+    ).toBeVisible();
+    await expect(eventTrigger.locator("..")).toHaveAttribute(
+      "title",
+      "Requires fleet:read, backups:read, jobs:write, and schedules:write.",
+    );
+  },
+);
 
 test("registers VPS identities and revokes current keys from the access panel", async ({
   page,
@@ -8784,6 +9213,83 @@ test("shows grouped execution summaries for job output details", async ({
   });
   expect(comparisonRequest).toMatchObject({ mode: "text" });
 });
+
+test(
+  "previews exact dispatch argv and shell payloads responsively",
+  { tag: "@dispatch-payload-preview" },
+  async ({ page }, testInfo) => {
+    await page.goto("/");
+    await unlockPrivilegeFor(page, "Jobs", "Dispatch");
+    const composer = page.locator(".commandComposer");
+    const commandInput = composer.getByLabel("Command argv");
+
+    await commandInput.fill(`/usr/bin/printf '%s %s' 'hello world' tail`);
+    const argvInspector = composer.getByRole("region", {
+      name: "Dispatch argv elements",
+      exact: true,
+    });
+    await expect(argvInspector).toContainText("4 ordered JSON elements");
+    await expect(argvInspector.getByLabel("Exact argv JSON value")).toHaveText(
+      JSON.stringify(["/usr/bin/printf", "%s %s", "hello world", "tail"]),
+    );
+    await expect(argvInspector.getByLabel("argv[2] exact value")).toHaveText(
+      "hello world",
+    );
+    const argvHelp = argvInspector.getByLabel("Parsed direct argv help");
+    await expect(argvHelp).toHaveAttribute("tabindex", "0");
+    await expect(argvHelp).toHaveAttribute("title", /without a shell/);
+    await expect
+      .poll(() =>
+        argvInspector.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+
+    await commandInput.fill(`/usr/bin/printf 'unfinished`);
+    await expect(argvInspector).toContainText(
+      "Parser error · Unterminated quoted argument",
+    );
+    await expect(argvInspector).toContainText("Payload unavailable");
+
+    if (testInfo.project.name.includes("mobile")) {
+      await composer
+        .getByLabel("Dispatch operation", { exact: true })
+        .selectOption("shell_script");
+    } else {
+      await composer
+        .getByLabel("Command operations")
+        .getByRole("button", { name: "Shell", exact: true })
+        .click();
+    }
+    const scriptInput = composer.getByLabel("Shell script");
+    await scriptInput.fill("  set -eu\nprintf '%s\\n' ready  \n");
+    const shellInspector = composer.getByRole("region", {
+      name: "Submitted script payload",
+      exact: true,
+    });
+    const submittedScript = "set -eu\nprintf '%s\\n' ready";
+    await expect(
+      shellInspector.getByLabel("Exact submitted script JSON value"),
+    ).toHaveText(JSON.stringify(submittedScript));
+    await expect(shellInspector.getByLabel("script exact value")).toHaveText(
+      submittedScript,
+    );
+    const shellHelp = shellInspector.getByLabel("Exact shell payload help");
+    await expect(shellHelp).toHaveAttribute("tabindex", "0");
+    await expect(shellHelp).toHaveAttribute(
+      "title",
+      /does not infer a shell executable or environment/,
+    );
+    await expect
+      .poll(() =>
+        shellInspector.evaluate(
+          (element) => element.scrollWidth - element.clientWidth,
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+  },
+);
 
 test(
   "shows accepted job progress while target evidence is still loading",

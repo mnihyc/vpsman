@@ -172,12 +172,22 @@ function scheduledRunScheduleLabel(
 }
 
 function scheduledRunCadenceLabel(schedule: ScheduleRecord): string {
+  if (schedule.trigger_kind === "event") {
+    return `Alert lifecycle edge · ${schedule.event_expression ?? "invalid expression"}`;
+  }
   return schedule.cadence_error
     ? "Invalid cadence"
-    : describeCronExpression(schedule.cron_expr);
+    : describeCronExpression(schedule.cron_expr ?? "");
 }
 
 function scheduledRunNextRunLabel(schedule: ScheduleRecord): string {
+  if (schedule.trigger_kind === "event") {
+    return schedule.event_armed_at
+      ? `Armed ${formatTime(schedule.event_armed_at)}`
+      : schedule.enabled
+        ? "Arm boundary unavailable"
+        : "Disabled";
+  }
   if (schedule.cadence_error) {
     return "Unavailable — invalid cadence";
   }
@@ -2546,13 +2556,13 @@ export function JobsPanel({
                         <strong>
                           {job.source_schedule_id ?? "Data unavailable"}
                         </strong>
-                        <span>Cadence</span>
+                        <span>Trigger</span>
                         <strong>
                           {schedule
-                            ? `${scheduledRunCadenceLabel(schedule)} · ${schedule.timezone}`
+                            ? `${scheduledRunCadenceLabel(schedule)}${schedule.timezone ? ` · ${schedule.timezone}` : ""}`
                             : "Open schedule registry"}
                         </strong>
-                        <span>Current next run</span>
+                        <span>Current next run / arm</span>
                         <strong>
                           {schedule
                             ? scheduledRunNextRunLabel(schedule)

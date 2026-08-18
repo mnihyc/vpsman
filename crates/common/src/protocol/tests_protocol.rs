@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use super::{
     agent_update_release_statuses, backup_request_statuses, canonical_db_privilege_intent,
-    file_transfer_command_types, file_transfer_session_events, file_transfer_session_status,
-    file_transfer_session_statuses, fleet_alert_notification_delivery_process_statuses,
-    fleet_alert_notification_delivery_statuses, is_file_transfer_command_type,
-    is_file_transfer_session_event, is_fleet_alert_notification_delivery_process_status,
+    canonical_schedule_privilege_intent, file_transfer_command_types, file_transfer_session_events,
+    file_transfer_session_status, file_transfer_session_statuses,
+    fleet_alert_notification_delivery_process_statuses, fleet_alert_notification_delivery_statuses,
+    is_file_transfer_command_type, is_file_transfer_session_event,
+    is_fleet_alert_notification_delivery_process_status,
     is_fleet_alert_notification_delivery_status, is_server_job_status, is_server_job_type,
     is_terminal_command_type, is_terminal_session_event, is_topology_edge_health_status,
     is_topology_neighbor_state, is_topology_node_status, is_topology_observation_state,
@@ -17,17 +18,18 @@ use super::{
     job_command_type_labels, job_command_variant_names, job_status_class_by_status,
     job_status_classes, job_statuses, job_target_status_class_by_status, job_target_status_classes,
     job_target_statuses, migration_link_statuses, parse_build_number, restore_plan_statuses,
-    server_job_statuses, server_job_types, terminal_command_types, terminal_session_events,
-    terminal_session_state, terminal_session_states, terminal_session_statuses,
-    topology_edge_health_statuses, topology_neighbor_states, topology_node_statuses,
-    topology_observation_states, topology_probe_states, topology_runtime_states,
-    webhook_rule_delivery_history_statuses, webhook_rule_delivery_process_statuses,
-    webhook_rule_delivery_statuses, AgentHello, AgentRuntimeConfigReloadRequest,
-    AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand, JobStatus, JobStatusClass,
-    JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus, RestorePlanStatus, ServerHello,
-    JOB_COMMAND_SAFETY_EXCLUSIVE, JOB_COMMAND_SAFETY_EXEC, JOB_COMMAND_SAFETY_READ,
-    JOB_COMMAND_SAFETY_WRITE, JOB_STATUS_CLASSES, JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_SKIPPED,
-    JOB_TARGET_STATUS_CLASSES, TARGET_STATUS_SKIPPED,
+    schedule_privilege_intent_fields, server_job_statuses, server_job_types,
+    terminal_command_types, terminal_session_events, terminal_session_state,
+    terminal_session_states, terminal_session_statuses, topology_edge_health_statuses,
+    topology_neighbor_states, topology_node_statuses, topology_observation_states,
+    topology_probe_states, topology_runtime_states, webhook_rule_delivery_history_statuses,
+    webhook_rule_delivery_process_statuses, webhook_rule_delivery_statuses, AgentHello,
+    AgentRuntimeConfigReloadRequest, AgentUpdateReleaseStatus, BackupRequestStatus, JobCommand,
+    JobStatus, JobStatusClass, JobTargetStatus, JobTargetStatusClass, MigrationLinkStatus,
+    RestorePlanStatus, SchedulePrivilegeIntentInput, ServerHello, JOB_COMMAND_SAFETY_EXCLUSIVE,
+    JOB_COMMAND_SAFETY_EXEC, JOB_COMMAND_SAFETY_READ, JOB_COMMAND_SAFETY_WRITE, JOB_STATUS_CLASSES,
+    JOB_STATUS_PARTIAL_SUCCESS, JOB_STATUS_SKIPPED, JOB_TARGET_STATUS_CLASSES,
+    TARGET_STATUS_SKIPPED,
 };
 
 #[test]
@@ -806,6 +808,63 @@ fn job_privilege_intent_binds_rollout_policy_hash() {
     assert_eq!(
         intent,
         r#"{"version":1,"action":"job.dispatch","selector_expression":"tag:prod","command_type":"shell_argv","operation_payload_hash":"ab","rollout_policy_hash":"cd","resolved_targets":["client-a","client-b"],"max_timeout_secs":30,"force_unprivileged":false,"privileged":true}"#
+    );
+}
+
+#[test]
+fn schedule_privilege_intent_fields_match_canonical_v2_payload() {
+    let resolved_targets = vec!["client-b".to_string(), "client-a".to_string()];
+    let intent = canonical_schedule_privilege_intent(SchedulePrivilegeIntentInput {
+        action: "schedule.update",
+        schedule_id: Some("schedule-a"),
+        definition_revision: Some(7),
+        name: " Alert handler ",
+        command_type: "shell_argv",
+        operation_payload_hash: "ab",
+        selector_expression: " tag:edge ",
+        resolved_targets: &resolved_targets,
+        trigger_kind: "event",
+        cron_expr: None,
+        timezone: None,
+        event_expression: Some(" alert.triggered "),
+        enabled: true,
+        catch_up_policy: None,
+        catch_up_limit: None,
+        retry_delay_secs: None,
+        max_failures: 3,
+        deferred_until: None,
+        deleted: false,
+    })
+    .unwrap();
+
+    assert_eq!(
+        schedule_privilege_intent_fields(),
+        &[
+            "version",
+            "action",
+            "schedule_id",
+            "definition_revision",
+            "name",
+            "command_type",
+            "operation_payload_hash",
+            "selector_expression",
+            "resolved_targets",
+            "trigger_kind",
+            "cron_expr",
+            "timezone",
+            "event_expression",
+            "enabled",
+            "catch_up_policy",
+            "catch_up_limit",
+            "retry_delay_secs",
+            "max_failures",
+            "deferred_until",
+            "deleted",
+        ]
+    );
+    assert_eq!(
+        intent,
+        r#"{"version":2,"action":"schedule.update","schedule_id":"schedule-a","definition_revision":7,"name":"Alert handler","command_type":"shell_argv","operation_payload_hash":"ab","selector_expression":"tag:edge","resolved_targets":["client-a","client-b"],"trigger_kind":"event","cron_expr":null,"timezone":null,"event_expression":"alert.triggered","enabled":true,"catch_up_policy":null,"catch_up_limit":null,"retry_delay_secs":null,"max_failures":3,"deferred_until":null,"deleted":false}"#
     );
 }
 

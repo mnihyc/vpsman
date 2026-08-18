@@ -26,18 +26,17 @@
         "job.type:shell",
         "job.target.status:online",
         "schedule.due",
-        "schedule.dispatched",
+        "schedule.job_finished",
         "schedule.failed",
-        "alert.open",
+        "alert.triggered",
         "alert.severity:critical",
         "alert.category:network",
-        "alert.state:open",
         "telemetry.rollup",
         "telemetry.network_rate",
         "telemetry.tunnel"
       ],
       "job": { "status": "running", "type": "shell", "target": { "status": "online" } },
-      "alert": { "severity": "critical", "category": "disk", "state": "open" }
+      "alert": { "severity": "critical", "category": "disk", "lifecycle_state": "triggered" }
     },
     "core": {
       "vps": {
@@ -50,7 +49,7 @@
       },
       "event_predicates": ["interval.1min", "vps.status.become_stale"],
       "job": { "status": "failed", "type": "backup", "target": { "status": "stale" } },
-      "alert": { "severity": "warning", "category": "cpu", "state": "open" }
+      "alert": { "severity": "warning", "category": "cpu", "lifecycle_state": "resolved" }
     },
     "untagged": {
       "vps": {
@@ -122,12 +121,11 @@
     "job.type:shell",
     "job.target.status:online",
     "schedule.due",
-    "schedule.dispatched",
+    "schedule.job_finished",
     "schedule.failed",
-    "alert.open",
+    "alert.triggered",
     "alert.severity:critical",
     "alert.category:network",
-    "alert.state:open",
     "telemetry.rollup",
     "telemetry.network_rate",
     "telemetry.tunnel"
@@ -148,8 +146,9 @@
     { "name": "region_does_not_alias_country", "expression": "region:US", "matches": [] },
     { "name": "untagged", "expression": "untagged", "matches": ["untagged"] },
     { "name": "missing_metadata", "expression": "vps.stale_reason = manual", "matches": [] },
-    { "name": "event_predicates", "expression": "interval.30sec && job.status:running && alert.open", "matches": ["edge"] },
-    { "name": "advertised_webhook_event_suggestions", "expression": "interval.30sec && interval.1min && interval.5min && interval.1h && server.on_start && vps.status.online && vps.status.become_offline && vps.tag_changed && job.created && job.status:completed && job.status:failed && job.status.become_failed && job.type:shell && job.target.status:online && schedule.due && schedule.dispatched && schedule.failed && alert.open && alert.severity:critical && alert.category:network && alert.state:open && telemetry.rollup && telemetry.network_rate && telemetry.tunnel", "matches": ["edge"] },
-    { "name": "event_object_fields", "expression": "job.status = running && alert.severity = critical", "matches": ["edge"] }
+    { "name": "event_predicates", "expression": "interval.30sec && job.status:running && alert.triggered", "matches": ["edge"] },
+    { "name": "advertised_webhook_event_suggestions", "expression": "interval.30sec && interval.1min && interval.5min && interval.1h && server.on_start && vps.status.online && vps.status.become_offline && vps.tag_changed && job.created && job.status:completed && job.status:failed && job.status.become_failed && job.type:shell && job.target.status:online && schedule.due && schedule.job_finished && schedule.failed && alert.triggered && alert.severity:critical && alert.category:network && telemetry.rollup && telemetry.network_rate && telemetry.tunnel", "matches": ["edge"] },
+    { "name": "event_object_fields", "expression": "job.status = running && alert.severity = critical", "matches": ["edge"] },
+    { "name": "canonical_alert_lifecycle_field", "expression": "alert.lifecycle_state = triggered", "matches": ["edge"] }
   ]
 }

@@ -27,7 +27,7 @@ use crate::{
     jobs::resolve_target_ids,
     privilege::{
         build_privilege_for_job_command, build_privilege_for_schedule, load_super_password,
-        load_super_salt_hex, SchedulePrivilegeRequest,
+        load_super_salt_hex, SchedulePrivilegePayload, SchedulePrivilegeRequest,
     },
 };
 
@@ -404,17 +404,22 @@ pub(crate) fn backup_policy_upsert(
         SchedulePrivilegeRequest {
             action: target.action,
             schedule_id: target.schedule_id.as_deref(),
+            definition_revision: stored_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.definition_revision),
             name: &options.name,
-            command: &operation,
+            payload: SchedulePrivilegePayload::Operation(&operation),
             command_type: "backup",
             selector_expression: &selector_expression,
             resolved_targets: &target_ids,
-            cron_expr: &options.cron_expr,
-            timezone: "UTC",
+            trigger_kind: "cron",
+            cron_expr: Some(&options.cron_expr),
+            timezone: Some("UTC"),
+            event_expression: None,
             enabled: options.enabled,
-            catch_up_policy: &options.catch_up_policy,
-            catch_up_limit: options.catch_up_limit,
-            retry_delay_secs: options.retry_delay_secs,
+            catch_up_policy: Some(&options.catch_up_policy),
+            catch_up_limit: Some(options.catch_up_limit),
+            retry_delay_secs: Some(options.retry_delay_secs),
             max_failures: options.max_failures,
             deferred_until: None,
             deleted: false,
@@ -449,6 +454,8 @@ pub(crate) fn backup_policy_upsert(
         "privilege_assertion": privilege_assertion,
     });
     if let Some(snapshot) = stored_snapshot {
+        payload["expected_definition_revision"] =
+            serde_json::Value::from(snapshot.definition_revision);
         payload["expected_selector_expression"] =
             serde_json::Value::String(snapshot.selector_expression);
         payload["expected_target_client_ids"] = serde_json::to_value(snapshot.target_client_ids)?;

@@ -51,6 +51,56 @@ fn webhook_rule_request_validates_expression_and_target() {
 }
 
 #[test]
+fn pending_legacy_policy_payload_is_reshaped_to_the_canonical_rule_context() {
+    let canonical = canonicalize_alert_event_payload(json!({
+        "event": {
+            "kind": "alert.policy_reached",
+            "predicates": ["alert.policy_reached", "alert.open"]
+        },
+        "rule": {
+            "id": "11111111-2222-4333-8444-555555555555",
+            "name": "legacy resource threshold",
+            "rule_version": 4,
+            "condition_expression": "cpu.load_1 >= 3",
+            "traffic_selector": null,
+            "window_secs": 300
+        }
+    }));
+    assert!(canonical.get("rule").is_none());
+    assert_eq!(canonical["event"]["kind"], "alert.triggered");
+    assert_eq!(canonical["event"]["predicates"], json!(["alert.triggered"]));
+    assert_eq!(
+        canonical["policy_rule"]["trigger_condition_expression"],
+        "cpu.load_1 >= 3"
+    );
+    assert_eq!(
+        canonical["policy_rule"]["trigger_meta_condition"],
+        json!({"kind":"sustained","window_seconds":300})
+    );
+    assert_eq!(canonical["policy_rule"]["rule_kind"], "metric");
+    assert_eq!(
+        canonical["policy_rule"]["evidence_source"],
+        "telemetry.combined"
+    );
+    assert!(canonical["policy_rule"]
+        .get("condition_expression")
+        .is_none());
+    assert!(canonical["policy_rule"].get("window_secs").is_none());
+}
+
+#[test]
+fn canonical_rule_audit_hashes_exact_bytes() {
+    assert_eq!(
+        sha256_text("alert.policy_reached"),
+        "8455dff07cb9b0663064bb6ddc14fad0f30a7418cb7dc3d38885824f19a17dc9"
+    );
+    assert_ne!(
+        sha256_text("alert.policy_reached"),
+        sha256_text("alert.policy_reached ")
+    );
+}
+
+#[test]
 fn webhook_rotation_hash_is_stable_across_scan_batch_order() {
     let first = Uuid::parse_str("11111111-2222-4333-8444-555555555555").unwrap();
     let second = Uuid::parse_str("22222222-2222-4333-8444-555555555555").unwrap();

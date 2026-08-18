@@ -21,6 +21,8 @@ pub(crate) struct BackupRequestView {
     pub(crate) artifact_id: Option<Uuid>,
     pub(crate) source_job_id: Option<Uuid>,
     pub(crate) source_schedule_id: Option<Uuid>,
+    pub(crate) causation_id: Option<Uuid>,
+    pub(crate) schedule_lineage: Vec<Uuid>,
     pub(crate) note: Option<String>,
     pub(crate) created_at: String,
 }
@@ -59,6 +61,7 @@ pub(crate) struct CreateBackupRequest {
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct BackupPolicyView {
     pub(crate) schedule_id: Uuid,
+    pub(crate) definition_revision: i64,
     pub(crate) name: String,
     pub(crate) enabled: bool,
     pub(crate) selector_expression: String,
@@ -143,6 +146,7 @@ where
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateBackupPolicyRequest {
+    pub(crate) expected_definition_revision: i64,
     pub(crate) name: String,
     pub(crate) selector_expression: String,
     pub(crate) target_client_ids: Vec<String>,

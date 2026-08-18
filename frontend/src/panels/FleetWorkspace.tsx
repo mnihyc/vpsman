@@ -135,6 +135,7 @@ import {
 } from "../privilege";
 import { selectorExpressionForClientIds } from "../searchExpression";
 import { WEBHOOK_EXPRESSION_SUGGESTIONS } from "../webhookExpressionSuggestions";
+import { DEFAULT_WEBHOOK_BODY_TEMPLATE } from "../webhookTemplate";
 import { productNameFromVpsRules, providerProductLabel } from "../vpsRules";
 import {
   decodeOutputPreview,
@@ -157,6 +158,9 @@ import {
 import type {
   ActiveView,
   AgentView,
+  AlertPolicyCorrelationMode,
+  AlertPolicyMetaCondition,
+  AlertPolicyRuleKind,
   BulkTagMutationRequest,
   CreateJobRequest,
   CreateJobResponse,
@@ -313,6 +317,7 @@ export function FleetWorkspace({
   agents,
   apiToken,
   apiError,
+  canManageAlertPolicies,
   fleetCoreEvidenceAvailable,
   fleetAlerts,
   fleetAlertStates,
@@ -375,6 +380,7 @@ export function FleetWorkspace({
   agents: AgentView[];
   apiToken: string;
   apiError: string | null;
+  canManageAlertPolicies: boolean;
   fleetCoreEvidenceAvailable: boolean;
   fleetAlerts: FleetAlertRecord[];
   fleetAlertStates: FleetAlertStateRecord[];
@@ -601,6 +607,7 @@ export function FleetWorkspace({
   const currentPolicyAlertsByClient = useMemo(() => {
     const map = new Map<string, PolicyAlertRecord[]>();
     for (const alert of currentPolicyAlerts) {
+      if (!alert.client_id) continue;
       const rows = map.get(alert.client_id) ?? [];
       rows.push(alert);
       map.set(alert.client_id, rows);
@@ -610,6 +617,7 @@ export function FleetWorkspace({
   const policyAlertHistoryByClient = useMemo(() => {
     const map = new Map<string, PolicyAlertRecord[]>();
     for (const alert of policyAlerts) {
+      if (!alert.client_id) continue;
       const rows = map.get(alert.client_id) ?? [];
       rows.push(alert);
       map.set(alert.client_id, rows);
@@ -1760,8 +1768,8 @@ export function FleetWorkspace({
               )}${fleetAlertPoliciesTruncated ? " loaded" : ""} policy groups`}</span>
             </div>
             <span className="sectionContext">
-              Selector expressions match VPSs; rule rows issue first-reach
-              alerts
+              Typed rules confirm Trigger conditions and automatic Resolve
+              conditions
             </span>
           </div>
           <ConsoleFreshnessBanner error={apiError} />
@@ -1769,6 +1777,7 @@ export function FleetWorkspace({
             agents={targetAgents}
             alertsEvidenceAvailable={policyAlertsEvidenceAvailable}
             alertsTruncated={policyAlertHistoryTruncated}
+            canManagePolicies={canManageAlertPolicies}
             onDryRun={onDryRunFleetAlertPolicy}
             onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
@@ -3365,11 +3374,17 @@ function TrafficRulesDetail({
         size: 210,
         minSize: 160,
         searchValue: (row) =>
-          `${row.rule.name} ${row.rule.condition_expression}`,
+          `${row.rule.name} ${row.rule.trigger_condition_expression} ${row.rule.evidence_source} ${row.rule.rule_kind}`,
         cell: (row) => (
           <span className="historyPrimary">
             <strong>{row.rule.name}</strong>
-            <small className="monoValue">{row.rule.condition_expression}</small>
+            <small>
+              {policyRuleKindLabel(row.rule.rule_kind)} ·{" "}
+              {policyEvidenceSourceLabel(row.rule.evidence_source)}
+            </small>
+            <small className="monoValue">
+              {row.rule.trigger_condition_expression}
+            </small>
           </span>
         ),
       },
@@ -3419,12 +3434,29 @@ function TrafficRulesDetail({
         },
       },
       {
-        id: "window",
-        header: "Window",
-        size: 105,
-        minSize: 90,
-        sortValue: (row) => row.rule.window_secs,
-        cell: (row) => formatPolicyWindow(row.rule.window_secs),
+        id: "triggerMeta",
+        header: "Trigger meta",
+        size: 145,
+        minSize: 120,
+        sortValue: (row) =>
+          policyMetaConditionLabel(row.rule.trigger_meta_condition, "trigger"),
+        cell: (row) => (
+          <span className="historyPrimary">
+            <strong>
+              {policyMetaConditionLabel(
+                row.rule.trigger_meta_condition,
+                "trigger",
+              )}
+            </strong>
+            <small>
+              Resolve:{" "}
+              {policyMetaConditionLabel(
+                row.rule.resolve_meta_condition,
+                "resolve",
+              )}
+            </small>
+          </span>
+        ),
       },
       {
         id: "actual",
@@ -4450,9 +4482,28 @@ function ConsoleField({
   label: ReactNode;
   labelTitle?: string;
 }) {
+  const helpId = useId();
+  const helpLabel = typeof label === "string" ? label : "Field";
   return (
     <div className={className ? `consoleField ${className}` : "consoleField"}>
-      <span title={labelTitle}>{label}</span>
+      {labelTitle ? (
+        <span className="fieldLabelWithHelp">
+          <span>{label}</span>
+          <button
+            aria-describedby={helpId}
+            aria-label={`${helpLabel} help`}
+            className="fieldHelpIcon"
+            type="button"
+          >
+            ?
+            <span className="fieldHelpPopover" id={helpId} role="tooltip">
+              {labelTitle}
+            </span>
+          </button>
+        </span>
+      ) : (
+        <span>{label}</span>
+      )}
       {children}
       {hint && <small>{hint}</small>}
     </div>
@@ -4770,13 +4821,19 @@ function policyRulesSummary(policy: FleetAlertPolicyRecord): string {
   if (policy.rule_count === 0) {
     return "no rules";
   }
-  const trafficCount = policy.rules.filter((rule) =>
-    rule.condition_expression.includes("traffic."),
+  const metricCount = policy.rules.filter(
+    (rule) => rule.rule_kind === "metric",
   ).length;
-  const resourceCount = policy.rule_count - trafficCount;
+  const stateCount = policy.rules.filter(
+    (rule) => rule.rule_kind === "state",
+  ).length;
+  const occurrenceCount = policy.rules.filter(
+    (rule) => rule.rule_kind === "occurrence",
+  ).length;
   const parts = [
-    trafficCount > 0 ? `${trafficCount} traffic` : null,
-    resourceCount > 0 ? `${resourceCount} resource` : null,
+    metricCount > 0 ? `${metricCount} metric` : null,
+    stateCount > 0 ? `${stateCount} state` : null,
+    occurrenceCount > 0 ? `${occurrenceCount} occurrence` : null,
     `${policy.enabled_rule_count} enabled / ${policy.rule_count} total`,
   ].filter((part): part is string => Boolean(part));
   return parts.join(" · ");
@@ -4807,76 +4864,135 @@ function policyActiveSummary(policy: FleetAlertPolicyRecord): string {
   return `${total} · ${breakdown.join(" / ")}`;
 }
 
-function policyRuleLabel(rule: {
-  condition_expression: string;
-  severity: string;
-}): string {
-  return `${rule.condition_expression} · ${rule.severity}`;
-}
-
 function PolicyDetailGrid({ policy }: { policy: FleetAlertPolicyRecord }) {
   return (
-    <div className="consoleInlineDetailGrid">
-      <span>
-        <strong>Policy</strong>
-        <span>{policy.name}</span>
-      </span>
-      <span>
-        <strong>ID</strong>
-        <span className="monoValue">{policy.id}</span>
-      </span>
-      <span>
-        <strong>Selector</strong>
-        <span className="monoValue">{policy.selector_expression}</span>
-      </span>
-      <span>
-        <strong>State</strong>
-        <span>{policy.enabled ? "enabled" : "disabled"}</span>
-      </span>
-      <span>
-        <strong>Rules</strong>
-        <span>{policyRulesSummary(policy)}</span>
-      </span>
-      <span>
-        <strong>Matched VPS</strong>
-        <span>{policy.matched_vps_count}</span>
-      </span>
-      <span>
-        <strong>Active states</strong>
-        <span>{policyActiveSummary(policy)}</span>
-      </span>
-      <span>
-        <strong>Incomplete VPS</strong>
-        <span>{policy.incomplete_vps_count}</span>
-      </span>
-      <span>
-        <strong>Last evaluated</strong>
+    <div className="policyDetailStack">
+      <div className="consoleInlineDetailGrid">
         <span>
-          {policy.last_evaluated_at
-            ? formatCompactTime(policy.last_evaluated_at)
-            : "never"}
+          <strong>Policy</strong>
+          <span>{policy.name}</span>
         </span>
-      </span>
-      <span>
-        <strong>Created</strong>
-        <span>{formatCompactTime(policy.created_at)}</span>
-      </span>
-      <span>
-        <strong>Updated</strong>
-        <span>{formatCompactTime(policy.updated_at)}</span>
-      </span>
-      <span>
-        <strong>Notes</strong>
-        <span>{policy.notes || "none"}</span>
-      </span>
-      <span>
-        <strong>Rule rows</strong>
         <span>
-          {policy.rules.length === 0
-            ? "none"
-            : policy.rules.map(policyRuleLabel).join(" · ")}
+          <strong>ID</strong>
+          <span className="monoValue">{policy.id}</span>
         </span>
-      </span>
+        <span>
+          <strong>Selector</strong>
+          <span className="monoValue">{policy.selector_expression}</span>
+        </span>
+        <span>
+          <strong>State</strong>
+          <span>{policy.enabled ? "enabled" : "disabled"}</span>
+        </span>
+        <span>
+          <strong>Rules</strong>
+          <span>{policyRulesSummary(policy)}</span>
+        </span>
+        <span>
+          <strong>Matched VPS</strong>
+          <span>{policy.matched_vps_count}</span>
+        </span>
+        <span>
+          <strong>Active states</strong>
+          <span>{policyActiveSummary(policy)}</span>
+        </span>
+        <span>
+          <strong>Incomplete VPS</strong>
+          <span>{policy.incomplete_vps_count}</span>
+        </span>
+        <span>
+          <strong>Last evaluated</strong>
+          <span>
+            {policy.last_evaluated_at
+              ? formatCompactTime(policy.last_evaluated_at)
+              : "never"}
+          </span>
+        </span>
+        <span>
+          <strong>Created</strong>
+          <span>{formatCompactTime(policy.created_at)}</span>
+        </span>
+        <span>
+          <strong>Updated</strong>
+          <span>{formatCompactTime(policy.updated_at)}</span>
+        </span>
+        <span>
+          <strong>Notes</strong>
+          <span>{policy.notes || "none"}</span>
+        </span>
+      </div>
+      <div
+        aria-label="Alert policy rule provenance"
+        className="policyRuleProvenanceList"
+      >
+        {policy.rules.map((rule) => (
+          <section className="policyRuleProvenance" key={rule.id}>
+            <div className="policyRuleProvenanceHeader">
+              <span>
+                <strong>{rule.name}</strong>
+                <small>
+                  {policyRuleKindLabel(rule.rule_kind)} · {rule.severity} · v
+                  {rule.rule_version}
+                </small>
+              </span>
+              <ConsoleStatusBadge
+                tone={rule.system_seed_key ? "info" : "neutral"}
+              >
+                {rule.system_seed_key ? "System default" : "User rule"}
+              </ConsoleStatusBadge>
+            </div>
+            <dl>
+              <div>
+                <dt>Evidence</dt>
+                <dd>{policyEvidenceSourceLabel(rule.evidence_source)}</dd>
+              </div>
+              <div>
+                <dt>Trigger</dt>
+                <dd>
+                  <code>{rule.trigger_condition_expression}</code>
+                  <small>
+                    {policyMetaConditionLabel(
+                      rule.trigger_meta_condition,
+                      "trigger",
+                    )}
+                  </small>
+                </dd>
+              </div>
+              <div>
+                <dt>Resolve</dt>
+                <dd>
+                  <code>
+                    {policyResolveConditionSummary({
+                      resolveConditionExpression:
+                        rule.resolve_condition_expression,
+                      resolveMetaCondition: rule.resolve_meta_condition,
+                      ruleKind: rule.rule_kind,
+                    })}
+                  </code>
+                  <small>
+                    {policyMetaConditionLabel(
+                      rule.resolve_meta_condition,
+                      "resolve",
+                    )}
+                  </small>
+                </dd>
+              </div>
+              <div>
+                <dt>Armed</dt>
+                <dd>
+                  {formatCompactTime(rule.armed_at)}
+                  <small>after evidence #{rule.armed_after_evidence_seq}</small>
+                </dd>
+              </div>
+            </dl>
+            {rule.system_seed_key ? (
+              <small className="monoValue policySystemSeedKey">
+                {rule.system_seed_key}
+              </small>
+            ) : null}
+          </section>
+        ))}
+      </div>
     </div>
   );
 }
@@ -5005,18 +5121,193 @@ function WebhookRuleDetailGrid({ rule }: { rule: WebhookRuleRecord }) {
   );
 }
 
-const POLICY_WINDOWS = [0, 60, 300, 900] as const;
 const POLICY_SEVERITIES = ["info", "warning", "critical"] as const;
+const POLICY_CATEGORIES = [
+  "agent_status",
+  "network",
+  "backup",
+  "agent_update",
+  "job",
+  "capability_degraded",
+  "traffic",
+  "resource",
+] as const;
+const POLICY_EVIDENCE_SOURCES: ReadonlyArray<{
+  description: string;
+  example: string;
+  kind: AlertPolicyRuleKind;
+  label: string;
+  value: string;
+}> = [
+  {
+    value: "telemetry.combined",
+    kind: "metric",
+    label: "Resource and traffic metrics",
+    description:
+      "Interval telemetry with explicit Unknown when required samples are missing.",
+    example: "cpu.utilization_ratio >= 0.9",
+  },
+  {
+    value: "agent.status",
+    kind: "state",
+    label: "Agent connectivity state",
+    description:
+      "Authoritative never, disconnected, stale, offline, or online evidence.",
+    example: "evidence.status = offline",
+  },
+  {
+    value: "agent.access",
+    kind: "state",
+    label: "Agent access state",
+    description:
+      "Key revocation and restored-access evidence, independent of connectivity.",
+    example: "evidence.status = revoked",
+  },
+  {
+    value: "tunnel.adapter",
+    kind: "state",
+    label: "Tunnel adapter health",
+    description:
+      "Runtime-identity-bound custom adapter results for enabled endpoints.",
+    example: "evidence.adapter.success = false",
+  },
+  {
+    value: "tunnel.traffic",
+    kind: "state",
+    label: "Tunnel traffic health",
+    description:
+      "Runtime-identity-bound traffic quality for enabled tunnel endpoints.",
+    example: "evidence.traffic.status != ok",
+  },
+  {
+    value: "job.terminal",
+    kind: "occurrence",
+    label: "Terminal job outcome",
+    description: "One immutable fact for each terminal job result.",
+    example: "evidence.status in [failed, agent_timeout, control_timeout]",
+  },
+  {
+    value: "backup.failure",
+    kind: "occurrence",
+    label: "Backup request failure",
+    description: "One immutable fact for each failed backup request.",
+    example: "evidence.status = execution_failed",
+  },
+  {
+    value: "job.capability",
+    kind: "occurrence",
+    label: "Capability-degraded target",
+    description:
+      "One immutable fact for each target skipped for a missing capability.",
+    example: "evidence.status = skipped",
+  },
+];
+
+type PolicyMetaDraftKind =
+  | "immediate"
+  | "sustained"
+  | "count"
+  | "elapsed_since_trigger";
+
+function policyRuleKindLabel(kind: string): string {
+  switch (kind) {
+    case "metric":
+      return "Metric condition";
+    case "state":
+      return "State condition";
+    case "occurrence":
+      return "Occurrence";
+    default:
+      return readableToken(kind);
+  }
+}
+
+function policyEvidenceSourceLabel(source: string): string {
+  return (
+    POLICY_EVIDENCE_SOURCES.find((candidate) => candidate.value === source)
+      ?.label ?? readableToken(source)
+  );
+}
+
+function policyMetaConditionLabel(
+  condition: AlertPolicyMetaCondition | null | undefined,
+  phase: "trigger" | "resolve",
+): string {
+  if (!condition || condition.kind === "immediate") {
+    return "Immediate";
+  }
+  if (condition.kind === "sustained") {
+    return `${formatPolicyInterval(condition.seconds)} sustained`;
+  }
+  if (condition.kind === "count") {
+    return `${condition.confirmations} confirmations / ${formatPolicyInterval(condition.within_seconds)}`;
+  }
+  if (condition.kind === "elapsed_since_trigger") {
+    return `Auto-resolve after ${formatPolicyInterval(condition.seconds)}`;
+  }
+  return phase === "trigger"
+    ? "Trigger meta unavailable"
+    : "Resolve meta unavailable";
+}
+
+function policyResolveConditionSummary({
+  resolveConditionExpression,
+  resolveMetaCondition,
+  ruleKind,
+}: {
+  resolveConditionExpression: string | null | undefined;
+  resolveMetaCondition: AlertPolicyMetaCondition | null | undefined;
+  ruleKind?: AlertPolicyRuleKind;
+}): string {
+  if (resolveConditionExpression?.trim()) {
+    return resolveConditionExpression;
+  }
+  if (
+    ruleKind === "occurrence" ||
+    resolveMetaCondition?.kind === "elapsed_since_trigger"
+  ) {
+    return "no condition expression · elapsed since Triggered";
+  }
+  return "inverse Trigger";
+}
+
+function formatPolicyInterval(seconds: number): string {
+  if (seconds % 86_400 === 0) {
+    return `${seconds / 86_400}d`;
+  }
+  if (seconds % 3600 === 0) {
+    return `${seconds / 3600}h`;
+  }
+  if (seconds % 60 === 0) {
+    return `${seconds / 60}m`;
+  }
+  return `${seconds}s`;
+}
 
 type PolicyRuleDraft = {
   localId: string;
   id?: string;
+  system_seed_key: string | null;
   name: string;
   enabled: boolean;
-  condition_expression: string;
+  rule_kind: AlertPolicyRuleKind;
+  evidence_source: string;
+  correlation_mode: AlertPolicyCorrelationMode;
+  trigger_condition_expression: string;
+  trigger_meta_kind: PolicyMetaDraftKind;
+  trigger_meta_seconds: string;
+  trigger_meta_confirmations: string;
+  trigger_meta_within_seconds: string;
+  resolve_condition_expression: string;
+  resolve_meta_kind: PolicyMetaDraftKind;
+  resolve_meta_seconds: string;
+  resolve_meta_confirmations: string;
+  resolve_meta_within_seconds: string;
   traffic_selector: string;
-  window_secs: string;
   severity: string;
+  category: string;
+  title_template: string;
+  detail_template: string;
 };
 
 type PolicySaveSnapshot = {
@@ -5028,12 +5319,136 @@ type PolicySaveSnapshot = {
 function defaultPolicyRuleDraft(): PolicyRuleDraft {
   return {
     localId: crypto.randomUUID(),
+    system_seed_key: null,
     name: "",
     enabled: true,
-    condition_expression: "",
+    rule_kind: "metric",
+    evidence_source: "telemetry.combined",
+    correlation_mode: "natural_key",
+    trigger_condition_expression: "",
+    trigger_meta_kind: "immediate",
+    trigger_meta_seconds: "120",
+    trigger_meta_confirmations: "3",
+    trigger_meta_within_seconds: "300",
+    resolve_condition_expression: "",
+    resolve_meta_kind: "immediate",
+    resolve_meta_seconds: "60",
+    resolve_meta_confirmations: "2",
+    resolve_meta_within_seconds: "300",
     traffic_selector: "",
-    window_secs: "0",
     severity: "warning",
+    category: "resource",
+    title_template: "",
+    detail_template: "",
+  };
+}
+
+type PolicyRulePreset = "cpu" | "agent_offline" | "job_failure";
+
+function policyRulePresetDraft(preset: PolicyRulePreset): PolicyRuleDraft {
+  const base = defaultPolicyRuleDraft();
+  if (preset === "agent_offline") {
+    return {
+      ...base,
+      name: "Agent offline",
+      rule_kind: "state",
+      evidence_source: "agent.status",
+      trigger_condition_expression: "evidence.status = offline",
+      trigger_meta_kind: "sustained",
+      trigger_meta_seconds: "120",
+      resolve_condition_expression: "evidence.status = online",
+      resolve_meta_kind: "sustained",
+      resolve_meta_seconds: "60",
+      severity: "critical",
+      category: "agent_status",
+      title_template: "Agent is not online",
+      detail_template:
+        "{subject.display_name} currently reports {evidence.status}",
+    };
+  }
+  if (preset === "job_failure") {
+    return {
+      ...base,
+      name: "Job failure",
+      rule_kind: "occurrence",
+      evidence_source: "job.terminal",
+      correlation_mode: "natural_key",
+      trigger_condition_expression:
+        "evidence.status in [failed, agent_timeout, control_timeout]",
+      resolve_meta_kind: "elapsed_since_trigger",
+      resolve_meta_seconds: "604800",
+      severity: "critical",
+      category: "job",
+      title_template: "Job requires operator attention",
+      detail_template: "{evidence.command_type} job {evidence.status}",
+    };
+  }
+  return {
+    ...base,
+    name: "High CPU utilization",
+    trigger_condition_expression: "cpu.utilization_ratio >= 0.9",
+    trigger_meta_kind: "sustained",
+    trigger_meta_seconds: "300",
+    resolve_condition_expression: "cpu.utilization_ratio < 0.75",
+    resolve_meta_kind: "sustained",
+    resolve_meta_seconds: "120",
+    severity: "warning",
+    category: "resource",
+    title_template: "Resource policy threshold reached",
+    detail_template:
+      "{subject.display_name} matched {policy_rule.trigger_condition_expression}",
+  };
+}
+
+function policyRuleDraftIsBlank(draft: PolicyRuleDraft): boolean {
+  return (
+    !draft.name.trim() &&
+    !draft.trigger_condition_expression.trim() &&
+    !draft.title_template.trim() &&
+    !draft.detail_template.trim()
+  );
+}
+
+function policyMetaConditionFromDraft(
+  draft: PolicyRuleDraft,
+  phase: "trigger" | "resolve",
+): AlertPolicyMetaCondition | null {
+  const kind =
+    phase === "trigger" ? draft.trigger_meta_kind : draft.resolve_meta_kind;
+  if (kind === "immediate") {
+    return null;
+  }
+  if (kind === "sustained") {
+    return {
+      kind,
+      seconds:
+        optionalInteger(
+          phase === "trigger"
+            ? draft.trigger_meta_seconds
+            : draft.resolve_meta_seconds,
+        ) ?? 0,
+    };
+  }
+  if (kind === "count") {
+    return {
+      kind,
+      confirmations:
+        optionalInteger(
+          phase === "trigger"
+            ? draft.trigger_meta_confirmations
+            : draft.resolve_meta_confirmations,
+        ) ?? 0,
+      within_seconds:
+        optionalInteger(
+          phase === "trigger"
+            ? draft.trigger_meta_within_seconds
+            : draft.resolve_meta_within_seconds,
+        ) ?? 0,
+    };
+  }
+  return {
+    kind: "elapsed_since_trigger",
+    seconds: optionalInteger(draft.resolve_meta_seconds) ?? 0,
   };
 }
 
@@ -5041,12 +5456,55 @@ function draftFromPolicyRule(rule: PolicyRuleRecord): PolicyRuleDraft {
   return {
     localId: rule.id,
     id: rule.id,
+    system_seed_key: rule.system_seed_key,
     name: rule.name,
     enabled: rule.enabled,
-    condition_expression: rule.condition_expression,
+    rule_kind: rule.rule_kind,
+    evidence_source: rule.evidence_source,
+    correlation_mode: rule.correlation_mode,
+    trigger_condition_expression: rule.trigger_condition_expression,
+    trigger_meta_kind: rule.trigger_meta_condition?.kind ?? "immediate",
+    trigger_meta_seconds: String(
+      rule.trigger_meta_condition && "seconds" in rule.trigger_meta_condition
+        ? rule.trigger_meta_condition.seconds
+        : 120,
+    ),
+    trigger_meta_confirmations: String(
+      rule.trigger_meta_condition?.kind === "count"
+        ? rule.trigger_meta_condition.confirmations
+        : 3,
+    ),
+    trigger_meta_within_seconds: String(
+      rule.trigger_meta_condition?.kind === "count"
+        ? rule.trigger_meta_condition.within_seconds
+        : 300,
+    ),
+    resolve_condition_expression: rule.resolve_condition_expression ?? "",
+    resolve_meta_kind:
+      rule.resolve_meta_condition?.kind ??
+      (rule.rule_kind === "occurrence" ? "elapsed_since_trigger" : "immediate"),
+    resolve_meta_seconds: String(
+      rule.resolve_meta_condition && "seconds" in rule.resolve_meta_condition
+        ? rule.resolve_meta_condition.seconds
+        : rule.rule_kind === "occurrence"
+          ? 604_800
+          : 60,
+    ),
+    resolve_meta_confirmations: String(
+      rule.resolve_meta_condition?.kind === "count"
+        ? rule.resolve_meta_condition.confirmations
+        : 2,
+    ),
+    resolve_meta_within_seconds: String(
+      rule.resolve_meta_condition?.kind === "count"
+        ? rule.resolve_meta_condition.within_seconds
+        : 300,
+    ),
     traffic_selector: rule.traffic_selector ?? "",
-    window_secs: String(rule.window_secs),
     severity: rule.severity,
+    category: rule.category,
+    title_template: rule.title_template,
+    detail_template: rule.detail_template,
   };
 }
 
@@ -5055,10 +5513,21 @@ function requestRuleFromDraft(draft: PolicyRuleDraft): PolicyRuleRequest {
     id: draft.id,
     name: draft.name.trim(),
     enabled: draft.enabled,
-    condition_expression: draft.condition_expression.trim(),
+    rule_kind: draft.rule_kind,
+    evidence_source: draft.evidence_source,
+    correlation_mode: draft.correlation_mode,
+    trigger_condition_expression: draft.trigger_condition_expression.trim(),
+    trigger_meta_condition: policyMetaConditionFromDraft(draft, "trigger"),
+    resolve_condition_expression:
+      draft.rule_kind === "occurrence"
+        ? null
+        : draft.resolve_condition_expression.trim() || null,
+    resolve_meta_condition: policyMetaConditionFromDraft(draft, "resolve"),
     traffic_selector: draft.traffic_selector.trim() || null,
-    window_secs: optionalInteger(draft.window_secs) ?? 0,
     severity: draft.severity,
+    category: draft.category,
+    title_template: draft.title_template.trim(),
+    detail_template: draft.detail_template.trim(),
   };
 }
 
@@ -5075,10 +5544,18 @@ function policyRequestFromRecord(
       id: rule.id,
       name: rule.name,
       enabled: rule.enabled,
-      condition_expression: rule.condition_expression,
+      rule_kind: rule.rule_kind,
+      evidence_source: rule.evidence_source,
+      correlation_mode: rule.correlation_mode,
+      trigger_condition_expression: rule.trigger_condition_expression,
+      trigger_meta_condition: rule.trigger_meta_condition,
+      resolve_condition_expression: rule.resolve_condition_expression,
+      resolve_meta_condition: rule.resolve_meta_condition,
       traffic_selector: rule.traffic_selector,
-      window_secs: rule.window_secs,
       severity: rule.severity,
+      category: rule.category,
+      title_template: rule.title_template,
+      detail_template: rule.detail_template,
     })),
     notes: policy.notes,
     confirmed: true,
@@ -5104,22 +5581,243 @@ function policyDraftValidationMessage(
   if (request.rules.length === 0) {
     return "At least one rule row is required";
   }
+  if (
+    request.rules.some(
+      (rule) => rule.enabled && rule.evidence_source === "job.terminal",
+    ) &&
+    request.selector_expression.trim() !== "*"
+  ) {
+    return 'Enabled job outcome rules are subjectless and require the VPS selector "*"';
+  }
   for (const [index, rule] of request.rules.entries()) {
     const row = index + 1;
     if (requireLabels && !rule.name.trim()) {
       return `Rule ${row} name is required`;
     }
-    if (!rule.condition_expression.trim()) {
-      return `Rule ${row} condition expression is required`;
+    if (!rule.trigger_condition_expression.trim()) {
+      return `Rule ${row} Trigger condition is required`;
+    }
+    if (!rule.evidence_source.trim()) {
+      return `Rule ${row} evidence source is required`;
+    }
+    if (!rule.title_template.trim() || !rule.detail_template.trim()) {
+      return `Rule ${row} title and detail templates are required`;
+    }
+    if (
+      rule.trigger_meta_condition &&
+      !policyMetaConditionHasPositiveValues(rule.trigger_meta_condition)
+    ) {
+      return `Rule ${row} Trigger meta condition requires positive values`;
+    }
+    if (
+      rule.resolve_meta_condition &&
+      !policyMetaConditionHasPositiveValues(rule.resolve_meta_condition)
+    ) {
+      return `Rule ${row} Resolve meta condition requires positive values`;
+    }
+    if (
+      rule.rule_kind === "occurrence" &&
+      rule.trigger_meta_condition?.kind === "count" &&
+      rule.correlation_mode === "natural_key"
+    ) {
+      return `Rule ${row} Count must correlate occurrences by subject or globally`;
+    }
+    if (
+      rule.evidence_source === "job.terminal" &&
+      rule.trigger_meta_condition?.kind === "count" &&
+      rule.correlation_mode !== "global"
+    ) {
+      return `Rule ${row} job outcome Count is subjectless and must correlate globally`;
+    }
+    if (
+      rule.rule_kind === "occurrence" &&
+      rule.trigger_meta_condition?.kind === "sustained"
+    ) {
+      return `Rule ${row} occurrences support Immediate or Count Trigger meta conditions, not Sustained`;
+    }
+    if (
+      rule.rule_kind === "occurrence" &&
+      rule.trigger_meta_condition?.kind !== "count" &&
+      rule.correlation_mode !== "natural_key"
+    ) {
+      return `Rule ${row} Immediate occurrence confirmation uses its immutable natural key`;
+    }
+    if (
+      rule.rule_kind !== "occurrence" &&
+      rule.correlation_mode !== "natural_key"
+    ) {
+      return `Rule ${row} condition rules use their stable natural key`;
+    }
+    if (
+      rule.rule_kind === "occurrence" &&
+      rule.resolve_meta_condition?.kind !== "elapsed_since_trigger"
+    ) {
+      return `Rule ${row} occurrences require an elapsed Resolve meta condition`;
     }
   }
   return null;
+}
+
+function policyMetaConditionHasPositiveValues(
+  condition: AlertPolicyMetaCondition,
+): boolean {
+  if (condition.kind === "immediate") {
+    return true;
+  }
+  if (condition.kind === "count") {
+    return condition.confirmations > 0 && condition.within_seconds > 0;
+  }
+  return condition.seconds > 0;
+}
+
+function PolicyMetaConditionEditor({
+  draft,
+  onChange,
+  phase,
+}: {
+  draft: PolicyRuleDraft;
+  onChange: (patch: Partial<PolicyRuleDraft>) => void;
+  phase: "trigger" | "resolve";
+}) {
+  const occurrenceResolve =
+    phase === "resolve" && draft.rule_kind === "occurrence";
+  const kind =
+    phase === "trigger" ? draft.trigger_meta_kind : draft.resolve_meta_kind;
+  const seconds =
+    phase === "trigger"
+      ? draft.trigger_meta_seconds
+      : draft.resolve_meta_seconds;
+  const confirmations =
+    phase === "trigger"
+      ? draft.trigger_meta_confirmations
+      : draft.resolve_meta_confirmations;
+  const withinSeconds =
+    phase === "trigger"
+      ? draft.trigger_meta_within_seconds
+      : draft.resolve_meta_within_seconds;
+  const label =
+    phase === "trigger" ? "Trigger meta condition" : "Resolve meta condition";
+  const setKind = (nextKind: PolicyMetaDraftKind) => {
+    const patch: Partial<PolicyRuleDraft> =
+      phase === "trigger"
+        ? { trigger_meta_kind: nextKind }
+        : { resolve_meta_kind: nextKind };
+    if (
+      phase === "trigger" &&
+      nextKind === "count" &&
+      draft.rule_kind === "occurrence" &&
+      draft.correlation_mode === "natural_key"
+    ) {
+      patch.correlation_mode =
+        draft.evidence_source === "job.terminal" ? "global" : "subject";
+    }
+    onChange(patch);
+  };
+  return (
+    <div className="policyMetaConditionEditor">
+      <ConsoleField
+        label={label}
+        labelTitle={
+          occurrenceResolve
+            ? "Every occurrence automatically resolves after this elapsed duration. An operator may resolve it earlier."
+            : phase === "trigger"
+              ? "Optional confirmation applied after the Trigger condition matches. Immediate stores no extra meta object. Unknown evidence never confirms and pauses Sustained time."
+              : "Optional confirmation applied after the Resolve condition matches. If Resolve condition is blank, a condition resolves only when the Trigger condition is conclusively false."
+        }
+      >
+        <select
+          aria-label={label}
+          disabled={occurrenceResolve}
+          onChange={(event) =>
+            setKind(event.target.value as PolicyMetaDraftKind)
+          }
+          value={occurrenceResolve ? "elapsed_since_trigger" : kind}
+        >
+          {phase === "trigger" || !occurrenceResolve ? (
+            <>
+              <option value="immediate">Immediate (default)</option>
+              {draft.rule_kind !== "occurrence" ? (
+                <option value="sustained">Sustained duration</option>
+              ) : null}
+              <option value="count">Confirmation count</option>
+            </>
+          ) : null}
+          {occurrenceResolve ? (
+            <option value="elapsed_since_trigger">
+              Elapsed after Triggered
+            </option>
+          ) : null}
+        </select>
+      </ConsoleField>
+      {(kind === "sustained" || occurrenceResolve) && (
+        <ConsoleField label={occurrenceResolve ? "Resolve after" : "Seconds"}>
+          <input
+            aria-label={`${label} seconds`}
+            min={1}
+            onChange={(event) =>
+              onChange(
+                phase === "trigger"
+                  ? { trigger_meta_seconds: event.target.value }
+                  : { resolve_meta_seconds: event.target.value },
+              )
+            }
+            type="number"
+            value={seconds}
+          />
+        </ConsoleField>
+      )}
+      {kind === "count" && !occurrenceResolve ? (
+        <>
+          <ConsoleField label="Confirmations">
+            <input
+              aria-label={`${label} confirmations`}
+              min={1}
+              onChange={(event) =>
+                onChange(
+                  phase === "trigger"
+                    ? { trigger_meta_confirmations: event.target.value }
+                    : { resolve_meta_confirmations: event.target.value },
+                )
+              }
+              type="number"
+              value={confirmations}
+            />
+          </ConsoleField>
+          <ConsoleField label="Within seconds">
+            <input
+              aria-label={`${label} within seconds`}
+              min={1}
+              onChange={(event) =>
+                onChange(
+                  phase === "trigger"
+                    ? { trigger_meta_within_seconds: event.target.value }
+                    : { resolve_meta_within_seconds: event.target.value },
+                )
+              }
+              type="number"
+              value={withinSeconds}
+            />
+          </ConsoleField>
+        </>
+      ) : null}
+      <small className="policyMetaConditionHint">
+        {occurrenceResolve
+          ? "Expiry is a real Resolved lifecycle edge; it can run a matching alert-event schedule."
+          : kind === "immediate"
+            ? "No additional delay or count."
+            : kind === "sustained"
+              ? "Unknown pauses accumulated matching time; conclusive opposite evidence resets it."
+              : "Only distinct authoritative evidence revisions count; evaluator ticks never do."}
+      </small>
+    </div>
+  );
 }
 
 export function FleetAlertPolicyManager({
   agents,
   alertsEvidenceAvailable = true,
   alertsTruncated = false,
+  canManagePolicies = true,
   editorMode = "inline",
   onEditorOpenChange,
   onPolicyFocusChange,
@@ -5135,6 +5833,7 @@ export function FleetAlertPolicyManager({
   agents: AgentView[];
   alertsEvidenceAvailable?: boolean;
   alertsTruncated?: boolean;
+  canManagePolicies?: boolean;
   editorMode?: "inline" | "focused";
   onEditorOpenChange?: (open: boolean) => void;
   onPolicyFocusChange?: (policyId: string | null) => void;
@@ -5473,6 +6172,13 @@ export function FleetAlertPolicyManager({
   }
 
   function createPolicy() {
+    if (!canManagePolicies) {
+      setPolicyStatus(
+        "Alert Policy changes require fleet:read, backups:read, and integrations:write",
+        "warning",
+      );
+      return;
+    }
     if (policyWorkflowBusy) return;
     enterPolicyWorkflow("editor");
     resetForm();
@@ -5480,6 +6186,13 @@ export function FleetAlertPolicyManager({
   }
 
   function editPolicy(policy: FleetAlertPolicyRecord) {
+    if (!canManagePolicies) {
+      setPolicyStatus(
+        "Alert Policy changes require fleet:read, backups:read, and integrations:write",
+        "warning",
+      );
+      return;
+    }
     if (policyWorkflowBusy) return;
     enterPolicyWorkflow("editor");
     setEditingId(policy.id);
@@ -5525,8 +6238,44 @@ export function FleetAlertPolicyManager({
     );
   }
 
+  function updateRuleKind(localId: string, ruleKind: AlertPolicyRuleKind) {
+    const evidenceSource =
+      POLICY_EVIDENCE_SOURCES.find((source) => source.kind === ruleKind)
+        ?.value ?? "telemetry.combined";
+    updateRuleDraft(localId, {
+      rule_kind: ruleKind,
+      evidence_source: evidenceSource,
+      correlation_mode: "natural_key",
+      trigger_meta_kind: "immediate",
+      category:
+        ruleKind === "metric"
+          ? "resource"
+          : ruleKind === "state"
+            ? "agent_status"
+            : "job",
+      resolve_condition_expression: "",
+      resolve_meta_kind:
+        ruleKind === "occurrence" ? "elapsed_since_trigger" : "immediate",
+      resolve_meta_seconds: ruleKind === "occurrence" ? "604800" : "60",
+    });
+  }
+
   function addRuleDraft() {
     setRuleDrafts((current) => [...current, defaultPolicyRuleDraft()]);
+  }
+
+  function addRulePreset(preset: PolicyRulePreset) {
+    const next = policyRulePresetDraft(preset);
+    setRuleDrafts((current) =>
+      current.length === 1 && policyRuleDraftIsBlank(current[0])
+        ? [next]
+        : [...current, next],
+    );
+    if (preset === "job_failure" && !selectorExpression.trim()) {
+      setSelectorExpression("*");
+    }
+    setDryRunPreview(null);
+    setSaveSnapshot(null);
   }
 
   function removeRuleDraft(localId: string) {
@@ -5580,6 +6329,13 @@ export function FleetAlertPolicyManager({
   }
 
   async function reviewSubmit() {
+    if (!canManagePolicies) {
+      setPolicyStatus(
+        "Alert Policy changes require fleet:read, backups:read, and integrations:write",
+        "warning",
+      );
+      return;
+    }
     const request = currentDryRunRequest();
     try {
       const preview = await dryRunCurrentPolicy(true, request);
@@ -5597,6 +6353,13 @@ export function FleetAlertPolicyManager({
   }
 
   async function submit() {
+    if (!canManagePolicies) {
+      setPolicyStatus(
+        "Alert Policy changes require fleet:read, backups:read, and integrations:write",
+        "warning",
+      );
+      return;
+    }
     const snapshot = saveSnapshot;
     if (!snapshot) {
       setPolicyStatus("Run dry-run and review policy before saving", "warning");
@@ -5627,7 +6390,7 @@ export function FleetAlertPolicyManager({
   }
 
   function requestDeletePolicies(rows: FleetAlertPolicyRecord[]) {
-    if (policyWorkflowBusy || rows.length === 0) return;
+    if (!canManagePolicies || policyWorkflowBusy || rows.length === 0) return;
     enterPolicyWorkflow("table");
     setDeleteRows(rows);
   }
@@ -5669,7 +6432,7 @@ export function FleetAlertPolicyManager({
     rows: FleetAlertPolicyRecord[],
     nextEnabled: boolean,
   ) {
-    if (policyWorkflowBusy || rows.length === 0) return;
+    if (!canManagePolicies || policyWorkflowBusy || rows.length === 0) return;
     enterPolicyWorkflow("table");
     if (!beginSaveMutation()) {
       return;
@@ -5729,6 +6492,7 @@ export function FleetAlertPolicyManager({
           "Opens the policy group editor below the table.",
         ),
       disabled: (rows) => policyWorkflowBusy || rows.length !== 1,
+      hidden: () => !canManagePolicies,
       icon: <Pencil size={14} />,
       onSelect: (rows) => rows[0] && editPolicy(rows[0]),
     },
@@ -5741,6 +6505,7 @@ export function FleetAlertPolicyManager({
       disabled: (rows) =>
         policyWorkflowBusy ||
         rows.filter((policy) => !policy.enabled).length === 0,
+      hidden: () => !canManagePolicies,
       icon: <Power size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -5757,6 +6522,7 @@ export function FleetAlertPolicyManager({
       disabled: (rows) =>
         policyWorkflowBusy ||
         rows.filter((policy) => policy.enabled).length === 0,
+      hidden: () => !canManagePolicies,
       icon: <PowerOff size={14} />,
       onSelect: (rows) =>
         void setPoliciesEnabled(
@@ -5771,6 +6537,7 @@ export function FleetAlertPolicyManager({
         rows.length +
         " selected policy groups. Issued alerts remain in alert history.",
       disabled: (rows) => policyWorkflowBusy || rows.length === 0,
+      hidden: () => !canManagePolicies,
       icon: <Trash2 size={14} />,
       onSelect: requestDeletePolicies,
       tone: "danger",
@@ -5835,6 +6602,16 @@ export function FleetAlertPolicyManager({
         </div>
       ) : null}
       <div className="consoleResourceLayout fullWidth">
+        {!canManagePolicies ? (
+          <div className="consoleInlineNotice policyReadOnlyNotice" role="note">
+            <strong>Alert Policies are read-only for this session</strong>
+            <small>
+              Editing, enabling, disabling, and deleting policies requires
+              fleet:read, backups:read, and integrations:write. Policy details
+              and lifecycle history remain available.
+            </small>
+          </div>
+        ) : null}
         {showPolicyList && policyFilterClientId ? (
           <div className="consoleInlineNotice policyFocusNotice">
             <strong>
@@ -5866,11 +6643,13 @@ export function FleetAlertPolicyManager({
               <button
                 className="primaryAction compactAction"
                 data-tooltip-disabled-reason={
-                  policyWorkflowBusy
-                    ? "An alert policy save or delete is already in progress"
-                    : undefined
+                  !canManagePolicies
+                    ? "Requires fleet:read, backups:read, and integrations:write"
+                    : policyWorkflowBusy
+                      ? "An alert policy save or delete is already in progress"
+                      : undefined
                 }
-                disabled={policyWorkflowBusy}
+                disabled={!canManagePolicies || policyWorkflowBusy}
                 onClick={createPolicy}
                 type="button"
               >
@@ -5883,13 +6662,15 @@ export function FleetAlertPolicyManager({
         {showPolicyList && detailPolicy && !editorOpen ? (
           <ConsoleDetailPanel
             actions={
-              <button
-                className="secondaryAction"
-                type="button"
-                onClick={() => editPolicy(detailPolicy)}
-              >
-                Edit policy
-              </button>
+              canManagePolicies ? (
+                <button
+                  className="secondaryAction"
+                  type="button"
+                  onClick={() => editPolicy(detailPolicy)}
+                >
+                  Edit policy
+                </button>
+              ) : undefined
             }
             description="Policy group metadata, rule rows, and retained alert lifecycle history."
             onClose={closePolicyDetails}
@@ -6109,125 +6890,369 @@ export function FleetAlertPolicyManager({
                     {ruleDrafts.length === 1 ? "rule row" : "rule rows"}
                   </span>
                 </div>
-                <button
-                  className="secondaryAction compactAction"
-                  onClick={addRuleDraft}
-                  type="button"
-                >
-                  <Plus size={14} />
-                  <span>Add rule</span>
-                </button>
+                <div className="policyRuleHeaderActions">
+                  <span className="policyPresetLabel">Start with</span>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => addRulePreset("cpu")}
+                    title="Add a sustained CPU trigger with a lower recovery threshold"
+                    type="button"
+                  >
+                    CPU
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => addRulePreset("agent_offline")}
+                    title="Add the default anti-flap offline and recovery timings"
+                    type="button"
+                  >
+                    Agent offline
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => addRulePreset("job_failure")}
+                    title='Add a prospective job failure occurrence; a blank selector becomes "*"'
+                    type="button"
+                  >
+                    Job failure
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={addRuleDraft}
+                    title="Add an empty metric rule"
+                    type="button"
+                  >
+                    <Plus size={14} />
+                    <span>Blank</span>
+                  </button>
+                </div>
               </div>
               <div className="policyRuleEditor">
-                {ruleDrafts.map((draft) => (
-                  <section className="policyRuleCard" key={draft.localId}>
-                    <div className="policyRuleCardHeader">
-                      <label className="checkLine inlineCheck">
-                        <input
-                          checked={draft.enabled}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              enabled: event.target.checked,
-                            })
-                          }
-                          type="checkbox"
-                        />
-                        <span>Enabled</span>
-                      </label>
-                      <button
-                        className="secondaryAction compactAction"
-                        data-tooltip-disabled-reason={
-                          ruleDrafts.length <= 1
-                            ? "An alert policy must keep at least one rule"
-                            : undefined
-                        }
-                        disabled={ruleDrafts.length <= 1}
-                        onClick={() => removeRuleDraft(draft.localId)}
-                        type="button"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                    <div className="consoleFormGrid policyRuleFormGrid">
-                      <ConsoleField label="Rule">
-                        <input
-                          aria-label="Rule name"
-                          placeholder="80% total quota"
-                          value={draft.name}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              name: event.target.value,
-                            })
-                          }
-                        />
-                      </ConsoleField>
-                      <ConsoleField
-                        label="Condition expression"
-                        className="fieldFull"
-                        labelTitle="Supported metrics: traffic quota/cycle values, cpu.utilization_ratio (busy-time ratio), cpu.load_saturation (load per core), cpu.load_1 (raw load), memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
-                      >
-                        <textarea
-                          aria-label="Rule condition expression"
-                          placeholder="traffic.cycle.total >= traffic.quota.total * 0.8"
-                          value={draft.condition_expression}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              condition_expression: event.target.value,
-                            })
-                          }
-                        />
-                      </ConsoleField>
-                      <ConsoleField label="Traffic selector override">
-                        <input
-                          aria-label="Traffic selector override"
-                          placeholder="blank = VPS traffic.selectors"
-                          value={draft.traffic_selector}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              traffic_selector: event.target.value,
-                            })
-                          }
-                        />
-                      </ConsoleField>
-                      <ConsoleField label="Window">
-                        <select
-                          aria-label="Rule window"
-                          value={draft.window_secs}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              window_secs: event.target.value,
-                            })
-                          }
+                {ruleDrafts.map((draft) => {
+                  const source = POLICY_EVIDENCE_SOURCES.find(
+                    (candidate) => candidate.value === draft.evidence_source,
+                  );
+                  return (
+                    <section className="policyRuleCard" key={draft.localId}>
+                      <div className="policyRuleCardHeader">
+                        <label className="checkLine inlineCheck">
+                          <input
+                            checked={draft.enabled}
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                enabled: event.target.checked,
+                              })
+                            }
+                            type="checkbox"
+                          />
+                          <span>Enabled</span>
+                        </label>
+                        <div className="policyRuleCardHeaderActions">
+                          {draft.system_seed_key ? (
+                            <ConsoleStatusBadge
+                              title={`System default identity ${draft.system_seed_key} is preserved when this rule is edited`}
+                              tone="info"
+                            >
+                              System default
+                            </ConsoleStatusBadge>
+                          ) : null}
+                          <button
+                            className="secondaryAction compactAction"
+                            data-tooltip-disabled-reason={
+                              ruleDrafts.length <= 1
+                                ? "An alert policy must keep at least one rule"
+                                : undefined
+                            }
+                            disabled={ruleDrafts.length <= 1}
+                            onClick={() => removeRuleDraft(draft.localId)}
+                            type="button"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </div>
+                      <div className="consoleFormGrid policyRuleIdentityGrid">
+                        <ConsoleField label="Rule">
+                          <input
+                            aria-label="Rule name"
+                            placeholder="80% total quota"
+                            value={draft.name}
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                name: event.target.value,
+                              })
+                            }
+                          />
+                        </ConsoleField>
+                        <ConsoleField
+                          label="Rule type"
+                          labelTitle="Metric and State rules own auto-recovering conditions. Occurrence rules own immutable facts and must auto-resolve after an elapsed duration."
                         >
-                          {POLICY_WINDOWS.map((windowSecs) => (
-                            <option key={windowSecs} value={String(windowSecs)}>
-                              {windowSecs === 0
-                                ? "immediate"
-                                : windowSecs / 60 + "m"}
-                            </option>
-                          ))}
-                        </select>
-                      </ConsoleField>
-                      <ConsoleField label="Severity">
-                        <select
-                          aria-label="Rule severity"
-                          value={draft.severity}
-                          onChange={(event) =>
-                            updateRuleDraft(draft.localId, {
-                              severity: event.target.value,
-                            })
-                          }
+                          <select
+                            aria-label="Rule type"
+                            onChange={(event) =>
+                              updateRuleKind(
+                                draft.localId,
+                                event.target.value as AlertPolicyRuleKind,
+                              )
+                            }
+                            value={draft.rule_kind}
+                          >
+                            <option value="metric">Metric condition</option>
+                            <option value="state">State condition</option>
+                            <option value="occurrence">Occurrence</option>
+                          </select>
+                        </ConsoleField>
+                        <ConsoleField
+                          label="Evidence source"
+                          labelTitle="A typed adapter exposes only its documented fields. Missing required evidence evaluates Unknown, never false."
                         >
-                          {POLICY_SEVERITIES.map((severity) => (
-                            <option key={severity} value={severity}>
-                              {severity}
-                            </option>
-                          ))}
-                        </select>
-                      </ConsoleField>
-                    </div>
-                  </section>
-                ))}
+                          <select
+                            aria-label="Rule evidence source"
+                            onChange={(event) => {
+                              const evidenceSource = event.target.value;
+                              updateRuleDraft(draft.localId, {
+                                evidence_source: evidenceSource,
+                                ...(draft.rule_kind === "occurrence" &&
+                                draft.trigger_meta_kind === "count"
+                                  ? {
+                                      correlation_mode:
+                                        evidenceSource === "job.terminal"
+                                          ? "global"
+                                          : "subject",
+                                    }
+                                  : {}),
+                              });
+                            }}
+                            value={draft.evidence_source}
+                          >
+                            {POLICY_EVIDENCE_SOURCES.filter(
+                              (candidate) => candidate.kind === draft.rule_kind,
+                            ).map((candidate) => (
+                              <option
+                                key={candidate.value}
+                                value={candidate.value}
+                              >
+                                {candidate.label}
+                              </option>
+                            ))}
+                          </select>
+                        </ConsoleField>
+                      </div>
+                      <div className="policyEvidenceSourceGuide">
+                        <DatabaseBackup size={16} />
+                        <span>
+                          <strong>
+                            {source?.label ??
+                              policyEvidenceSourceLabel(draft.evidence_source)}
+                          </strong>
+                          <small>
+                            {source?.description ??
+                              "Typed evidence schema is unavailable for this stored source."}
+                          </small>
+                          <code>
+                            {source?.example ?? draft.evidence_source}
+                          </code>
+                        </span>
+                      </div>
+                      <div className="policyLifecyclePhases">
+                        <section className="policyLifecyclePhase triggerPhase">
+                          <div className="policyLifecyclePhaseHeader">
+                            <span className="policyPhaseNumber">1</span>
+                            <span>
+                              <strong>Trigger condition</strong>
+                              <small>
+                                Required · evaluates typed evidence with true,
+                                false, or Unknown
+                              </small>
+                            </span>
+                          </div>
+                          <ConsoleField
+                            label="Trigger condition expression"
+                            className="fieldFull"
+                            labelTitle="The selected evidence source defines available fields and types. Operators include >, >=, <, <=, =, !=, in, arithmetic, &&, ||, !, and parentheses."
+                          >
+                            <textarea
+                              aria-label="Rule Trigger condition expression"
+                              placeholder={
+                                source?.example ?? "evidence.status = failed"
+                              }
+                              value={draft.trigger_condition_expression}
+                              onChange={(event) =>
+                                updateRuleDraft(draft.localId, {
+                                  trigger_condition_expression:
+                                    event.target.value,
+                                })
+                              }
+                            />
+                          </ConsoleField>
+                          <PolicyMetaConditionEditor
+                            draft={draft}
+                            onChange={(patch) =>
+                              updateRuleDraft(draft.localId, patch)
+                            }
+                            phase="trigger"
+                          />
+                          {draft.rule_kind === "occurrence" &&
+                          draft.trigger_meta_kind === "count" ? (
+                            <ConsoleField
+                              label="Count correlation"
+                              labelTitle={
+                                draft.evidence_source === "job.terminal"
+                                  ? "Terminal-job evidence is subjectless, so distinct occurrences confirm one global cohort."
+                                  : "Defines which distinct occurrences share one confirmation cohort. The unique source occurrence IDs are always retained."
+                              }
+                            >
+                              <select
+                                aria-label="Occurrence count correlation"
+                                onChange={(event) =>
+                                  updateRuleDraft(draft.localId, {
+                                    correlation_mode: event.target
+                                      .value as AlertPolicyCorrelationMode,
+                                  })
+                                }
+                                value={draft.correlation_mode}
+                              >
+                                {draft.evidence_source !== "job.terminal" ? (
+                                  <option value="subject">Per subject</option>
+                                ) : null}
+                                <option value="global">
+                                  Across all subjects
+                                </option>
+                              </select>
+                            </ConsoleField>
+                          ) : null}
+                        </section>
+                        <section className="policyLifecyclePhase resolvePhase">
+                          <div className="policyLifecyclePhaseHeader">
+                            <span className="policyPhaseNumber">2</span>
+                            <span>
+                              <strong>Resolve condition</strong>
+                              <small>
+                                {draft.rule_kind === "occurrence"
+                                  ? "Automatic elapsed resolution · operator may resolve earlier"
+                                  : "Optional expression · blank means Trigger condition conclusively false"}
+                              </small>
+                            </span>
+                          </div>
+                          {draft.rule_kind === "occurrence" ? (
+                            <div className="policyResolveExplanation">
+                              Occurrence facts do not become false. They remain
+                              visible until the elapsed Resolve meta condition
+                              or an earlier audited operator resolution.
+                            </div>
+                          ) : (
+                            <ConsoleField
+                              className="fieldFull"
+                              label="Resolve condition expression (optional)"
+                              labelTitle="Leave blank for the exact inverse of Trigger. Supply a separate expression for hysteresis, such as triggering above 90% and resolving below 75%."
+                            >
+                              <textarea
+                                aria-label="Rule Resolve condition expression"
+                                placeholder="blank = Trigger condition is conclusively false"
+                                value={draft.resolve_condition_expression}
+                                onChange={(event) =>
+                                  updateRuleDraft(draft.localId, {
+                                    resolve_condition_expression:
+                                      event.target.value,
+                                  })
+                                }
+                              />
+                            </ConsoleField>
+                          )}
+                          <PolicyMetaConditionEditor
+                            draft={draft}
+                            onChange={(patch) =>
+                              updateRuleDraft(draft.localId, patch)
+                            }
+                            phase="resolve"
+                          />
+                        </section>
+                      </div>
+                      <div className="consoleFormGrid policyRulePresentationGrid">
+                        <ConsoleField label="Severity">
+                          <select
+                            aria-label="Rule severity"
+                            value={draft.severity}
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                severity: event.target.value,
+                              })
+                            }
+                          >
+                            {POLICY_SEVERITIES.map((severity) => (
+                              <option key={severity} value={severity}>
+                                {severity}
+                              </option>
+                            ))}
+                          </select>
+                        </ConsoleField>
+                        <ConsoleField label="Category">
+                          <select
+                            aria-label="Rule category"
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                category: event.target.value,
+                              })
+                            }
+                            value={draft.category}
+                          >
+                            {POLICY_CATEGORIES.map((category) => (
+                              <option key={category} value={category}>
+                                {readableToken(category)}
+                              </option>
+                            ))}
+                          </select>
+                        </ConsoleField>
+                        {draft.evidence_source === "telemetry.combined" ? (
+                          <ConsoleField label="Traffic selector override">
+                            <input
+                              aria-label="Traffic selector override"
+                              placeholder="blank = VPS traffic.selectors"
+                              value={draft.traffic_selector}
+                              onChange={(event) =>
+                                updateRuleDraft(draft.localId, {
+                                  traffic_selector: event.target.value,
+                                })
+                              }
+                            />
+                          </ConsoleField>
+                        ) : null}
+                        <ConsoleField
+                          className="fieldFull"
+                          label="Alert title template"
+                          labelTitle="Presentation belongs to this policy rule, never to a raw evidence adapter. Use strict scalar placeholders from the selected evidence schema."
+                        >
+                          <input
+                            aria-label="Rule alert title template"
+                            placeholder="Agent is offline"
+                            value={draft.title_template}
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                title_template: event.target.value,
+                              })
+                            }
+                          />
+                        </ConsoleField>
+                        <ConsoleField
+                          className="fieldFull"
+                          label="Alert detail template"
+                        >
+                          <textarea
+                            aria-label="Rule alert detail template"
+                            placeholder="{subject.display_name} has remained {evidence.status}."
+                            value={draft.detail_template}
+                            onChange={(event) =>
+                              updateRuleDraft(draft.localId, {
+                                detail_template: event.target.value,
+                              })
+                            }
+                          />
+                        </ConsoleField>
+                      </div>
+                    </section>
+                  );
+                })}
               </div>
             </div>
             {dryRunPreview ? (
@@ -6309,14 +7334,38 @@ function PolicyDryRunPreview({
         }
         tone="warning"
       />
+      {preview.rule_previews.some(
+        (rule) => rule.preview_mode === "prospective",
+      ) ? (
+        <div className="policyProspectiveNotice" role="note">
+          Occurrence results are prospective. Saving arms the policy for new
+          accepted occurrences; this preview never replays historical jobs,
+          backups, or capability facts.
+        </div>
+      ) : null}
       <div className="miniTable">
         {preview.rule_previews.map((rule) => (
           <div
             className="miniTableRow"
-            key={rule.rule_name + rule.condition_expression}
+            key={rule.rule_name + rule.trigger_condition_expression}
           >
             <strong>{rule.rule_name}</strong>
-            <span className="monoValue">{rule.condition_expression}</span>
+            <span className="monoValue">
+              Trigger: {rule.trigger_condition_expression}
+            </span>
+            <span>
+              {policyMetaConditionLabel(rule.trigger_meta_condition, "trigger")}
+            </span>
+            <span className="monoValue">
+              Resolve:{" "}
+              {policyResolveConditionSummary({
+                resolveConditionExpression: rule.resolve_condition_expression,
+                resolveMetaCondition: rule.resolve_meta_condition,
+              })}
+            </span>
+            <span>
+              {policyMetaConditionLabel(rule.resolve_meta_condition, "resolve")}
+            </span>
             <span>{rule.category}</span>
             <ConsoleStatusBadge
               tone={
@@ -6329,9 +7378,20 @@ function PolicyDryRunPreview({
             >
               {rule.severity}
             </ConsoleStatusBadge>
-            <span>{rule.true_count} true</span>
-            <span>{rule.false_count} false</span>
-            <span>{rule.incomplete_count} incomplete</span>
+            {rule.preview_mode === "prospective" ? (
+              <span
+                className="policyProspectiveValue"
+                title="Occurrence policies begin with newly accepted facts after the policy is armed; historical occurrences are not counted or replayed."
+              >
+                Prospective · no historical replay
+              </span>
+            ) : (
+              <>
+                <span>{rule.true_count} true</span>
+                <span>{rule.false_count} false</span>
+                <span>{rule.incomplete_count} incomplete</span>
+              </>
+            )}
           </div>
         ))}
       </div>
@@ -6440,9 +7500,7 @@ function IssuedPolicyAlertList({
               >
                 {alert.severity}
               </ConsoleStatusBadge>
-              <strong>
-                {agentNameById.get(alert.client_id) ?? alert.client_id}
-              </strong>
+              <strong>{policyAlertSubjectLabel(alert, agentNameById)}</strong>
               <span>{alert.title}</span>
               <span>Triggered {formatCompactTime(alert.observed_at)}</span>
               <span>{policyAlertLifecycleEvidence(alert)}</span>
@@ -6452,6 +7510,36 @@ function IssuedPolicyAlertList({
       )}
     </div>
   );
+}
+
+function policyAlertSubjectLabel(
+  alert: PolicyAlertRecord,
+  agentNameById: Map<string, string>,
+): string {
+  const target = alert as PolicyAlertRecord & {
+    client_id: string | null;
+    target_id?: string | null;
+    target_kind?: string | null;
+  };
+  const clientId = target.client_id?.trim();
+  if (clientId) {
+    return agentNameById.get(clientId) ?? clientId;
+  }
+
+  const targetKind = target.target_kind?.trim();
+  const targetId = target.target_id?.trim();
+  if (targetKind === "policy_source" && targetId?.startsWith("global:")) {
+    const source = targetId.slice("global:".length).trim();
+    return source
+      ? `Global · ${readableToken(source.split(".").join("_"))}`
+      : "Global · subjectless";
+  }
+  if (targetKind || targetId) {
+    return `${targetKind ? readableToken(targetKind) : "Subjectless"}${
+      targetId ? ` · ${targetId}` : ""
+    }`;
+  }
+  return "Global · subjectless";
 }
 
 function policyAlertLifecycleEvidence(alert: PolicyAlertRecord): string {
@@ -8189,15 +9277,6 @@ const ALERT_NOTIFICATION_PAYLOAD_EXAMPLE = `{
   }
 }`;
 
-const DEFAULT_WEBHOOK_BODY_TEMPLATE = `{#
-Alert: [{alert.severity}] {alert.title} on {vps.display_name} ({event.id})
-Traffic threshold: {vps.display_name} used {traffic.cycle_percent}% in {policy.name}; source rule {policy_rule.name}
-Resource threshold: [{alert.severity}] {alert.title} on {vps.display_name}; condition {policy_rule.condition_expression}
-VPS status event: [{event.kind}] {vps.display_name} is {vps.status}
-Interval fleet summary: [{event.kind}] {matched_vps.length} VPSs: {matched_vps.map(vps.name).join(", ")}
-#}
-[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}`;
-
 function notificationChannelDraftValidationMessage({
   cooldownSecs,
   name,
@@ -8336,7 +9415,7 @@ export function WebhookRuleManager({
   const savePendingRef = useRef(false);
   const [name, setName] = useState("");
   const [enabled, setEnabled] = useState(false);
-  const [expression, setExpression] = useState("");
+  const [expression, setExpression] = useState("alert.triggered");
   const [target, setTarget] = useState("");
   const [bodyTemplate, setBodyTemplate] = useState(
     DEFAULT_WEBHOOK_BODY_TEMPLATE,
@@ -8345,7 +9424,7 @@ export function WebhookRuleManager({
   const [clearSigningSecret, setClearSigningSecret] = useState(false);
   const [cooldownSecs, setCooldownSecs] = useState("300");
   const [notes, setNotes] = useState("");
-  const [eventKind, setEventKind] = useState("interval.30sec");
+  const [eventKind, setEventKind] = useState("alert.triggered");
   const [eventId, setEventId] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [statusTone, setStatusTone] = useState<ActionFeedbackTone>("info");
@@ -8488,7 +9567,7 @@ export function WebhookRuleManager({
     setEditorTestPreview(null);
     setName("");
     setEnabled(false);
-    setExpression("");
+    setExpression("alert.triggered");
     setTarget("");
     setBodyTemplate(DEFAULT_WEBHOOK_BODY_TEMPLATE);
     setSigningSecret("");
@@ -9398,14 +10477,14 @@ export function WebhookRuleManager({
               <ConsoleField
                 label="Expression"
                 className="fieldFull"
-                hint="All alert producers emit generic alert.triggered and alert.resolved lifecycle edges. Policy rules also expose alert.policy_triggered and alert.policy_resolved; alert.policy_reached remains a compatibility alias. Persisting and Unknown emit no edge."
+                hint="Every Alert Policy emits only generic alert.triggered and alert.resolved lifecycle edges. Trigger and Resolve meta conditions suppress raw flaps before these edges exist; Persisting and Unknown emit no edge."
               >
                 <SearchExpressionInput
                   agents={agents}
                   ariaLabel="Webhook expression"
                   className="targetExpressionBar"
                   onChange={setExpression}
-                  placeholder="interval.30sec && tag:edge"
+                  placeholder="alert.triggered && alert.category:traffic"
                   suggestions={WEBHOOK_EXPRESSION_SUGGESTIONS}
                   value={expression}
                 />
@@ -9493,7 +10572,7 @@ export function WebhookRuleManager({
                 label="Body template"
                 labelTitle="Template used to render the webhook message field."
                 className="fieldFull"
-                hint="Renders the message field in the fixed webhook JSON envelope. The multiline block between standalone {# and #} markers contains non-rendering examples; copy one outside the block to use it. Available roots include vps, matched_vps, event, rule, alert, policy, policy_rule, and traffic."
+                hint="Renders the message field in the fixed webhook JSON envelope. The starter body renders the matching conditional branch and includes full alert lifecycle context; edit it directly. Available roots include vps, matched_vps, event, rule, alert, policy, policy_rule, and traffic."
               >
                 <WebhookTemplateEditor
                   value={bodyTemplate}
@@ -10592,16 +11671,6 @@ function formatMetricValue(
     return formatBytes(value);
   }
   return value % 1 === 0 ? String(value) : value.toFixed(2);
-}
-
-function formatPolicyWindow(windowSecs: number): string {
-  if (windowSecs <= 0) {
-    return "immediate";
-  }
-  if (windowSecs % 60 === 0) {
-    return `${windowSecs / 60}m`;
-  }
-  return `${windowSecs}s`;
 }
 
 function formatSampleAge(seconds: number | null | undefined): string {

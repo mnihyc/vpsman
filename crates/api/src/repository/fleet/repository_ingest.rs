@@ -2,6 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
+use serde_json::Value;
 use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use tokio::sync::RwLock;
 use tracing::debug;
@@ -17,9 +18,12 @@ use crate::model::{
     AgentView, ClientStatusHistoryView, TelemetryNetworkRateView, TelemetryRollupView,
     TelemetrySampleView, TelemetryTunnelAdapterHealthView, TelemetryTunnelView,
 };
-use crate::model_alert_policies::TrafficCounterSampleRecord;
+use crate::model_alert_policies::{
+    AlertPolicyRuleKind, TrafficAccountingRecord, TrafficCounterSampleRecord,
+};
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::{Repository, TelemetryIngestWatermark, TelemetryIngestWatermarks};
+use crate::repository_alert_policies::postgres_traffic_accounting_snapshot_in_tx;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
     enqueue_target_terminal_event_in_tx,
@@ -34,6 +38,10 @@ use crate::repository_operational_alerts::{
     mark_postgres_tunnel_alerts_unknown_for_clients_in_tx,
     reconcile_postgres_agent_alert_transition_in_tx,
     reconcile_postgres_tunnel_alerts_for_clients_in_tx,
+};
+use crate::repository_policy_lifecycle::{
+    record_policy_evidence_in_tx, record_policy_scope_revision_evidence_for_clients_in_tx,
+    PolicyEvidenceFact,
 };
 use crate::security::constant_time_eq;
 
@@ -1226,6 +1234,28 @@ impl Repository {
                     std::slice::from_ref(&event.telemetry.client_id),
                 )
                 .await?;
+                let observed_at = Utc
+                    .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+                    .single()
+                    .context("telemetry observed timestamp is invalid")?;
+                let traffic = postgres_traffic_accounting_snapshot_in_tx(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    observed_at,
+                )
+                .await?;
+                record_combined_telemetry_policy_evidence_in_tx(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    event.gateway_session_id,
+                    event.process_incarnation_id,
+                    event.telemetry_seq,
+                    sample_id,
+                    reported_observed_unix,
+                    metrics,
+                    &traffic,
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(TelemetryRecordOutcome::Recorded)
             }
@@ -1251,6 +1281,17 @@ impl Repository {
     #[cfg(test)]
     pub(crate) async fn record_telemetry(&self, event: &GatewayTelemetryIngest) -> Result<bool> {
         Ok(self.record_telemetry_outcome(event).await? == TelemetryRecordOutcome::Recorded)
+    }
+
+    pub(crate) async fn repair_combined_telemetry_policy_evidence(
+        &self,
+        _limit: i64,
+    ) -> Result<usize> {
+        // Accepted PostgreSQL telemetry and its immutable neutral evidence are
+        // one transaction. Reconstructing a missing fact from the current
+        // watermark/latest sample would bind an old source identity to newer
+        // metrics or traffic. Only missing evaluator receipts are repairable.
+        Ok(0)
     }
 
     async fn record_port_forward_runtime_from_telemetry(
@@ -3127,6 +3168,128 @@ fn telemetry_totals(metrics: &AgentMetrics) -> (i64, i64, i64, i64) {
     (disk_total, disk_available, network_rx, network_tx)
 }
 
+async fn record_combined_telemetry_policy_evidence_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+    gateway_session_id: Uuid,
+    process_incarnation_id: Uuid,
+    telemetry_seq: u64,
+    telemetry_sample_id: Uuid,
+    reported_observed_unix: u64,
+    metrics: &AgentMetrics,
+    traffic: &TrafficAccountingRecord,
+) -> Result<()> {
+    let observed_at = Utc
+        .timestamp_opt(metrics.observed_unix.min(i64::MAX as u64) as i64, 0)
+        .single()
+        .context("telemetry observed timestamp is invalid")?;
+    record_policy_evidence_in_tx(
+        tx,
+        PolicyEvidenceFact {
+            source_kind: "telemetry.combined".to_string(),
+            source_event_id: format!(
+                "telemetry.combined:{gateway_session_id}:{process_incarnation_id}:{telemetry_seq}"
+            ),
+            fact_kind: AlertPolicyRuleKind::Metric,
+            natural_key: client_id.to_string(),
+            confirmation_bucket_key: client_id.to_string(),
+            subject_client_id: Some(client_id.to_string()),
+            target_kind: "client".to_string(),
+            target_id: client_id.to_string(),
+            source_status: if traffic.state == "ok" {
+                "complete".to_string()
+            } else {
+                "incomplete".to_string()
+            },
+            // Metric completeness is field-local: absent CPU utilization,
+            // quota, or a reset-safe traffic cycle becomes a missing JSON
+            // leaf and therefore Kleene Unknown only for expressions that
+            // reference that fact.
+            complete: true,
+            // The lifecycle recorder replaces this with the canonical subject
+            // snapshot while the telemetry transaction still owns the client.
+            subject_snapshot: serde_json::json!({}),
+            payload: combined_metric_evidence_payload(
+                metrics,
+                traffic,
+                gateway_session_id,
+                process_incarnation_id,
+                telemetry_seq,
+                telemetry_sample_id,
+                reported_observed_unix,
+            ),
+            observed_at,
+            state_started_at: Some(observed_at),
+            causation_id: None,
+            schedule_lineage: Vec::new(),
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+fn combined_metric_evidence_payload(
+    metrics: &AgentMetrics,
+    traffic: &TrafficAccountingRecord,
+    gateway_session_id: Uuid,
+    process_incarnation_id: Uuid,
+    telemetry_seq: u64,
+    telemetry_sample_id: Uuid,
+    reported_observed_unix: u64,
+) -> Value {
+    let (disk_total, disk_available, _, _) = telemetry_totals(metrics);
+    let memory_available_ratio = (metrics.memory.total_bytes > 0).then(|| {
+        (metrics
+            .memory
+            .available_bytes
+            .min(metrics.memory.total_bytes) as f64)
+            / metrics.memory.total_bytes as f64
+    });
+    let disk_available_ratio =
+        (disk_total > 0).then(|| disk_available.clamp(0, disk_total) as f64 / disk_total as f64);
+    let cpu_load_saturation = (metrics.cpu.cores > 0)
+        .then(|| metrics.cpu.load.one / f64::from(metrics.cpu.cores))
+        .filter(|value| value.is_finite());
+    let traffic_complete = (traffic.state == "ok").then_some(traffic);
+    serde_json::json!({
+        "telemetry": {
+            "gateway_session_id": gateway_session_id,
+            "process_incarnation_id": process_incarnation_id,
+            "seq": telemetry_seq,
+            "sample_id": telemetry_sample_id,
+            "reported_observed_unix": reported_observed_unix,
+            "accepted_observed_unix": metrics.observed_unix,
+        },
+        "cpu": {
+            "utilization_ratio": metrics.cpu.utilization_ratio,
+            "load_1": metrics.cpu.load.one,
+            "load_saturation": cpu_load_saturation,
+        },
+        "memory": {"available_ratio": memory_available_ratio},
+        "disk": {"available_ratio": disk_available_ratio},
+        "traffic": {
+            "quota": {
+                "total": traffic_complete.and_then(|record| record.quota_total_bytes),
+                "rx": traffic_complete.and_then(|record| record.quota_rx_bytes),
+                "tx": traffic_complete.and_then(|record| record.quota_tx_bytes),
+            },
+            "cycle": {
+                "total": traffic_complete.map(|record| record.total_bytes),
+                "rx": traffic_complete.map(|record| record.rx_bytes),
+                "tx": traffic_complete.map(|record| record.tx_bytes),
+            },
+            "cycle_percent": traffic_complete.and_then(|record| record.cycle_percent),
+            "state": traffic.state,
+            "snapshot": {
+                "as_of_unix": metrics.observed_unix,
+                "selector_hash": traffic.selector_hash,
+                "last_sample_at": traffic.last_sample_at,
+                "counter_epochs_seen": traffic.counter_epochs_seen,
+            },
+        },
+    })
+}
+
 fn weighted_avg_f64(current_avg: f64, current_count: i32, next_value: f64) -> f64 {
     let current_count = current_count.max(1) as f64;
     ((current_avg * current_count) + next_value) / (current_count + 1.0)
@@ -3261,6 +3424,7 @@ pub(crate) async fn record_client_status_transition_in_tx(
         tx, client_id, to_status,
     )
     .await?;
+    record_policy_scope_revision_evidence_for_clients_in_tx(tx, &[client_id.to_string()]).await?;
     mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(tx, &[client_id.to_string()]).await?;
     insert_client_status_webhook_event_in_tx(
         tx,

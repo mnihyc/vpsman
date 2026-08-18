@@ -168,8 +168,8 @@ tunnel_ipv6_allocation_pool_cidr = "fd80::/128"
 }
 
 #[test]
-fn suite_config_accepts_legacy_alert_threshold_keys_as_parse_only() {
-    let config = SuiteConfig::parse(
+fn suite_config_rejects_retired_resource_alert_threshold_keys() {
+    let error = SuiteConfig::parse(
         r#"
 version = 1
 
@@ -182,22 +182,7 @@ alert_cpu_load_warning = 4.0
 alert_cpu_load_critical = 2.0
 "#,
     )
-    .expect("legacy alert threshold keys remain parse-compatible");
+    .expect_err("retired resource alert threshold keys must not remain parse-compatible");
 
-    assert_eq!(
-        config.api.deprecated_resource_alert_threshold_fields(),
-        vec![
-            "api.alert_memory_available_warning_ratio",
-            "api.alert_memory_available_critical_ratio",
-            "api.alert_disk_available_warning_ratio",
-            "api.alert_disk_available_critical_ratio",
-            "api.alert_cpu_load_warning",
-            "api.alert_cpu_load_critical",
-        ]
-    );
-    assert!(!config
-        .validation_summary()
-        .hot_reload_fields
-        .iter()
-        .any(|field| field == "api.alert_*"));
+    assert!(error.contains("unknown field `alert_memory_available_warning_ratio`"));
 }

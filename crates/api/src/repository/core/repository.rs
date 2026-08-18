@@ -78,13 +78,11 @@ pub(crate) struct MemoryState {
     pub(crate) policy_rule_states:
         Arc<RwLock<Vec<crate::model_alert_policies::PolicyRuleStateRecord>>>,
     pub(crate) policy_alerts: Arc<RwLock<Vec<crate::model_alert_policies::PolicyAlertRecord>>>,
+    #[cfg(test)]
     pub(crate) operational_alert_episodes:
         Arc<RwLock<Vec<crate::model::OperationalAlertEpisodeRecord>>>,
+    #[cfg(test)]
     pub(crate) operational_alert_mutation: Arc<Mutex<()>>,
-    pub(crate) operational_alert_bootstrapped: Arc<RwLock<bool>>,
-    pub(crate) operational_alert_event_source_cutoff_at: Arc<RwLock<Option<String>>>,
-    pub(crate) operational_alert_condition_client_cursor: Arc<RwLock<Option<String>>>,
-    pub(crate) operational_alert_tunnel_boundaries: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) operational_alert_tunnel_plan_boundaries: Arc<RwLock<HashMap<Uuid, String>>>,
     pub(crate) fleet_alert_states: Arc<RwLock<Vec<crate::model_alert_states::FleetAlertStateView>>>,
     pub(crate) fleet_alert_notification_channels:

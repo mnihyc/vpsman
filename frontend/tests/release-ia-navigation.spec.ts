@@ -5777,22 +5777,56 @@ test("observability webhook rule editor retains registry and navigation context"
   const bodyTemplateEditor = editor.getByRole("textbox", {
     name: "Webhook body template",
   });
+  await expect(editor.getByLabel("Webhook expression")).toHaveValue(
+    "alert.triggered",
+  );
   await expect(bodyTemplateEditor).toBeVisible();
-  const bodyTemplateLines = await bodyTemplateEditor
-    .locator(".cm-line")
-    .allTextContents();
-  expect(bodyTemplateLines).toEqual([
-    "{#",
-    "Alert: [{alert.severity}] {alert.title} on {vps.display_name} ({event.id})",
-    "Traffic threshold: {vps.display_name} used {traffic.cycle_percent}% in {policy.name}; source rule {policy_rule.name}",
-    "Resource threshold: [{alert.severity}] {alert.title} on {vps.display_name}; condition {policy_rule.condition_expression}",
-    "VPS status event: [{event.kind}] {vps.display_name} is {vps.status}",
-    'Interval fleet summary: [{event.kind}] {matched_vps.length} VPSs: {matched_vps.map(vps.name).join(", ")}',
-    "#}",
-    "[{event.kind}] {rule.name}: {vps.display_name} ({vps.id}) is {vps.status}",
-  ]);
+  await expect(bodyTemplateEditor).toContainText("[if alert.triggered]");
+  await expect(bodyTemplateEditor).toContainText("🚨 ALERT TRIGGERED");
+  await expect(bodyTemplateEditor).toContainText(
+    "Event: {event.kind} · {event.id}",
+  );
+  await expect(bodyTemplateEditor).toContainText(
+    "Record: {alert.record_kind} · lifecycle {alert.lifecycle_state}",
+  );
+  await expect(bodyTemplateEditor).toContainText(
+    "Classification: {alert.category} · {alert.severity}",
+  );
+  await expect(bodyTemplateEditor).toContainText("Title: {alert.title}");
+  await expect(bodyTemplateEditor).toContainText("Detail: {alert.detail}");
+  await expect(bodyTemplateEditor).toContainText(
+    "Policy: {policy.name} ({policy.id})",
+  );
+  await expect(bodyTemplateEditor).toContainText(
+    "Rule: {policy_rule.name} ({policy_rule.id})",
+  );
+  await expect(bodyTemplateEditor).toContainText(
+    "Target: {alert.target_kind}:{alert.target_id}",
+  );
+  await expect(bodyTemplateEditor).toContainText("[elseif alert.resolved]");
+  await expect(bodyTemplateEditor).toContainText("✅ ALERT RESOLVED");
+  await bodyTemplateEditor.press("Control+End");
+  const bottomTemplateText = (
+    await bodyTemplateEditor.locator(".cm-line").allTextContents()
+  ).join("\n");
+  expect(bottomTemplateText).toContain(
+    "Transition: {event.from_status} → {event.to_status}",
+  );
+  expect(bottomTemplateText).toContain(
+    '[elseif event.kind = "telemetry.rollup"]',
+  );
+  expect(bottomTemplateText).toContain("📊 TELEMETRY ROLLUP");
+  expect(bottomTemplateText).toContain(
+    "Telemetry subject: {telemetry.client_id} via {telemetry.gateway_id}",
+  );
+  expect(bottomTemplateText).toContain(
+    "Occurred at (unix): {event.occurred_at_unix}",
+  );
+  expect(bottomTemplateText).toContain("[else]");
+  expect(bottomTemplateText).toContain("ℹ️ EVENT");
+  expect(bottomTemplateText).toContain("[endif]");
   await expect(editor).toContainText(
-    "The multiline block between standalone {# and #} markers contains non-rendering examples",
+    "The starter body renders the matching conditional branch and includes full alert lifecycle context",
   );
   const cooldown = editor.getByLabel("Webhook cooldown seconds");
   await expect(cooldown).toHaveAttribute("min", "0");
@@ -5803,7 +5837,7 @@ test("observability webhook rule editor retains registry and navigation context"
   await editor.getByLabel("Webhook rule name").fill("edge-status-webhook");
   await editor
     .getByLabel("Webhook expression")
-    .fill("interval.30sec && tag:edge");
+    .fill("alert.triggered && alert.category:agent_status");
   await editor
     .getByLabel("Webhook target")
     .fill("https://hooks.example.net/vpsman");

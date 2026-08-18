@@ -173,11 +173,16 @@ pub(crate) enum Command {
         confirmed: bool,
     },
     Schedules,
+    /// Create a cron schedule or a policy-owned alert lifecycle edge schedule.
     ScheduleCreate(ScheduleCreateCommand),
+    /// Replace a schedule definition using its latest frozen target snapshot and revision.
     ScheduleUpdate(ScheduleUpdateCommand),
     ScheduleEnable(ScheduleMutationCommand),
     ScheduleDisable(ScheduleMutationCommand),
     ScheduleDefer(ScheduleDeferCommand),
+    /// Re-resolve and freeze a schedule's selector targets using revision CAS.
+    ScheduleRefreshTargets(ScheduleMutationCommand),
+    /// Dispatch a cron schedule immediately; alert-event schedules reject this action.
     ScheduleApplyNow(ScheduleMutationCommand),
     ScheduleDelete(ScheduleMutationCommand),
     JobCreate {

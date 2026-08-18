@@ -40,8 +40,18 @@ const ALERT_OPERATOR_STATES = new Set<AlertOperatorState>([
   "muted",
   "escalated",
 ]);
-const AUTOMATIC_RESOLUTION_REASONS = new Set([
+const CONDITION_AUTOMATIC_RESOLUTION_REASONS = new Set([
   "condition_recovered",
+  "recovery_expression_matched",
+  "source_scope_exited",
+  "policy_scope_exited",
+  "policy_scope_changed",
+  "policy_disabled",
+  "policy_changed",
+  "policy_deleted",
+]);
+const OCCURRENCE_AUTOMATIC_RESOLUTION_REASONS = new Set([
+  "policy_time_elapsed",
   "source_scope_exited",
   "policy_scope_exited",
   "policy_scope_changed",
@@ -290,13 +300,19 @@ function validLifecycleState(
     ) {
       return null;
     }
-  } else if (
-    recordKind !== "condition" ||
-    !AUTOMATIC_RESOLUTION_REASONS.has(value.resolution_reason) ||
-    value.resolution_note !== null ||
-    value.resolution_actor_id !== null
-  ) {
-    return null;
+  } else {
+    const automaticReasonValid =
+      (recordKind === "condition" &&
+        CONDITION_AUTOMATIC_RESOLUTION_REASONS.has(value.resolution_reason)) ||
+      (recordKind === "event" &&
+        OCCURRENCE_AUTOMATIC_RESOLUTION_REASONS.has(value.resolution_reason));
+    if (
+      !automaticReasonValid ||
+      value.resolution_note !== null ||
+      value.resolution_actor_id !== null
+    ) {
+      return null;
+    }
   }
   return state;
 }

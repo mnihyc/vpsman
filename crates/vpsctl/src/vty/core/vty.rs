@@ -52,7 +52,9 @@ use crate::vty_process::{
     process_supervisor_inventory_path, process_supervisor_usage,
 };
 use crate::vty_schedules::{
-    parse_vty_schedule_create_options, submit_vty_schedule_create, VtyScheduleCreateRequest,
+    parse_vty_event_schedule_create_options, parse_vty_schedule_create_options,
+    submit_vty_event_schedule_create, submit_vty_schedule_create, VtyEventScheduleCreateRequest,
+    VtyScheduleCreateRequest,
 };
 use crate::vty_terminal::{is_vty_terminal_command, submit_vty_terminal_command};
 use crate::vty_terminal_sessions::{
@@ -86,6 +88,8 @@ Fleet and integrations:
   fleet-alerts | fleet-alert-export | fleet-alert-states | fleet-alert-state-update
   vps-rules | vps-rules-get | vps-rules-preview | vps-rules-upsert | vps-rules-unset
   alert-policies | alert-policy-get | alert-policy-preview | alert-policy-upsert
+  alert-policy-preview and alert-policy-upsert require --selector and repeatable
+    --rule-json <PolicyRuleRequest JSON>
   fleet-alert-notification-channels | fleet-alert-notification-channel-upsert
   fleet-alert-notifications | fleet-alert-notification-dispatch | fleet-alert-notification-process
   config-presets | config-preset-create | config-preset-clone
@@ -99,7 +103,7 @@ Fleet and integrations:
 Jobs and schedules:
   jobs | job-create | job-shell | job-targets | job-target-status-download
   job-outputs | job-follow | job-output-download
-  schedules | schedule-create
+  schedules | schedule-create | schedule-event-create
   server-jobs | artifact-cleanup-preview | artifact-cleanup-create | server-job-cancel
 
 Files, terminals, and processes:
@@ -197,7 +201,15 @@ const TERMINAL_SESSIONS_USAGE: &str = concat!(
 
 const SCHEDULE_CREATE_USAGE: &str = concat!(
     "usage: schedule-create <name> <cron_min> <cron_hour> <cron_dom> ",
-    "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...> --confirmed"
+    "<cron_mon> <cron_dow> <command> [schedule policy flags] <target ...> --confirmed\n",
+    "       schedule-event-create <name> <alert-expression> ",
+    "[--event-argv-template <element>]... [--max-failures <1-100>] ",
+    "[--disabled] <target ...> --confirmed\n",
+    "       event example: alert.triggered&&alert.category:traffic\n",
+    "       enter the VTY event expression as one token (no spaces around && or ||)\n",
+    "       event schedules require schedules:write, jobs:write, fleet:read, and backups:read\n",
+    "       omit every --event-argv-template for the safe /bin/true default\n",
+    "       use the Schedule web UI for authoritative per-edge server preview"
 );
 
 const TERMINAL_COMMAND_USAGE: &str = concat!(
@@ -343,6 +355,50 @@ pub(crate) fn run_vty(api_url: &str) -> Result<()> {
                 "{}",
                 submit_vty_network_evidence_command(api_url, token.as_deref(), command)?
             ),
+            command if command.starts_with("schedule-event-create ") => {
+                let parts = command.split_whitespace().collect::<Vec<_>>();
+                if parts.len() < 4 {
+                    println!("{SCHEDULE_CREATE_USAGE}");
+                    continue;
+                }
+                let schedule_options = match parse_vty_event_schedule_create_options(&parts[3..]) {
+                    Ok(options) => options,
+                    Err(error) => {
+                        println!("usage error: {error}");
+                        continue;
+                    }
+                };
+                let target_refs = schedule_options
+                    .target_tokens
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                let selection = match VtyJobSelection::parse(&target_refs) {
+                    Ok(selection) => selection,
+                    Err(error) => {
+                        println!("usage error: {error}");
+                        continue;
+                    }
+                };
+                if !privilege_context.enabled {
+                    println!(
+                        "usage error: schedule-event-create requires privilege unlock; run enable first"
+                    );
+                    continue;
+                }
+                println!(
+                    "{}",
+                    submit_vty_event_schedule_create(VtyEventScheduleCreateRequest {
+                        api_url,
+                        token: token.as_deref(),
+                        name: parts[1],
+                        event_expression: parts[2],
+                        selection,
+                        options: &schedule_options,
+                        privilege_context: &privilege_context,
+                    })?
+                );
+            }
             command if command.starts_with("schedule-create ") => {
                 let parts = command.split_whitespace().collect::<Vec<_>>();
                 if parts.len() < 8 {

@@ -114,7 +114,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "alerts",
       label: "Alerts",
-      description: "Operational and policy-issued fleet alert triage",
+      description: "Unified policy-owned fleet alert lifecycle and triage",
     },
     {
       id: "instance_detail",

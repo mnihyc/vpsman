@@ -8,6 +8,9 @@ import {
 } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
+  BellRing,
+  Braces,
+  CalendarClock,
   ChevronDown,
   ClipboardList,
   Clock3,
@@ -21,6 +24,7 @@ import {
   ShieldCheck,
   Target,
   Trash2,
+  WandSparkles,
 } from "lucide-react";
 import {
   ConsoleDataGrid,
@@ -29,6 +33,7 @@ import {
 } from "../components/ConsoleDataGrid";
 import { ConsoleCollapsibleSection } from "../components/ConsoleLayout";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
+import { ArgvInspector } from "../components/ExactPayloadInspector";
 import { SearchExpressionInput } from "../components/SearchExpressionInput";
 import {
   buildPrivilegeAssertion,
@@ -58,10 +63,13 @@ import type {
   CreateJobResponse,
   CreateScheduleRequest,
   DeferScheduleRequest,
+  EventScheduleTemplatePreviewRequest,
+  EventScheduleTemplatePreviewResponse,
   JobTargetSelection,
   JobOperation,
   SchedulePrivilegeMutationRequest,
   ScheduleRecord,
+  ScheduleTriggerKind,
   UpdateScheduleRequest,
   UpdateScheduleTargetsRequest,
 } from "../types";
@@ -74,8 +82,38 @@ import {
 import { LocalTargetPreview } from "./TargetImpactPreview";
 import { buildScheduleTargetUpdatePrivilegeAssertion } from "../scheduleTargetMaintenance";
 import { scrollIntoViewWithMotion } from "../motion";
+import {
+  SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS,
+  SCHEDULE_EVENT_EXPRESSION_EXAMPLES,
+  scheduleEventExpressionValidationMessage,
+} from "../eventExpression";
+import {
+  ALERT_EVENT_ARGV_CONTROL_TOKENS,
+  ALERT_EVENT_ARGV_HELPER_TOKENS,
+  ALERT_EVENT_ARGV_MAX_BYTES,
+  ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES,
+  ALERT_EVENT_ARGV_MAX_ELEMENTS,
+  ALERT_EVENT_ARGV_SCALAR_PATHS,
+} from "../generated/protocolContracts";
 
 const SCHEDULE_SELECTOR_STORAGE_KEY = "vpsman.schedules.selectorExpression";
+const EVENT_SCHEDULE_NOOP_ARGV = ["/bin/true"];
+const EVENT_SCHEDULE_ECHO_RECIPE =
+  "/usr/bin/printf '%s\\n' '[{event.kind}] {alert.title} · {alert.category}/{alert.severity} · episode {alert.id} generation {alert.trigger_generation}'";
+const EVENT_SCHEDULE_SCALAR_TEMPLATE_PATHS = new Set<string>(
+  ALERT_EVENT_ARGV_SCALAR_PATHS,
+);
+const EVENT_SCHEDULE_FEATURED_TEMPLATE_TOKENS = [
+  "{event.kind}",
+  "{event.id}",
+  "{alert.title}",
+  "{alert.category}",
+  "{alert.severity}",
+  "{alert.id}",
+  "{alert.trigger_generation}",
+  "{policy.name}",
+  "{policy_rule.name}",
+] as const;
 
 function ScheduleFieldLabel({ help, label }: { help: string; label: string }) {
   return (
@@ -97,6 +135,7 @@ function ScheduleFieldLabel({ help, label }: { help: string; label: string }) {
 export function SchedulesPanel({
   activeSubpage: _activeSubpage,
   agents,
+  canManageAlertEventSchedules,
   commandTemplates,
   commandTemplatesTruncated,
   error,
@@ -109,6 +148,7 @@ export function SchedulesPanel({
   onEnableSchedule,
   onOpenPrivilegeUnlock,
   onOpenScheduledRuns,
+  onPreviewEventTemplate,
   onRefresh,
   onResolveTargets,
   onUpdateSchedule,
@@ -119,6 +159,7 @@ export function SchedulesPanel({
 }: {
   activeSubpage: string;
   agents: AgentView[];
+  canManageAlertEventSchedules: boolean;
   commandTemplates: CommandTemplateRecord[];
   commandTemplatesTruncated: boolean;
   error: string | null;
@@ -146,6 +187,9 @@ export function SchedulesPanel({
   ) => Promise<void>;
   onOpenPrivilegeUnlock: () => void;
   onOpenScheduledRuns?: () => void;
+  onPreviewEventTemplate: (
+    request: EventScheduleTemplatePreviewRequest,
+  ) => Promise<EventScheduleTemplatePreviewResponse>;
   onRefresh: () => Promise<void>;
   onResolveTargets: (
     selection: JobTargetSelection,
@@ -166,7 +210,9 @@ export function SchedulesPanel({
   const [name, setName] = useState("");
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [commandText, setCommandText] = useState("");
+  const [triggerKind, setTriggerKind] = useState<ScheduleTriggerKind>("cron");
   const [cronExpr, setCronExpr] = useState("0 * * * *");
+  const [eventExpression, setEventExpression] = useState("alert.triggered");
   const [enabled, setEnabled] = useState(false);
   const [catchUpPolicy, setCatchUpPolicy] = useState("skip_missed");
   const [catchUpLimit, setCatchUpLimit] = useState(1);
@@ -237,13 +283,17 @@ export function SchedulesPanel({
     return () => window.cancelAnimationFrame(frame);
   }, [scheduleLifecycleFeedback?.message]);
 
-  const argv = useMemo(() => {
+  const parsedCommand = useMemo(() => {
     try {
-      return parseCommandArgv(commandText);
-    } catch {
-      return [];
+      return { argv: parseCommandArgv(commandText), error: null };
+    } catch (error) {
+      return {
+        argv: [],
+        error: error instanceof Error ? error.message : "Invalid command argv",
+      };
     }
   }, [commandText]);
+  const argv = parsedCommand.argv;
   const selectedTemplate = useMemo(
     () =>
       commandTemplates.find((template) => template.id === selectedTemplateId) ??
@@ -258,11 +308,52 @@ export function SchedulesPanel({
     () => commandTemplates.filter((template) => !template.built_in),
     [commandTemplates],
   );
+  const cronDirectArgv =
+    triggerKind !== "cron"
+      ? null
+      : selectedTemplate
+        ? selectedTemplate.operation.type === "shell"
+          ? selectedTemplate.operation.argv
+          : null
+        : argv;
+  const eventArgvTemplate = useMemo<string[] | null>(() => {
+    if (triggerKind !== "event") return null;
+    if (selectedTemplate?.operation.type === "shell") {
+      return selectedTemplate.operation.argv;
+    }
+    return argv.length > 0 ? argv : null;
+  }, [argv, selectedTemplate, triggerKind]);
+  const eventArgvTemplateError = useMemo(
+    () =>
+      triggerKind === "event"
+        ? eventArgvTemplateValidationMessage(
+            eventArgvTemplate,
+            selectedTemplate?.operation ?? null,
+            parsedCommand.error,
+          )
+        : null,
+    [eventArgvTemplate, parsedCommand.error, selectedTemplate, triggerKind],
+  );
   const scheduleOperation = useMemo<JobOperation | null>(
     () =>
-      selectedTemplate?.operation ??
-      (argv.length > 0 ? { type: "shell", argv, pty: false } : null),
-    [argv, selectedTemplate],
+      triggerKind === "cron"
+        ? (selectedTemplate?.operation ??
+          (argv.length > 0 ? { type: "shell", argv, pty: false } : null))
+        : null,
+    [argv, selectedTemplate, triggerKind],
+  );
+  const usesDefaultEventNoop =
+    triggerKind === "event" && eventArgvTemplate === null;
+  const operationForPrivilege = useMemo<JobOperation | null>(
+    () =>
+      triggerKind === "event"
+        ? {
+            type: "shell",
+            argv: eventArgvTemplate ?? EVENT_SCHEDULE_NOOP_ARGV,
+            pty: false,
+          }
+        : scheduleOperation,
+    [eventArgvTemplate, scheduleOperation, triggerKind],
   );
   const selectorParse = useMemo(
     () => parseSearchExpression(selectorExpression),
@@ -293,27 +384,47 @@ export function SchedulesPanel({
   );
   const selectedTargetCount = selectedTargetIds.length;
   const cronShapeValid = useMemo(() => hasCronFieldShape(cronExpr), [cronExpr]);
-  const nextRuns = useMemo(() => previewNextCronRuns(cronExpr, 5), [cronExpr]);
+  const eventExpressionError = useMemo(
+    () =>
+      triggerKind === "event"
+        ? scheduleEventExpressionValidationMessage(eventExpression)
+        : null,
+    [eventExpression, triggerKind],
+  );
+  const triggerDefinitionValid =
+    triggerKind === "cron" ? cronShapeValid : eventExpressionError === null;
+  const nextRuns = useMemo(
+    () => (triggerKind === "cron" ? previewNextCronRuns(cronExpr, 5) : []),
+    [cronExpr, triggerKind],
+  );
   const ready =
     name.trim().length > 0 &&
-    scheduleOperation !== null &&
-    cronShapeValid &&
+    (triggerKind === "cron" || canManageAlertEventSchedules) &&
+    operationForPrivilege !== null &&
+    eventArgvTemplateError === null &&
+    triggerDefinitionValid &&
     selectorExpression.trim().length > 0 &&
     !selectorParse.error &&
     !selectorEvidenceUnavailable;
   const scheduleReviewUnavailableReason = pending
     ? "A schedule change is already in progress"
-    : !name.trim()
-      ? "Enter a schedule name"
-      : scheduleOperation === null
-        ? "Select a command template or enter a valid command"
-        : !cronShapeValid
-          ? "Enter a valid five-field UTC cron expression"
-          : !selectorExpression.trim()
-            ? "Enter a VPS selector expression"
-            : selectorEvidenceUnavailable
-              ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
-              : (selectorParse.error ?? undefined);
+    : triggerKind === "event" && !canManageAlertEventSchedules
+      ? "Alert-event schedules require fleet:read, backups:read, jobs:write, and schedules:write"
+      : !name.trim()
+        ? "Enter a schedule name"
+        : operationForPrivilege === null
+          ? "Select a command template or enter a valid command"
+          : eventArgvTemplateError
+            ? eventArgvTemplateError
+            : triggerKind === "cron" && !cronShapeValid
+              ? "Enter a valid five-field UTC cron expression"
+              : triggerKind === "event" && eventExpressionError
+                ? eventExpressionError
+                : !selectorExpression.trim()
+                  ? "Enter a VPS selector expression"
+                  : selectorEvidenceUnavailable
+                    ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
+                    : (selectorParse.error ?? undefined);
   const status = schedulesTruncated
     ? `${formatLowerBoundCount(schedules.length, true)} loaded schedules`
     : countPhrase(schedules.length, "schedule");
@@ -326,6 +437,10 @@ export function SchedulesPanel({
     : "success";
   const confirmationNextRun =
     pendingScheduleSnapshot?.nextRun ?? nextRuns[0] ?? null;
+  const confirmationTriggerKind =
+    pendingScheduleSnapshot?.triggerKind ?? triggerKind;
+  const confirmationEventPreview =
+    pendingScheduleSnapshot?.eventTemplatePreview ?? null;
 
   const confirmationItems = [
     {
@@ -354,40 +469,105 @@ export function SchedulesPanel({
     {
       label: "Operation",
       title: operationEvidenceTitle(
-        pendingScheduleSnapshot?.operation ??
-          selectedTemplate?.operation ??
-          scheduleOperation,
+        pendingScheduleSnapshot
+          ? scheduleSnapshotPrivilegeOperation(pendingScheduleSnapshot)
+          : operationForPrivilege,
       ),
       value: pendingScheduleSnapshot
-        ? (pendingScheduleSnapshot.selectedTemplateName ??
-          operationSummary(pendingScheduleSnapshot.operation))
+        ? pendingScheduleSnapshot.triggerKind === "event"
+          ? eventArgvTemplateSummary(pendingScheduleSnapshot.eventArgvTemplate)
+          : (pendingScheduleSnapshot.selectedTemplateName ??
+            operationSummary(pendingScheduleSnapshot.operation))
         : selectedTemplate
           ? selectedTemplate.name
-          : operationSummary(scheduleOperation),
+          : triggerKind === "event"
+            ? eventArgvTemplateSummary(eventArgvTemplate)
+            : operationSummary(scheduleOperation),
     },
     {
-      label: "Cron",
-      value: `${pendingScheduleSnapshot?.cronExpr ?? cronExpr.trim()} UTC`,
+      label: "Trigger",
+      value:
+        confirmationTriggerKind === "event"
+          ? "Alert lifecycle event"
+          : "UTC cron",
     },
-    {
-      label: "Next",
-      value: confirmationNextRun
-        ? formatTime(confirmationNextRun)
-        : "Server calculates after save",
-    },
-    {
-      label: "Catch-up",
-      value: formatCatchUpPolicy(
-        pendingScheduleSnapshot?.catchUpPolicy ?? catchUpPolicy,
-      ),
-    },
-    {
-      label: "Retry",
-      value: formatInterval(
-        pendingScheduleSnapshot?.retryDelaySecs ??
-          clampInteger(retryDelaySecs, 1, 86_400),
-      ),
-    },
+    ...(confirmationTriggerKind === "event"
+      ? [
+          {
+            label: "Alert expression",
+            value:
+              pendingScheduleSnapshot?.eventExpression ??
+              eventExpression.trim(),
+          },
+          {
+            label: "Event handling",
+            value: "Prospective · one job per edge · deferred edges skipped",
+          },
+          ...(confirmationEventPreview
+            ? [
+                {
+                  label: "Saved argv JSON",
+                  value: (
+                    <ScheduleReviewExactValue
+                      label="Saved argv JSON value"
+                      value={JSON.stringify(
+                        confirmationEventPreview.template_argv,
+                      )}
+                    />
+                  ),
+                },
+                ...confirmationEventPreview.previews.flatMap(
+                  (preview, previewIndex) => [
+                    {
+                      label: `${eventEdgeLabel(preview.context.event_kind)} rendered argv`,
+                      value: (
+                        <ScheduleReviewExactValue
+                          label={`${eventEdgeLabel(preview.context.event_kind)} rendered argv sample value`}
+                          value={JSON.stringify(preview.rendered_argv ?? [])}
+                        />
+                      ),
+                    },
+                    {
+                      label: `${eventEdgeLabel(preview.context.event_kind)} sample context`,
+                      value: `[${preview.context.event_kind}] ${preview.context.alert_severity} ${preview.context.alert_category} · ${preview.context.policy_name} / ${preview.context.policy_rule_name}`,
+                    },
+                    {
+                      label:
+                        previewIndex === 0
+                          ? "Render evidence"
+                          : `${eventEdgeLabel(preview.context.event_kind)} evidence`,
+                      value: `${confirmationEventPreview.template_hash.slice(0, 12)} → ${preview.rendered_hash?.slice(0, 12) ?? "invalid"}`,
+                    },
+                  ],
+                ),
+              ]
+            : []),
+        ]
+      : [
+          {
+            label: "Cron",
+            value: `${pendingScheduleSnapshot?.cronExpr ?? cronExpr.trim()} UTC`,
+          },
+          {
+            label: "Next",
+            value: confirmationNextRun
+              ? formatTime(confirmationNextRun)
+              : "Server calculates after save",
+          },
+          {
+            label: "Catch-up",
+            value: formatCatchUpPolicy(
+              pendingScheduleSnapshot?.catchUpPolicy ?? catchUpPolicy,
+            ),
+          },
+          {
+            label: "Retry",
+            value: formatInterval(
+              pendingScheduleSnapshot?.retryDelaySecs ??
+                clampInteger(retryDelaySecs, 1, 86_400),
+            ),
+          },
+        ]),
     {
       label: "State",
       value:
@@ -418,7 +598,7 @@ export function SchedulesPanel({
         minSize: 120,
         sortValue: (schedule) => schedule.command_type,
         searchValue: (schedule) =>
-          `${schedule.command_type} ${operationSummary(schedule.operation)} ${schedule.operation_error ?? ""}`,
+          `${schedule.command_type} ${scheduleOperationSummary(schedule)} ${schedule.operation_error ?? ""}`,
         cell: (schedule) => (
           <span className="historyPrimary">
             <strong
@@ -426,13 +606,13 @@ export function SchedulesPanel({
                 scheduleOperationInvalid(schedule) ? "status warn" : undefined
               }
               title={operationEvidenceTitle(
-                schedule.operation,
+                schedulePrivilegeOperation(schedule),
                 schedule.operation_error,
               )}
             >
               {scheduleOperationInvalid(schedule)
                 ? "Invalid saved operation"
-                : operationSummary(schedule.operation)}
+                : scheduleOperationSummary(schedule)}
             </strong>
             <small>
               {scheduleOperationInvalid(schedule)
@@ -467,27 +647,50 @@ export function SchedulesPanel({
         },
       },
       {
-        id: "cron",
-        header: "Human cadence",
+        id: "trigger",
+        header: "Trigger",
         size: 165,
         minSize: 140,
-        sortValue: (schedule) => schedule.cron_expr,
+        sortValue: (schedule) =>
+          schedule.trigger_kind === "event"
+            ? `event ${schedule.event_expression ?? ""}`
+            : `cron ${schedule.cron_expr ?? ""}`,
         searchValue: (schedule) =>
-          `${schedule.cron_expr} ${describeCronExpression(schedule.cron_expr)} ${schedule.timezone} ${schedule.cadence_error ?? ""}`,
+          schedule.trigger_kind === "event"
+            ? `alert event ${schedule.event_expression ?? ""} ${schedule.event_armed_at ?? ""}`
+            : `${schedule.cron_expr ?? ""} ${describeCronExpression(schedule.cron_expr ?? "")} ${schedule.timezone ?? ""} ${schedule.cadence_error ?? ""}`,
         cell: (schedule) => {
+          if (schedule.trigger_kind === "event") {
+            return (
+              <span
+                className="historyPrimary scheduleCadenceCell"
+                title={
+                  schedule.event_expression ??
+                  "Alert event expression is unavailable"
+                }
+              >
+                <strong>Alert lifecycle edge</strong>
+                <small>
+                  {schedule.event_expression || "Missing expression"}
+                </small>
+                <small>Policy-confirmed · one job per edge</small>
+              </span>
+            );
+          }
           const cadenceError = scheduleCadenceErrorDetail(schedule);
+          const cron = schedule.cron_expr ?? "";
           return (
             <span
               className="historyPrimary scheduleCadenceCell"
-              title={`${schedule.cron_expr} ${schedule.timezone}`}
+              title={`${cron} ${schedule.timezone ?? "UTC"}`}
             >
               {cadenceError ? (
                 <strong className="status warn">Invalid cadence</strong>
               ) : (
-                <strong>{describeCronExpression(schedule.cron_expr)}</strong>
+                <strong>{describeCronExpression(cron)}</strong>
               )}
               <small>
-                {schedule.cron_expr} · {schedule.timezone}
+                {cron} · {schedule.timezone ?? "UTC"}
               </small>
               {cadenceError ? <small>{cadenceError}</small> : null}
             </span>
@@ -496,12 +699,13 @@ export function SchedulesPanel({
       },
       {
         id: "nextRun",
-        header: "Next run / Overdue",
+        header: "Next run / Armed",
         size: 170,
         minSize: 145,
-        sortValue: (schedule) => schedule.next_run_at,
+        sortValue: (schedule) =>
+          schedule.next_run_at ?? schedule.event_armed_at ?? "",
         searchValue: (schedule) =>
-          `${schedule.next_run_at} ${schedule.next_runs.join(" ")} ${schedule.last_run_at ?? ""}`,
+          `${schedule.next_run_at ?? ""} ${schedule.event_armed_at ?? ""} ${schedule.next_runs.join(" ")} ${schedule.last_run_at ?? ""}`,
         cell: (schedule) => {
           const timing = scheduleRunTiming(schedule);
           return (
@@ -652,20 +856,25 @@ export function SchedulesPanel({
         onOpenPrivilegeUnlock();
         throw new Error("Privilege unlock is required");
       }
-      const operationHash = await operationPayloadHashHex(snapshot.operation);
+      const operationHash = await operationPayloadHashHex(
+        scheduleSnapshotPrivilegeOperation(snapshot),
+      );
       const privilegeAssertion = await buildPrivilegeAssertion({
         intent: canonicalSchedulePrivilegeIntent({
           action: snapshot.editingScheduleId
             ? "schedule.update"
             : "schedule.create",
           scheduleId: snapshot.editingScheduleId,
+          definitionRevision: snapshot.expectedDefinitionRevision,
           name: snapshot.name,
           commandType: snapshot.commandType,
           operationPayloadHash: operationHash,
           selectorExpression: snapshot.selectorExpression,
           resolvedTargets: snapshot.targetClientIds,
+          triggerKind: snapshot.triggerKind,
           cronExpr: snapshot.cronExpr,
-          timezone: "UTC",
+          timezone: snapshot.triggerKind === "cron" ? "UTC" : null,
+          eventExpression: snapshot.eventExpression,
           enabled: snapshot.enabled,
           catchUpPolicy: snapshot.catchUpPolicy,
           catchUpLimit: snapshot.catchUpLimit,
@@ -679,10 +888,14 @@ export function SchedulesPanel({
       const request: CreateScheduleRequest = {
         name: snapshot.name,
         operation: snapshot.operation,
+        event_argv_template: snapshot.eventArgvTemplate,
         selector_expression: snapshot.selectorExpression,
         target_client_ids: snapshot.targetClientIds,
-        cron_expr: snapshot.cronExpr,
-        timezone: "UTC",
+        trigger_kind: snapshot.triggerKind,
+        cron_expr: snapshot.triggerKind === "cron" ? snapshot.cronExpr : null,
+        timezone: snapshot.triggerKind === "cron" ? "UTC" : null,
+        event_expression:
+          snapshot.triggerKind === "event" ? snapshot.eventExpression : null,
         enabled: snapshot.enabled,
         catch_up_policy: snapshot.catchUpPolicy,
         catch_up_limit: snapshot.catchUpLimit,
@@ -694,6 +907,8 @@ export function SchedulesPanel({
       if (snapshot.editingScheduleId) {
         await onUpdateSchedule(snapshot.editingScheduleId, {
           ...request,
+          expected_definition_revision:
+            snapshot.expectedDefinitionRevision ?? 0,
           expected_selector_expression:
             snapshot.expectedSelectorExpression ?? "",
           expected_target_client_ids: snapshot.expectedTargetClientIds ?? [],
@@ -718,7 +933,9 @@ export function SchedulesPanel({
     setName("");
     setSelectedTemplateId("");
     setCommandText("");
+    setTriggerKind("cron");
     setCronExpr("0 * * * *");
+    setEventExpression("alert.triggered");
     setEnabled(false);
     setCatchUpPolicy("skip_missed");
     setCatchUpLimit(1);
@@ -732,23 +949,33 @@ export function SchedulesPanel({
   }
 
   async function buildScheduleDraftSnapshot(): Promise<ScheduleDraftSnapshot> {
-    if (!ready || !scheduleOperation) {
+    if (!ready || !operationForPrivilege) {
       throw new Error("Schedule is incomplete");
     }
     const selector = selectorExpression.trim();
     const draft = {
       editingScheduleId,
       name: name.trim(),
-      operation: scheduleOperation,
-      commandType: commandTypeForApi(scheduleOperation),
+      operation: triggerKind === "cron" ? scheduleOperation : null,
+      eventArgvTemplate: triggerKind === "event" ? eventArgvTemplate : null,
+      commandType:
+        triggerKind === "event"
+          ? "shell_argv"
+          : commandTypeForApi(operationForPrivilege),
       selectorExpression: selector,
-      cronExpr: cronExpr.trim(),
+      triggerKind,
+      cronExpr: triggerKind === "cron" ? cronExpr.trim() : null,
+      eventExpression: triggerKind === "event" ? eventExpression.trim() : null,
       enabled,
-      catchUpPolicy,
-      catchUpLimit: clampInteger(catchUpLimit, 1, 25),
-      retryDelaySecs: clampInteger(retryDelaySecs, 1, 86_400),
+      catchUpPolicy: triggerKind === "event" ? null : catchUpPolicy,
+      catchUpLimit:
+        triggerKind === "event" ? null : clampInteger(catchUpLimit, 1, 25),
+      retryDelaySecs:
+        triggerKind === "event"
+          ? null
+          : clampInteger(retryDelaySecs, 1, 86_400),
       maxFailures: clampInteger(maxFailures, 1, 100),
-      nextRun: nextRuns[0] ?? null,
+      nextRun: triggerKind === "cron" ? (nextRuns[0] ?? null) : null,
       selectedTemplateName: selectedTemplate?.name ?? null,
     };
     const editingSchedule = editingScheduleId
@@ -758,19 +985,48 @@ export function SchedulesPanel({
     const selectorChanged =
       editingSchedule !== null &&
       selector !== editingSchedule.selector_expression.trim();
-    const targetClientIds =
+    const targetClientIdsPromise =
       editingSchedule && !selectorChanged
-        ? fixedTargetIds(editingSchedule)
-        : (
-            await onResolveTargets({ selector_expression: selector })
-          ).targets.map((target) => target.id);
+        ? Promise.resolve(fixedTargetIds(editingSchedule))
+        : onResolveTargets({ selector_expression: selector }).then((response) =>
+            response.targets.map((target) => target.id),
+          );
+    const eventTemplatePreviewPromise =
+      triggerKind === "event"
+        ? onPreviewEventTemplate({
+            event_expression: eventExpression.trim(),
+            event_argv_template: eventArgvTemplate,
+          })
+        : Promise.resolve(null);
+    const [targetClientIds, eventTemplatePreview] = await Promise.all([
+      targetClientIdsPromise,
+      eventTemplatePreviewPromise,
+    ]);
     if (!targetClientIds.length) {
       throw new Error("Schedule confirmation resolved no VPSs");
+    }
+    const previewError = eventTemplatePreview?.previews
+      .flatMap((preview) => preview.elements)
+      .find((element) => element.error_code || element.error_message);
+    if (
+      eventTemplatePreview &&
+      (!eventTemplatePreview.previews.length ||
+        eventTemplatePreview.previews.some(
+          (preview) => !preview.rendered_argv,
+        ) ||
+        previewError)
+    ) {
+      throw new Error(
+        previewError?.error_message ??
+          "The server could not render the event argv template",
+      );
     }
     return {
       ...draft,
       expectedSelectorExpression: editingSchedule?.selector_expression ?? null,
       expectedTargetClientIds: editingSchedule?.target_client_ids ?? null,
+      expectedDefinitionRevision: editingSchedule?.definition_revision ?? null,
+      eventTemplatePreview,
       targetClientIds,
     };
   }
@@ -779,16 +1035,26 @@ export function SchedulesPanel({
     if (pending) return;
     setPendingScheduleSnapshot(null);
     setScheduleLifecycleFeedback(null);
-    const matchingTemplate = schedule.operation
+    const editableOperation: JobOperation | null =
+      schedule.trigger_kind === "event"
+        ? schedule.event_argv_template
+          ? {
+              type: "shell",
+              argv: schedule.event_argv_template,
+              pty: false,
+            }
+          : null
+        : schedule.operation;
+    const matchingTemplate = editableOperation
       ? commandTemplates.find(
           (template) =>
             JSON.stringify(template.operation) ===
-            JSON.stringify(schedule.operation),
+            JSON.stringify(editableOperation),
         )
       : undefined;
     if (
-      schedule.operation &&
-      schedule.operation.type !== "shell" &&
+      editableOperation &&
+      editableOperation.type !== "shell" &&
       !matchingTemplate
     ) {
       setScheduleLifecycleFeedback({
@@ -799,7 +1065,7 @@ export function SchedulesPanel({
       });
       return;
     }
-    if (!schedule.operation) {
+    if (schedule.trigger_kind === "cron" && !schedule.operation) {
       setScheduleLifecycleFeedback({
         message:
           "The saved operation is invalid. Choose a replacement command or template, then review the full schedule update.",
@@ -810,15 +1076,19 @@ export function SchedulesPanel({
     setName(schedule.name);
     setSelectedTemplateId(matchingTemplate?.id ?? "");
     setCommandText(
-      schedule.operation?.type === "shell"
-        ? operationToCommandText(schedule.operation)
-        : "",
+      matchingTemplate
+        ? ""
+        : editableOperation?.type === "shell"
+          ? operationToCommandText(editableOperation)
+          : "",
     );
-    setCronExpr(schedule.cron_expr);
+    setTriggerKind(schedule.trigger_kind);
+    setCronExpr(schedule.cron_expr ?? "0 * * * *");
+    setEventExpression(schedule.event_expression ?? "alert.triggered");
     setEnabled(schedule.enabled);
-    setCatchUpPolicy(schedule.catch_up_policy);
-    setCatchUpLimit(schedule.catch_up_limit);
-    setRetryDelaySecs(schedule.retry_delay_secs);
+    setCatchUpPolicy(schedule.catch_up_policy ?? "skip_missed");
+    setCatchUpLimit(schedule.catch_up_limit ?? 1);
+    setRetryDelaySecs(schedule.retry_delay_secs ?? 300);
     setMaxFailures(schedule.max_failures);
     setSelectorExpression(schedule.selector_expression);
     setComposerRevealRequest((current) => current + 1);
@@ -844,6 +1114,14 @@ export function SchedulesPanel({
   function reviewApplyNow(schedule: ScheduleRecord) {
     if (pending) return;
     setScheduleActionError(null);
+    if (schedule.trigger_kind === "event") {
+      setScheduleLifecycleFeedback({
+        message:
+          "Alert-event schedules require a real Triggered or Resolved edge; Apply now never invents template context.",
+        tone: "warning",
+      });
+      return;
+    }
     if (!privilegeMaterial) {
       onOpenPrivilegeUnlock();
       setScheduleLifecycleFeedback({
@@ -881,6 +1159,7 @@ export function SchedulesPanel({
         );
         for (const update of reviewedUpdates) {
           await onUpdateScheduleTargets(update.schedule.id, {
+            expected_definition_revision: update.schedule.definition_revision,
             confirmed: true,
             privilege_assertion: update.privilegeAssertion,
           });
@@ -918,19 +1197,28 @@ export function SchedulesPanel({
       let successMessage: string;
       if (action.type === "enable") {
         await onEnableSchedule(action.schedule.id, {
+          expected_definition_revision: action.schedule.definition_revision,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
-        successMessage = `${action.schedule.name} enabled; automatic runs resumed`;
+        successMessage =
+          action.schedule.trigger_kind === "event"
+            ? `${action.schedule.name} enabled and re-armed for future alert edges`
+            : `${action.schedule.name} enabled; automatic runs resumed`;
       } else if (action.type === "disable") {
         await onDisableSchedule(action.schedule.id, {
+          expected_definition_revision: action.schedule.definition_revision,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
-        successMessage = `${action.schedule.name} disabled; automatic runs paused`;
+        successMessage =
+          action.schedule.trigger_kind === "event"
+            ? `${action.schedule.name} disabled; alert edges will be skipped until re-enabled`
+            : `${action.schedule.name} disabled; automatic runs paused`;
       } else if (action.type === "defer") {
         await onDeferSchedule(action.schedule.id, {
           deferred_until: action.deferredUntil,
+          expected_definition_revision: action.schedule.definition_revision,
           reason: action.reason || null,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
@@ -938,12 +1226,14 @@ export function SchedulesPanel({
         successMessage = `${action.schedule.name} deferred until ${formatCompactTime(action.deferredUntil)}`;
       } else if (action.type === "delete") {
         await onDeleteSchedule(action.schedule.id, {
+          expected_definition_revision: action.schedule.definition_revision,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
         successMessage = `${action.schedule.name} deleted`;
       } else {
         const response = await onApplyScheduleNow(action.schedule.id, {
+          expected_definition_revision: action.schedule.definition_revision,
           confirmed: true,
           privilege_assertion: privilegeAssertion,
         });
@@ -1055,10 +1345,11 @@ export function SchedulesPanel({
     if (!targetIds.length && action !== "schedule.targets.update") {
       throw new Error("Schedule has no fixed VPS targets");
     }
+    const privilegeOperation = schedulePrivilegeOperation(schedule);
     const operationHash =
       schedule.operation_payload_hash?.trim() ||
-      (schedule.operation
-        ? await operationPayloadHashHex(schedule.operation)
+      (privilegeOperation
+        ? await operationPayloadHashHex(privilegeOperation)
         : "");
     if (!operationHash) {
       throw new Error("Schedule operation evidence is unavailable");
@@ -1067,13 +1358,16 @@ export function SchedulesPanel({
       intent: canonicalSchedulePrivilegeIntent({
         action,
         scheduleId: schedule.id,
+        definitionRevision: schedule.definition_revision,
         name: schedule.name,
         commandType: schedule.command_type,
         operationPayloadHash: operationHash,
         selectorExpression: selectorExpressionForIntent,
         resolvedTargets: targetIds,
+        triggerKind: schedule.trigger_kind,
         cronExpr: schedule.cron_expr,
         timezone: schedule.timezone,
+        eventExpression: schedule.event_expression,
         enabled: nextEnabled,
         catchUpPolicy: schedule.catch_up_policy,
         catchUpLimit: schedule.catch_up_limit,
@@ -1096,6 +1390,16 @@ export function SchedulesPanel({
     }
   }
 
+  function insertEventTemplateArgument(token: string) {
+    setSelectedTemplateId("");
+    setCommandText((current) => {
+      const prefix = current.trim()
+        ? current.trimEnd()
+        : "/usr/bin/printf '%s\\n'";
+      return `${prefix} ${quoteCommandArg(token)}`;
+    });
+  }
+
   function actionDetail(action: ScheduleAction): string {
     if (action.type === "targetUpdate") {
       return `Re-resolves each saved audit selector and replaces only the ${
@@ -1108,7 +1412,9 @@ export function SchedulesPanel({
       return "Dispatches a normal job from the saved fixed target snapshot without changing the next scheduled run.";
     }
     if (action.type === "defer") {
-      return `Pauses automatic execution until ${formatCompactTime(action.deferredUntil)}.`;
+      return action.schedule.trigger_kind === "event"
+        ? `Skips matching alert edges until ${formatCompactTime(action.deferredUntil)}. Skipped edges never replay; resuming establishes a new arm boundary.`
+        : `Pauses automatic execution until ${formatCompactTime(action.deferredUntil)}.`;
     }
     return `${actionConfirmLabel(action.type)} ${action.schedule.name}.`;
   }
@@ -1172,12 +1478,12 @@ export function SchedulesPanel({
       {
         label: "Operation",
         title: operationEvidenceTitle(
-          action.schedule.operation,
+          schedulePrivilegeOperation(action.schedule),
           action.schedule.operation_error,
         ),
         value: scheduleOperationInvalid(action.schedule)
           ? "Invalid saved operation · repair required"
-          : `${operationSummary(action.schedule.operation)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
+          : `${scheduleOperationSummary(action.schedule)} · ${scheduleCommandTypeLabel(action.schedule.command_type)}`,
       },
       {
         label: "Fixed targets",
@@ -1227,27 +1533,32 @@ export function SchedulesPanel({
     cronExpr,
     editingScheduleId,
     enabled,
+    eventExpression,
     invalidateReviewGeneration,
     maxFailures,
     name,
     retryDelaySecs,
     selectedTemplateId,
     selectorExpression,
+    triggerKind,
   ]);
 
   const scheduleActions: ConsoleDataGridAction<ScheduleRecord>[] = [
     {
       description: (rows) =>
-        describeScheduleAction(
-          rows,
-          "Run",
-          "Dispatches one job from the saved fixed target snapshot.",
-          " now",
-        ),
+        rows[0]?.trigger_kind === "event"
+          ? "Alert-event schedules require a real lifecycle edge and cannot be run with synthetic template data."
+          : describeScheduleAction(
+              rows,
+              "Run",
+              "Dispatches one job from the saved fixed target snapshot.",
+              " now",
+            ),
       label: "Review run now",
       disabled: (rows) =>
         pending ||
         rows.length !== 1 ||
+        rows[0]?.trigger_kind === "event" ||
         Boolean(rows[0] && scheduleOperationInvalid(rows[0])),
       icon: <Play size={14} />,
       onSelect: (rows) => rows[0] && reviewApplyNow(rows[0]),
@@ -1402,12 +1713,15 @@ export function SchedulesPanel({
           className="scheduleExecutionPolicy"
           aria-label="Schedule execution policy"
         >
-          <Clock3 size={16} />
+          <BellRing size={16} />
           <span>
-            Enabled schedules with a valid cadence automatically dispatch future
-            jobs from their saved target snapshot. Use <strong>Run now</strong>{" "}
-            for one manual dispatch; approval work is separate in Jobs /
-            Approvals.
+            Enabled schedules dispatch jobs from their saved target snapshot
+            after either a UTC cron time or a policy-confirmed alert lifecycle
+            edge. Alert schedules consume only <strong>Triggered</strong> and{" "}
+            <strong>Resolved</strong> edges—never raw status or telemetry flaps.
+            Use <strong>Run now</strong> on cron schedules for one manual
+            dispatch; alert schedules require a real edge and render its exact
+            context.
           </span>
         </div>
         <ActionFeedback
@@ -1599,7 +1913,7 @@ export function SchedulesPanel({
           storageKey="vpsman.panel.schedules.create"
           summary={
             schedules.length === 0
-              ? "Create the first recurring job"
+              ? "Create the first automated job"
               : selectorEvidenceUnavailable
                 ? VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE
                 : `${countPhrase(selectedTargetCount, "matching VPS", "matching VPSs")} in local preview; server resolves before save`
@@ -1616,6 +1930,64 @@ export function SchedulesPanel({
                 value={name}
               />
             </label>
+            <fieldset className="scheduleTriggerFieldset">
+              <legend>
+                <ScheduleFieldLabel
+                  help="Choose one trigger. Cron dispatches on UTC time. Alert event dispatches only after an Alert Policy emits a durable Triggered or Resolved lifecycle edge."
+                  label="Trigger"
+                />
+              </legend>
+              <div
+                aria-label="Schedule trigger kind"
+                className="scheduleTriggerChoices"
+                role="radiogroup"
+              >
+                <label
+                  className={triggerKind === "cron" ? "selected" : undefined}
+                >
+                  <input
+                    checked={triggerKind === "cron"}
+                    name="schedule-trigger-kind"
+                    onChange={() => setTriggerKind("cron")}
+                    type="radio"
+                    value="cron"
+                  />
+                  <CalendarClock size={19} />
+                  <span>
+                    <strong>Time · cron</strong>
+                    <small>
+                      Run at reviewed UTC times with catch-up controls.
+                    </small>
+                  </span>
+                </label>
+                <label
+                  className={triggerKind === "event" ? "selected" : undefined}
+                  title={
+                    canManageAlertEventSchedules
+                      ? "Consume policy-confirmed alert lifecycle edges."
+                      : "Requires fleet:read, backups:read, jobs:write, and schedules:write."
+                  }
+                >
+                  <input
+                    checked={triggerKind === "event"}
+                    disabled={!canManageAlertEventSchedules}
+                    name="schedule-trigger-kind"
+                    onChange={() => setTriggerKind("event")}
+                    type="radio"
+                    value="event"
+                  />
+                  <BellRing size={19} />
+                  <span>
+                    <strong>Alert event</strong>
+                    <small>
+                      {canManageAlertEventSchedules
+                        ? "Run once after policy-confirmed Triggered or Resolved."
+                        : "Requires fleet:read, backups:read, jobs:write, and schedules:write."}
+                    </small>
+                  </span>
+                </label>
+              </div>
+            </fieldset>
             <label>
               <span>Template</span>
               <select
@@ -1623,11 +1995,18 @@ export function SchedulesPanel({
                 onChange={(event) => selectCommandTemplate(event.target.value)}
                 value={selectedTemplateId}
               >
-                <option value="">One-off shell argv</option>
+                <option value="">Custom direct argv</option>
                 {builtinTemplates.length > 0 && (
                   <optgroup label="Built-in templates">
                     {builtinTemplates.map((template) => (
-                      <option key={template.id} value={template.id}>
+                      <option
+                        disabled={
+                          triggerKind === "event" &&
+                          template.operation.type !== "shell"
+                        }
+                        key={template.id}
+                        value={template.id}
+                      >
                         {template.name}
                       </option>
                     ))}
@@ -1640,7 +2019,14 @@ export function SchedulesPanel({
                     </option>
                     <optgroup label="User-defined templates">
                       {userTemplates.map((template) => (
-                        <option key={template.id} value={template.id}>
+                        <option
+                          disabled={
+                            triggerKind === "event" &&
+                            template.operation.type !== "shell"
+                          }
+                          key={template.id}
+                          value={template.id}
+                        >
                           {template.name} · {template.command_type}
                         </option>
                       ))}
@@ -1659,10 +2045,16 @@ export function SchedulesPanel({
               title={
                 selectedTemplate
                   ? operationEvidenceTitle(selectedTemplate.operation)
-                  : "Command and arguments submitted by each scheduled run."
+                  : triggerKind === "event"
+                    ? "Each saved argv element is rendered independently from the alert edge and passed directly to the selected executable."
+                    : "Command and arguments submitted by each scheduled run."
               }
             >
-              <span>Command argv</span>
+              <span>
+                {triggerKind === "event"
+                  ? "Event job argv template"
+                  : "Command argv"}
+              </span>
               <textarea
                 aria-label="Schedule job argv"
                 data-tooltip-disabled-reason={
@@ -1672,6 +2064,11 @@ export function SchedulesPanel({
                 }
                 disabled={selectedTemplate !== null}
                 onChange={(event) => setCommandText(event.target.value)}
+                placeholder={
+                  triggerKind === "event"
+                    ? "/bin/true (used automatically when left empty)"
+                    : "/usr/bin/uptime"
+                }
                 rows={3}
                 value={
                   selectedTemplate
@@ -1680,93 +2077,262 @@ export function SchedulesPanel({
                 }
               />
             </label>
-            <div className="dispatchControls">
-              <label>
-                <ScheduleFieldLabel
-                  help="Five-field cron expression evaluated in UTC. For example, 0 2 * * * runs every day at 02:00 UTC."
-                  label="UTC cron"
+            {triggerKind === "event" ? (
+              <div
+                aria-label="Alert event argv template guide"
+                className="scheduleTemplateGuide"
+              >
+                <div className="scheduleTemplateGuideHeader">
+                  <Braces size={17} />
+                  <span>
+                    <strong>Exact per-argument rendering</strong>
+                    <small>
+                      Missing or non-scalar values fail closed. argv[0] stays
+                      literal; each later element is rendered independently and
+                      is never split or reparsed.
+                    </small>
+                  </span>
+                </div>
+                <div className="inlineActions scheduleTemplateRecipes">
+                  <button
+                    className="secondaryAction compactAction"
+                    disabled={usesDefaultEventNoop}
+                    onClick={() => {
+                      setSelectedTemplateId("");
+                      setCommandText("");
+                    }}
+                    title="Save no argv template; the server dispatches /bin/true"
+                    type="button"
+                  >
+                    Use no-op
+                  </button>
+                  <button
+                    className="secondaryAction compactAction"
+                    onClick={() => {
+                      setSelectedTemplateId("");
+                      setCommandText(EVENT_SCHEDULE_ECHO_RECIPE);
+                    }}
+                    title="Fill a direct printf argv recipe with useful alert fields"
+                    type="button"
+                  >
+                    <WandSparkles size={14} />
+                    Use alert summary
+                  </button>
+                </div>
+                <div className="scheduleTemplateTokens" role="list">
+                  {EVENT_SCHEDULE_FEATURED_TEMPLATE_TOKENS.map((token) => (
+                    <button
+                      key={token}
+                      onClick={() => insertEventTemplateArgument(token)}
+                      title={`Insert ${token} as one argv element`}
+                      type="button"
+                    >
+                      {token}
+                    </button>
+                  ))}
+                </div>
+                <EventArgvTemplateInspector
+                  template={eventArgvTemplate}
+                  validationError={eventArgvTemplateError}
                 />
-                <input
-                  aria-label="Schedule cron expression"
-                  onChange={(event) => setCronExpr(event.target.value)}
-                  placeholder="0 2 * * *"
-                  value={cronExpr}
+                <small className="mutedText">
+                  Alert-event jobs use the same reviewed fixed target snapshot
+                  as cron jobs. The alert subject filters the edge; it never
+                  silently replaces dispatch targets. Vpsman does not infer a
+                  shell: it passes the rendered argv directly, and the selected
+                  executable defines how each argument is interpreted.
+                </small>
+              </div>
+            ) : null}
+            {triggerKind === "cron" && cronDirectArgv !== null ? (
+              <ArgvInspector
+                ariaLabel="Cron schedule argv elements"
+                argv={cronDirectArgv}
+                elementDetail={(_value, index) =>
+                  index === 0
+                    ? "Executable value · passed directly"
+                    : "Exact argument · passed directly"
+                }
+                error={selectedTemplate ? null : parsedCommand.error}
+                footer="One row is one exact argument. The cron trigger controls when this ordered payload runs; values are never split or reparsed after this preview."
+                help="Whitespace separates custom authoring values unless quotes or backslash escaping group them. The resulting ordered argv, or the selected template's exact argv, is passed directly to the executable without a shell or a second parse."
+                summary={
+                  selectedTemplate
+                    ? `${cronDirectArgv.length} ordered JSON ${cronDirectArgv.length === 1 ? "element" : "elements"} · selected template`
+                    : undefined
+                }
+                title="Parsed direct argv"
+              />
+            ) : null}
+            {triggerKind === "cron" ? (
+              <>
+                <div className="dispatchControls">
+                  <label>
+                    <ScheduleFieldLabel
+                      help="Five-field cron expression evaluated in UTC. For example, 0 2 * * * runs every day at 02:00 UTC."
+                      label="UTC cron"
+                    />
+                    <input
+                      aria-label="Schedule cron expression"
+                      onChange={(event) => setCronExpr(event.target.value)}
+                      placeholder="0 2 * * *"
+                      value={cronExpr}
+                    />
+                  </label>
+                  <label className="checkLine inlineCheck">
+                    <input
+                      checked={enabled}
+                      onChange={(event) => setEnabled(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>Enabled</span>
+                  </label>
+                </div>
+                <div className="dispatchControls">
+                  <label>
+                    <ScheduleFieldLabel
+                      help="Controls missed cron times after downtime: skip them, dispatch one missed run, or dispatch a bounded backlog."
+                      label="Catch-up"
+                    />
+                    <select
+                      aria-label="Schedule catch-up policy"
+                      onChange={(event) => setCatchUpPolicy(event.target.value)}
+                      value={catchUpPolicy}
+                    >
+                      <option value="skip_missed">Skip missed</option>
+                      <option value="run_once">Run one missed</option>
+                      <option value="run_all_limited">
+                        Run limited backlog
+                      </option>
+                    </select>
+                  </label>
+                  <label>
+                    <ScheduleFieldLabel
+                      help="Maximum missed runs dispatched when Catch-up is Run limited backlog. It is ignored by the other policies."
+                      label="Catch-up limit"
+                    />
+                    <input
+                      aria-label="Schedule catch-up limit"
+                      data-tooltip-disabled-reason={
+                        catchUpPolicy !== "run_all_limited"
+                          ? "Catch-up limit applies only to Run limited backlog"
+                          : undefined
+                      }
+                      disabled={catchUpPolicy !== "run_all_limited"}
+                      max={25}
+                      min={1}
+                      onChange={(event) =>
+                        setCatchUpLimit(Number(event.target.value))
+                      }
+                      type="number"
+                      value={catchUpLimit}
+                    />
+                  </label>
+                </div>
+              </>
+            ) : (
+              <div className="scheduleEventDefinition">
+                <div className="targetSelectorHeader">
+                  <strong>Alert event expression</strong>
+                  <span>
+                    Policy confirmation suppresses raw flaps before this
+                    schedule sees an edge.
+                  </span>
+                </div>
+                <SearchExpressionInput
+                  ariaLabel="Schedule alert event expression"
+                  className="targetExpressionBar"
+                  metaDescription="Every OR branch must include alert.triggered or alert.resolved. Other fields may only filter immutable alert, policy, rule, or event metadata."
+                  onChange={setEventExpression}
+                  placeholder="alert.triggered && alert.category:traffic"
+                  showVerificationMessage
+                  suggestions={SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS}
+                  value={eventExpression}
+                  verification={eventExpressionError ? "invalid" : "valid"}
+                  verificationMessage={
+                    eventExpressionError ??
+                    "Policy lifecycle edge · prospective · one job per edge"
+                  }
                 />
-              </label>
-              <label className="checkLine inlineCheck">
-                <input
-                  checked={enabled}
-                  onChange={(event) => setEnabled(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>Enabled</span>
-              </label>
-            </div>
-            <div className="dispatchControls">
-              <label>
-                <ScheduleFieldLabel
-                  help="Controls missed runs after downtime: skip them, dispatch one missed run, or dispatch a bounded backlog."
-                  label="Catch-up"
-                />
-                <select
-                  aria-label="Schedule catch-up policy"
-                  onChange={(event) => setCatchUpPolicy(event.target.value)}
-                  value={catchUpPolicy}
+                <div
+                  aria-label="Alert event expression examples"
+                  className="scheduleEventExamples"
                 >
-                  <option value="skip_missed">Skip missed</option>
-                  <option value="run_once">Run one missed</option>
-                  <option value="run_all_limited">Run limited backlog</option>
-                </select>
-              </label>
-              <label>
-                <ScheduleFieldLabel
-                  help="Maximum missed runs dispatched when Catch-up is Run limited backlog. It is ignored by the other policies."
-                  label="Catch-up limit"
-                />
-                <input
-                  aria-label="Schedule catch-up limit"
-                  data-tooltip-disabled-reason={
-                    catchUpPolicy !== "run_all_limited"
-                      ? "Catch-up limit applies only to Run limited backlog"
-                      : undefined
-                  }
-                  disabled={catchUpPolicy !== "run_all_limited"}
-                  min={1}
-                  max={25}
-                  onChange={(event) =>
-                    setCatchUpLimit(Number(event.target.value))
-                  }
-                  type="number"
-                  value={catchUpLimit}
-                />
-              </label>
-            </div>
+                  {SCHEDULE_EVENT_EXPRESSION_EXAMPLES.map((example) => (
+                    <button
+                      className={
+                        eventExpression.trim() === example.expression
+                          ? "selected"
+                          : undefined
+                      }
+                      key={example.expression}
+                      onClick={() => setEventExpression(example.expression)}
+                      title={example.detail}
+                      type="button"
+                    >
+                      <strong>{example.label}</strong>
+                      <small>{example.expression}</small>
+                    </button>
+                  ))}
+                </div>
+                <div className="scheduleEventSemantics">
+                  <BellRing size={16} />
+                  <span>
+                    <strong>No raw-event flapping</strong>
+                    <small>
+                      Agent status, job failure, traffic, and telemetry become
+                      alert edges only after their policy Trigger condition and
+                      Trigger meta condition pass. Persisting and Unknown emit
+                      no schedule event.
+                    </small>
+                  </span>
+                </div>
+                <label className="checkLine inlineCheck">
+                  <input
+                    checked={enabled}
+                    onChange={(event) => setEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>Enabled and armed for future matching edges</span>
+                </label>
+              </div>
+            )}
             <div className="dispatchControls">
+              {triggerKind === "cron" ? (
+                <label>
+                  <ScheduleFieldLabel
+                    help="Delay before the scheduler retries a failed cron run."
+                    label="Retry delay (seconds)"
+                  />
+                  <input
+                    aria-label="Schedule retry delay seconds"
+                    max={86_400}
+                    min={1}
+                    onChange={(event) =>
+                      setRetryDelaySecs(Number(event.target.value))
+                    }
+                    type="number"
+                    value={retryDelaySecs}
+                  />
+                </label>
+              ) : (
+                <div className="scheduleEventReceiptNote">
+                  <strong>Each lifecycle edge is consumed once</strong>
+                  <span>
+                    A failed job does not replay its source alert. A later alert
+                    generation is a new eligible edge.
+                  </span>
+                </div>
+              )}
               <label>
                 <ScheduleFieldLabel
-                  help="Delay before the scheduler retries after a failed run."
-                  label="Retry delay (seconds)"
-                />
-                <input
-                  aria-label="Schedule retry delay seconds"
-                  min={1}
-                  max={86_400}
-                  onChange={(event) =>
-                    setRetryDelaySecs(Number(event.target.value))
-                  }
-                  type="number"
-                  value={retryDelaySecs}
-                />
-              </label>
-              <label>
-                <ScheduleFieldLabel
-                  help="Consecutive failed runs allowed before the scheduler disables this schedule."
+                  help="Consecutive failed jobs allowed before the scheduler disables future dispatches."
                   label="Max failures"
                 />
                 <input
                   aria-label="Schedule max failures"
-                  min={1}
                   max={100}
+                  min={1}
                   onChange={(event) =>
                     setMaxFailures(Number(event.target.value))
                   }
@@ -1818,30 +2384,50 @@ export function SchedulesPanel({
               ) : null}
             </div>
             <div className="schedulePreview">
-              <strong>Next runs</strong>
+              <strong>
+                {triggerKind === "event" ? "Event arming preview" : "Next runs"}
+              </strong>
               <span>
-                {nextRuns.length
-                  ? `${describeCronExpression(cronExpr)}. Times shown in browser timezone.`
-                  : cronShapeValid
-                    ? "No run appears in the short local preview; the server validates this cadence when saved."
-                    : "Cron must use five fields; the server validates it when saved."}
+                {triggerKind === "event"
+                  ? (eventExpressionError ??
+                    "Saving or enabling arms this definition after the current lifecycle-event sequence. Earlier and deferred-window edges never replay.")
+                  : nextRuns.length
+                    ? `${describeCronExpression(cronExpr)}. Times shown in browser timezone.`
+                    : cronShapeValid
+                      ? "No run appears in the short local preview; the server validates this cadence when saved."
+                      : "Cron must use five fields; the server validates it when saved."}
               </span>
-              <div className="targetChipList">
-                {nextRuns.map((run) => (
+              {triggerKind === "cron" ? (
+                <div className="targetChipList">
+                  {nextRuns.map((run) => (
+                    <span
+                      className="targetChip"
+                      key={run}
+                      title={formatTime(run)}
+                    >
+                      {formatSchedulePreviewTime(run)}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="targetChipList">
+                  <span className="targetChip">Policy-confirmed</span>
                   <span
                     className="targetChip"
-                    key={run}
-                    title={formatTime(run)}
+                    title="A durable receipt deduplicates materialization to one job for this schedule and lifecycle edge."
                   >
-                    {formatSchedulePreviewTime(run)}
+                    One job per edge
                   </span>
-                ))}
-              </div>
-              <small
-                title={operationEvidenceTitle(
-                  selectedTemplate?.operation ?? scheduleOperation,
-                )}
-              >
+                  <span className="targetChip">Fixed targets</span>
+                  <span
+                    className="targetChip"
+                    title="Direct schedule, job, backup, and capability ancestry is tracked and cyclic dispatch fails closed. Indirect effects of a shell command on later agent or telemetry state cannot currently be correlated."
+                  >
+                    Direct cycle guard
+                  </span>
+                </div>
+              )}
+              <small title={operationEvidenceTitle(operationForPrivilege)}>
                 {selectorEvidenceUnavailable
                   ? `${VPS_RULE_SEARCH_UNAVAILABLE_MESSAGE}; `
                   : selectorExpression.trim()
@@ -1849,7 +2435,9 @@ export function SchedulesPanel({
                     : "No target selector; "}
                 {selectedTemplate
                   ? selectedTemplate.name
-                  : operationSummary(scheduleOperation)}
+                  : triggerKind === "event"
+                    ? eventArgvTemplateSummary(eventArgvTemplate)
+                    : operationSummary(scheduleOperation)}
               </small>
             </div>
             {!confirmationOpen && (
@@ -1893,11 +2481,23 @@ export function SchedulesPanel({
                   ? "Update schedule"
                   : "Save schedule"
               }
-              detail={`Recurring ${
-                pendingScheduleSnapshot?.selectedTemplateName ??
-                operationSummary(
-                  pendingScheduleSnapshot?.operation ?? scheduleOperation,
-                )
+              detail={`${
+                (pendingScheduleSnapshot?.triggerKind ?? triggerKind) ===
+                "event"
+                  ? "Alert-event automation"
+                  : "Recurring automation"
+              } using ${
+                pendingScheduleSnapshot
+                  ? pendingScheduleSnapshot.triggerKind === "event"
+                    ? eventArgvTemplateSummary(
+                        pendingScheduleSnapshot.eventArgvTemplate,
+                      )
+                    : (pendingScheduleSnapshot.selectedTemplateName ??
+                      operationSummary(pendingScheduleSnapshot.operation))
+                  : triggerKind === "event"
+                    ? eventArgvTemplateSummary(eventArgvTemplate)
+                    : (selectedTemplate?.name ??
+                      operationSummary(scheduleOperation))
               } on ${vpsCountLabel(
                 pendingScheduleSnapshot?.targetClientIds.length ??
                   selectedTargetCount,
@@ -1930,6 +2530,181 @@ function commandTypeForApi(operation: JobOperation): string {
     return operation.pty ? "shell_pty" : "shell_argv";
   }
   return operation.type;
+}
+
+function EventArgvTemplateInspector({
+  template,
+  validationError,
+}: {
+  template: string[] | null;
+  validationError: string | null;
+}) {
+  const effectiveTemplate = template ?? EVENT_SCHEDULE_NOOP_ARGV;
+  const validationBelongsToElement = effectiveTemplate.some(
+    (value, index) =>
+      eventArgvElementValidationMessage(value, index) === validationError,
+  );
+  return (
+    <ArgvInspector
+      ariaLabel="Alert event argv elements"
+      argv={effectiveTemplate}
+      elementDetail={(_value, index) =>
+        index === 0
+          ? "Literal executable · never rendered"
+          : "Literal text with strict scalar placeholders"
+      }
+      elementError={eventArgvElementValidationMessage}
+      error={validationBelongsToElement ? null : validationError}
+      footer="A rendered example from the server validator appears in the final review before save."
+      help="The JSON value and every row show the exact ordered argv that will be saved. Each value is independently passed to the executable; no shell parsing or second argument split occurs."
+      summary={
+        template === null
+          ? "No template saved · the server uses its explicit no-op"
+          : undefined
+      }
+      title="Exact saved argv"
+    />
+  );
+}
+
+function ScheduleReviewExactValue({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <code aria-label={label} className="scheduleReviewExactValue" tabIndex={0}>
+      {value}
+    </code>
+  );
+}
+
+function scheduleSnapshotPrivilegeOperation(
+  snapshot: ScheduleDraftSnapshot,
+): JobOperation {
+  if (snapshot.triggerKind === "event") {
+    return {
+      type: "shell",
+      argv: snapshot.eventArgvTemplate ?? EVENT_SCHEDULE_NOOP_ARGV,
+      pty: false,
+    };
+  }
+  if (!snapshot.operation) {
+    throw new Error("Cron schedule operation is unavailable");
+  }
+  return snapshot.operation;
+}
+
+function eventArgvTemplateSummary(template: string[] | null): string {
+  if (!template) {
+    return "Default no-op · /bin/true";
+  }
+  return `${template[0] ?? "Invalid argv"} · ${countPhrase(
+    Math.max(0, template.length - 1),
+    "templated argument",
+  )}`;
+}
+
+function eventEdgeLabel(kind: string): string {
+  if (kind === "alert.triggered") return "Triggered";
+  if (kind === "alert.resolved") return "Resolved";
+  return kind;
+}
+
+function eventArgvTemplateValidationMessage(
+  template: string[] | null,
+  selectedOperation: JobOperation | null,
+  commandParseError: string | null,
+): string | null {
+  if (selectedOperation && selectedOperation.type !== "shell") {
+    return "Alert-event schedules support direct argv templates only";
+  }
+  if (selectedOperation?.type === "shell" && selectedOperation.pty) {
+    return "Alert-event argv templates cannot allocate a PTY";
+  }
+  if (!selectedOperation && commandParseError) {
+    return commandParseError;
+  }
+  if (!template) {
+    return null;
+  }
+  if (template.length > ALERT_EVENT_ARGV_MAX_ELEMENTS) {
+    return `Alert-event argv templates support at most ${ALERT_EVENT_ARGV_MAX_ELEMENTS} elements`;
+  }
+  const encodedBytes = template.reduce(
+    (total, value) => total + new TextEncoder().encode(value).length,
+    0,
+  );
+  if (encodedBytes > ALERT_EVENT_ARGV_MAX_BYTES) {
+    return "Alert-event argv template exceeds the 64 KiB limit";
+  }
+  if (template.length === 0 || !template[0]?.trim()) {
+    return "argv[0] is required";
+  }
+  for (let index = 0; index < template.length; index += 1) {
+    const error = eventArgvElementValidationMessage(template[index], index);
+    if (error) {
+      return error;
+    }
+  }
+  return null;
+}
+
+function eventArgvElementValidationMessage(
+  value: string,
+  index: number,
+): string | null {
+  if (value.includes("\0")) {
+    return `argv[${index}] contains a NUL byte`;
+  }
+  if (!value.length) {
+    return `argv[${index}] cannot be empty`;
+  }
+  if (
+    new TextEncoder().encode(value).length > ALERT_EVENT_ARGV_MAX_ELEMENT_BYTES
+  ) {
+    return `argv[${index}] exceeds the 16 KiB element limit`;
+  }
+  if (index === 0) {
+    return containsTemplateSyntax(value)
+      ? "argv[0] must be a literal executable path, not a template"
+      : null;
+  }
+  if (containsControlOrHelperSyntax(value)) {
+    return `argv[${index}] cannot use conditional, loop, or helper template syntax`;
+  }
+  let unknownPath: string | null = null;
+  const withoutPlaceholders = value.replace(/\{([^{}]+)\}/g, (_match, path) => {
+    if (!EVENT_SCHEDULE_SCALAR_TEMPLATE_PATHS.has(path)) {
+      unknownPath ??= path;
+    }
+    return "";
+  });
+  if (unknownPath) {
+    return `argv[${index}] uses unsupported scalar path {${unknownPath}}`;
+  }
+  if (withoutPlaceholders.includes("{") || withoutPlaceholders.includes("}")) {
+    return `argv[${index}] contains malformed placeholder syntax`;
+  }
+  return null;
+}
+
+function containsTemplateSyntax(value: string): boolean {
+  return (
+    value.includes("{") ||
+    value.includes("}") ||
+    containsControlOrHelperSyntax(value)
+  );
+}
+
+function containsControlOrHelperSyntax(value: string): boolean {
+  const lower = value.toLowerCase();
+  return (
+    ALERT_EVENT_ARGV_CONTROL_TOKENS.some((token) => lower.includes(token)) ||
+    ALERT_EVENT_ARGV_HELPER_TOKENS.some((token) => lower.includes(token))
+  );
 }
 
 function clampInteger(value: number, min: number, max: number): number {
@@ -1965,20 +2740,25 @@ type ScheduleTargetUpdate = {
 type ScheduleDraftSnapshot = {
   editingScheduleId: string | null;
   name: string;
-  operation: JobOperation;
+  operation: JobOperation | null;
+  eventArgvTemplate: string[] | null;
   commandType: string;
   selectorExpression: string;
   targetClientIds: string[];
-  cronExpr: string;
+  triggerKind: ScheduleTriggerKind;
+  cronExpr: string | null;
+  eventExpression: string | null;
+  eventTemplatePreview: EventScheduleTemplatePreviewResponse | null;
   enabled: boolean;
-  catchUpPolicy: string;
-  catchUpLimit: number;
-  retryDelaySecs: number;
+  catchUpPolicy: string | null;
+  catchUpLimit: number | null;
+  retryDelaySecs: number | null;
   maxFailures: number;
   nextRun: string | null;
   selectedTemplateName: string | null;
   expectedSelectorExpression: string | null;
   expectedTargetClientIds: string[] | null;
+  expectedDefinitionRevision: number | null;
 };
 
 function actionName(action: ScheduleAction): string {
@@ -2160,9 +2940,16 @@ function sameStringSet(left: string[], right: string[]): boolean {
 
 function operationToCommandText(operation: JobOperation): string {
   if (operation.type === "shell") {
-    return operation.argv.join(" ");
+    return operation.argv.map(quoteCommandArg).join(" ");
   }
   return operationSummary(operation);
+}
+
+function quoteCommandArg(value: string): string {
+  if (value && !/[\s'"\\]/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 function toDatetimeLocal(date: Date): string {
@@ -2343,7 +3130,10 @@ function scheduleCommandTypeLabel(commandType: string): string {
 }
 
 function describeSchedulePolicy(schedule: ScheduleRecord): string {
-  const retry = `retry after ${formatInterval(schedule.retry_delay_secs)}`;
+  if (schedule.trigger_kind === "event") {
+    return "Each matching edge is consumed once; deferred-window edges are skipped and never replayed";
+  }
+  const retry = `retry after ${formatInterval(schedule.retry_delay_secs ?? 300)}`;
   if (schedule.catch_up_policy === "run_all_limited") {
     return `Run up to ${schedule.catch_up_limit} missed runs; ${retry}`;
   }
@@ -2428,13 +3218,13 @@ function ScheduleExpandedDetail({
         <strong>Operation</strong>
         <span
           title={operationEvidenceTitle(
-            schedule.operation,
+            schedulePrivilegeOperation(schedule),
             schedule.operation_error,
           )}
         >
           {scheduleOperationInvalid(schedule)
             ? "Invalid saved operation"
-            : operationSummary(schedule.operation)}
+            : scheduleOperationSummary(schedule)}
         </span>
         <span>
           {scheduleOperationInvalid(schedule)
@@ -2460,7 +3250,9 @@ function ScheduleExpandedDetail({
         </span>
       </span>
       <span>
-        <strong>Future runs</strong>
+        <strong>
+          {schedule.trigger_kind === "event" ? "Event arming" : "Future runs"}
+        </strong>
         <span>
           {timing.futureRuns.length > 0
             ? timing.futureRuns
@@ -2486,7 +3278,9 @@ function ScheduleExpandedDetail({
               ? "Invalid operation — automatic and manual runs are blocked"
               : schedule.cadence_error
                 ? "Invalid cadence — edit required; automatic runs are blocked"
-                : "Enabled schedules authorize future runs automatically"
+                : schedule.trigger_kind === "event"
+                  ? "Enabled for future matching lifecycle edges; Apply now is unavailable"
+                  : "Enabled schedules authorize future runs automatically"
             : "Disabled schedules do not dispatch future runs"}
         </span>
         <span>{describeSchedulePolicy(schedule)}</span>
@@ -2510,6 +3304,45 @@ function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
         "Automatic and manual runs are blocked until a full reviewed edit replaces the saved operation.",
       futureRuns: [],
       label: "Invalid operation",
+      staleRuns: [],
+      tone: "warn",
+    };
+  }
+  if (schedule.trigger_kind === "event") {
+    if (!schedule.enabled) {
+      return {
+        detail: "Disabled; lifecycle edges are not queued for later replay.",
+        futureRuns: [],
+        label: "Disabled",
+        staleRuns: [],
+        tone: "neutral",
+      };
+    }
+    if (
+      schedule.deferred_until &&
+      Date.parse(schedule.deferred_until) > Date.now()
+    ) {
+      return {
+        detail: `Edges are skipped until ${formatTime(schedule.deferred_until)}; resuming establishes a new arm boundary.`,
+        futureRuns: [],
+        label: "Deferred",
+        staleRuns: [],
+        tone: "info",
+      };
+    }
+    if (schedule.event_armed_at) {
+      return {
+        detail: `Prospectively armed ${formatCompactTime(schedule.event_armed_at)}; waiting for a matching policy lifecycle edge.`,
+        futureRuns: [],
+        label: "Listening",
+        staleRuns: [],
+        tone: "ok",
+      };
+    }
+    return {
+      detail: "Enabled event definition has not reported an arm boundary.",
+      futureRuns: [],
+      label: "Awaiting arm",
       staleRuns: [],
       tone: "warn",
     };
@@ -2568,7 +3401,38 @@ function scheduleRunTiming(schedule: ScheduleRecord): ScheduleRunTiming {
 }
 
 function scheduleOperationInvalid(schedule: ScheduleRecord): boolean {
-  return !schedule.operation || Boolean(schedule.operation_error);
+  if (schedule.operation_error) {
+    return true;
+  }
+  if (schedule.trigger_kind === "event") {
+    return (
+      eventArgvTemplateValidationMessage(
+        schedule.event_argv_template,
+        null,
+        null,
+      ) !== null
+    );
+  }
+  return !schedule.operation;
+}
+
+function schedulePrivilegeOperation(
+  schedule: ScheduleRecord,
+): JobOperation | null {
+  if (schedule.trigger_kind === "event") {
+    return {
+      type: "shell",
+      argv: schedule.event_argv_template ?? EVENT_SCHEDULE_NOOP_ARGV,
+      pty: false,
+    };
+  }
+  return schedule.operation;
+}
+
+function scheduleOperationSummary(schedule: ScheduleRecord): string {
+  return schedule.trigger_kind === "event"
+    ? eventArgvTemplateSummary(schedule.event_argv_template)
+    : operationSummary(schedule.operation);
 }
 
 function scheduleCadenceErrorDetail(schedule: ScheduleRecord): string | null {

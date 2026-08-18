@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{types::Json as SqlJson, Postgres, Row, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vpsman_common::{
+    rewrite_retired_alert_event_aliases, rewrite_template_retired_alert_event_aliases,
     validate_template, WEBHOOK_RULE_DELIVERY_STATUS_CANCELED_DISABLED,
     WEBHOOK_RULE_DELIVERY_STATUS_DELIVERED, WEBHOOK_RULE_DELIVERY_STATUS_FAILED,
     WEBHOOK_RULE_DELIVERY_STATUS_IN_PROGRESS, WEBHOOK_RULE_DELIVERY_STATUS_MATCHED_DRY_RUN,
@@ -35,6 +36,112 @@ const MAX_SIGNING_SECRET_BYTES: usize = 1024;
 const WEBHOOK_ROTATION_SCAN_BATCH_SIZE: i64 = 1_000;
 
 impl Repository {
+    /// Performs the single guarded 0012 canonicalization pass before any
+    /// rejecting parser or worker consumer is allowed to see persisted data.
+    pub(crate) async fn canonicalize_alert_event_expressions(&self) -> Result<()> {
+        match self {
+            Self::Memory(memory) => {
+                let mut rules = memory.webhook_rules.write().await;
+                for rule in rules.iter_mut() {
+                    rule.expression = rewrite_retired_alert_event_aliases(&rule.expression)
+                        .map_err(anyhow::Error::msg)?;
+                    rule.body_template =
+                        rewrite_template_retired_alert_event_aliases(&rule.body_template)
+                            .map_err(anyhow::Error::msg)?;
+                }
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+                    .bind("vpsman.alert_expression_migration")
+                    .execute(&mut *tx)
+                    .await?;
+                let completed: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT completed_at IS NOT NULL
+                    FROM alert_expression_migration_meta
+                    WHERE singleton
+                    FOR UPDATE
+                    "#,
+                )
+                .fetch_one(&mut *tx)
+                .await?;
+                if completed {
+                    tx.commit().await?;
+                    return Ok(());
+                }
+
+                let mut expression_count = 0_i64;
+                let mut template_count = 0_i64;
+                for row in sqlx::query(
+                    "SELECT id, expression, body_template FROM webhook_rules ORDER BY id FOR UPDATE",
+                )
+                .fetch_all(&mut *tx)
+                .await?
+                {
+                    let id: Uuid = row.try_get("id")?;
+                    let expression: String = row.try_get("expression")?;
+                    let body_template: String = row.try_get("body_template")?;
+                    let rewritten_expression = rewrite_retired_alert_event_aliases(&expression)
+                        .map_err(anyhow::Error::msg)?;
+                    let rewritten_template =
+                        rewrite_template_retired_alert_event_aliases(&body_template)
+                            .map_err(anyhow::Error::msg)?;
+                    if rewritten_expression != expression || rewritten_template != body_template {
+                        sqlx::query(
+                            r#"
+                            INSERT INTO alert_expression_migration_audit (
+                                rule_id, prior_expression, rewritten_expression,
+                                prior_body_template, rewritten_body_template,
+                                prior_expression_sha256, rewritten_expression_sha256,
+                                prior_body_template_sha256, rewritten_body_template_sha256
+                            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                            ON CONFLICT (rule_id) DO NOTHING
+                            "#,
+                        )
+                        .bind(id)
+                        .bind(&expression)
+                        .bind(&rewritten_expression)
+                        .bind(&body_template)
+                        .bind(&rewritten_template)
+                        .bind(sha256_text(&expression))
+                        .bind(sha256_text(&rewritten_expression))
+                        .bind(sha256_text(&body_template))
+                        .bind(sha256_text(&rewritten_template))
+                        .execute(&mut *tx)
+                        .await?;
+                        sqlx::query(
+                            "UPDATE webhook_rules SET expression=$2, body_template=$3 WHERE id=$1",
+                        )
+                        .bind(id)
+                        .bind(&rewritten_expression)
+                        .bind(&rewritten_template)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    expression_count += i64::from(rewritten_expression != expression);
+                    template_count += i64::from(rewritten_template != body_template);
+                }
+                canonicalize_pending_alert_event_rows_in_tx(&mut tx).await?;
+                sqlx::query(
+                    r#"
+                    UPDATE alert_expression_migration_meta
+                    SET completed_at=clock_timestamp(), rewritten_rule_count=$1,
+                        rewritten_template_count=$2
+                    WHERE singleton AND completed_at IS NULL
+                    "#,
+                )
+                .bind(expression_count)
+                .bind(template_count)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(())
+            }
+        }
+    }
+
     pub(crate) async fn list_webhook_rules(
         &self,
         limit: i64,
@@ -1817,6 +1924,163 @@ fn cancel_memory_webhook_rule_deliveries(
         delivery.next_attempt_at = None;
         delivery.delivered_at = None;
     }
+}
+
+async fn canonicalize_pending_alert_event_rows_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<()> {
+    let pending_delivery_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM webhook_rule_deliveries
+        WHERE status IN ('queued','in_progress','failed')
+        "#,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    anyhow::ensure!(
+        pending_delivery_count == 0,
+        "alert expression migration requires queued, in-progress, and retryable webhook deliveries to be drained before upgrade"
+    );
+
+    let rows = sqlx::query(
+        r#"
+        SELECT occurred_at, id, kind, event_predicates, payload
+        FROM webhook_events
+        WHERE processed_at IS NULL
+        ORDER BY occurred_at, id
+        FOR UPDATE
+        "#,
+    )
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in rows {
+        let occurred_at: DateTime<Utc> = row.try_get("occurred_at")?;
+        let id: Uuid = row.try_get("id")?;
+        let kind: String = row.try_get("kind")?;
+        let predicates: Vec<String> = row.try_get("event_predicates")?;
+        let payload: Value = row.try_get::<SqlJson<Value>, _>("payload")?.0;
+        let canonical_kind = canonical_alert_event_name(&kind).to_string();
+        let canonical_predicates = canonical_alert_event_predicates(&predicates);
+        let canonical_payload = canonicalize_alert_event_payload(payload);
+        if canonical_kind != kind
+            || canonical_predicates != predicates
+            || canonical_payload != row.try_get::<SqlJson<Value>, _>("payload")?.0
+        {
+            sqlx::query(
+                r#"
+                UPDATE webhook_events
+                SET kind=$3, event_predicates=$4, payload=$5
+                WHERE occurred_at=$1 AND id=$2
+                "#,
+            )
+            .bind(occurred_at)
+            .bind(id)
+            .bind(canonical_kind)
+            .bind(canonical_predicates)
+            .bind(SqlJson(canonical_payload))
+            .execute(&mut **tx)
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn canonical_alert_event_name(value: &str) -> &str {
+    match value {
+        "alert.open" | "alert.policy_reached" | "alert.policy_triggered" => "alert.triggered",
+        "alert.policy_resolved" => "alert.resolved",
+        value => value,
+    }
+}
+
+fn canonical_alert_event_predicates(values: &[String]) -> Vec<String> {
+    let mut canonical = Vec::with_capacity(values.len());
+    for value in values {
+        let value = canonical_alert_event_name(value).to_string();
+        if !canonical.contains(&value) {
+            canonical.push(value);
+        }
+    }
+    canonical
+}
+
+fn canonicalize_alert_event_payload(mut payload: Value) -> Value {
+    let Some(root) = payload.as_object_mut() else {
+        return payload;
+    };
+    if let Some(Value::String(kind)) = root.get_mut("kind") {
+        *kind = canonical_alert_event_name(kind).to_string();
+    }
+    if let Some(Value::Object(event)) = root.get_mut("event") {
+        if let Some(Value::String(kind)) = event.get_mut("kind") {
+            *kind = canonical_alert_event_name(kind).to_string();
+        }
+        if let Some(Value::Array(predicates)) = event.get_mut("predicates") {
+            let values = predicates
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            *predicates = canonical_alert_event_predicates(&values)
+                .into_iter()
+                .map(Value::String)
+                .collect();
+        }
+    }
+    if let Some(legacy_rule) = root.remove("rule") {
+        if !root.contains_key("policy_rule") {
+            root.insert(
+                "policy_rule".to_string(),
+                canonicalize_legacy_policy_rule_payload(legacy_rule),
+            );
+        }
+    }
+    payload
+}
+
+fn canonicalize_legacy_policy_rule_payload(mut rule: Value) -> Value {
+    let Some(object) = rule.as_object_mut() else {
+        return rule;
+    };
+    if !object.contains_key("trigger_condition_expression") {
+        if let Some(expression) = object.remove("condition_expression") {
+            object.insert("trigger_condition_expression".to_string(), expression);
+        }
+    } else {
+        object.remove("condition_expression");
+    }
+    if !object.contains_key("trigger_meta_condition") {
+        if let Some(window) = object.remove("window_secs") {
+            let seconds = window
+                .as_i64()
+                .or_else(|| window.as_str().and_then(|value| value.parse().ok()))
+                .unwrap_or_default()
+                .max(0);
+            object.insert(
+                "trigger_meta_condition".to_string(),
+                if seconds == 0 {
+                    json!({"kind":"immediate","window_seconds":0})
+                } else {
+                    json!({"kind":"sustained","window_seconds":seconds})
+                },
+            );
+        }
+    } else {
+        object.remove("window_secs");
+    }
+    object
+        .entry("rule_kind".to_string())
+        .or_insert_with(|| json!("metric"));
+    object
+        .entry("evidence_source".to_string())
+        .or_insert_with(|| json!("telemetry.combined"));
+    rule
+}
+
+fn sha256_text(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 #[cfg(test)]

@@ -40,8 +40,12 @@ const SCHEDULE_CRON_NO_FUTURE_OCCURRENCE: &str = "schedule_cron_no_future_occurr
 const SCHEDULE_OPERATION_INVALID: &str = "schedule_operation_invalid";
 #[path = "runtime/actor_authority.rs"]
 mod actor_authority;
+#[path = "runtime/alert_event_schedules.rs"]
+mod alert_event_schedules;
 #[path = "delivery/alert_notifications.rs"]
 mod alert_notifications;
+#[path = "runtime/alert_policy_retention.rs"]
+mod alert_policy_retention;
 #[path = "retention/backup_policy_retention.rs"]
 mod backup_policy_retention;
 #[path = "runtime/build_info.rs"]
@@ -63,6 +67,7 @@ mod webhook_rules;
 mod worker_leases;
 
 use actor_authority::{actor_authorized, actor_authorized_in_tx};
+use alert_event_schedules::process_alert_event_schedules;
 use alert_notifications::{
     process_alert_notifications, AlertNotificationWorkerConfig, AlertNotificationWorkerRun,
 };
@@ -75,8 +80,9 @@ use operational_alerts::{
     reconcile_agent_status_transition_in_tx, reconcile_scheduled_job_event_sources_in_tx,
 };
 use webhook_rules::{
-    ensure_event_partitions, insert_webhook_event_in_tx, process_webhook_rules,
-    WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
+    ensure_event_partitions, insert_webhook_event_in_tx,
+    insert_webhook_event_with_provenance_at_in_tx, process_webhook_rules, WebhookRuleWorkerConfig,
+    WebhookRuleWorkerRun,
 };
 use worker_leases::acquire_worker_lease;
 
@@ -727,6 +733,12 @@ async fn main() -> Result<()> {
             webhook_rule_delivered = webhook_rules.delivered,
             webhook_rule_failed = webhook_rules.failed,
             webhook_rule_pruned = webhook_rules.pruned,
+            alert_policy_evidence_receipts_pruned = webhook_rules
+                .alert_policy_retention
+                .evidence_receipts_pruned,
+            alert_policy_evidence_pruned = webhook_rules.alert_policy_retention.evidence_pruned,
+            alert_lifecycle_events_pruned =
+                webhook_rules.alert_policy_retention.lifecycle_events_pruned,
             backup_policy_prune_policies = backup_policy_prune.policies_scanned,
             backup_policy_prune_matched = backup_policy_prune.matched_rows,
             backup_policy_prune_pruned = backup_policy_prune.pruned_rows,
@@ -890,6 +902,8 @@ async fn main() -> Result<()> {
                     || run.legacy_manual_events_skipped > 0
                     || run.processed > 0
                     || run.pruned > 0
+                    || run.alert_policy_retention.evidence_pruned > 0
+                    || run.alert_policy_retention.lifecycle_events_pruned > 0
                 {
                     info!(
                         materialized = run.materialized,
@@ -898,6 +912,11 @@ async fn main() -> Result<()> {
                         delivered = run.delivered,
                         failed = run.failed,
                         pruned = run.pruned,
+                        alert_policy_evidence_receipts_pruned =
+                            run.alert_policy_retention.evidence_receipts_pruned,
+                        alert_policy_evidence_pruned = run.alert_policy_retention.evidence_pruned,
+                        alert_lifecycle_events_pruned =
+                            run.alert_policy_retention.lifecycle_events_pruned,
                         "processed webhook rules"
                     );
                 }
@@ -1938,7 +1957,12 @@ async fn process_due_schedules_if_leader(
         );
         return Ok(0);
     };
-    let result = process_due_schedules(pool, limit, dispatch_config).await;
+    let result = async {
+        let event_jobs = process_alert_event_schedules(pool, limit, dispatch_config).await?;
+        let cron_jobs = process_due_schedules(pool, limit, dispatch_config).await?;
+        Ok(event_jobs + cron_jobs)
+    }
+    .await;
     lease.finish().await?;
     result
 }
@@ -1956,6 +1980,7 @@ async fn process_due_schedules(
         FROM schedules
         WHERE enabled = TRUE
           AND deleted_at IS NULL
+          AND trigger_kind = 'cron'
           AND next_run_at <= now()
           AND (deferred_until IS NULL OR deferred_until <= now())
         "#,
@@ -1968,6 +1993,7 @@ async fn process_due_schedules(
         FROM schedules
         WHERE enabled = TRUE
           AND deleted_at IS NULL
+          AND trigger_kind = 'cron'
           AND next_run_at <= now()
           AND (deferred_until IS NULL OR deferred_until <= now())
         ORDER BY next_run_at, id
@@ -2009,6 +2035,7 @@ async fn process_due_schedule(
             (SELECT username FROM operators WHERE id = schedules.actor_id) AS actor_username,
             (SELECT role FROM operators WHERE id = schedules.actor_id) AS actor_role,
             name,
+            definition_revision,
             operation,
             selector_expression,
             target_client_ids,
@@ -2024,6 +2051,7 @@ async fn process_due_schedule(
         WHERE id = $1
           AND enabled = TRUE
           AND deleted_at IS NULL
+          AND trigger_kind = 'cron'
           AND next_run_at <= now()
           AND (deferred_until IS NULL OR deferred_until <= now())
         FOR UPDATE SKIP LOCKED
@@ -2066,6 +2094,8 @@ async fn process_due_schedule(
             actor_username,
             actor_role,
             name,
+            definition_revision: row.try_get("definition_revision")?,
+            trigger_kind: "cron".to_string(),
             operation,
             selector_expression: row.try_get("selector_expression")?,
             target_client_ids: row.try_get("target_client_ids")?,
@@ -2077,6 +2107,7 @@ async fn process_due_schedule(
             max_failures: row.try_get("max_failures")?,
             failure_count: row.try_get("failure_count")?,
             last_error: row.try_get("last_error")?,
+            materialization: ScheduleMaterializationContext::default(),
         };
         if !actor_authorized_in_tx(
             &mut tx,
@@ -2122,6 +2153,8 @@ struct DueSchedule {
     actor_username: Option<String>,
     actor_role: Option<String>,
     name: String,
+    definition_revision: i64,
+    trigger_kind: String,
     operation: JobCommand,
     selector_expression: String,
     target_client_ids: Vec<String>,
@@ -2133,6 +2166,19 @@ struct DueSchedule {
     max_failures: i32,
     failure_count: i32,
     last_error: Option<String>,
+    materialization: ScheduleMaterializationContext,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ScheduleMaterializationContext {
+    job_id: Option<Uuid>,
+    causation_id: Option<Uuid>,
+    schedule_lineage: Vec<Uuid>,
+    source_lifecycle_event_seq: Option<i64>,
+    source_lifecycle_event_id: Option<Uuid>,
+    source_event_id: Option<String>,
+    source_payload_hash: Option<String>,
+    rendered_operation_hash: Option<String>,
 }
 
 #[derive(Clone)]
@@ -2221,7 +2267,7 @@ async fn materialize_due_schedule(
         false,
     );
     let operation_type = job_command_operation_type(&operation);
-    let job_id = Uuid::new_v4();
+    let job_id = schedule.materialization.job_id.unwrap_or_else(Uuid::new_v4);
     let busy_update_skips =
         load_schedule_busy_update_skips(tx, &operation, &dispatch_targets).await?;
     let busy_update_skip_set = busy_update_skips
@@ -2304,16 +2350,25 @@ async fn materialize_due_schedule(
         "privileged": true,
         "force_unprivileged": false,
         "source_schedule_id": schedule.id,
+        "schedule_definition_revision": schedule.definition_revision,
+        "causation_id": schedule.materialization.causation_id,
+        "schedule_lineage": &schedule.materialization.schedule_lineage,
     }))?);
+    if let Some(rendered_operation_hash) = &schedule.materialization.rendered_operation_hash {
+        ensure!(
+            rendered_operation_hash == &command_hash,
+            "schedule_rendered_operation_hash_mismatch"
+        );
+    }
     sqlx::query(
         r#"
         INSERT INTO jobs (
             id, actor_id, command_type, privileged, status, target_count,
             payload_hash, operation, source_schedule_id, request_fingerprint,
-            max_timeout_secs, completed_at
+            max_timeout_secs, completed_at, causation_id, schedule_lineage
         )
         VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10,
-            CASE WHEN $11 THEN now() ELSE NULL END)
+            CASE WHEN $11 THEN now() ELSE NULL END, $12, $13)
         "#,
     )
     .bind(job_id)
@@ -2327,6 +2382,8 @@ async fn materialize_due_schedule(
     .bind(&request_fingerprint)
     .bind(max_timeout_secs as i64)
     .bind(job_completed_immediately)
+    .bind(schedule.materialization.causation_id)
+    .bind(&schedule.materialization.schedule_lineage)
     .execute(&mut **tx)
     .await?;
 
@@ -2410,6 +2467,8 @@ async fn materialize_due_schedule(
     .bind(serde_json::json!({
         "schedule_id": schedule.id,
         "schedule_name": schedule.name,
+        "trigger_kind": &schedule.trigger_kind,
+        "definition_revision": schedule.definition_revision,
         "result": if targets.is_empty() { "skipped" } else { "requested" },
         "origin_kind": "worker",
         "component": "schedule-dispatch-worker",
@@ -2418,6 +2477,13 @@ async fn materialize_due_schedule(
         "operator_role": &schedule.actor_role,
         "operation_type": operation_type,
         "job_id": job_id,
+        "causation_id": schedule.materialization.causation_id,
+        "schedule_lineage": &schedule.materialization.schedule_lineage,
+        "source_lifecycle_event_seq": schedule.materialization.source_lifecycle_event_seq,
+        "source_lifecycle_event_id": schedule.materialization.source_lifecycle_event_id,
+        "source_event_id": &schedule.materialization.source_event_id,
+        "source_payload_hash": &schedule.materialization.source_payload_hash,
+        "rendered_operation_hash": schedule.materialization.rendered_operation_hash.as_deref().unwrap_or(&command_hash),
         "fixed_targets": &targets,
         "materialized_targets": &materialized_targets,
         "unavailable_fixed_targets": &target_availability.unavailable_targets,
@@ -2438,7 +2504,7 @@ async fn materialize_due_schedule(
     .execute(&mut **tx)
     .await?;
 
-    sqlx::query(
+    let schedule_update = sqlx::query(
         r#"
         UPDATE schedules
         SET
@@ -2460,14 +2526,22 @@ async fn materialize_due_schedule(
             END,
             updated_at = now()
         WHERE id = $1
+          AND definition_revision = $5
         "#,
     )
     .bind(schedule.id)
     .bind(job_id)
     .bind(status)
     .bind(job_completed_immediately)
+    .bind(schedule.definition_revision)
     .execute(&mut **tx)
     .await?;
+    if schedule.trigger_kind == "cron" {
+        ensure!(
+            schedule_update.rows_affected() == 1,
+            "schedule_definition_revision_changed_before_materialization"
+        );
+    }
 
     record_schedule_due_webhook_event(
         tx,
@@ -2935,7 +3009,7 @@ async fn record_schedule_due_webhook_event(
         input.command_type,
         input.job_status,
     );
-    insert_webhook_event_in_tx(
+    insert_webhook_event_with_provenance_at_in_tx(
         tx,
         "schedule.due",
         &event_id,
@@ -2950,6 +3024,8 @@ async fn record_schedule_due_webhook_event(
             "schedule": {
                 "id": schedule.id,
                 "name": &schedule.name,
+                "trigger_kind": &schedule.trigger_kind,
+                "definition_revision": schedule.definition_revision,
                 "command_type": input.command_type,
                 "selector_expression": &schedule.selector_expression,
                 "fixed_target_ids": input.targets,
@@ -2963,9 +3039,15 @@ async fn record_schedule_due_webhook_event(
                 "status": input.job_status,
                 "type": input.command_type,
                 "source_schedule_id": schedule.id,
+                "causation_id": schedule.materialization.causation_id,
+                "schedule_lineage": &schedule.materialization.schedule_lineage,
                 "target_count": input.targets.len(),
             },
         }),
+        Utc::now(),
+        schedule.materialization.source_lifecycle_event_seq,
+        schedule.materialization.causation_id,
+        &schedule.materialization.schedule_lineage,
     )
     .await?;
     Ok(())
@@ -2990,7 +3072,7 @@ async fn record_schedule_job_finished_webhook_event(
     ];
     predicates.sort();
     predicates.dedup();
-    insert_webhook_event_in_tx(
+    insert_webhook_event_with_provenance_at_in_tx(
         tx,
         "schedule.job_finished",
         &event_id,
@@ -3005,6 +3087,8 @@ async fn record_schedule_job_finished_webhook_event(
             "schedule": {
                 "id": schedule.id,
                 "name": &schedule.name,
+                "trigger_kind": &schedule.trigger_kind,
+                "definition_revision": schedule.definition_revision,
                 "last_job_id": job_id,
                 "last_job_status": job_status,
                 "last_job_error": null,
@@ -3014,10 +3098,16 @@ async fn record_schedule_job_finished_webhook_event(
                 "status": job_status,
                 "type": command_type,
                 "source_schedule_id": schedule.id,
+                "causation_id": schedule.materialization.causation_id,
+                "schedule_lineage": &schedule.materialization.schedule_lineage,
                 "target_count": targets.len(),
                 "target_ids": targets,
             },
         }),
+        Utc::now(),
+        schedule.materialization.source_lifecycle_event_seq,
+        schedule.materialization.causation_id,
+        &schedule.materialization.schedule_lineage,
     )
     .await?;
     Ok(())
@@ -3049,7 +3139,7 @@ async fn advance_schedule_after_materialization(
     run_count: i64,
 ) -> Result<()> {
     let next_run_at = next_run_after_success(schedule, run_count, Utc::now())?;
-    sqlx::query(
+    let advanced = sqlx::query(
         r#"
         UPDATE schedules
         SET
@@ -3057,12 +3147,18 @@ async fn advance_schedule_after_materialization(
             next_run_at = to_timestamp($2),
             updated_at = now()
         WHERE id = $1
+          AND definition_revision = $3
         "#,
     )
     .bind(schedule.id)
     .bind(next_run_at.timestamp() as f64)
+    .bind(schedule.definition_revision)
     .execute(&mut **tx)
     .await?;
+    ensure!(
+        advanced.rows_affected() == 1,
+        "schedule_definition_revision_changed_before_advance"
+    );
     Ok(())
 }
 

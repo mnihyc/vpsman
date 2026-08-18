@@ -564,7 +564,7 @@ export function HomeTelemetryPanel({
               detail={
                 operations
                   ? `${operations.critical_alerts} critical, ${operations.warning_alerts} warning`
-                  : "Operational alert evidence unavailable"
+                  : "Current policy-owned alert evidence unavailable"
               }
               icon={<AlertTriangle size={19} />}
               label="Active alerts"

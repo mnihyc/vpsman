@@ -76,6 +76,40 @@ cargo run -p vpsctl -- tunnel-plan-export \
   --output-file ./plan.json
 ```
 
+Alert-policy shorthand is intentionally not supported. Preview an inline
+policy by supplying the selector and one or more complete, current
+`PolicyRuleRequest` objects with repeatable `--rule-json`:
+
+```sh
+cargo run -p vpsctl -- alert-policy preview \
+  --name edge-traffic \
+  --selector tag:edge \
+  --rule-json '{
+    "name":"quota-80",
+    "enabled":true,
+    "rule_kind":"metric",
+    "evidence_source":"telemetry.combined",
+    "correlation_mode":"natural_key",
+    "trigger_condition_expression":"traffic.cycle.total >= traffic.quota.total * 0.8",
+    "resolve_condition_expression":"traffic.cycle.total < traffic.quota.total * 0.7",
+    "resolve_meta_condition":{"kind":"sustained","seconds":60},
+    "severity":"warning",
+    "category":"traffic",
+    "title_template":"Traffic quota is nearly exhausted",
+    "detail_template":"{subject.display_name} used {evidence.traffic.cycle_percent}% of its traffic quota"
+  }'
+```
+
+For an upsert, the same inline form is available with `--confirmed`. A complete
+policy request can instead be supplied from a reviewed JSON file:
+
+```sh
+cargo run -p vpsctl -- alert-policy upsert \
+  --name edge-traffic \
+  --file ./edge-traffic-policy.json \
+  --confirmed
+```
+
 ## VTY Privileged Mode
 
 Start VTY:
@@ -138,7 +172,7 @@ operator-session-revoke <session_uuid> --confirmed
 fleet-alert-state-update --alert-id agent_status:agent:<hash> --action mute --muted-for-secs 14400 --reason maintenance --confirmed
 vps-rules-preview --selector tag:edge --set traffic.reset_day=14 --set traffic.quota.total=3TB --set traffic.selectors=eth0+tx,ens3
 vps-rules-upsert --selector tag:edge --set traffic.reset_day=14 --set traffic.quota.total=3TB --set traffic.selectors=eth0+tx,ens3 --confirmed
-alert-policy-upsert --name edge-traffic --selector tag:edge --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' --severity warning --confirmed
+alert-policy-upsert --name edge-traffic --selector tag:edge --rule-json='{"name":"quota-80","enabled":true,"rule_kind":"metric","evidence_source":"telemetry.combined","correlation_mode":"natural_key","trigger_condition_expression":"traffic.cycle.total >= traffic.quota.total * 0.8","resolve_condition_expression":"traffic.cycle.total < traffic.quota.total * 0.7","resolve_meta_condition":{"kind":"sustained","seconds":60},"severity":"warning","category":"traffic","title_template":"Traffic quota nearly exhausted","detail_template":"Traffic cycle percent={evidence.traffic.cycle_percent}"}' --confirmed
 fleet-alert-notification-channel-upsert --name edge-webhook --scope-kind tag --scope-value edge --min-severity warning --categories agent_status,network,traffic --operator-states open,escalated --delivery-kind webhook --target https://hooks.example/vpsman --cooldown-secs 3600 --confirmed
 fleet-alert-notification-dispatch --confirmed --include-muted
 fleet-alert-notifications --status queued

@@ -137,10 +137,8 @@ appear as entered.
 
 Resource threshold alerts are issued only by enabled policy groups in
 Observability > Alerts. Starter resource policies are disabled by default, so
-review their selectors and conditions before enabling them. Legacy
-`VPSMAN_ALERT_*` environment variables and `api.alert_*` Suite TOML keys are
-accepted only to keep existing deployments parseable; they are ignored and
-produce a startup or Advanced TOML warning instead of silently creating alerts.
+review their selectors, typed evidence source, Trigger condition, Resolve
+condition, and meta conditions before enabling them.
 
 Inspect filtered alerts from CLI or VTY:
 
@@ -201,47 +199,37 @@ different operator choice. Port speed is display-only, although a new tunnel
 plan can prefill its editable Mbps bandwidth from one endpoint or the lower of
 both endpoints.
 
-Then create a policy group. The selector chooses target VPSs using the same
-selector expressions as dispatch previews (`tag:edge`, `provider:hetzner`,
-`id:<client_id>`, boolean operators, and parentheses). Rule rows are full
-condition expressions: comparisons, arithmetic, boolean operators, and
-parentheses are evaluated by the backend expression parser from current VPS
-rule/accounting values rather than treated as plain strings.
+Then create a policy group under Observability > Alerts. The selector chooses
+target VPSs using the same expressions as dispatch previews (`tag:edge`,
+`provider:hetzner`, `id:<client_id>`, boolean operators, and parentheses).
+Choose **Metric condition** with `telemetry.combined`, then enter:
 
-```sh
-cargo run -p vpsctl -- alert-policy preview \
-  --name edge-traffic \
-  --selector 'tag:edge' \
-  --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' \
-  --severity warning
-
-cargo run -p vpsctl -- alert-policy upsert \
-  --name edge-traffic \
-  --selector 'tag:edge' \
-  --rule 'traffic.cycle.total >= traffic.quota.total * 0.8' \
-  --severity warning \
-  --confirmed
-
-cargo run -p vpsctl -- alert-policies list --selector 'tag:edge'
+```text
+Trigger condition: traffic.cycle.total >= traffic.quota.total * 0.8
+Trigger meta condition: Sustained 5m
+Resolve condition: traffic.cycle.total < traffic.quota.total * 0.7
+Resolve meta condition: Sustained 2m
 ```
+
+The lower Resolve condition supplies hysteresis. If it is blank, recovery
+requires the Trigger condition to evaluate conclusively false. Leaving either
+meta condition empty means Immediate. Missing or stale quota/counter evidence
+is Unknown: it pauses Sustained confirmation and never masquerades as recovery.
 
 In the UI, Fleet > Instances keeps traffic columns hidden by default; enable
 them through Fields when you need operational status in the main table. Expand a
 VPS and open Traffic & Rules for counters, current cycle usage, incomplete
-reasons, current policy lifecycle, and recent policy alert history. Use Config > Rules for bulk
-dry-run, preview-hash confirmation, and explicit unset actions. Use
-Observability > Alerts for policy-group editing, selector dry-runs, notification
-channels, and rule previews.
-Unresolved policy alerts appear in Fleet > Alerts. New episodes emit the
-`alert.policy_triggered` predicate, and recovery emits
-`alert.policy_resolved` plus generic `alert.resolved`. The trigger event kind
-remains `alert.policy_reached` for compatibility, and
-`alert.policy_reached` remains a compatibility predicate alias; use the
-lifecycle predicates for new webhook rules. Persisting and Unknown evaluations
-do not emit lifecycle webhooks. Delivery payloads use `alert`, `policy`,
-`policy_rule`, and `traffic` for source event data, `matched_vps` for matched
-VPSs, and `rule` for the webhook rule. Observability > Alerts retains the full
-policy alert history, including resolved rows.
+reasons, current policy lifecycle, and recent policy alert history. Use
+Config > Rules for bulk dry-run, preview-hash confirmation, and explicit unset
+actions. Use Observability > Alerts for policy-group editing, selector dry-runs,
+notification channels, and rule previews.
+
+Unresolved policy episodes appear in Fleet > Alerts. A confirmed new generation
+emits only `alert.triggered`; confirmed recovery emits only `alert.resolved`.
+Persisting and Unknown evaluations emit no automation edge. Delivery payloads
+use `alert`, `policy`, and `policy_rule` for the persisted lifecycle snapshot,
+`matched_vps` for matched VPSs, and `rule` for the webhook rule. Resolved rows
+remain in alert history.
 
 Lifecycle edges bypass webhook-rule cooldown because the policy generation
 already suppresses repeated true evaluations. Delivery remains retryable, so
@@ -249,29 +237,72 @@ consumers should deduplicate by `event.id` and use the alert ID, trigger
 generation, lifecycle state, and timestamps rather than assuming HTTP arrival
 order.
 
-The predefined traffic-quota starter is an ordinary disabled policy. Once an
-operator enables it, a rule that remains true through its configured window
-enters **Triggered** and issues one alert for that continuous true episode.
-Repeated valid true evaluations move it to **Persisting**, update its last
-confirmation time, and reuse the same trigger generation. A valid false
-evaluation is explicit recovery: it marks that generation **Resolved** with a
-resolution time and reason. Missing, stale, or otherwise incomplete evidence is
-**Unknown**; it neither resolves the episode nor re-arms the rule. A later
-false-to-true recurrence starts a new generation and can issue a new alert after
-the window is satisfied.
+The predefined traffic starters are ordinary disabled policies. Once an
+operator reviews and enables one, a rule that passes its Trigger condition and
+meta condition enters **Triggered** and issues one edge for that generation.
+Repeated valid confirmation moves it to **Persisting**, updates its last
+confirmation time, and reuses the generation. The Resolve condition and meta
+condition mark the generation **Resolved**. Missing, stale, or incomplete
+evidence is **Unknown**; it neither resolves nor re-arms the rule. A later
+recovery-to-trigger recurrence starts a new generation.
 
 Resolution reasons are explicit and stable: `condition_recovered`,
-`policy_scope_exited`, `policy_scope_changed`, `policy_disabled`,
-`policy_changed`, and `policy_deleted`. Automation should branch on those
-values; missing evidence is Unknown, never an implicit recovery.
+`recovery_expression_matched`, `policy_scope_exited`, `policy_scope_changed`,
+`policy_disabled`, `policy_changed`, and `policy_deleted`. Automation should
+branch on those values; missing evidence is Unknown, never an implicit
+recovery.
 
-Fleet > Alerts contains unresolved policy alerts alongside system operational
-alerts. Resolved policy alerts leave that live queue but remain in
-Observability > Alerts under **Recent policy alert history**, where Triggered,
-Persisting, Unknown, and Resolved states include their available confirmation
-or resolution evidence. **Active States** and traffic warning summaries count
-only Triggered and Persisting rows. Older issued rows whose lifecycle cannot be
-reconstructed appear as Unknown history and are not treated as active.
+Fleet > Alerts is the unified policy-owned lifecycle view for agent, tunnel,
+job, backup, capability, resource, and traffic evidence. Resolved alerts leave
+the current queue but remain in history, where Triggered, Persisting, Unknown,
+and Resolved states include their available confirmation or resolution
+evidence. Active summaries count only Triggered and Persisting rows. Unknown is
+current but inactive and never treated as an implicit zero or recovery.
+
+### Dispatch a job from a confirmed alert
+
+Open Automation > Schedules, create a schedule, and choose **Alert event**
+instead of **Time · cron**. The two modes are intentionally separate: Cron owns
+time cadence and catch-up, while Alert event owns prospective policy lifecycle
+edges. For a traffic control workflow, create two schedules over the same
+reviewed target snapshot:
+
+```text
+Mitigation expression: alert.triggered && alert.category:traffic
+Recovery expression:   alert.resolved && alert.category:traffic
+```
+
+Narrow by stable policy or rule ID when only one policy should control the
+command. Do not listen to raw `vps.status`, job, or telemetry events; put that
+logic in the Alert Policy so Trigger/Resolve conditions and meta conditions
+remove flapping once for webhooks and schedules alike.
+
+An omitted argv template is an explicit no-op, `["/bin/true"]`, which is useful
+while validating the expression. A direct shell-free mitigation can render
+immutable alert fields without changing argv boundaries:
+
+```json
+[
+  "/usr/local/sbin/apply-traffic-limit",
+  "--episode",
+  "{alert.episode_id}",
+  "--severity",
+  "{alert.severity}"
+]
+```
+
+The review step shows the exact saved JSON array, a server-rendered sample,
+each indexed argv result, and both hashes. `argv[0]` is always literal;
+rendered values are never split into more arguments. Event schedules retain
+their separately reviewed fixed VPS targets—the alert subject filters the edge
+but never silently retargets the job. A durable receipt creates at most one job
+per matching schedule and edge. Deferred-window edges are skipped, and a
+matching recovery job waits for that same schedule's mitigation job to finish.
+
+Direct schedule/job/backup/capability ancestry prevents known automation
+cycles. A shell command's indirect effect on later agent or telemetry state
+cannot currently carry that causation token, so make such commands idempotent
+and filter them to a specific policy or rule.
 
 Route alert notifications through scoped channel presets:
 

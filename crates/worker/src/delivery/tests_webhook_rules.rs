@@ -60,7 +60,7 @@ async fn postgres_prunes_only_processed_telemetry_events_past_the_short_retentio
                 now() - interval '8 days', NULL),
             ($3, 'telemetry.rollup', 'recent-processed', '{}'::jsonb,
                 now() - interval '6 days', now() - interval '6 days'),
-            ($4, 'alert.open', 'old-non-telemetry', '{}'::jsonb,
+            ($4, 'job.created', 'old-non-telemetry', '{}'::jsonb,
                 now() - interval '8 days', now() - interval '8 days')
         "#,
     )
@@ -98,83 +98,63 @@ async fn postgres_prunes_only_processed_telemetry_events_past_the_short_retentio
 }
 
 #[tokio::test]
-async fn postgres_policy_resolution_materializes_once_for_an_explicit_retained_subject() {
+async fn postgres_partition_rotation_never_drops_unprocessed_rows() {
     let Some(db) = PgWorkerTestDb::maybe_new().await else {
         return;
     };
-    insert_webhook_test_client(&db.pool, "retained-edge", "deleted", true).await;
-    let stable_rule = insert_webhook_test_rule(
-        &db.pool,
-        "retained-resolution",
-        "alert.policy_resolved && alert.resolved && policy.name = monthly && rule.name = quota-80",
-    )
-    .await;
-    let mutable_vps_rule = insert_webhook_test_rule(
-        &db.pool,
-        "retained-resolution-live-state",
-        "alert.policy_resolved && status = deleted",
-    )
-    .await;
-    let event_id = "policy-alert:retained-edge:resolved";
-    let subject_client_ids = vec!["retained-edge".to_string()];
-    let payload = json!({
-        "event": {"kind": "alert.policy_resolved", "id": event_id},
-        "alert": {"category": "traffic"},
-        "policy": {"name": "monthly"},
-        "rule": {"name": "quota-80"},
-    });
-    assert!(insert_webhook_event(
-        &db.pool,
-        "alert.policy_resolved",
-        event_id,
-        &["alert.policy_resolved", "alert.resolved"],
-        &subject_client_ids,
-        payload.clone(),
-    )
-    .await
-    .unwrap());
-    assert!(!insert_webhook_event(
-        &db.pool,
-        "alert.policy_resolved",
-        event_id,
-        &["alert.policy_resolved", "alert.resolved"],
-        &subject_client_ids,
-        payload,
-    )
-    .await
-    .unwrap());
-
-    assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
-            .await
-            .unwrap(),
-        (1, 0)
-    );
-    assert_eq!(
-        process_webhook_events(&db.pool, WebhookRuleWorkerConfig::default())
-            .await
-            .unwrap(),
-        (0, 0)
-    );
-
-    let deliveries = sqlx::query_as::<_, (Uuid, String, String, SqlJson<Value>)>(
+    let partition_date = Utc::now().date_naive() - ChronoDuration::days(3);
+    create_event_partition(&db.pool, partition_date)
+        .await
+        .unwrap();
+    let event_id = Uuid::new_v4();
+    let occurred_at = partition_date.and_hms_opt(12, 0, 0).unwrap().and_utc();
+    sqlx::query(
         r#"
-        SELECT rule_id, event_kind, event_id, matched_vps
-        FROM webhook_rule_deliveries
-        ORDER BY rule_id
+        INSERT INTO webhook_events (id, kind, event_id, payload, occurred_at)
+        VALUES ($1, 'retention.partition_test', $2, '{}'::jsonb, $3)
         "#,
     )
-    .fetch_all(&db.pool)
+    .bind(event_id)
+    .bind(format!("retention-partition:{event_id}"))
+    .bind(occurred_at)
+    .execute(&db.pool)
     .await
     .unwrap();
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(deliveries[0].0, stable_rule);
-    assert_ne!(deliveries[0].0, mutable_vps_rule);
-    assert_eq!(deliveries[0].1, "alert.policy_resolved");
-    assert_eq!(deliveries[0].2, event_id);
-    assert_eq!(deliveries[0].3 .0[0]["id"], "retained-edge");
-    assert_eq!(deliveries[0].3 .0[0]["display_name"], "retained-edge");
-    assert_eq!(deliveries[0].3 .0[0]["status"], "deleted");
+    let config = WebhookRuleWorkerConfig::new(25, 100, 1, 1, 1_000, 5).unwrap();
+    assert_eq!(
+        drop_old_event_partitions(&db.pool, config).await.unwrap(),
+        0
+    );
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM webhook_events WHERE id=$1)",
+    )
+    .bind(event_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    sqlx::query("UPDATE webhook_events SET processed_at=now() WHERE id=$1")
+        .bind(event_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        drop_old_event_partitions(&db.pool, config).await.unwrap(),
+        1
+    );
+    let partition_name = format!("webhook_events_{}", partition_date.format("%Y%m%d"));
+    assert!(!sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM pg_tables
+            WHERE schemaname=current_schema() AND tablename=$1
+        )
+        "#,
+    )
+    .bind(partition_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
 
     db.cleanup().await;
 }
@@ -480,7 +460,7 @@ async fn postgres_permanent_failures_remain_delivery_and_audit_evidence_only() {
         &db.pool,
         "alert.triggered",
         "fleet-alert:no-recursion:triggered",
-        &["alert.triggered", "alert.open", "alert.category:job"],
+        &["alert.triggered", "alert.category:job"],
         &[],
         json!({
             "event": {
@@ -636,12 +616,7 @@ fn automatic_delivery_cooldown_blocks_new_events_but_not_boundary_event() {
 
 #[test]
 fn alert_lifecycle_edges_bypass_rule_cooldown_but_keep_exact_dedupe() {
-    for event_kind in [
-        "alert.triggered",
-        "alert.resolved",
-        "alert.policy_reached",
-        "alert.policy_resolved",
-    ] {
+    for event_kind in ["alert.triggered", "alert.resolved"] {
         assert!(!delivery_candidate_is_suppressed(
             false, 1_300, 1_100, event_kind
         ));
@@ -653,7 +628,7 @@ fn alert_lifecycle_edges_bypass_rule_cooldown_but_keep_exact_dedupe() {
         false,
         1_300,
         1_100,
-        "alert.open"
+        "job.created"
     ));
 }
 
@@ -702,9 +677,10 @@ fn persisted_rule_validation_reports_expression_and_template_errors() {
         .to_string();
     assert!(expression_error.starts_with("invalid webhook rule expression:"));
 
-    let template_error = validated_rule_expression(&rule("tag:edge", "[if alert.open]missing end"))
-        .unwrap_err()
-        .to_string();
+    let template_error =
+        validated_rule_expression(&rule("tag:edge", "[if alert.triggered]missing end"))
+            .unwrap_err()
+            .to_string();
     assert!(template_error.starts_with("invalid webhook rule template:"));
 
     assert!(validated_rule_expression(&rule(
@@ -876,7 +852,7 @@ fn policy_alert_event_uses_event_roots_without_webhook_rule_collision() {
         id: Uuid::nil(),
         actor_id: None,
         name: "delivery-rule".to_string(),
-        expression: "alert.policy_reached && alert.category:traffic && traffic.cycle_percent >= 80 && policy.name = monthly && rule.name = quota-80 && policy_rule.window_secs = 0".to_string(),
+        expression: "alert.triggered && alert.category:traffic && traffic.cycle_percent >= 80 && policy.name = monthly && policy_rule.name = quota-80 && policy_rule.trigger_meta_condition.window_seconds = 0".to_string(),
         target: "https://hooks.acme.com/vpsman".to_string(),
         body_template:
             "{rule.name} {policy.name} {policy_rule.name} {traffic.cycle_percent}".to_string(),
@@ -885,18 +861,21 @@ fn policy_alert_event_uses_event_roots_without_webhook_rule_collision() {
     let event = EventRow {
         id: Uuid::from_u128(7),
         actor_id: None,
-        kind: "alert.policy_reached".to_string(),
+        kind: "alert.triggered".to_string(),
         event_id: "policy-alert:test".to_string(),
         event_predicates: vec![
-            "alert.policy_reached".to_string(),
+            "alert.triggered".to_string(),
             "alert.category:traffic".to_string(),
         ],
         subject_client_ids: vec!["edge-a".to_string()],
         payload: json!({
-            "event": {"kind": "alert.policy_reached"},
+            "event": {"kind": "alert.triggered"},
             "alert": {"category": "traffic"},
             "policy": {"name": "monthly"},
-            "rule": {"name": "quota-80", "window_secs": 0},
+            "policy_rule": {
+                "name": "quota-80",
+                "trigger_meta_condition": {"kind": "immediate", "window_seconds": 0}
+            },
             "traffic": {"cycle_percent": 82.0},
         }),
         occurred_at_unix: 1,
@@ -1089,7 +1068,6 @@ fn subjectless_generic_alert_edges_match_only_event_and_alert_context() {
         event_id: "fleet-alert:global-job:triggered".to_string(),
         event_predicates: vec![
             "alert.triggered".to_string(),
-            "alert.open".to_string(),
             "alert.category:job".to_string(),
             "alert.severity:critical".to_string(),
         ],

@@ -246,6 +246,8 @@ impl Repository {
                         artifact_id,
                         source_job_id,
                         source_schedule_id,
+                        causation_id,
+                        schedule_lineage,
                         note,
                         created_at::text AS created_at
                     FROM backup_requests

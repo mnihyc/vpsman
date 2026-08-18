@@ -6,6 +6,7 @@ fn backup_policy_prune_preview_hash_ignores_moving_cutoff() {
     let plan = vec![BackupPolicyPrunePlan {
         policy: BackupPolicyView {
             schedule_id,
+            definition_revision: 1,
             name: "nightly".to_string(),
             enabled: true,
             selector_expression: "id:edge-a".to_string(),
