@@ -299,6 +299,9 @@ pub(crate) struct SystemDashboardGatewayEventsView {
     pub(crate) critical_failures_by_reason: GatewayForwardCriticalFailureCounters,
     pub(crate) retained_output_truncated_events: Option<u64>,
     pub(crate) rejected_agent_connections: Option<u64>,
+    pub(crate) telemetry_admission_limit: Option<u64>,
+    pub(crate) telemetry_admission_active: Option<u64>,
+    pub(crate) telemetry_admission_waiting: Option<u64>,
     pub(crate) status: String,
 }
 
@@ -331,6 +334,7 @@ pub(crate) struct SystemDashboardCapacityView {
     pub(crate) worker_db_pool: Option<u32>,
     pub(crate) dispatcher_batch: Option<i64>,
     pub(crate) dispatcher_in_flight: Option<usize>,
+    pub(crate) gateway_telemetry_in_flight: Option<usize>,
     pub(crate) dispatch_ack_secs: Option<u64>,
     pub(crate) event_post_secs: Option<u64>,
     pub(crate) internal_http_read_secs: Option<u64>,

@@ -39,6 +39,114 @@ fn enabled_runtime_status_and_latency_bound_telemetry_publish_cadence() {
 }
 
 #[test]
+fn telemetry_initial_phase_is_stable_bounded_and_distributed_across_large_fleet() {
+    let process_incarnation_id = uuid::Uuid::from_u128(0x1020_3040_5060_7080_90a0_b0c0_d0e0_f000);
+    let interval_secs = 60;
+    let mut occupied_second_buckets = BTreeSet::new();
+
+    for index in 0..100 {
+        let client_id = format!("fleet-agent-{index:03}");
+        let first =
+            telemetry_initial_phase_delay(&client_id, process_incarnation_id, interval_secs);
+        let reconnect =
+            telemetry_initial_phase_delay(&client_id, process_incarnation_id, interval_secs);
+        assert_eq!(first, reconnect);
+        assert!(first > Duration::ZERO);
+        assert!(first <= MAX_TELEMETRY_INITIAL_PHASE);
+        occupied_second_buckets.insert(first.as_millis() / 1_000);
+    }
+
+    assert!(
+        occupied_second_buckets.len() >= 10,
+        "100 deterministic clients should spread across most of the 15-second phase window"
+    );
+    assert!(
+        telemetry_initial_phase_delay("short-interval", process_incarnation_id, 5)
+            <= Duration::from_secs(5)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn telemetry_ticker_has_no_immediate_tick_and_skips_missed_ticks() {
+    let process_incarnation_id = uuid::Uuid::from_u128(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00);
+    let delay = telemetry_initial_phase_delay("client-a", process_incarnation_id, 30);
+    let mut ticker = telemetry_ticker("client-a", process_incarnation_id, 30);
+
+    assert_eq!(
+        ticker.missed_tick_behavior(),
+        time::MissedTickBehavior::Skip
+    );
+    assert!(
+        time::timeout(Duration::ZERO, ticker.tick()).await.is_err(),
+        "the first telemetry tick must never be immediately ready"
+    );
+    time::advance(delay).await;
+    assert!(time::timeout(Duration::ZERO, ticker.tick()).await.is_ok());
+
+    time::advance(Duration::from_secs(95)).await;
+    assert!(time::timeout(Duration::ZERO, ticker.tick()).await.is_ok());
+    assert!(
+        time::timeout(Duration::ZERO, ticker.tick()).await.is_err(),
+        "Skip must not replay every missed telemetry tick"
+    );
+}
+
+#[test]
+fn reconnect_keeps_phase_until_effective_interval_changes() {
+    let process_incarnation_id = uuid::Uuid::from_u128(0xaabb_ccdd_eeff_0011_2233_4455_6677_8899);
+    let connected = telemetry_initial_phase_delay("client-a", process_incarnation_id, 60);
+    let reconnected = telemetry_initial_phase_delay("client-a", process_incarnation_id, 60);
+
+    assert_eq!(connected, reconnected);
+    let current = AgentConfig {
+        telemetry_interval_secs: 60,
+        ..AgentConfig::default()
+    };
+    let mut active_interval_secs = 60;
+    assert_eq!(
+        accept_telemetry_interval_update(&mut active_interval_secs, Some(&current)),
+        None
+    );
+    assert_eq!(active_interval_secs, 60);
+    let next = AgentConfig {
+        telemetry_interval_secs: 30,
+        ..current.clone()
+    };
+    assert_eq!(
+        accept_telemetry_interval_update(&mut active_interval_secs, Some(&next)),
+        Some(30)
+    );
+    assert_eq!(active_interval_secs, 30);
+}
+
+#[test]
+fn accepted_config_rephases_from_server_hello_interval_not_cached_config() {
+    let cached_current = AgentConfig {
+        telemetry_interval_secs: 60,
+        ..AgentConfig::default()
+    };
+    let accepted_next = cached_current.clone();
+    let mut active_interval_secs = 15;
+
+    assert_eq!(
+        accept_telemetry_interval_update(&mut active_interval_secs, Some(&accepted_next)),
+        Some(60)
+    );
+    assert_eq!(active_interval_secs, 60);
+}
+
+#[test]
+fn config_read_does_not_mutate_active_telemetry_interval() {
+    let mut active_interval_secs = 15;
+
+    assert_eq!(
+        accept_telemetry_interval_update(&mut active_interval_secs, None),
+        None
+    );
+    assert_eq!(active_interval_secs, 15);
+}
+
+#[test]
 fn configured_os_release_read_failure_is_explicit() {
     let path = std::env::temp_dir().join(format!(
         "vpsman-missing-os-release-{}",

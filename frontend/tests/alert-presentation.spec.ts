@@ -26,6 +26,7 @@ const baseAlert: FleetAlertRecord = {
   severity: "warning",
   state_actor_id: null,
   state_reason: null,
+  state_revision: 0,
   state_updated_at: null,
   status: "policy_condition",
   target_id: "fixture-policy-rule-01",

@@ -1822,6 +1822,7 @@ export function App() {
           dashboard.systemDashboardError,
         )}
         initialMonitoringCards={dashboard.initialHomeMonitoringCards}
+        initialMonitoringCardsPending={dashboard.initialHomeSnapshotPending}
         dashboardOverview={dashboard.dashboardOverview}
         dashboardPreferences={dashboard.dashboardPreferences}
         dashboardWindow={dashboard.dashboardOverviewWindow}
@@ -1953,7 +1954,6 @@ export function App() {
         }
         onProcessWebhookRuleDeliveries={dashboard.processWebhookRuleDeliveries}
         onRotateWebhookDeliveryHistory={dashboard.rotateWebhookDeliveryHistory}
-        onUpdateFleetAlertState={dashboard.updateFleetAlertState}
         onUpsertFleetAlertNotificationChannel={
           dashboard.upsertFleetAlertNotificationChannel
         }
@@ -2971,7 +2971,7 @@ export function App() {
             onOpenAlertPolicies={() => selectView("Observability", "alerts")}
             onOpenVpsDetail={releaseRoutes.openVpsDetail}
             onResolve={dashboard.resolveFleetAlert}
-            onUpdate={dashboard.updateFleetAlertState}
+            onUpdateBulk={dashboard.bulkUpdateFleetAlertStates}
           />
         );
       }

@@ -241,6 +241,9 @@ export type SystemDashboardGatewayEventsRecord = {
   critical_failures_by_reason: GatewayForwardCriticalFailureCounters;
   retained_output_truncated_events: number | null;
   rejected_agent_connections: number | null;
+  telemetry_admission_limit: number | null;
+  telemetry_admission_active: number | null;
+  telemetry_admission_waiting: number | null;
   status: "live" | "unavailable" | string;
 };
 
@@ -270,6 +273,7 @@ export type SystemDashboardCapacityRecord = {
   worker_db_pool: number | null;
   dispatcher_batch: number | null;
   dispatcher_in_flight: number | null;
+  gateway_telemetry_in_flight: number | null;
   dispatch_ack_secs: number | null;
   event_post_secs: number | null;
   internal_http_read_secs: number | null;
@@ -507,6 +511,7 @@ export type FleetAlertRecord = {
   operator_state: "open" | "acknowledged" | "muted" | "escalated" | string;
   muted_until_unix: number | null;
   escalation_level: number;
+  state_revision: number;
   state_reason: string | null;
   state_actor_id: string | null;
   state_updated_at: string | null;
@@ -517,6 +522,7 @@ export type FleetAlertStateRecord = {
   state: "open" | "acknowledged" | "muted" | "escalated" | string;
   muted_until_unix: number | null;
   escalation_level: number;
+  revision: number;
   reason: string | null;
   actor_id: string | null;
   created_at: string;
@@ -528,7 +534,24 @@ export type FleetAlertStateRequest = {
   action: "acknowledge" | "mute" | "escalate" | "clear" | string;
   muted_for_secs?: number | null;
   reason?: string | null;
+  expected_revision?: number | null;
   confirmed: boolean;
+};
+
+export type FleetAlertStateBulkRequest = {
+  action: FleetAlertStateRequest["action"];
+  items: Array<{
+    alert_id: string;
+    expected_revision: number;
+  }>;
+  muted_for_secs?: number | null;
+  reason?: string | null;
+  confirmed: boolean;
+};
+
+export type FleetAlertStateBulkResponse = {
+  batch_id: string;
+  states: FleetAlertStateRecord[];
 };
 
 export type FleetAlertResolveRequest = {

@@ -1333,6 +1333,7 @@ pub(crate) fn operational_episode_to_fleet_alert(
         operator_state: "open".to_string(),
         muted_until_unix: None,
         escalation_level: 0,
+        state_revision: 0,
         state_reason: None,
         state_actor_id: None,
         state_updated_at: None,

@@ -1343,6 +1343,12 @@ pub struct GatewayForwardMetricsSnapshot {
     #[serde(default)]
     pub rejected_agent_connections: u64,
     #[serde(default)]
+    pub telemetry_admission_limit: u64,
+    #[serde(default)]
+    pub telemetry_admission_active: u64,
+    #[serde(default)]
+    pub telemetry_admission_waiting: u64,
+    #[serde(default)]
     pub unhealthy: bool,
 }
 

@@ -109,6 +109,7 @@ pub struct SuiteCapacityConfig {
     pub worker_db_pool: Option<u32>,
     pub dispatcher_batch: Option<i64>,
     pub dispatcher_in_flight: Option<usize>,
+    pub gateway_telemetry_in_flight: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -180,6 +181,11 @@ impl SuiteConfig {
         if let Some(value) = self.capacity.dispatcher_in_flight {
             if !(1..=512).contains(&value) {
                 return Err("capacity.dispatcher_in_flight_out_of_range".to_string());
+            }
+        }
+        if let Some(value) = self.capacity.gateway_telemetry_in_flight {
+            if !(1..=512).contains(&value) {
+                return Err("capacity.gateway_telemetry_in_flight_out_of_range".to_string());
             }
         }
         validate_optional_u64(self.worker.tick_secs, 1, 3600, "worker.tick_secs")?;
@@ -362,6 +368,7 @@ impl SuiteConfig {
                 "storage.object_create_bucket".to_string(),
                 "capacity.api_db_pool".to_string(),
                 "capacity.worker_db_pool".to_string(),
+                "capacity.gateway_telemetry_in_flight".to_string(),
                 "worker.once".to_string(),
                 "worker.worker_id".to_string(),
                 "timeout.internal_http_connect_secs".to_string(),

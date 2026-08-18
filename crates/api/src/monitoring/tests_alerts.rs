@@ -5,6 +5,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
+use crate::model_alert_states::{BulkFleetAlertStateItem, BulkUpdateFleetAlertStatesRequest};
+
 #[tokio::test]
 async fn fleet_alerts_derive_actionable_current_status() {
     let repo = Repository::Memory(MemoryState::default());
@@ -1817,6 +1819,7 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 state: "acknowledged".to_string(),
                 muted_until_unix: None,
                 escalation_level: 0,
+                revision: 1,
                 reason: Some("known older alert".to_string()),
                 actor_id: None,
                 created_at: "00000".to_string(),
@@ -1831,6 +1834,7 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 state: "open".to_string(),
                 muted_until_unix: None,
                 escalation_level: 0,
+                revision: 1,
                 reason: None,
                 actor_id: None,
                 created_at: format!("{index:05}"),
@@ -1946,6 +1950,7 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
                 action: "mute".to_string(),
                 muted_for_secs: Some(600),
                 reason: Some("maintenance window".to_string()),
+                expected_revision: None,
                 confirmed: true,
             },
             &operator,
@@ -1997,6 +2002,7 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
                 action: "acknowledge".to_string(),
                 muted_for_secs: None,
                 reason: Some("operator reviewing".to_string()),
+                expected_revision: None,
                 confirmed: true,
             },
             &operator,
@@ -2024,6 +2030,7 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
                 action: "escalate".to_string(),
                 muted_for_secs: None,
                 reason: Some("needs immediate action".to_string()),
+                expected_revision: None,
                 confirmed: true,
             },
             &operator,
@@ -2032,6 +2039,121 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
         .unwrap();
     assert_eq!(escalated.state, "escalated");
     assert_eq!(escalated.escalation_level, 1);
+}
+
+#[tokio::test]
+async fn fleet_alert_state_bulk_is_revisioned_atomic_and_batch_audited() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    let initial = BulkUpdateFleetAlertStatesRequest {
+        action: "acknowledge".to_string(),
+        items: vec![
+            BulkFleetAlertStateItem {
+                alert_id: "alert:bulk-b".to_string(),
+                expected_revision: 0,
+            },
+            BulkFleetAlertStateItem {
+                alert_id: "alert:bulk-a".to_string(),
+                expected_revision: 0,
+            },
+        ],
+        muted_for_secs: None,
+        reason: Some("reviewed together".to_string()),
+        confirmed: true,
+    };
+    let response = repo
+        .bulk_update_fleet_alert_states(&initial, &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .states
+            .iter()
+            .map(|state| state.alert_id.as_str())
+            .collect::<Vec<_>>(),
+        ["alert:bulk-a", "alert:bulk-b"]
+    );
+    assert!(response.states.iter().all(|state| state.revision == 1));
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    let audits = memory.audits.read().await;
+    assert_eq!(audits.len(), 2);
+    assert!(audits.iter().all(|audit| {
+        audit.metadata["batch_id"] == json!(response.batch_id)
+            && audit.metadata["batch_size"] == 2
+            && audit.metadata["batch_action"] == "acknowledge"
+    }));
+    drop(audits);
+
+    let stale = BulkUpdateFleetAlertStatesRequest {
+        action: "escalate".to_string(),
+        items: vec![
+            BulkFleetAlertStateItem {
+                alert_id: "alert:bulk-a".to_string(),
+                expected_revision: 1,
+            },
+            BulkFleetAlertStateItem {
+                alert_id: "alert:bulk-new".to_string(),
+                expected_revision: 1,
+            },
+        ],
+        muted_for_secs: None,
+        reason: Some("must remain atomic".to_string()),
+        confirmed: true,
+    };
+    let error = repo
+        .bulk_update_fleet_alert_states(&stale, &operator)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("fleet_alert_state_snapshot_stale"));
+    let states = memory.fleet_alert_states.read().await;
+    assert_eq!(states.len(), 2);
+    assert!(states.iter().all(|state| {
+        state.state == "acknowledged" && state.revision == 1 && state.escalation_level == 0
+    }));
+    drop(states);
+    assert_eq!(memory.audits.read().await.len(), 2);
+
+    let escalated = repo
+        .bulk_update_fleet_alert_states(
+            &BulkUpdateFleetAlertStatesRequest {
+                action: "escalate".to_string(),
+                items: vec![BulkFleetAlertStateItem {
+                    alert_id: "alert:bulk-a".to_string(),
+                    expected_revision: 1,
+                }],
+                muted_for_secs: None,
+                reason: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(escalated.states[0].escalation_level, 1);
+    assert_eq!(escalated.states[0].revision, 2);
+    let escalated_again = repo
+        .bulk_update_fleet_alert_states(
+            &BulkUpdateFleetAlertStatesRequest {
+                action: "escalate".to_string(),
+                items: vec![BulkFleetAlertStateItem {
+                    alert_id: "alert:bulk-a".to_string(),
+                    expected_revision: 2,
+                }],
+                muted_for_secs: None,
+                reason: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(escalated_again.states[0].escalation_level, 2);
+    assert_eq!(escalated_again.states[0].revision, 3);
 }
 
 #[tokio::test]

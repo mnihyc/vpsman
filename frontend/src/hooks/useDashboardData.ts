@@ -33,6 +33,10 @@ import { useTopologyData } from "./useTopologyData";
 const FLEET_FALLBACK_REFRESH_MS = 15_000;
 const FLEET_FULL_RECONCILE_MS = 60_000;
 
+function documentIsHidden(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
 function readStoredToken(key: string): string {
   if (typeof window === "undefined") {
     return "";
@@ -73,6 +77,9 @@ export function useDashboardData(activeView: ActiveView) {
     useState<JobDetailsInvalidationSignal | null>(null);
   const [authRefreshError, setAuthRefreshError] = useState<string | null>(null);
   const [logoutWarning, setLogoutWarning] = useState<string | null>(null);
+  const [documentVisible, setDocumentVisible] = useState(
+    () => !documentIsHidden(),
+  );
   const dashboardOverviewReloadTimer = useRef<number | null>(null);
   const fleetReloadTimer = useRef<number | null>(null);
   const inventoryReloadTimer = useRef<number | null>(null);
@@ -91,11 +98,15 @@ export function useDashboardData(activeView: ActiveView) {
     left: boolean;
   } | null>(null);
   const [homeSnapshotSettledToken, setHomeSnapshotSettledToken] = useState("");
+  const [homeSnapshotPendingToken, setHomeSnapshotPendingToken] = useState("");
   const [homeMonitoringCards, setHomeMonitoringCards] = useState<
     HomeSnapshotRecord["monitoring_cards"] | null
   >(null);
   const clearDashboardDataRef = useRef<() => void>(() => undefined);
   const activeViewRef = useRef(activeView);
+  const hiddenFleetRefreshPendingRef = useRef(false);
+  const hiddenOverviewRefreshPendingRef = useRef(false);
+  const overviewVisibilityCatchupRef = useRef(false);
 
   if (apiToken && initialViewForTokenRef.current?.token !== apiToken) {
     initialViewForTokenRef.current = {
@@ -219,7 +230,11 @@ export function useDashboardData(activeView: ActiveView) {
     homeSnapshotStartedTokenRef.current = "";
     initialViewForTokenRef.current = null;
     setHomeSnapshotSettledToken("");
+    setHomeSnapshotPendingToken("");
     setHomeMonitoringCards(null);
+    hiddenFleetRefreshPendingRef.current = false;
+    hiddenOverviewRefreshPendingRef.current = false;
+    overviewVisibilityCatchupRef.current = false;
     for (const timer of [
       dashboardOverviewReloadTimer,
       fleetReloadTimer,
@@ -261,21 +276,37 @@ export function useDashboardData(activeView: ActiveView) {
   clearDashboardDataRef.current = clearDashboardData;
 
   const scheduleDashboardOverviewReload = useCallback(() => {
+    if (documentIsHidden()) {
+      hiddenOverviewRefreshPendingRef.current = true;
+      return;
+    }
     if (dashboardOverviewReloadTimer.current !== null) {
       window.clearTimeout(dashboardOverviewReloadTimer.current);
     }
     dashboardOverviewReloadTimer.current = window.setTimeout(() => {
       dashboardOverviewReloadTimer.current = null;
+      if (documentIsHidden()) {
+        hiddenOverviewRefreshPendingRef.current = true;
+        return;
+      }
       void dashboardOverview.loadDashboardOverview();
     }, 250);
   }, [dashboardOverview.loadDashboardOverview]);
   const scheduleFleetReload = useCallback(() => {
+    if (documentIsHidden()) {
+      hiddenFleetRefreshPendingRef.current = true;
+      return;
+    }
     if (fleetReloadTimer.current !== null) {
       return;
     }
     fleetReloadTimer.current = window.setTimeout(() => {
       fleetReloadTimer.current = null;
-      void fleet.loadFleet();
+      if (documentIsHidden()) {
+        hiddenFleetRefreshPendingRef.current = true;
+        return;
+      }
+      void fleet.loadFleet(true);
     }, 750);
   }, [fleet.loadFleet]);
   const scheduleInventoryReload = useCallback(() => {
@@ -349,6 +380,69 @@ export function useDashboardData(activeView: ActiveView) {
   );
 
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      const visible = !documentIsHidden();
+      setDocumentVisible(visible);
+      if (!visible) {
+        const initialHomeSnapshotDeferred = Boolean(
+          apiToken &&
+          isInitialHomeVisit &&
+          homeSnapshotStartedTokenRef.current !== apiToken,
+        );
+        hiddenFleetRefreshPendingRef.current = Boolean(
+          apiToken && !initialHomeSnapshotDeferred,
+        );
+        hiddenOverviewRefreshPendingRef.current = Boolean(
+          apiToken &&
+          !initialHomeSnapshotDeferred &&
+          (activeViewRef.current === "Home" ||
+            activeViewRef.current === "Observability"),
+        );
+        for (const timer of [dashboardOverviewReloadTimer, fleetReloadTimer]) {
+          if (timer.current !== null) {
+            window.clearTimeout(timer.current);
+            timer.current = null;
+          }
+        }
+        return;
+      }
+      const initialHomeSnapshotInFlight = Boolean(
+        apiToken &&
+        isInitialHomeVisit &&
+        homeSnapshotStartedTokenRef.current === apiToken &&
+        homeSnapshotSettledToken !== apiToken,
+      );
+      if (initialHomeSnapshotInFlight) {
+        return;
+      }
+      if (hiddenFleetRefreshPendingRef.current && apiToken) {
+        hiddenFleetRefreshPendingRef.current = false;
+        void fleet.loadFleet(true);
+      }
+      if (
+        hiddenOverviewRefreshPendingRef.current &&
+        apiToken &&
+        (activeViewRef.current === "Home" ||
+          activeViewRef.current === "Observability")
+      ) {
+        hiddenOverviewRefreshPendingRef.current = false;
+        overviewVisibilityCatchupRef.current = true;
+        void dashboardOverview.loadDashboardOverview();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    handleVisibilityChange();
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [
+    apiToken,
+    dashboardOverview.loadDashboardOverview,
+    fleet.loadFleet,
+    homeSnapshotSettledToken,
+    isInitialHomeVisit,
+  ]);
+
+  useEffect(() => {
     if (!apiToken && hasStoredAuthSession()) {
       void refreshStoredAuth();
     }
@@ -357,12 +451,14 @@ export function useDashboardData(activeView: ActiveView) {
   useEffect(() => {
     if (
       !apiToken ||
+      !documentVisible ||
       !isInitialHomeVisit ||
       homeSnapshotStartedTokenRef.current === apiToken
     ) {
       return;
     }
     homeSnapshotStartedTokenRef.current = apiToken;
+    setHomeSnapshotPendingToken(apiToken);
     const generation = homeSnapshotGenerationRef.current + 1;
     homeSnapshotGenerationRef.current = generation;
     setHomeMonitoringCards(null);
@@ -477,6 +573,13 @@ export function useDashboardData(activeView: ActiveView) {
           unavailableSnapshotSource(message),
         );
         setHomeSnapshotSettledToken(apiToken);
+      })
+      .finally(() => {
+        if (generation === homeSnapshotGenerationRef.current) {
+          setHomeSnapshotPendingToken((current) =>
+            current === apiToken ? "" : current,
+          );
+        }
       });
   }, [
     access.beginHomeOperatorHydration,
@@ -489,6 +592,7 @@ export function useDashboardData(activeView: ActiveView) {
     dashboardOverview.beginHomeDashboardOverviewHydration,
     dashboardOverview.dashboardPreferences,
     dashboardOverview.hydrateHomeDashboardOverview,
+    documentVisible,
     fleet.beginHomeFleetHydration,
     fleet.hydrateHomeFleet,
     isInitialHomeVisit,
@@ -509,25 +613,28 @@ export function useDashboardData(activeView: ActiveView) {
   }, [access.loadCurrentOperatorProfile, apiToken, isInitialHomeVisit]);
 
   useEffect(() => {
-    if (!apiToken || isInitialHomeVisit) {
+    if (!apiToken || !documentVisible || isInitialHomeVisit) {
       return;
     }
     void fleet.loadFleet();
-  }, [apiToken, fleet.loadFleet, isInitialHomeVisit]);
+  }, [apiToken, documentVisible, fleet.loadFleet, isInitialHomeVisit]);
 
   useEffect(() => {
-    if (!apiToken || wsState !== "connected") {
+    if (!apiToken || wsState !== "connected" || !documentVisible) {
       return;
     }
-    const timer = window.setInterval(
-      () => void fleet.loadFleet(),
-      FLEET_FULL_RECONCILE_MS,
-    );
+    const timer = window.setInterval(() => {
+      if (documentIsHidden()) {
+        hiddenFleetRefreshPendingRef.current = true;
+        return;
+      }
+      void fleet.loadFleet();
+    }, FLEET_FULL_RECONCILE_MS);
     return () => window.clearInterval(timer);
-  }, [apiToken, fleet.loadFleet, wsState]);
+  }, [apiToken, documentVisible, fleet.loadFleet, wsState]);
 
   useEffect(() => {
-    if (!apiToken || wsState === "connected") {
+    if (!apiToken || wsState === "connected" || !documentVisible) {
       return;
     }
     let disposed = false;
@@ -536,6 +643,10 @@ export function useDashboardData(activeView: ActiveView) {
 
     async function loadFallbackSnapshot() {
       if (disposed || refreshInFlight) {
+        return;
+      }
+      if (documentIsHidden()) {
+        hiddenFleetRefreshPendingRef.current = true;
         return;
       }
       refreshInFlight = true;
@@ -559,11 +670,18 @@ export function useDashboardData(activeView: ActiveView) {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [apiToken, fleet.loadFleet, fleet.loadFleetTelemetry, wsState]);
+  }, [
+    apiToken,
+    documentVisible,
+    fleet.loadFleet,
+    fleet.loadFleetTelemetry,
+    wsState,
+  ]);
 
   useEffect(() => {
     if (
       !apiToken ||
+      !documentVisible ||
       (activeView !== "Home" && activeView !== "Observability")
     ) {
       return;
@@ -572,8 +690,13 @@ export function useDashboardData(activeView: ActiveView) {
     let timer: number | null = null;
 
     async function loadAndSchedule() {
+      if (documentIsHidden()) {
+        hiddenOverviewRefreshPendingRef.current = true;
+        return;
+      }
       await dashboardOverview.loadDashboardOverview();
-      if (disposed) {
+      if (disposed || documentIsHidden()) {
+        if (!disposed) hiddenOverviewRefreshPendingRef.current = true;
         return;
       }
       timer = window.setTimeout(
@@ -584,7 +707,15 @@ export function useDashboardData(activeView: ActiveView) {
       );
     }
 
-    if (isInitialHomeVisit) {
+    if (overviewVisibilityCatchupRef.current) {
+      overviewVisibilityCatchupRef.current = false;
+      timer = window.setTimeout(
+        loadAndSchedule,
+        dashboardRefreshIntervalMs(
+          dashboardOverview.dashboardPreferences.refreshIntervalSecs,
+        ),
+      );
+    } else if (isInitialHomeVisit) {
       if (homeSnapshotSettledToken !== apiToken) {
         return;
       }
@@ -606,6 +737,7 @@ export function useDashboardData(activeView: ActiveView) {
   }, [
     activeView,
     apiToken,
+    documentVisible,
     dashboardOverview.dashboardPreferences.refreshIntervalSecs,
     dashboardOverview.loadDashboardOverview,
     homeSnapshotSettledToken,
@@ -735,7 +867,11 @@ export function useDashboardData(activeView: ActiveView) {
         socket?.send(JSON.stringify({ type: "auth", access_token: apiToken }));
         setWsState("connected");
         if (recovering) {
-          void fleet.loadFleetTelemetry();
+          if (documentIsHidden()) {
+            hiddenFleetRefreshPendingRef.current = true;
+          } else {
+            void fleet.loadFleetTelemetry(true);
+          }
         }
       });
       socket.addEventListener("close", () => {
@@ -774,7 +910,11 @@ export function useDashboardData(activeView: ActiveView) {
           return;
         }
         if (event.type === "fleet_telemetry_invalidated") {
-          void fleet.loadFleetTelemetry();
+          if (documentIsHidden()) {
+            hiddenFleetRefreshPendingRef.current = true;
+          } else {
+            void fleet.loadFleetTelemetry(true);
+          }
           if (currentView === "Network" || currentView === "Observability") {
             scheduleNetworkEvidenceReload();
           }
@@ -995,6 +1135,8 @@ export function useDashboardData(activeView: ActiveView) {
     initialHomeMonitoringCards: isInitialHomeVisit
       ? homeMonitoringCards
       : undefined,
+    initialHomeSnapshotPending:
+      isInitialHomeVisit && homeSnapshotPendingToken === apiToken,
     jobs: jobs.jobs,
     jobsTruncated: jobs.jobsTruncated,
     jobApprovals: jobs.jobApprovals,
@@ -1088,7 +1230,7 @@ export function useDashboardData(activeView: ActiveView) {
     loadHostStorageInventory: jobs.loadHostStorageInventory,
     jobRollouts: jobs.jobRollouts,
     updateJobRollout: jobs.updateJobRollout,
-    updateFleetAlertState: fleet.updateFleetAlertState,
+    bulkUpdateFleetAlertStates: fleet.bulkUpdateFleetAlertStates,
     resolveFleetAlert: fleet.resolveFleetAlert,
     dryRunFleetAlertPolicy: fleet.dryRunFleetAlertPolicy,
     upsertFleetAlertNotificationChannel:

@@ -1528,6 +1528,12 @@ nav {
   white-space: normal;
 }
 
+.configurationReviewList:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .configurationReviewList > span {
   display: grid;
   gap: 2px;

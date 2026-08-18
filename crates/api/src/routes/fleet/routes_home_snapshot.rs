@@ -11,9 +11,12 @@ use crate::{
     model::ListQuery,
     model_fleet_snapshot::FleetSnapshotSource,
     model_home_snapshot::HomeSnapshotResponse,
-    routes_dashboard::{load_dashboard_overview, DashboardOverviewQuery},
+    routes_dashboard::{
+        dashboard_overview_prepared_singleflight_key, load_prepared_dashboard_overview,
+        prepare_dashboard_overview, DashboardOverviewQuery, PreparedDashboardOverview,
+    },
     routes_fleet_snapshot::{load_home_agents, load_home_fleet_sources, FLEET_DETAIL_LIMIT},
-    routes_monitoring::monitoring_cards_for_agents,
+    routes_monitoring::monitoring_cards_for_agents_projection,
     routes_system::{load_system_dashboard, SystemDashboardQuery},
     security::{
         operator_has_scope, SCOPE_AUDIT_READ, SCOPE_BACKUPS_READ, SCOPE_FLEET_READ,
@@ -31,14 +34,66 @@ pub(crate) async fn home_snapshot(
     Query(dashboard_query): Query<DashboardOverviewQuery>,
 ) -> Result<Json<HomeSnapshotResponse>, ApiError> {
     let auth = state.require_operator(&headers).await?;
-    let scopes = &auth.operator.scopes;
+    let fleet_read = operator_has_scope(&auth.operator.scopes, SCOPE_FLEET_READ);
+    let prepared_dashboard = if fleet_read {
+        Some(prepare_dashboard_overview(&dashboard_query, unix_now())?)
+    } else {
+        None
+    };
+    let key = home_snapshot_singleflight_key(
+        &auth.operator,
+        &dashboard_query,
+        prepared_dashboard.as_ref(),
+    );
+    let events = state.events.clone();
+    let response = events
+        .singleflight_home_snapshot(key, move || async move {
+            let _admission = state.events.acquire_heavy_read_permit().await?;
+            let prepared_dashboard = if fleet_read {
+                Some(prepare_dashboard_overview(&dashboard_query, unix_now())?)
+            } else {
+                None
+            };
+            build_home_snapshot(&state, auth.operator, prepared_dashboard).await
+        })
+        .await?;
+    Ok(Json(response))
+}
+
+fn home_snapshot_singleflight_key(
+    operator: &crate::model::OperatorView,
+    dashboard_query: &DashboardOverviewQuery,
+    prepared_dashboard: Option<&PreparedDashboardOverview>,
+) -> String {
+    let dashboard = prepared_dashboard.map_or_else(
+        || serde_json::json!({ "permitted": false }),
+        |prepared| dashboard_overview_prepared_singleflight_key(dashboard_query, prepared),
+    );
+    serde_json::json!({
+        "endpoint": "home_snapshot",
+        "auth": crate::state::read_singleflight_auth_key(
+            operator.id,
+            &operator.scopes,
+        ),
+        "operator": operator,
+        "dashboard": dashboard,
+    })
+    .to_string()
+}
+
+async fn build_home_snapshot(
+    state: &AppState,
+    operator: crate::model::OperatorView,
+    prepared_dashboard: Option<PreparedDashboardOverview>,
+) -> Result<HomeSnapshotResponse, ApiError> {
+    let scopes = &operator.scopes;
     let fleet_read = operator_has_scope(scopes, SCOPE_FLEET_READ);
     let jobs_read = operator_has_scope(scopes, SCOPE_JOBS_READ);
     let terminal_read = operator_has_scope(scopes, SCOPE_TERMINAL_READ);
     let backups_read = operator_has_scope(scopes, SCOPE_BACKUPS_READ);
     let audit_read = operator_has_scope(scopes, SCOPE_AUDIT_READ);
     let schedules_read = operator_has_scope(scopes, SCOPE_SCHEDULES_READ);
-    let agents = load_home_agents(&state, scopes).await;
+    let agents = load_home_agents(state, scopes).await;
     let monitoring_agents = agents.data.clone();
     let system_query = SystemDashboardQuery {
         window: Some("1d".to_string()),
@@ -63,18 +118,18 @@ pub(crate) async fn home_snapshot(
         system_dashboard,
         dashboard_overview,
     ) = tokio::join!(
-        load_home_fleet_sources(&state, scopes, agents),
-        load_home_monitoring_cards(&state, fleet_read, monitoring_agents),
-        load_source("jobs", fleet_read, load_jobs(&state, &jobs_query)),
+        load_home_fleet_sources(state, scopes, agents),
+        load_home_monitoring_cards(state, fleet_read, monitoring_agents),
+        load_source("jobs", fleet_read, load_jobs(state, &jobs_query)),
         load_source(
             "file_transfers",
             jobs_read,
-            load_file_transfer_sessions(&state),
+            load_file_transfer_sessions(state),
         ),
         load_source(
             "terminal_sessions",
             terminal_read,
-            load_terminal_sessions(&state),
+            load_terminal_sessions(state),
         ),
         load_source(
             "backups",
@@ -99,18 +154,14 @@ pub(crate) async fn home_snapshot(
         load_source(
             "system_dashboard",
             fleet_read,
-            load_system_dashboard(&state, &system_query),
+            load_system_dashboard(state, &system_query),
         ),
-        load_source(
-            "dashboard_overview",
-            fleet_read,
-            load_dashboard_overview(&state, &dashboard_query, &auth.operator.preferences),
-        ),
+        load_home_dashboard_overview(state, fleet_read, prepared_dashboard, &operator.preferences,),
     );
 
-    Ok(Json(HomeSnapshotResponse {
+    Ok(HomeSnapshotResponse {
         generated_at: unix_now().to_string(),
-        operator: auth.operator,
+        operator,
         summary: fleet.summary,
         agents: fleet.agents,
         telemetry_rollups: fleet.telemetry_rollups,
@@ -127,7 +178,27 @@ pub(crate) async fn home_snapshot(
         schedules,
         system_dashboard,
         dashboard_overview,
-    }))
+    })
+}
+
+async fn load_home_dashboard_overview(
+    state: &AppState,
+    permitted: bool,
+    prepared: Option<PreparedDashboardOverview>,
+    preferences: &crate::model::OperatorPreferences,
+) -> FleetSnapshotSource<crate::model_dashboard::DashboardOverviewView> {
+    if !permitted {
+        return FleetSnapshotSource::unavailable("operator_scope_insufficient");
+    }
+    let Some(prepared) = prepared else {
+        return FleetSnapshotSource::unavailable("home_snapshot_dashboard_overview_unavailable");
+    };
+    load_source(
+        "dashboard_overview",
+        true,
+        load_prepared_dashboard_overview(state, prepared, preferences),
+    )
+    .await
 }
 
 async fn load_home_monitoring_cards(
@@ -144,7 +215,7 @@ async fn load_home_monitoring_cards(
     load_source(
         "monitoring_cards",
         true,
-        monitoring_cards_for_agents(state, agents),
+        monitoring_cards_for_agents_projection(state, agents, false),
     )
     .await
 }

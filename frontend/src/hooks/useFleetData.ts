@@ -4,6 +4,7 @@ import {
   apiGet,
   apiPost,
   apiPostPreview,
+  isHeavyReadAdmissionBusy,
   isApiUnauthorized,
 } from "../api";
 import { emptySummary } from "../constants";
@@ -20,8 +21,9 @@ import type {
   FleetAlertNotificationDeliveryRecord,
   FleetAlertNotificationDispatchRequest,
   FleetAlertNotificationProcessRequest,
+  FleetAlertStateBulkRequest,
+  FleetAlertStateBulkResponse,
   FleetAlertStateRecord,
-  FleetAlertStateRequest,
   FleetSummary,
   PolicyAlertRecord,
   PolicyDryRunRequest,
@@ -109,11 +111,19 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     token: string;
     promise: Promise<void>;
   } | null>(null);
+  const fleetFullInFlight = useRef<{
+    token: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const fleetFullRefreshPending = useRef(false);
   const fleetTelemetryRefreshPending = useRef(false);
-  const fleetAlertEventReviewInFlight = useRef(false);
-  const loadFleetTelemetryRef = useRef<() => Promise<void>>(() =>
+  const loadFleetRef = useRef<(trailing?: boolean) => Promise<void>>(() =>
     Promise.resolve(),
   );
+  const loadFleetTelemetryRef = useRef<(trailing?: boolean) => Promise<void>>(
+    () => Promise.resolve(),
+  );
+  const fleetAlertEventReviewInFlight = useRef(false);
   const deletedClientIds = useRef(new Set<string>());
   const fleetSourceErrors = useRef<Partial<Record<FleetErrorSource, string>>>(
     {},
@@ -530,202 +540,254 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     [apiToken, publishFleetError],
   );
 
-  const loadFleet = useCallback(async () => {
-    if (apiTokenRef.current !== apiToken) {
-      return;
-    }
-    const fullGeneration = ++fleetFullGeneration.current;
-    const coreGeneration = ++fleetCoreGeneration.current;
-    const telemetryGeneration = ++fleetTelemetryGeneration.current;
-    try {
-      const snapshot = await apiGet<FleetSnapshotRecord>(
-        "/api/v1/fleet/snapshot?mode=full",
-        apiToken,
-      );
-      if (apiTokenRef.current !== apiToken || snapshot.mode !== "full") {
-        return;
+  const loadFleet = useCallback(
+    (trailingRefresh = false) => {
+      if (apiTokenRef.current !== apiToken) {
+        return Promise.resolve();
       }
-      const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
-      const telemetryIsCurrent =
-        telemetryGeneration === fleetTelemetryGeneration.current;
-      const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
-      if (coreIsCurrent) {
-        applyFleetCoreSnapshot(snapshot);
+      if (fleetFullInFlight.current?.token === apiToken) {
+        if (trailingRefresh) fleetFullRefreshPending.current = true;
+        return fleetFullInFlight.current.promise;
       }
-      if (telemetryIsCurrent) {
-        applyFleetTelemetrySnapshot(snapshot);
-      }
-      if (fullLoadIsCurrent) {
-        applyFleetDetailSnapshot(snapshot);
-      }
-    } catch (error) {
-      const fullLoadIsCurrent = fullGeneration === fleetFullGeneration.current;
-      const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
-      const telemetryIsCurrent =
-        telemetryGeneration === fleetTelemetryGeneration.current;
-      if (
-        apiTokenRef.current !== apiToken ||
-        (!fullLoadIsCurrent && !coreIsCurrent && !telemetryIsCurrent)
-      ) {
-        return;
-      }
-      if (isApiUnauthorized(error)) {
-        onUnauthorized();
-        setSummary(emptySummary);
-        setAgents([]);
-        setFleetAlerts([]);
-        setFleetAlertsTruncated(false);
-        setFleetAlertHistory([]);
-        setFleetAlertHistoryTruncated(false);
-        setFleetAlertStates([]);
-        setFleetAlertPolicies([]);
-        setVpsRuleValues([]);
-        setTrafficAccounting([]);
-        setPolicyAlerts([]);
-        setCurrentPolicyAlerts([]);
-        setCurrentPolicyAlertsTruncated(false);
-        setFleetAlertNotificationChannels([]);
-        setFleetAlertNotifications([]);
-        setWebhookRules([]);
-        setWebhookRuleDeliveries([]);
-        setTelemetryRollups([]);
-        setTelemetryNetworkRates([]);
-        setTelemetryTunnels([]);
-        setTelemetryUptimes([]);
-        setFleetCoreEvidenceAvailable(false);
-        setFleetAlertsEvidenceAvailable(false);
-        setFleetAlertHistoryEvidenceAvailable(false);
-        setFleetAlertStatesEvidenceAvailable(false);
-        setPolicyAlertsEvidenceAvailable(false);
-        setCurrentPolicyAlertsEvidenceAvailable(false);
-        setConfigPolicyEvidenceAvailable(false);
-        setVpsRuleEvidenceAvailable(false);
-        fleetSourceErrors.current = { core: "Operator login required" };
-        setApiError("Operator login required");
-        return;
-      }
-      const message =
-        error instanceof Error ? error.message : "Fleet refresh unavailable";
-      if (coreIsCurrent) {
-        setFleetCoreEvidenceAvailable(false);
-        publishFleetError("core", message);
-      }
-      if (telemetryIsCurrent) {
-        publishFleetError("telemetry", message);
-      }
-      if (fullLoadIsCurrent) {
-        setFleetAlertsEvidenceAvailable(false);
-        setFleetAlerts([]);
-        setFleetAlertsTruncated(false);
-        setFleetAlertHistoryEvidenceAvailable(false);
-        setFleetAlertStatesEvidenceAvailable(false);
-        setPolicyAlertsEvidenceAvailable(false);
-        setCurrentPolicyAlertsEvidenceAvailable(false);
-        setConfigPolicyEvidenceAvailable(false);
-        setVpsRuleEvidenceAvailable(false);
-        setCurrentPolicyAlerts([]);
-        setCurrentPolicyAlertsTruncated(false);
-        publishFleetError("detail", message);
-      }
-    }
-  }, [
-    apiToken,
-    applyFleetCoreSnapshot,
-    applyFleetDetailSnapshot,
-    applyFleetTelemetrySnapshot,
-    onUnauthorized,
-    publishFleetError,
-  ]);
+      const request = (async () => {
+        if (fleetTelemetryInFlight.current?.token === apiToken) {
+          await fleetTelemetryInFlight.current.promise;
+        }
+        if (apiTokenRef.current !== apiToken) {
+          return;
+        }
+        const fullGeneration = ++fleetFullGeneration.current;
+        const coreGeneration = ++fleetCoreGeneration.current;
+        const telemetryGeneration = ++fleetTelemetryGeneration.current;
+        try {
+          const snapshot = await apiGet<FleetSnapshotRecord>(
+            "/api/v1/fleet/snapshot?mode=full",
+            apiToken,
+          );
+          if (apiTokenRef.current !== apiToken || snapshot.mode !== "full") {
+            return;
+          }
+          const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+          const telemetryIsCurrent =
+            telemetryGeneration === fleetTelemetryGeneration.current;
+          const fullLoadIsCurrent =
+            fullGeneration === fleetFullGeneration.current;
+          if (coreIsCurrent) {
+            applyFleetCoreSnapshot(snapshot);
+          }
+          if (telemetryIsCurrent) {
+            applyFleetTelemetrySnapshot(snapshot);
+          }
+          if (fullLoadIsCurrent) {
+            applyFleetDetailSnapshot(snapshot);
+          }
+        } catch (error) {
+          const fullLoadIsCurrent =
+            fullGeneration === fleetFullGeneration.current;
+          const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+          const telemetryIsCurrent =
+            telemetryGeneration === fleetTelemetryGeneration.current;
+          if (
+            apiTokenRef.current !== apiToken ||
+            (!fullLoadIsCurrent && !coreIsCurrent && !telemetryIsCurrent)
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setSummary(emptySummary);
+            setAgents([]);
+            setFleetAlerts([]);
+            setFleetAlertsTruncated(false);
+            setFleetAlertHistory([]);
+            setFleetAlertHistoryTruncated(false);
+            setFleetAlertStates([]);
+            setFleetAlertPolicies([]);
+            setVpsRuleValues([]);
+            setTrafficAccounting([]);
+            setPolicyAlerts([]);
+            setCurrentPolicyAlerts([]);
+            setCurrentPolicyAlertsTruncated(false);
+            setFleetAlertNotificationChannels([]);
+            setFleetAlertNotifications([]);
+            setWebhookRules([]);
+            setWebhookRuleDeliveries([]);
+            setTelemetryRollups([]);
+            setTelemetryNetworkRates([]);
+            setTelemetryTunnels([]);
+            setTelemetryUptimes([]);
+            setFleetCoreEvidenceAvailable(false);
+            setFleetAlertsEvidenceAvailable(false);
+            setFleetAlertHistoryEvidenceAvailable(false);
+            setFleetAlertStatesEvidenceAvailable(false);
+            setPolicyAlertsEvidenceAvailable(false);
+            setCurrentPolicyAlertsEvidenceAvailable(false);
+            setConfigPolicyEvidenceAvailable(false);
+            setVpsRuleEvidenceAvailable(false);
+            fleetSourceErrors.current = { core: "Operator login required" };
+            setApiError("Operator login required");
+            return;
+          }
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Fleet refresh unavailable";
+          if (isHeavyReadAdmissionBusy(error)) {
+            publishFleetError("core", message);
+            publishFleetError("telemetry", message);
+            publishFleetError("detail", message);
+            return;
+          }
+          if (coreIsCurrent) {
+            setFleetCoreEvidenceAvailable(false);
+            publishFleetError("core", message);
+          }
+          if (telemetryIsCurrent) {
+            publishFleetError("telemetry", message);
+          }
+          if (fullLoadIsCurrent) {
+            setFleetAlertsEvidenceAvailable(false);
+            setFleetAlerts([]);
+            setFleetAlertsTruncated(false);
+            setFleetAlertHistoryEvidenceAvailable(false);
+            setFleetAlertStatesEvidenceAvailable(false);
+            setPolicyAlertsEvidenceAvailable(false);
+            setCurrentPolicyAlertsEvidenceAvailable(false);
+            setConfigPolicyEvidenceAvailable(false);
+            setVpsRuleEvidenceAvailable(false);
+            setCurrentPolicyAlerts([]);
+            setCurrentPolicyAlertsTruncated(false);
+            publishFleetError("detail", message);
+          }
+        }
+      })();
+      const trackedRequest = request.finally(() => {
+        if (fleetFullInFlight.current?.promise === trackedRequest) {
+          fleetFullInFlight.current = null;
+          if (
+            fleetFullRefreshPending.current &&
+            apiTokenRef.current === apiToken
+          ) {
+            fleetFullRefreshPending.current = false;
+            fleetTelemetryRefreshPending.current = false;
+            queueMicrotask(() => void loadFleetRef.current());
+          } else if (
+            fleetTelemetryRefreshPending.current &&
+            apiTokenRef.current === apiToken
+          ) {
+            fleetTelemetryRefreshPending.current = false;
+            queueMicrotask(() => void loadFleetTelemetryRef.current());
+          }
+        }
+      });
+      fleetFullInFlight.current = { token: apiToken, promise: trackedRequest };
+      return trackedRequest;
+    },
+    [
+      apiToken,
+      applyFleetCoreSnapshot,
+      applyFleetDetailSnapshot,
+      applyFleetTelemetrySnapshot,
+      onUnauthorized,
+      publishFleetError,
+    ],
+  );
+  loadFleetRef.current = loadFleet;
 
-  const loadFleetTelemetry = useCallback(() => {
-    if (apiTokenRef.current !== apiToken) {
-      return Promise.resolve();
-    }
-    if (fleetTelemetryInFlight.current?.token === apiToken) {
-      fleetTelemetryRefreshPending.current = true;
-      return fleetTelemetryInFlight.current.promise;
-    }
-    fleetTelemetryRefreshPending.current = false;
-    const coreGeneration = ++fleetCoreGeneration.current;
-    const telemetryGeneration = ++fleetTelemetryGeneration.current;
-    const request = (async () => {
-      try {
-        const snapshot = await apiGet<FleetSnapshotRecord>(
-          "/api/v1/fleet/snapshot?mode=live",
-          apiToken,
-        );
-        if (apiTokenRef.current !== apiToken || snapshot.mode !== "live") {
-          return;
-        }
-        if (coreGeneration === fleetCoreGeneration.current) {
-          applyFleetCoreSnapshot(snapshot);
-        }
-        if (telemetryGeneration === fleetTelemetryGeneration.current) {
-          applyFleetTelemetrySnapshot(snapshot);
-        }
-      } catch (error) {
-        const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
-        const telemetryIsCurrent =
-          telemetryGeneration === fleetTelemetryGeneration.current;
-        if (
-          apiTokenRef.current !== apiToken ||
-          (!coreIsCurrent && !telemetryIsCurrent)
-        ) {
-          return;
-        }
-        if (isApiUnauthorized(error)) {
-          onUnauthorized();
-          setSummary(emptySummary);
-          setAgents([]);
-          setTelemetryRollups([]);
-          setTelemetryNetworkRates([]);
-          setTelemetryTunnels([]);
-          setTelemetryUptimes([]);
-          setFleetCoreEvidenceAvailable(false);
-          setFleetAlertsEvidenceAvailable(false);
-          fleetSourceErrors.current = { core: "Operator login required" };
-          setApiError("Operator login required");
-          return;
-        }
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Live fleet telemetry unavailable";
-        if (coreIsCurrent) {
-          setFleetCoreEvidenceAvailable(false);
-          publishFleetError("core", message);
-        }
-        if (telemetryIsCurrent) {
-          publishFleetError("telemetry", message);
-        }
+  const loadFleetTelemetry = useCallback(
+    (trailingRefresh = false) => {
+      if (apiTokenRef.current !== apiToken) {
+        return Promise.resolve();
       }
-    })();
-    const trackedRequest = request.finally(() => {
-      if (fleetTelemetryInFlight.current?.promise === trackedRequest) {
-        fleetTelemetryInFlight.current = null;
-        if (
-          fleetTelemetryRefreshPending.current &&
-          apiTokenRef.current === apiToken
-        ) {
-          fleetTelemetryRefreshPending.current = false;
-          queueMicrotask(() => void loadFleetTelemetryRef.current());
-        }
+      if (fleetFullInFlight.current?.token === apiToken) {
+        if (trailingRefresh) fleetTelemetryRefreshPending.current = true;
+        return fleetFullInFlight.current.promise;
       }
-    });
-    fleetTelemetryInFlight.current = {
-      token: apiToken,
-      promise: trackedRequest,
-    };
-    return trackedRequest;
-  }, [
-    apiToken,
-    applyFleetCoreSnapshot,
-    applyFleetTelemetrySnapshot,
-    onUnauthorized,
-    publishFleetError,
-  ]);
+      if (fleetTelemetryInFlight.current?.token === apiToken) {
+        if (trailingRefresh) fleetTelemetryRefreshPending.current = true;
+        return fleetTelemetryInFlight.current.promise;
+      }
+      const coreGeneration = ++fleetCoreGeneration.current;
+      const telemetryGeneration = ++fleetTelemetryGeneration.current;
+      const request = (async () => {
+        try {
+          const snapshot = await apiGet<FleetSnapshotRecord>(
+            "/api/v1/fleet/snapshot?mode=live",
+            apiToken,
+          );
+          if (apiTokenRef.current !== apiToken || snapshot.mode !== "live") {
+            return;
+          }
+          if (coreGeneration === fleetCoreGeneration.current) {
+            applyFleetCoreSnapshot(snapshot);
+          }
+          if (telemetryGeneration === fleetTelemetryGeneration.current) {
+            applyFleetTelemetrySnapshot(snapshot);
+          }
+        } catch (error) {
+          const coreIsCurrent = coreGeneration === fleetCoreGeneration.current;
+          const telemetryIsCurrent =
+            telemetryGeneration === fleetTelemetryGeneration.current;
+          if (
+            apiTokenRef.current !== apiToken ||
+            (!coreIsCurrent && !telemetryIsCurrent)
+          ) {
+            return;
+          }
+          if (isApiUnauthorized(error)) {
+            onUnauthorized();
+            setSummary(emptySummary);
+            setAgents([]);
+            setTelemetryRollups([]);
+            setTelemetryNetworkRates([]);
+            setTelemetryTunnels([]);
+            setTelemetryUptimes([]);
+            setFleetCoreEvidenceAvailable(false);
+            setFleetAlertsEvidenceAvailable(false);
+            fleetSourceErrors.current = { core: "Operator login required" };
+            setApiError("Operator login required");
+            return;
+          }
+          const message =
+            error instanceof Error
+              ? error.message
+              : "Live fleet telemetry unavailable";
+          if (coreIsCurrent) {
+            setFleetCoreEvidenceAvailable(false);
+            publishFleetError("core", message);
+          }
+          if (telemetryIsCurrent) {
+            publishFleetError("telemetry", message);
+          }
+        }
+      })();
+      const trackedRequest = request.finally(() => {
+        if (fleetTelemetryInFlight.current?.promise === trackedRequest) {
+          fleetTelemetryInFlight.current = null;
+          if (
+            fleetTelemetryRefreshPending.current &&
+            apiTokenRef.current === apiToken
+          ) {
+            fleetTelemetryRefreshPending.current = false;
+            queueMicrotask(() => void loadFleetTelemetryRef.current());
+          }
+        }
+      });
+      fleetTelemetryInFlight.current = {
+        token: apiToken,
+        promise: trackedRequest,
+      };
+      return trackedRequest;
+    },
+    [
+      apiToken,
+      applyFleetCoreSnapshot,
+      applyFleetTelemetrySnapshot,
+      onUnauthorized,
+      publishFleetError,
+    ],
+  );
   loadFleetTelemetryRef.current = loadFleetTelemetry;
-
   const replaceFleetSnapshot = useCallback(
     (nextSummary: FleetSummary, nextAgents: AgentView[]) => {
       if (apiTokenRef.current !== apiToken) {
@@ -740,7 +802,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (staleDeletedIds.length > 0) {
         setFleetCoreEvidenceAvailable(false);
         publishFleetError("core", staleFleetSnapshotMessage(staleDeletedIds));
-        void loadFleet();
+        void loadFleet(true);
         return;
       }
       setSummary(nextSummary);
@@ -766,7 +828,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setAgents((current) =>
         current.map((stored) => (stored.id === agent.id ? agent : stored)),
       );
-      await loadFleet();
+      await loadFleet(true);
       return agent;
     },
     [apiToken, loadFleet],
@@ -840,7 +902,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setTelemetryUptimes((current) =>
           current.filter((record) => !deletedIds.has(record.client_id)),
         );
-        await loadFleet();
+        await loadFleet(true);
       }
       return outcomes;
     },
@@ -867,7 +929,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             left.name.localeCompare(right.name),
         );
       });
-      await loadFleet();
+      await loadFleet(true);
       return policy;
     },
     [apiToken, loadFleet],
@@ -911,7 +973,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
-      await loadFleet();
+      await loadFleet(true);
       return preview;
     },
     [apiToken, loadFleet],
@@ -926,7 +988,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         apiToken,
         request,
       );
-      await loadFleet();
+      await loadFleet(true);
       return preview;
     },
     [apiToken, loadFleet],
@@ -945,36 +1007,45 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlertPolicies((current) =>
         current.filter((policy) => policy.id !== policyId),
       );
-      await loadFleet();
+      await loadFleet(true);
     },
     [apiToken, loadFleet],
   );
 
-  const updateFleetAlertState = useCallback(
-    async (request: FleetAlertStateRequest) => {
-      const state = await apiPost<FleetAlertStateRecord>(
-        "/api/v1/fleet-alert-states",
-        apiToken,
-        request,
-      );
-      if (apiTokenRef.current !== apiToken) {
-        return state;
+  const bulkUpdateFleetAlertStates = useCallback(
+    async (request: FleetAlertStateBulkRequest) => {
+      try {
+        const response = await apiPost<FleetAlertStateBulkResponse>(
+          "/api/v1/fleet-alert-states/bulk",
+          apiToken,
+          request,
+        );
+        if (apiTokenRef.current !== apiToken) {
+          return response;
+        }
+        setFleetAlertStates((current) =>
+          mergeFleetAlertStates(current, response.states),
+        );
+        setFleetAlerts((current) =>
+          applyFleetAlertStates(current, response.states),
+        );
+        setFleetAlertHistory((current) =>
+          applyFleetAlertStates(current, response.states),
+        );
+        setFleetAlertEventReviewItems((current) =>
+          applyFleetAlertStates(current, response.states),
+        );
+        return response;
+      } catch (error) {
+        if (apiTokenRef.current === apiToken) {
+          try {
+            await loadFleet(true);
+          } catch {
+            // Recovery is best effort; preserve the original mutation failure.
+          }
+        }
+        throw error;
       }
-      setFleetAlertStates((current) => {
-        const withoutState = current.filter(
-          (stored) => stored.alert_id !== state.alert_id,
-        );
-        return [state, ...withoutState].sort((left, right) =>
-          right.updated_at.localeCompare(left.updated_at),
-        );
-      });
-      setFleetAlerts((current) => applyFleetAlertState(current, state));
-      setFleetAlertHistory((current) => applyFleetAlertState(current, state));
-      setFleetAlertEventReviewItems((current) =>
-        applyFleetAlertState(current, state),
-      );
-      await loadFleet();
-      return state;
     },
     [apiToken, loadFleet],
   );
@@ -999,7 +1070,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         alert,
         ...current.filter((stored) => stored.id !== alert.id),
       ]);
-      await loadFleet();
+      await loadFleet(true);
       return alert;
     },
     [apiToken, loadFleet],
@@ -1137,7 +1208,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           left.name.localeCompare(right.name),
         );
       });
-      await loadFleet();
+      await loadFleet(true);
       return channel;
     },
     [apiToken, loadFleet],
@@ -1156,7 +1227,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setFleetAlertNotificationChannels((current) =>
         current.filter((channel) => channel.id !== channelId),
       );
-      await loadFleet();
+      await loadFleet(true);
     },
     [apiToken, loadFleet],
   );
@@ -1179,7 +1250,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             right.created_at.localeCompare(left.created_at),
           );
         });
-        await loadFleet();
+        await loadFleet(true);
       }
       return deliveries;
     },
@@ -1206,7 +1277,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             right.created_at.localeCompare(left.created_at),
           );
         });
-        await loadFleet();
+        await loadFleet(true);
       }
       return deliveries;
     },
@@ -1231,7 +1302,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           left.name.localeCompare(right.name),
         );
       });
-      void loadFleet();
+      void loadFleet(true);
       return rule;
     },
     [apiToken, loadFleet],
@@ -1250,7 +1321,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       setWebhookRules((current) =>
         current.filter((rule) => rule.id !== ruleId),
       );
-      await loadFleet();
+      await loadFleet(true);
     },
     [apiToken, loadFleet],
   );
@@ -1283,7 +1354,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             right.created_at.localeCompare(left.created_at),
           );
         });
-        await loadFleet();
+        await loadFleet(true);
       }
       return deliveries;
     },
@@ -1310,7 +1381,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
             right.created_at.localeCompare(left.created_at),
           );
         });
-        await loadFleet();
+        await loadFleet(true);
       }
       return deliveries;
     },
@@ -1327,7 +1398,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         request,
       );
       if (request.confirmed) {
-        await loadFleet();
+        await loadFleet(true);
       }
       return response;
     },
@@ -1340,6 +1411,8 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetCoreGeneration.current += 1;
     fleetTelemetryGeneration.current += 1;
     fleetTelemetryInFlight.current = null;
+    fleetFullInFlight.current = null;
+    fleetFullRefreshPending.current = false;
     fleetTelemetryRefreshPending.current = false;
     fleetAlertEventReviewInFlight.current = false;
     fleetSourceErrors.current = {};
@@ -1446,7 +1519,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     dispatchWebhookRules,
     processWebhookRuleDeliveries,
     rotateWebhookDeliveryHistory,
-    updateFleetAlertState,
+    bulkUpdateFleetAlertStates,
   };
 }
 
@@ -1506,22 +1579,48 @@ function dedupeFleetAlertsById(alerts: FleetAlertRecord[]): FleetAlertRecord[] {
   return Array.from(byId.values());
 }
 
-function applyFleetAlertState(
+function applyFleetAlertStates(
   alerts: FleetAlertRecord[],
-  state: FleetAlertStateRecord,
+  states: FleetAlertStateRecord[],
 ): FleetAlertRecord[] {
+  const stateByAlertId = new Map(
+    states.map((state) => [state.alert_id, state]),
+  );
   return alerts.map((alert) =>
-    alert.id === state.alert_id
-      ? {
-          ...alert,
-          escalation_level: state.escalation_level,
-          muted_until_unix: state.muted_until_unix,
-          operator_state: state.state,
-          state_actor_id: state.actor_id,
-          state_reason: state.reason,
-          state_updated_at: state.updated_at,
-        }
-      : alert,
+    applyFleetAlertState(alert, stateByAlertId.get(alert.id)),
+  );
+}
+
+function applyFleetAlertState(
+  alert: FleetAlertRecord,
+  state: FleetAlertStateRecord | undefined,
+): FleetAlertRecord {
+  return state
+    ? {
+        ...alert,
+        escalation_level: state.escalation_level,
+        muted_until_unix: state.muted_until_unix,
+        operator_state: state.state,
+        state_actor_id: state.actor_id,
+        state_reason: state.reason,
+        state_revision: state.revision,
+        state_updated_at: state.updated_at,
+      }
+    : alert;
+}
+
+function mergeFleetAlertStates(
+  current: FleetAlertStateRecord[],
+  changed: FleetAlertStateRecord[],
+): FleetAlertStateRecord[] {
+  const changedIds = new Set(changed.map((state) => state.alert_id));
+  return [
+    ...changed,
+    ...current.filter((state) => !changedIds.has(state.alert_id)),
+  ].sort(
+    (left, right) =>
+      right.updated_at.localeCompare(left.updated_at) ||
+      left.alert_id.localeCompare(right.alert_id),
   );
 }
 

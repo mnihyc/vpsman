@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -33,6 +35,7 @@ use crate::{
         VpsRulesDryRunRequest, VpsRulesDryRunResponse,
     },
     model_alert_states::{
+        BulkUpdateFleetAlertStatesRequest, BulkUpdateFleetAlertStatesResponse,
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
@@ -361,11 +364,56 @@ pub(crate) async fn update_fleet_alert_state(
             .repo
             .update_fleet_alert_state(&request, &operator)
             .await
-            .map_err(ApiError::internal_mapper(
-                "fleet_alert_state_update_failed",
-                "The fleet alert state could not be updated.",
-            ))?,
+            .map_err(fleet_alert_state_mutation_error)?,
     ))
+}
+
+pub(crate) async fn bulk_update_fleet_alert_states(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<BulkUpdateFleetAlertStatesRequest>,
+) -> Result<Json<BulkUpdateFleetAlertStatesResponse>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    validate_bulk_alert_state_request(&request)?;
+    Ok(Json(
+        state
+            .repo
+            .bulk_update_fleet_alert_states(&request, &operator)
+            .await
+            .map_err(fleet_alert_state_mutation_error)?,
+    ))
+}
+
+fn fleet_alert_state_mutation_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("fleet_alert_state_snapshot_stale") {
+        return ApiError::conflict("fleet_alert_state_snapshot_stale");
+    }
+    for code in [
+        "fleet_alert_state_confirmation_required",
+        "fleet_alert_state_items_invalid",
+        "fleet_alert_state_duplicate_item",
+        "fleet_alert_state_expected_revision_invalid",
+        "fleet_alert_state_action_invalid",
+        "fleet_alert_mute_duration_invalid",
+        "fleet_alert_mute_duration_unexpected",
+    ] {
+        if message.contains(code) {
+            return ApiError::bad_request(code);
+        }
+    }
+    if message.contains("fleet_alert_escalation_level_overflow")
+        || message.contains("fleet_alert_state_revision_overflow")
+    {
+        return ApiError::conflict("fleet_alert_state_snapshot_stale");
+    }
+    ApiError::internal(
+        "fleet_alert_state_update_failed",
+        "The fleet alert state could not be updated.",
+        error,
+    )
 }
 
 pub(crate) async fn list_fleet_alert_policies(
@@ -867,10 +915,66 @@ fn validate_alert_state_request(request: &UpdateFleetAlertStateRequest) -> Resul
         ));
     }
     validate_alert_id(&request.alert_id)?;
-    match request.action.trim() {
-        "acknowledge" | "escalate" | "clear" => {}
+    if request
+        .expected_revision
+        .is_some_and(|revision| revision < 0)
+    {
+        return Err(ApiError::bad_request(
+            "fleet_alert_state_expected_revision_invalid",
+        ));
+    }
+    validate_alert_state_action_fields(
+        &request.action,
+        request.muted_for_secs,
+        request.reason.as_deref(),
+    )
+}
+
+fn validate_bulk_alert_state_request(
+    request: &BulkUpdateFleetAlertStatesRequest,
+) -> Result<(), ApiError> {
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "fleet_alert_state_confirmation_required",
+        ));
+    }
+    if request.items.is_empty() || request.items.len() > 1_000 {
+        return Err(ApiError::bad_request("fleet_alert_state_items_invalid"));
+    }
+    let mut alert_ids = HashSet::with_capacity(request.items.len());
+    for item in &request.items {
+        validate_alert_id(&item.alert_id)?;
+        if item.expected_revision < 0 {
+            return Err(ApiError::bad_request(
+                "fleet_alert_state_expected_revision_invalid",
+            ));
+        }
+        if !alert_ids.insert(item.alert_id.trim()) {
+            return Err(ApiError::bad_request("fleet_alert_state_duplicate_item"));
+        }
+    }
+    validate_alert_state_action_fields(
+        &request.action,
+        request.muted_for_secs,
+        request.reason.as_deref(),
+    )
+}
+
+fn validate_alert_state_action_fields(
+    action: &str,
+    muted_for_secs: Option<i64>,
+    reason: Option<&str>,
+) -> Result<(), ApiError> {
+    match action.trim() {
+        "acknowledge" | "escalate" | "clear" => {
+            if muted_for_secs.is_some() {
+                return Err(ApiError::bad_request(
+                    "fleet_alert_mute_duration_unexpected",
+                ));
+            }
+        }
         "mute" => {
-            if let Some(seconds) = request.muted_for_secs {
+            if let Some(seconds) = muted_for_secs {
                 if !(60..=90 * 24 * 60 * 60).contains(&seconds) {
                     return Err(ApiError::bad_request("fleet_alert_mute_duration_invalid"));
                 }
@@ -878,10 +982,8 @@ fn validate_alert_state_request(request: &UpdateFleetAlertStateRequest) -> Resul
         }
         _ => return Err(ApiError::bad_request("fleet_alert_state_action_invalid")),
     }
-    if let Some(reason) = request.reason.as_deref() {
-        if reason.len() > 1024 {
-            return Err(ApiError::bad_request("fleet_alert_state_reason_too_long"));
-        }
+    if reason.is_some_and(|reason| reason.len() > 1024) {
+        return Err(ApiError::bad_request("fleet_alert_state_reason_too_long"));
     }
     Ok(())
 }

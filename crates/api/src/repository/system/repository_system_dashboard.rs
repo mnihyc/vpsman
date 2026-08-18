@@ -690,6 +690,22 @@ pub(crate) fn system_metric_samples_from_snapshot(
                     .rejected_agent_connections
                     .unwrap_or_default() as f64,
             ),
+            sample(
+                "gateway_events.telemetry_admission_limit",
+                gateway_events.telemetry_admission_limit.unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.telemetry_admission_active",
+                gateway_events
+                    .telemetry_admission_active
+                    .unwrap_or_default() as f64,
+            ),
+            sample(
+                "gateway_events.telemetry_admission_waiting",
+                gateway_events
+                    .telemetry_admission_waiting
+                    .unwrap_or_default() as f64,
+            ),
         ]);
     }
     samples

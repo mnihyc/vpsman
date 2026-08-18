@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   Activity,
   AlertTriangle,
@@ -438,7 +445,7 @@ const suiteConfigSections: ConfigSectionSpec[] = [
   },
   {
     description:
-      "Control-plane pool and dispatch limits for 20-50 long-lived VPS operation.",
+      "Control-plane pool, dispatch, and gateway telemetry admission limits.",
     id: "capacity",
     title: "Capacity",
     fields: [
@@ -473,6 +480,14 @@ const suiteConfigSections: ConfigSectionSpec[] = [
         label: "Dispatcher in-flight",
         path: "capacity.dispatcher_in_flight",
         rule: "integer, 1 or greater",
+      },
+      {
+        defaultValue: "8",
+        help: "Maximum concurrent gateway telemetry posts admitted to the API. This bounded backpressure limit requires a gateway restart after save.",
+        kind: "number",
+        label: "Gateway telemetry in-flight",
+        path: "capacity.gateway_telemetry_in_flight",
+        rule: "integer, 1 to 512",
       },
     ],
   },
@@ -4686,6 +4701,12 @@ function SystemCapacityPanel({
     oldestAgeSecs: null,
   });
   const gatewayEvents = dashboard?.current.gateway_events;
+  const gatewayTelemetryLimit =
+    gatewayEvents?.telemetry_admission_limit ?? null;
+  const gatewayTelemetryActive =
+    gatewayEvents?.telemetry_admission_active ?? null;
+  const gatewayTelemetryWaiting =
+    gatewayEvents?.telemetry_admission_waiting ?? null;
   const gatewayQueueGrowth = seriesDelta(
     series,
     "gateway_events.current_queue_depth",
@@ -4709,9 +4730,28 @@ function SystemCapacityPanel({
     dispatchModel.tone,
     gatewayModel.tone,
   ]);
-  const configuredLimit = dashboard
-    ? `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`
-    : "Unknown";
+  const selectedConfiguredLimit =
+    activeSubsystem === "database"
+      ? {
+          label: "DB pool ceiling",
+          value: dashboard
+            ? `${dashboard.current.db_pool.max_connections} connections`
+            : "Unknown",
+        }
+      : activeSubsystem === "gateway"
+        ? {
+            label: "Telemetry admission ceiling",
+            value:
+              gatewayTelemetryLimit === null
+                ? "Not reported"
+                : `${gatewayTelemetryLimit} in-flight`,
+          }
+        : {
+            label: "Dispatch limit",
+            value: dashboard
+              ? `${valueOrNotConfigured(dispatcherInFlight)} in-flight / ${valueOrNotConfigured(dispatcherBatch)} batch`
+              : "Unknown",
+          };
   const capacityForecast = !dashboard
     ? "Capacity evidence is unavailable."
     : profileLimit && dispatcherInFlight && dispatcherBatch
@@ -4779,7 +4819,7 @@ function SystemCapacityPanel({
         badge={gatewayEvents?.status ?? "unavailable"}
         badgeTone={gatewayModel.tone}
         icon={<Network size={18} />}
-        insight="Gateway capacity warns only when queue age, growth, queue-full failures, or live status indicate pressure."
+        insight="Gateway capacity warns when queue age, growth, telemetry admission waiting, queue-full failures, or live status indicate pressure."
         title="Gateway capacity"
         subtitle="Gateway-to-API forwarding backlog, retries, drops, and queue saturation."
         metrics={[
@@ -4808,6 +4848,18 @@ function SystemCapacityPanel({
               gatewayEvents?.rejected_agent_connections,
             ),
           },
+          {
+            label: "Telemetry admission limit",
+            value: valueOrNotConfigured(gatewayTelemetryLimit),
+          },
+          {
+            label: "Telemetry posts active",
+            value: valueOrNotConfigured(gatewayTelemetryActive),
+          },
+          {
+            label: "Telemetry posts waiting",
+            value: valueOrNotConfigured(gatewayTelemetryWaiting),
+          },
         ]}
         thresholds={[
           {
@@ -4820,7 +4872,11 @@ function SystemCapacityPanel({
             tone: "critical",
             value: "queue full / expired drops",
           },
-          { label: "Warn", tone: "warning", value: "age or growth" },
+          {
+            label: "Warn",
+            tone: "warning",
+            value: "age, growth, or admission wait",
+          },
         ]}
         lines={chartLines(
           series,
@@ -4829,6 +4885,9 @@ function SystemCapacityPanel({
             "gateway_events.oldest_event_age_secs",
             "gateway_events.dropped_events",
             "gateway_events.retry_attempts",
+            "gateway_events.telemetry_admission_limit",
+            "gateway_events.telemetry_admission_active",
+            "gateway_events.telemetry_admission_waiting",
           ],
           dashboard?.bucket_secs ?? 60,
         )}
@@ -5008,6 +5067,36 @@ function SystemCapacityPanel({
               tone: gatewayModel.tone,
               value: systemToneLabel(gatewayModel.tone),
             },
+            {
+              detail:
+                "Active telemetry API posts compared with the live gateway admission ceiling.",
+              label: "Telemetry admission",
+              tone:
+                gatewayTelemetryActive === null ||
+                gatewayTelemetryLimit === null ||
+                gatewayTelemetryWaiting === null
+                  ? "neutral"
+                  : gatewayTelemetryWaiting > 0
+                    ? "warning"
+                    : "ok",
+              value:
+                gatewayTelemetryActive === null ||
+                gatewayTelemetryLimit === null
+                  ? "Unknown"
+                  : `${gatewayTelemetryActive}/${gatewayTelemetryLimit} active`,
+            },
+            {
+              detail:
+                "Waiting clients retain bounded coalesced telemetry while an admission permit is unavailable.",
+              label: "Telemetry waiting",
+              tone:
+                gatewayTelemetryWaiting === null
+                  ? "neutral"
+                  : gatewayTelemetryWaiting > 0
+                    ? "warning"
+                    : "ok",
+              value: valueOrNotConfigured(gatewayTelemetryWaiting),
+            },
           ]
         : [
             {
@@ -5066,6 +5155,10 @@ function SystemCapacityPanel({
             ["Dispatcher batch", "capacity.dispatcher_batch"],
           ]
         : [
+            [
+              "Gateway telemetry in-flight",
+              "capacity.gateway_telemetry_in_flight",
+            ],
             ["Event post seconds", "timeouts.event_post_secs"],
             ["Internal HTTP read", "timeouts.internal_http_read_secs"],
           ];
@@ -5202,8 +5295,8 @@ function SystemCapacityPanel({
                 <span>{capacityForecast}</span>
               </div>
               <div>
-                <strong>Dispatch limit</strong>
-                <span>{configuredLimit}</span>
+                <strong>{selectedConfiguredLimit.label}</strong>
+                <span>{selectedConfiguredLimit.value}</span>
               </div>
             </div>
             <CapacityFactorGrid
@@ -5336,7 +5429,15 @@ function CapacityFactorGrid({
   items: CapacityFactorItem[];
 }) {
   return (
-    <div className="systemCapacityFactorGrid" aria-label={ariaLabel}>
+    <div
+      className="systemCapacityFactorGrid"
+      aria-label={ariaLabel}
+      style={
+        {
+          "--capacity-factor-columns": items.length % 3 === 0 ? 3 : 4,
+        } as CSSProperties
+      }
+    >
       {items.map((item) => (
         <div
           className={`systemCapacityFactor ${item.tone ?? "neutral"}`}
@@ -7061,6 +7162,12 @@ function gatewayCapacityHealth({
   }
   if (oldestAgeSecs !== null && oldestAgeSecs >= 60) {
     return { reason: "oldest gateway event exceeds 60s", tone: "warning" };
+  }
+  if ((gatewayEvents.telemetry_admission_waiting ?? 0) > 0) {
+    return {
+      reason: "telemetry admission has waiting posts",
+      tone: "warning",
+    };
   }
   if (queueGrowth !== null && queueGrowth > 0) {
     return { reason: "gateway queue is growing", tone: "warning" };

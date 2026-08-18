@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
 use super::{
-    aligned_timeline_point_count, client_monitoring_view, enrich_monitoring_share_target_evidence,
-    monitoring_cards_for_agents, monitoring_range, network_rate_is_current, public_billing_plan,
-    public_monitoring_card, public_network_metric, public_traffic_metric,
-    retained_resolution_for_age, retained_traffic_resolution_for_age, tier_aligned_step_secs,
-    traffic_uses_exact_source, ClientMonitoringQuery,
+    aligned_timeline_point_count, build_monitoring_cards_page, client_monitoring_view,
+    enrich_monitoring_share_target_evidence, monitoring_cards_for_agents, monitoring_range,
+    network_rate_is_current, public_billing_plan, public_monitoring_card, public_network_metric,
+    public_traffic_metric, retained_resolution_for_age, retained_traffic_resolution_for_age,
+    tier_aligned_step_secs, traffic_uses_exact_source, ClientMonitoringQuery,
 };
 use axum::{
     body::Body,
@@ -24,7 +24,7 @@ use crate::{
         PublicMonitoringShareView, PublicNetworkMetricView, PublicNetworkPointView,
         PublicPingMetricView, PublicPingPointView, PublicPortSpeedView, PublicResourceMetricView,
         PublicSystemInformationView, PublicTrafficHistoryPointView, PublicTrafficMetricView,
-        TelemetryNetworkRateView,
+        TelemetryNetworkRateView, TelemetryRollupView, TelemetrySampleView,
     },
     model_alert_policies::TrafficAccountingRecord,
     repository::{MemoryState, Repository},
@@ -45,6 +45,111 @@ fn router_test_state() -> AppState {
         require_registered_agent_updates: false,
         suite_config_path: "config/vpsman.toml".into(),
         dispatcher_config: DispatcherRuntimeConfig::default(),
+    }
+}
+
+#[tokio::test]
+async fn home_monitoring_projection_omits_only_unrendered_histories() {
+    let state = router_test_state();
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!()
+    };
+    let now = crate::unix_now();
+    let observed_at = now.saturating_sub(30).to_string();
+    let agent = AgentView {
+        id: "v-history".to_string(),
+        display_name: "History VPS".to_string(),
+        status: "online".to_string(),
+        tags: Vec::new(),
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: Some(observed_at.clone()),
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: vpsman_common::AgentCapabilitySnapshot::default(),
+    };
+    memory.agents.write().await.push(agent.clone());
+    memory
+        .telemetry_samples
+        .write()
+        .await
+        .push(TelemetrySampleView {
+            id: uuid::Uuid::new_v4(),
+            client_id: agent.id.clone(),
+            observed_at: observed_at.clone(),
+            cpu_load_1: 0.5,
+            memory_total_bytes: 1_000,
+            memory_available_bytes: 500,
+            payload: serde_json::to_value(vpsman_common::AgentMetrics::default()).unwrap(),
+        });
+    memory
+        .telemetry_rollups
+        .write()
+        .await
+        .push(monitoring_test_rollup(&agent.id, &observed_at));
+
+    let default_projection = build_monitoring_cards_page(&state, None, 1_000, 0, true)
+        .await
+        .unwrap();
+    let home_projection = build_monitoring_cards_page(&state, None, 1_000, 0, false)
+        .await
+        .unwrap();
+
+    assert_eq!(default_projection.total, 1);
+    assert_eq!(default_projection.items.len(), 1);
+    assert!(!default_projection.items[0].resource_history.is_empty());
+    assert_eq!(home_projection.total, 1);
+    assert_eq!(home_projection.items.len(), 1);
+    assert_eq!(home_projection.next_offset, None);
+    assert!(home_projection.items[0].resources.is_some());
+    assert!(home_projection.items[0].resource_history.is_empty());
+    assert!(home_projection.items[0].network_history.is_empty());
+    assert!(home_projection.items[0].primary_ping_history.is_empty());
+}
+
+fn monitoring_test_rollup(client_id: &str, observed_at: &str) -> TelemetryRollupView {
+    TelemetryRollupView {
+        client_id: client_id.to_string(),
+        bucket_start: observed_at.to_string(),
+        bucket_secs: 60,
+        sample_count: 1,
+        cpu_usage_sample_count: 0,
+        cpu_usage_avg: None,
+        cpu_usage_max: None,
+        cpu_cores_max: 1,
+        cpu_load_1_avg: 0.5,
+        cpu_load_1_max: 0.5,
+        cpu_load_5_avg: 0.5,
+        cpu_load_5_max: 0.5,
+        cpu_load_15_avg: 0.5,
+        cpu_load_15_max: 0.5,
+        memory_total_bytes_max: 1_000,
+        memory_available_bytes_avg: 500,
+        memory_available_bytes_min: 500,
+        memory_used_ratio_avg: 0.5,
+        memory_used_ratio_max: 0.5,
+        swap_sample_count: 0,
+        swap_total_bytes_max: None,
+        swap_available_bytes_avg: None,
+        swap_available_bytes_min: None,
+        swap_used_ratio_avg: None,
+        swap_used_ratio_max: None,
+        disk_total_bytes_max: 2_000,
+        disk_available_bytes_avg: 1_000,
+        disk_available_bytes_min: 1_000,
+        disk_used_ratio_avg: 0.5,
+        disk_used_ratio_max: 0.5,
+        network_rx_bytes_max: 0,
+        network_tx_bytes_max: 0,
+        connections_sample_count: 0,
+        tcp_sockets_latest: None,
+        udp_sockets_latest: None,
+        connections_observed_at: None,
+        latest_observed_at: observed_at.to_string(),
+        updated_at: observed_at.to_string(),
     }
 }
 

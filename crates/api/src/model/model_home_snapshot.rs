@@ -14,7 +14,7 @@ use crate::{
     model_terminal::TerminalSessionView,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct HomeSnapshotResponse {
     pub(crate) generated_at: String,
     pub(crate) operator: OperatorView,

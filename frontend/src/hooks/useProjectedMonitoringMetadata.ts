@@ -37,6 +37,7 @@ export function useProjectedMonitoringMetadata(
     );
     let active = true;
     const params = new URLSearchParams({
+      include_history: "false",
       limit: "1",
       offset: "0",
       selector_expression: selectorExpressionForClientIds([clientId]),

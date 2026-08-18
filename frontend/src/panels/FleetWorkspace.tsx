@@ -180,7 +180,6 @@ import type {
   FleetAlertNotificationDispatchRequest,
   FleetAlertNotificationProcessRequest,
   FleetAlertStateRecord,
-  FleetAlertStateRequest,
   FleetSummary,
   TrafficAccountingRecord,
   TrafficAccountingSelectorBreakdown,
@@ -360,7 +359,6 @@ export function FleetWorkspace({
   onRotateWebhookDeliveryHistory,
   onSelectAgent,
   onUpdateAgentAlias,
-  onUpdateFleetAlertState,
   onUpsertFleetAlertNotificationChannel,
   onUpsertFleetAlertPolicy,
   onUpsertWebhookRule,
@@ -457,9 +455,6 @@ export function FleetWorkspace({
     displayName: string,
     confirmed: boolean,
   ) => Promise<AgentView>;
-  onUpdateFleetAlertState: (
-    request: FleetAlertStateRequest,
-  ) => Promise<FleetAlertStateRecord>;
   onUpsertFleetAlertNotificationChannel: (
     request: FleetAlertNotificationChannelRequest,
   ) => Promise<FleetAlertNotificationChannelRecord>;

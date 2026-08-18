@@ -37,7 +37,7 @@ use vpsman_common::{
 use crate::{
     api_client::{
         GatewayControlClient, GatewayForwardConfig, GatewayHttpTimeouts, GatewaySpoolConfig,
-        DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS,
+        DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS, DEFAULT_TELEMETRY_IN_FLIGHT,
     },
     control::run_control_listener,
     state::{
@@ -124,6 +124,13 @@ pub(crate) struct Args {
         default_value_t = DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS
     )]
     command_output_event_ttl_secs: u64,
+    #[arg(
+        long,
+        env = "VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT",
+        default_value_t = DEFAULT_TELEMETRY_IN_FLIGHT,
+        value_parser = parse_gateway_telemetry_in_flight
+    )]
+    telemetry_in_flight: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,6 +185,7 @@ async fn main() -> Result<()> {
         runtime_config.http_timeouts,
         args.gateway_spool_config(),
         runtime_config.forward_config,
+        args.telemetry_in_flight,
     );
     let state = GatewayState {
         forward_metrics: api_client.forward_metrics(),
@@ -272,6 +280,11 @@ impl Args {
             &mut self.gateway_id,
             "VPSMAN_GATEWAY_ID",
             config.gateway.gateway_id.as_deref(),
+        );
+        apply_usize_default(
+            &mut self.telemetry_in_flight,
+            "VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT",
+            config.capacity.gateway_telemetry_in_flight,
         );
         self.apply_runtime_suite_config(config);
         if self.internal_token.is_none() && env_absent("VPSMAN_INTERNAL_TOKEN") {
@@ -426,6 +439,16 @@ fn env_absent(name: &str) -> bool {
     std::env::var_os(name).is_none()
 }
 
+fn parse_gateway_telemetry_in_flight(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|_| "gateway telemetry in-flight limit must be an integer".to_string())?;
+    if !(1..=512).contains(&parsed) {
+        return Err("gateway telemetry in-flight limit must be between 1 and 512".to_string());
+    }
+    Ok(parsed)
+}
+
 fn apply_opt_string(target: &mut Option<String>, env_name: &str, value: Option<&str>) {
     if target.is_none() && env_absent(env_name) {
         if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
@@ -451,6 +474,14 @@ fn apply_path_default(target: &mut PathBuf, env_name: &str, value: Option<&str>)
 }
 
 fn apply_u64_default(target: &mut u64, env_name: &str, value: Option<u64>) {
+    if env_absent(env_name) {
+        if let Some(value) = value {
+            *target = value;
+        }
+    }
+}
+
+fn apply_usize_default(target: &mut usize, env_name: &str, value: Option<usize>) {
     if env_absent(env_name) {
         if let Some(value) = value {
             *target = value;
@@ -1021,7 +1052,7 @@ async fn handle_agent_frame(
                 .as_ref()
                 .copied()
                 .context("telemetry_before_hello")?;
-            info!(
+            debug!(
                 client_id = %telemetry.client_id,
                 hostname = %telemetry.metrics.hostname,
                 uptime = telemetry.metrics.uptime_secs,

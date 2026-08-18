@@ -169,6 +169,34 @@ fn gateway_bind_defaults_to_loopback() {
 }
 
 #[test]
+fn gateway_telemetry_admission_defaults_to_eight_and_rejects_invalid_limits() {
+    with_cleared_gateway_env(&["VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT"], || {
+        let args = Args::parse_from(["vpsman-gateway"]);
+        assert_eq!(args.telemetry_in_flight, 8);
+        for invalid in ["0", "513"] {
+            assert!(
+                Args::try_parse_from(["vpsman-gateway", "--telemetry-in-flight", invalid,])
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
+fn gateway_suite_capacity_sets_restart_scoped_telemetry_admission() {
+    with_cleared_gateway_env(&["VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT"], || {
+        let suite =
+            SuiteConfig::parse("version = 1\n\n[capacity]\ngateway_telemetry_in_flight = 12\n")
+                .unwrap();
+        let mut args = test_args();
+
+        args.apply_suite_config(&suite).unwrap();
+
+        assert_eq!(args.telemetry_in_flight, 12);
+    });
+}
+
+#[test]
 fn socket_peer_canonicalization_only_unmaps_ipv4_mapped_ipv6() {
     let ipv4 = "192.0.2.10:59443".parse().unwrap();
     let ipv4_mapped = "[::ffff:192.0.2.10]:59443".parse().unwrap();
@@ -305,6 +333,7 @@ fn test_args() -> Args {
         spool_disk_max_bytes: 4 * 1024 * 1024 * 1024,
         spool_shutdown_flush_secs: 30,
         command_output_event_ttl_secs: DEFAULT_COMMAND_OUTPUT_EVENT_TTL_SECS,
+        telemetry_in_flight: DEFAULT_TELEMETRY_IN_FLIGHT,
     }
 }
 
@@ -320,6 +349,7 @@ const GATEWAY_HOT_RELOAD_ENV: &[&str] = &[
     "VPSMAN_GATEWAY_SPOOL_DISK_MAX_BYTES",
     "VPSMAN_GATEWAY_SPOOL_SHUTDOWN_FLUSH_SECS",
     "VPSMAN_GATEWAY_COMMAND_OUTPUT_EVENT_TTL_SECS",
+    "VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT",
 ];
 
 static GATEWAY_SUITE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

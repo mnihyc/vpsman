@@ -1,6 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 
 static TEST_ENQUEUE_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -78,7 +78,6 @@ async fn forward_once(
 ) -> GatewayForwardOutcome {
     let metrics = GatewayForwardMetrics::default();
     let critical_failure_handler = StdRwLock::new(None);
-    let telemetry_pending = Mutex::new(HashMap::new());
     let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
     let runtime_config = GatewayForwardRuntimeConfig::default();
     let timeouts = StdRwLock::new(GatewayHttpTimeouts {
@@ -93,7 +92,6 @@ async fn forward_once(
         &metrics,
         &critical_failure_handler,
         session_rejection_handler,
-        &telemetry_pending,
         &spool,
         &runtime_config,
         &timeouts,
@@ -189,7 +187,6 @@ async fn shutdown_defers_non_command_events_to_spool() {
     let metrics = GatewayForwardMetrics::default();
     let critical_failure_handler = StdRwLock::new(None);
     let session_rejection_handler = StdRwLock::new(None);
-    let telemetry_pending = Mutex::new(HashMap::new());
     let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
     let runtime_config = GatewayForwardRuntimeConfig::default();
     let timeouts = StdRwLock::new(GatewayHttpTimeouts::default());
@@ -201,7 +198,6 @@ async fn shutdown_defers_non_command_events_to_spool() {
         &metrics,
         &critical_failure_handler,
         &session_rejection_handler,
-        &telemetry_pending,
         &spool,
         &runtime_config,
         &timeouts,
@@ -230,7 +226,6 @@ async fn shutdown_interrupts_blocked_api_forward_post() {
     let metrics = GatewayForwardMetrics::default();
     let critical_failure_handler = StdRwLock::new(None);
     let session_rejection_handler = StdRwLock::new(None);
-    let telemetry_pending = Mutex::new(HashMap::new());
     let spool = GatewayForwardSpool::new(GatewaySpoolConfig::default());
     let runtime_config = GatewayForwardRuntimeConfig::default();
     let timeouts = StdRwLock::new(GatewayHttpTimeouts {
@@ -245,7 +240,6 @@ async fn shutdown_interrupts_blocked_api_forward_post() {
         &metrics,
         &critical_failure_handler,
         &session_rejection_handler,
-        &telemetry_pending,
         &spool,
         &runtime_config,
         &timeouts,
@@ -277,9 +271,9 @@ async fn post_without_api_url_returns_error() {
 }
 
 #[tokio::test]
-async fn telemetry_enqueue_keeps_latest_pending_event() {
+async fn hot_client_telemetry_keeps_one_coalesced_slot_and_one_drain_token() {
     let forwarder = GatewayEventForwarder::default();
-    let (sender, _receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
+    let (sender, mut receiver) = mpsc::channel(PER_TARGET_QUEUE_CAPACITY);
     forwarder.queues.lock().await.insert(
         "client-a".to_string(),
         GatewayForwardQueue {
@@ -296,27 +290,160 @@ async fn telemetry_enqueue_keeps_latest_pending_event() {
         )
         .await
         .unwrap();
-    forwarder
-        .enqueue(
-            "client-a".to_string(),
-            test_event("/internal/v1/gateway/telemetry", br#"{"seq":2}"#),
-            test_timeouts(),
-        )
-        .await
-        .unwrap();
+    for sequence in 2..=100 {
+        forwarder
+            .enqueue(
+                "client-a".to_string(),
+                test_event(
+                    "/internal/v1/gateway/telemetry",
+                    format!(r#"{{"seq":{sequence}}}"#).as_bytes(),
+                ),
+                test_timeouts(),
+            )
+            .await
+            .unwrap();
+    }
 
     let pending = forwarder.telemetry_pending.lock().await;
     assert_eq!(
-        pending.get("client-a").map(|event| event.body.as_slice()),
-        Some(br#"{"seq":2}"#.as_slice())
+        pending
+            .events
+            .get("client-a")
+            .map(|event| event.body.as_slice()),
+        Some(br#"{"seq":100}"#.as_slice())
     );
+    assert_eq!(pending.draining_targets.len(), 1);
+    drop(pending);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(GatewayForwardQueueItem::Telemetry { .. })
+    ));
+    assert!(receiver.try_recv().is_err());
     let snapshot = forwarder.metrics.snapshot();
     assert_eq!(snapshot.queued_events, 1);
     assert_eq!(snapshot.current_queue_depth, 1);
-    assert_eq!(snapshot.dropped_events, 1);
-    assert_eq!(snapshot.telemetry_dropped_events, 1);
-    assert_eq!(snapshot.dropped_by_kind.telemetry, 1);
-    assert_eq!(snapshot.dropped_by_reason.coalesced, 1);
+    assert_eq!(snapshot.dropped_events, 99);
+    assert_eq!(snapshot.telemetry_dropped_events, 99);
+    assert_eq!(snapshot.dropped_by_kind.telemetry, 99);
+    assert_eq!(snapshot.dropped_by_reason.coalesced, 99);
+}
+
+#[tokio::test]
+async fn telemetry_admission_is_bounded_and_observable() {
+    let forwarder = Arc::new(GatewayEventForwarder::with_config(
+        GatewaySpoolConfig::disabled(),
+        GatewayForwardConfig::default(),
+        2,
+    ));
+    let (release_tx, release_rx) = watch::channel(false);
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let forwarder = forwarder.clone();
+        let mut release_rx = release_rx.clone();
+        tasks.push(tokio::spawn(async move {
+            let _permit = acquire_telemetry_admission(
+                forwarder.telemetry_admission.clone(),
+                forwarder.metrics.clone(),
+            )
+            .await
+            .expect("admission remains open");
+            if !*release_rx.borrow() {
+                release_rx.changed().await.unwrap();
+            }
+        }));
+    }
+
+    time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = forwarder.metrics.snapshot();
+            if snapshot.telemetry_admission_active == 2 && snapshot.telemetry_admission_waiting == 4
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let snapshot = forwarder.metrics.snapshot();
+    assert_eq!(snapshot.telemetry_admission_limit, 2);
+    assert_eq!(snapshot.telemetry_admission_active, 2);
+    assert_eq!(snapshot.telemetry_admission_waiting, 4);
+
+    release_tx.send(true).unwrap();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    let snapshot = forwarder.metrics.snapshot();
+    assert_eq!(snapshot.telemetry_admission_active, 0);
+    assert_eq!(snapshot.telemetry_admission_waiting, 0);
+}
+
+#[tokio::test]
+async fn telemetry_waits_for_admission_without_blocking_same_client_lifecycle() {
+    let forwarder = GatewayEventForwarder::with_config(
+        GatewaySpoolConfig::disabled(),
+        GatewayForwardConfig::default(),
+        1,
+    );
+    let held_permit = forwarder
+        .telemetry_admission
+        .clone()
+        .acquire_owned()
+        .await
+        .unwrap();
+    let mut telemetry = test_event("/internal/v1/gateway/telemetry", br#"{"seq":1}"#);
+    telemetry.created_at = time::Instant::now() - TELEMETRY_EVENT_TTL;
+    forwarder
+        .enqueue("client-a".to_string(), telemetry, test_timeouts())
+        .await
+        .unwrap();
+
+    time::timeout(Duration::from_secs(1), async {
+        while forwarder.metrics.snapshot().telemetry_admission_waiting != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(forwarder
+        .telemetry_pending
+        .lock()
+        .await
+        .events
+        .contains_key("client-a"));
+
+    let mut lifecycle = test_event("/internal/v1/gateway/agent-hello", br#"{}"#);
+    lifecycle.api_url = single_response_server("200 OK", r#"{"accepted":true}"#).await;
+    forwarder
+        .enqueue("client-a".to_string(), lifecycle, test_timeouts())
+        .await
+        .unwrap();
+    time::timeout(Duration::from_secs(1), async {
+        while forwarder.metrics.snapshot().delivered_events != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(forwarder
+        .telemetry_pending
+        .lock()
+        .await
+        .events
+        .contains_key("client-a"));
+
+    drop(held_permit);
+    time::timeout(Duration::from_secs(1), async {
+        while forwarder.metrics.snapshot().current_queue_depth != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending = forwarder.telemetry_pending.lock().await;
+    assert!(pending.events.is_empty());
+    assert!(pending.draining_targets.is_empty());
 }
 
 #[tokio::test]

@@ -241,6 +241,53 @@ fn effective_telemetry_interval_secs(configured_secs: u64, network: &AgentNetwor
     interval_secs
 }
 
+const MAX_TELEMETRY_INITIAL_PHASE: Duration = Duration::from_secs(15);
+
+fn telemetry_initial_phase_delay(
+    client_id: &str,
+    process_incarnation_id: uuid::Uuid,
+    interval_secs: u64,
+) -> Duration {
+    let interval = Duration::from_secs(interval_secs.max(1));
+    let phase_cap_millis = interval.min(MAX_TELEMETRY_INITIAL_PHASE).as_millis().max(1) as u64;
+    let mut hasher = Sha256::new();
+    hasher.update(b"vpsman.telemetry.initial-phase.v1\0");
+    hasher.update(client_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(process_incarnation_id.as_bytes());
+    hasher.update(interval_secs.to_be_bytes());
+    let digest = hasher.finalize();
+    let phase_hash = u64::from_be_bytes(digest[..8].try_into().expect("sha256 prefix"));
+    Duration::from_millis((phase_hash % phase_cap_millis).saturating_add(1))
+}
+
+fn telemetry_ticker(
+    client_id: &str,
+    process_incarnation_id: uuid::Uuid,
+    interval_secs: u64,
+) -> time::Interval {
+    let period = Duration::from_secs(interval_secs.max(1));
+    let first_tick = time::Instant::now()
+        + telemetry_initial_phase_delay(client_id, process_incarnation_id, interval_secs);
+    let mut ticker = time::interval_at(first_tick, period);
+    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+    ticker
+}
+
+fn accept_telemetry_interval_update(
+    active_interval_secs: &mut u64,
+    next: Option<&AgentConfig>,
+) -> Option<u64> {
+    let next = next?;
+    let next_interval_secs =
+        effective_telemetry_interval_secs(next.telemetry_interval_secs, &next.network);
+    if *active_interval_secs == next_interval_secs {
+        return None;
+    }
+    *active_interval_secs = next_interval_secs;
+    Some(next_interval_secs)
+}
+
 fn startup_requires_authoritative_runtime_config_sync(
     loaded_cached_runtime_config_version: Option<u64>,
     cached_runtime_config_contains_legacy_identity: bool,
@@ -328,10 +375,13 @@ async fn connect_and_stream(
     }
     resume_active_commands(&mut stream, &mut seq, command_runtime).await?;
     let mut telemetry_runtime_state = TelemetryRuntimeState::default();
-    let mut ticker = time::interval(Duration::from_secs(effective_telemetry_interval_secs(
-        server_hello.telemetry_interval_secs,
-        &config.network,
-    )));
+    let mut active_telemetry_interval_secs =
+        effective_telemetry_interval_secs(server_hello.telemetry_interval_secs, &config.network);
+    let mut ticker = telemetry_ticker(
+        &config.client_id,
+        process_incarnation_id,
+        active_telemetry_interval_secs,
+    );
     let mut unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
     let mut unmanaged_update_sleep =
         Box::pin(time::sleep_until(unmanaged_update_schedule.next_due()));
@@ -358,7 +408,7 @@ async fn connect_and_stream(
                 let frame = frame?;
                 match frame.kind {
                     MessageKind::Command => {
-                        if handle_command_frame(
+                        handle_command_frame(
                             frame,
                             CommandFrameContext {
                                 config,
@@ -368,16 +418,7 @@ async fn connect_and_stream(
                                 command_runtime,
                             },
                         )
-                        .await? {
-                            ticker = time::interval(Duration::from_secs(
-                                effective_telemetry_interval_secs(
-                                    config.telemetry_interval_secs,
-                                    &config.network,
-                                ),
-                            ));
-                            unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
-                            unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
-                        }
+                        .await?;
                     }
                     MessageKind::CommandCancel => {
                         let request: JobCancelRequest = decode_json(&frame.decoded_payload()?)?;
@@ -480,13 +521,19 @@ async fn connect_and_stream(
                             }
                             let config_update = result.config_update.take();
                             if let Some(next_config) = config_update {
+                                let rephase_interval_secs =
+                                    accept_telemetry_interval_update(
+                                        &mut active_telemetry_interval_secs,
+                                        Some(&next_config),
+                                    );
                                 *config = next_config;
-                                ticker = time::interval(Duration::from_secs(
-                                    effective_telemetry_interval_secs(
-                                        config.telemetry_interval_secs,
-                                        &config.network,
-                                    ),
-                                ));
+                                if let Some(next_interval_secs) = rephase_interval_secs {
+                                    ticker = telemetry_ticker(
+                                        &config.client_id,
+                                        process_incarnation_id,
+                                        next_interval_secs,
+                                    );
+                                }
                                 unmanaged_update_schedule = UnmanagedUpdateSchedule::new(config);
                                 unmanaged_update_sleep.as_mut().reset(unmanaged_update_schedule.next_due());
                             }
@@ -1890,7 +1937,7 @@ fn command_payload_hash(command: &JobCommand) -> Result<String> {
     Ok(payload_hash(&encode_json(command)?))
 }
 
-async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Result<bool> {
+async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Result<()> {
     let CommandFrameContext {
         config,
         config_path,
@@ -1929,7 +1976,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 output,
             )
             .await?;
-            return Ok(false);
+            return Ok(());
         }
     };
     let request_payload_hash = command_payload_hash(&request.command)?;
@@ -1962,7 +2009,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         .await?;
         send_unsupported_command_version(stream, frame.stream_id, seq, request.job_id, output)
             .await?;
-        return Ok(false);
+        return Ok(());
     }
     if let Some(active) = command_runtime.active_commands.get_mut(&request.job_id) {
         let same_payload = active.payload_hash == request_payload_hash;
@@ -1991,7 +2038,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         if remove_after_flush {
             command_runtime.active_commands.remove(&request.job_id);
         }
-        return Ok(false);
+        return Ok(());
     }
     if let Some(completed) = command_runtime.recent_commands.get(request.job_id) {
         if completed.payload_hash == request_payload_hash {
@@ -2013,7 +2060,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                 send_sequenced_command_outputs(stream, frame.stream_id, seq, &completed.outputs)
                     .await?;
             }
-            return Ok(false);
+            return Ok(());
         }
         let ack = JobAck {
             job_id: request.job_id,
@@ -2022,7 +2069,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         };
         send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
         *seq += 1;
-        return Ok(false);
+        return Ok(());
     }
     if let Some(ledger) = command_runtime.command_ledger.as_ref() {
         if let Some(completed) = ledger.lookup(request.job_id).await? {
@@ -2041,7 +2088,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
                     let output = duplicate_replay_unknown_terminal_output(request.job_id)?;
                     send_sequenced_command_output(stream, frame.stream_id, seq, 0, &output).await?;
                 }
-                return Ok(false);
+                return Ok(());
             }
             let ack = JobAck {
                 job_id: request.job_id,
@@ -2050,7 +2097,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             };
             send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
             *seq += 1;
-            return Ok(false);
+            return Ok(());
         }
     }
     if let JobCommand::RuntimeConfigSync {
@@ -2079,7 +2126,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             };
             send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
             *seq += 1;
-            return Ok(false);
+            return Ok(());
         }
     }
     let safety = job_command_safety(&request.command);
@@ -2100,7 +2147,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         };
         send_json_frame(stream, MessageKind::CommandAck, frame.stream_id, *seq, &ack).await?;
         *seq += 1;
-        return Ok(false);
+        return Ok(());
     }
     let ack = JobAck {
         job_id: request.job_id,
@@ -2115,6 +2162,8 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         .clamp(1, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS);
 
     if let JobCommand::ConfigRead = &request.command {
+        // Config reads are observational. Telemetry is rephased only by the
+        // accepted config-update path in the main loop.
         let result = read_redacted_config(request.job_id, config);
         let outputs =
             command_result_outputs(request.job_id, "config_read", max_timeout_secs, result);
@@ -2126,7 +2175,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
         )
         .await?;
         send_command_outputs(stream, frame.stream_id, seq, &outputs).await?;
-        return Ok(true);
+        return Ok(());
     }
     let runtime_sync = if let JobCommand::RuntimeConfigSync {
         desired_version,
@@ -2262,7 +2311,7 @@ async fn handle_command_frame(frame: Frame, ctx: CommandFrameContext<'_>) -> Res
             _task: task,
         },
     );
-    Ok(false)
+    Ok(())
 }
 
 fn decode_job_request_payload(payload: &[u8]) -> Result<DecodedJobRequest> {

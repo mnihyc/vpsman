@@ -318,8 +318,10 @@ occurrence evidence. Each rule has a Trigger condition, an optional Trigger
 meta condition (Immediate by default), an optional Resolve condition, and a
 Resolve meta condition. Conditions recover automatically; occurrences expire
 automatically after their configured elapsed window and may be resolved early.
-Only the generic `alert.triggered` and `alert.resolved` lifecycle edges reach
-webhooks or Alert-event schedules.
+Alert lifecycle automation emits only the generic `alert.triggered` and
+`alert.resolved` edges; either edge can reach webhooks and Alert-event
+schedules. Webhooks may also independently consume their documented raw event
+contexts.
 **Observability > Shared views** creates expiring public read-only projections,
 then retains the lifecycle needed to update frozen targets, copy the URL, extend
 active links, or revoke them. Each share freezes its VPS and visible-data scope
@@ -371,8 +373,8 @@ Compose deployments keep durable state under their `runtime/` directory:
 
 The current canonical database is intentionally fresh-first. Supported
 in-place steps are checksum-pinned: the exact v0.4.4 `0001`–`0009` baseline
-may apply `0010`, `0011`, and then `0012`, while the exact v0.3.5
-`0001`–`0008` baseline may apply `0009`, `0010`, `0011`, and then `0012`.
+may apply `0010` through `0013`, while the exact v0.3.5 `0001`–`0008`
+baseline may apply `0009` through `0013`.
 Drain all nonterminal webhook deliveries, then stop API/application and worker
 writers for the full migration sequence. Review
 [migration compatibility](docs/migration-compatibility.md) before updating any

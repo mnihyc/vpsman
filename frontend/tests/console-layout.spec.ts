@@ -172,6 +172,7 @@ test.beforeEach(async ({ page }, testInfo) => {
     fleetAlertStateFailure: testInfo.tags.includes(
       "@fleet-alert-state-failure",
     ),
+    fleetAlertBulkScale: testInfo.tags.includes("@fleet-alert-bulk-scale"),
     fleetAlertHistorySaturated: testInfo.tags.includes(
       "@fleet-alert-history-saturated",
     ),
@@ -3569,6 +3570,129 @@ test(
 );
 
 test(
+  "updates more than one hundred alert states with one atomic request and no success refresh",
+  { tag: "@fleet-alert-bulk-scale" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the desktop grid exposes the high-volume visible-row selector directly",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    const grid = page.getByLabel("Current alert episodes data grid");
+    await grid
+      .getByLabel("Current alert episodes page size")
+      .selectOption("250");
+    await grid
+      .getByRole("button", { name: "Select visible Current alert episodes" })
+      .click();
+    await expect(grid).toContainText("125 selected");
+    const snapshotsBefore = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: { fleetSnapshotReads: unknown[] };
+          }
+        ).__vpsmanTestRequests.fleetSnapshotReads.length,
+    );
+    await grid.getByRole("button", { name: "Actions", exact: true }).click();
+    await activate(
+      page.getByRole("menuitem", {
+        name: "Acknowledge Open triage",
+        exact: true,
+      }),
+    );
+    const prompt = page.getByLabel("Confirm fleet alert triage");
+    await expect(prompt).toContainText("125 alerts");
+    await expect(prompt).toContainText("Atomic · all or none");
+    const reviewList = prompt.locator(".configurationReviewList");
+    await expect(reviewList).toHaveAttribute("tabindex", "0");
+    await expect(reviewList).toContainText("fleet-alert-bulk-000");
+    await expect(reviewList).toContainText("117 more alerts");
+    expect(
+      await reviewList.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(1);
+    await activate(prompt.getByRole("button", { name: "Acknowledge" }));
+    await expect(prompt).not.toBeVisible();
+    await expect(
+      page.getByLabel("Fleet alerts", { exact: true }),
+    ).toContainText("125 current triaged");
+
+    const evidence = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertStates: Array<{
+                action: string;
+                items: Array<{
+                  alert_id: string;
+                  expected_revision: number;
+                }>;
+              }>;
+              fleetSnapshotReads: unknown[];
+            };
+          }
+        ).__vpsmanTestRequests,
+    );
+    expect(evidence.fleetAlertStates).toHaveLength(1);
+    expect(evidence.fleetAlertStates[0].action).toBe("acknowledge");
+    expect(evidence.fleetAlertStates[0].items).toHaveLength(125);
+    expect(
+      evidence.fleetAlertStates[0].items.every(
+        (item) => item.expected_revision === 0,
+      ),
+    ).toBe(true);
+    expect(evidence.fleetSnapshotReads).toHaveLength(snapshotsBefore);
+  },
+);
+
+test(
+  "reviews exact System Maintenance target deltas without horizontal clipping",
+  { tag: "@system-maintenance-target-review" },
+  async ({ page }) => {
+    await page.route(/\/api\/v1\/ping-targets(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: [], status: 200 }),
+    );
+    await page.route(/\/api\/v1\/monitoring-shares(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: [], status: 200 }),
+    );
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    await unlockPrivilegeFor(page, "System", "Maintenance");
+
+    const grid = page.getByLabel("Stale selector records data grid");
+    const updateAll = grid.getByRole("button", {
+      name: "Update all",
+      exact: true,
+    });
+    await expect(updateAll).toBeEnabled();
+    await activate(updateAll);
+
+    const prompt = page.getByLabel("Confirm stale target updates");
+    await expect(prompt).toBeVisible();
+    await expect(prompt).toContainText("Not cross-resource atomic");
+    const reviewList = prompt.locator(".configurationReviewList");
+    await expect(reviewList).toHaveAttribute("tabindex", "0");
+    const scheduleDelta = reviewList.locator("span", {
+      hasText: "Schedule · edge-health-hourly",
+    });
+    await expect(scheduleDelta).toContainText("Added: None");
+    await expect(scheduleDelta).toContainText("Removed: agent-fra-02");
+    expect(
+      await reviewList.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(1);
+    await activate(prompt.getByRole("button", { name: "Cancel" }));
+    await expect(prompt).toBeHidden();
+  },
+);
+
+test(
   "keeps a failed fleet alert triage inside its reviewed confirmation",
   { tag: "@fleet-alert-state-failure" },
   async ({ page }, testInfo) => {
@@ -3579,6 +3703,15 @@ test(
 
     await page.goto("/");
     await openConsoleSubpage(page, "Fleet", "Alerts");
+
+    const snapshotsBefore = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: { fleetSnapshotReads: unknown[] };
+          }
+        ).__vpsmanTestRequests.fleetSnapshotReads.length,
+    );
 
     const grid = page.getByLabel("Current alert episodes data grid");
     const alertRow = grid
@@ -3597,9 +3730,28 @@ test(
     const prompt = page.getByLabel("Confirm fleet alert triage");
     await activate(prompt.getByRole("button", { name: "Acknowledge" }));
     await expect(prompt).toBeVisible();
-    await expect(prompt.locator(".confirmationPromptError")).toContainText(
+    const errorMessage = prompt.locator(".confirmationPromptError");
+    await expect(errorMessage).toContainText("atomic (all or none)");
+    await expect(errorMessage).toContainText(
+      "A current-state refresh was attempted",
+    );
+    await expect(errorMessage).toContainText(
       "Simulated fleet alert triage failure",
     );
+    await expect(errorMessage).not.toContainText("No alerts were updated");
+    const requests = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertStates: unknown[];
+              fleetSnapshotReads: unknown[];
+            };
+          }
+        ).__vpsmanTestRequests,
+    );
+    expect(requests.fleetAlertStates).toHaveLength(1);
+    expect(requests.fleetSnapshotReads).toHaveLength(snapshotsBefore + 1);
   },
 );
 

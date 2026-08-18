@@ -59,6 +59,7 @@ pub(crate) struct FleetAlertView {
     pub(crate) operator_state: String,
     pub(crate) muted_until_unix: Option<i64>,
     pub(crate) escalation_level: i32,
+    pub(crate) state_revision: i64,
     pub(crate) state_reason: Option<String>,
     pub(crate) state_actor_id: Option<Uuid>,
     pub(crate) state_updated_at: Option<String>,

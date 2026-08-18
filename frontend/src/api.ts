@@ -2,7 +2,9 @@ import type { JsonValue } from "./types";
 
 export class ApiUnauthorizedError extends Error {
   constructor() {
-    super("The operator session is absent or expired. Sign in again before retrying this action.");
+    super(
+      "The operator session is absent or expired. Sign in again before retrying this action.",
+    );
     this.name = "ApiUnauthorizedError";
   }
 }
@@ -62,6 +64,9 @@ function apiErrorGuidance(status: number, code: string): string {
   if (code.includes("capability") || code.includes("unsupported")) {
     return "The selected VPS does not currently advertise the required capability; inspect its agent status before retrying.";
   }
+  if (code === "heavy_read_admission_busy") {
+    return "Keep the current data visible while the console retries after the active read pressure clears.";
+  }
   switch (status) {
     case 400:
       return "Review the submitted values and correct the invalid field before retrying.";
@@ -91,7 +96,10 @@ export function buildAuthHeaders(apiToken: string): HeadersInit | undefined {
 
 export function buildJsonHeaders(apiToken: string): HeadersInit {
   return apiToken
-    ? { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" }
+    ? {
+        Authorization: `Bearer ${apiToken}`,
+        "Content-Type": "application/json",
+      }
     : { "Content-Type": "application/json" };
 }
 
@@ -115,28 +123,41 @@ export function buildListPath(path: string, query: ListQueryParams): string {
 }
 
 const GET_RETRY_DELAYS_MS = [150, 500, 1_000];
+const HEAVY_READ_RETRY_DELAYS_MS = [250, 750, 1_500];
 const PREVIEW_POST_RETRY_DELAYS_MS = [
-  150,
-  500,
-  1_000,
-  2_000,
-  4_000,
-  8_000,
-  13_000,
+  150, 500, 1_000, 2_000, 4_000, 8_000, 13_000,
 ];
 
 async function fetchGetWithTransientRetry(
   path: string,
   apiToken: string,
 ): Promise<Response> {
-  for (let attempt = 0; ; attempt += 1) {
+  let transportAttempt = 0;
+  let admissionAttempt = 0;
+  for (;;) {
     try {
-      return await fetch(path, { headers: buildAuthHeaders(apiToken) });
+      const response = await fetch(path, {
+        headers: buildAuthHeaders(apiToken),
+      });
+      if (response.status !== 429) {
+        return response;
+      }
+      const admissionError = await apiErrorFromResponse(response.clone());
+      if (admissionError.code !== "heavy_read_admission_busy") {
+        return response;
+      }
+      const delay = HEAVY_READ_RETRY_DELAYS_MS[admissionAttempt];
+      if (delay === undefined) {
+        return response;
+      }
+      admissionAttempt += 1;
+      await wait(delay + Math.floor(Math.random() * Math.min(delay, 250)));
     } catch (error) {
-      const delay = GET_RETRY_DELAYS_MS[attempt];
+      const delay = GET_RETRY_DELAYS_MS[transportAttempt];
       if (delay === undefined || !isTransientFetchFailure(error)) {
         throw apiTransportError(error);
       }
+      transportAttempt += 1;
       await wait(delay);
     }
   }
@@ -198,7 +219,11 @@ function apiTransportError(error: unknown): ApiTransportError {
   return new ApiTransportError(browserDetail);
 }
 
-export async function apiPost<T = JsonValue>(path: string, apiToken: string, body: unknown): Promise<T> {
+export async function apiPost<T = JsonValue>(
+  path: string,
+  apiToken: string,
+  body: unknown,
+): Promise<T> {
   const response = await apiFetch(path, {
     method: "POST",
     headers: buildJsonHeaders(apiToken),
@@ -221,7 +246,11 @@ export async function apiPostPreview<T = JsonValue>(
   apiToken: string,
   body: unknown,
 ): Promise<T> {
-  const response = await fetchPreviewPostWithTransientRetry(path, apiToken, body);
+  const response = await fetchPreviewPostWithTransientRetry(
+    path,
+    apiToken,
+    body,
+  );
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
   }
@@ -234,7 +263,11 @@ export async function apiPostPreview<T = JsonValue>(
   return await apiJsonFromResponse<T>(response, `POST ${path}`);
 }
 
-export async function apiPut<T = JsonValue>(path: string, apiToken: string, body: unknown): Promise<T> {
+export async function apiPut<T = JsonValue>(
+  path: string,
+  apiToken: string,
+  body: unknown,
+): Promise<T> {
   const response = await apiFetch(path, {
     method: "PUT",
     headers: buildJsonHeaders(apiToken),
@@ -273,7 +306,10 @@ export async function apiPostBinary<T = JsonValue>(
   return await apiJsonFromResponse<T>(response, `POST ${path}`);
 }
 
-export async function apiGet<T = JsonValue>(path: string, apiToken: string): Promise<T> {
+export async function apiGet<T = JsonValue>(
+  path: string,
+  apiToken: string,
+): Promise<T> {
   const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
@@ -284,7 +320,10 @@ export async function apiGet<T = JsonValue>(path: string, apiToken: string): Pro
   return await apiJsonFromResponse<T>(response, `GET ${path}`);
 }
 
-export async function apiGetBlob(path: string, apiToken: string): Promise<Blob> {
+export async function apiGetBlob(
+  path: string,
+  apiToken: string,
+): Promise<Blob> {
   const response = await fetchGetWithTransientRetry(path, apiToken);
   if (response.status === 401) {
     throw new ApiUnauthorizedError();
@@ -295,10 +334,17 @@ export async function apiGetBlob(path: string, apiToken: string): Promise<Blob> 
   return await response.blob();
 }
 
-export async function apiDelete<T = JsonValue>(path: string, apiToken: string, body?: unknown): Promise<T> {
+export async function apiDelete<T = JsonValue>(
+  path: string,
+  apiToken: string,
+  body?: unknown,
+): Promise<T> {
   const response = await apiFetch(path, {
     method: "DELETE",
-    headers: body === undefined ? buildAuthHeaders(apiToken) : buildJsonHeaders(apiToken),
+    headers:
+      body === undefined
+        ? buildAuthHeaders(apiToken)
+        : buildJsonHeaders(apiToken),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (response.status === 401) {
@@ -313,11 +359,25 @@ export async function apiDelete<T = JsonValue>(path: string, apiToken: string, b
   return await apiJsonFromResponse<T>(response, `DELETE ${path}`);
 }
 
-export function isApiUnauthorized(error: unknown): error is ApiUnauthorizedError {
+export function isApiUnauthorized(
+  error: unknown,
+): error is ApiUnauthorizedError {
   return error instanceof ApiUnauthorizedError;
 }
 
-export async function apiErrorFromResponse(response: Response): Promise<ApiResponseError> {
+export function isHeavyReadAdmissionBusy(
+  error: unknown,
+): error is ApiResponseError {
+  return (
+    error instanceof ApiResponseError &&
+    error.status === 429 &&
+    error.code === "heavy_read_admission_busy"
+  );
+}
+
+export async function apiErrorFromResponse(
+  response: Response,
+): Promise<ApiResponseError> {
   let code = `http_${response.status}`;
   let detail: string | null = null;
   let recovery: string | null = null;
@@ -349,7 +409,9 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiRespo
     detail = `The server returned an unreadable error body${browserErrorDetail(error)}`;
   }
   if (!detail && code === `http_${response.status}`) {
-    detail = response.statusText.trim() || "The server returned no explanatory error body";
+    detail =
+      response.statusText.trim() ||
+      "The server returned no explanatory error body";
   }
   return new ApiResponseError(response.status, code, detail, recovery);
 }

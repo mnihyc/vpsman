@@ -68,6 +68,7 @@ type HomePanelProps = {
   homeEvidenceComplete: boolean;
   homeError: string | null;
   initialMonitoringCards?: SnapshotSource<MonitoringCardView[]> | null;
+  initialMonitoringCardsPending: boolean;
   jobs: JobHistoryRecord[];
   jobsEvidenceAvailable: boolean;
   recordBounds: {
@@ -149,6 +150,7 @@ export function HomePanel({
   homeEvidenceComplete,
   homeError,
   initialMonitoringCards,
+  initialMonitoringCardsPending,
   jobs,
   jobsEvidenceAvailable,
   recordBounds,
@@ -679,6 +681,7 @@ export function HomePanel({
           fleetAlertsEvidenceAvailable={fleetAlertsEvidenceAvailable}
           jobs={jobs}
           initialMonitoringCards={initialMonitoringCards}
+          initialMonitoringCardsPending={initialMonitoringCardsPending}
           maxCards={8}
           recordBounds={{
             backups: recordBounds.backups,

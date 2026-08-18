@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    future::Future,
     net::SocketAddr,
+    panic::AssertUnwindSafe,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, RwLock as StdRwLock, Weak},
     time::Duration,
@@ -8,7 +10,8 @@ use std::{
 
 use anyhow::Result;
 use axum::http::HeaderMap;
-use tokio::sync::broadcast;
+use futures_util::FutureExt;
+use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
 use vpsman_common::{SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
 use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
 
@@ -17,6 +20,10 @@ use crate::{
     error::ApiError,
     gateway_client::GatewayDispatchClient,
     model::{AuthContext, WsEvent},
+    model_dashboard::DashboardOverviewView,
+    model_fleet_snapshot::FleetSnapshotResponse,
+    model_home_snapshot::HomeSnapshotResponse,
+    model_monitoring::MonitoringCardsPageView,
     object_store::BackupObjectStore,
     repository::Repository,
     repository_jobs::TerminalizationBatch,
@@ -30,6 +37,9 @@ const DEFAULT_OPERATOR_AUTH_USERNAME_FAILED_ATTEMPT_LIMIT: i64 = 8;
 const DEFAULT_OPERATOR_AUTH_IP_FAILED_ATTEMPT_LIMIT: i64 = 8;
 const DEFAULT_OPERATOR_AUTH_FAILED_ATTEMPT_WINDOW_SECS: u64 = 15 * 60;
 const DEFAULT_OPERATOR_AUTH_LOCKOUT_SECS: u64 = 15 * 60;
+const HEAVY_READ_IN_FLIGHT: usize = 2;
+const HEAVY_READ_WAITING: usize = 4;
+const HEAVY_READ_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 static SUITE_CONFIG_LAST_KNOWN_GOOD: OnceLock<StdRwLock<HashMap<PathBuf, SuiteConfig>>> =
     OnceLock::new();
 
@@ -43,6 +53,12 @@ struct PendingWsInvalidations {
 pub(crate) struct WsEventBus {
     public_events: broadcast::Sender<WsEvent>,
     invalidations: Weak<Mutex<PendingWsInvalidations>>,
+    fleet_snapshot_singleflight: Singleflight<FleetSnapshotResponse>,
+    monitoring_cards_singleflight: Singleflight<MonitoringCardsPageView>,
+    dashboard_overview_singleflight: Singleflight<DashboardOverviewView>,
+    home_snapshot_singleflight: Singleflight<HomeSnapshotResponse>,
+    heavy_read_permits: Arc<Semaphore>,
+    heavy_read_waiters: Arc<Semaphore>,
 }
 
 pub(crate) struct WsInvalidationDriver {
@@ -57,13 +73,119 @@ impl WsEventBus {
             Self {
                 public_events,
                 invalidations: Arc::downgrade(&pending),
+                fleet_snapshot_singleflight: Singleflight::default(),
+                monitoring_cards_singleflight: Singleflight::default(),
+                dashboard_overview_singleflight: Singleflight::default(),
+                home_snapshot_singleflight: Singleflight::default(),
+                heavy_read_permits: Arc::new(Semaphore::new(HEAVY_READ_IN_FLIGHT)),
+                heavy_read_waiters: Arc::new(Semaphore::new(HEAVY_READ_WAITING)),
             },
             WsInvalidationDriver { pending },
         )
     }
 
+    pub(crate) async fn singleflight_fleet_snapshot<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<FleetSnapshotResponse, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<FleetSnapshotResponse, ApiError>> + Send + 'static,
+    {
+        self.fleet_snapshot_singleflight
+            .run(
+                key,
+                "fleet_snapshot_panicked",
+                "The fleet snapshot could not be prepared.",
+                load,
+            )
+            .await
+    }
+
+    pub(crate) async fn singleflight_monitoring_cards<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<MonitoringCardsPageView, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<MonitoringCardsPageView, ApiError>> + Send + 'static,
+    {
+        self.monitoring_cards_singleflight
+            .run(
+                key,
+                "monitoring_cards_panicked",
+                "The VPS monitoring cards could not be prepared.",
+                load,
+            )
+            .await
+    }
+
+    pub(crate) async fn singleflight_dashboard_overview<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<DashboardOverviewView, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<DashboardOverviewView, ApiError>> + Send + 'static,
+    {
+        self.dashboard_overview_singleflight
+            .run(
+                key,
+                "dashboard_overview_panicked",
+                "The dashboard overview could not be prepared.",
+                load,
+            )
+            .await
+    }
+
+    pub(crate) async fn singleflight_home_snapshot<F, Fut>(
+        &self,
+        key: String,
+        load: F,
+    ) -> Result<HomeSnapshotResponse, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<HomeSnapshotResponse, ApiError>> + Send + 'static,
+    {
+        self.home_snapshot_singleflight
+            .run(
+                key,
+                "home_snapshot_panicked",
+                "The Home snapshot could not be prepared.",
+                load,
+            )
+            .await
+    }
+
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<WsEvent> {
         self.public_events.subscribe()
+    }
+
+    pub(crate) async fn acquire_heavy_read_permit(&self) -> Result<OwnedSemaphorePermit, ApiError> {
+        if let Ok(permit) = Arc::clone(&self.heavy_read_permits).try_acquire_owned() {
+            return Ok(permit);
+        }
+        let waiting = Arc::clone(&self.heavy_read_waiters)
+            .try_acquire_owned()
+            .map_err(|_| ApiError::too_many_requests("heavy_read_admission_busy"))?;
+        let permit = tokio::time::timeout(
+            HEAVY_READ_WAIT_TIMEOUT,
+            Arc::clone(&self.heavy_read_permits).acquire_owned(),
+        )
+        .await
+        .map_err(|_| ApiError::too_many_requests("heavy_read_admission_busy"))?
+        .map_err(|_| {
+            ApiError::internal(
+                "heavy_read_admission_closed",
+                "Read admission is unavailable.",
+                anyhow::anyhow!("heavy read admission semaphore closed"),
+            )
+        })?;
+        drop(waiting);
+        Ok(permit)
     }
 
     pub(crate) fn publish(&self, event: WsEvent) {
@@ -90,6 +212,168 @@ impl WsEventBus {
             .job_ids
             .insert(job_id);
     }
+}
+
+#[derive(Clone)]
+struct SharedApiError {
+    status: axum::http::StatusCode,
+    code: &'static str,
+    error: String,
+    public_message: Option<String>,
+}
+
+impl SharedApiError {
+    fn from_api_error(error: ApiError) -> Self {
+        Self {
+            status: error.status,
+            code: error.code,
+            error: error.error.to_string(),
+            public_message: error.public_message,
+        }
+    }
+
+    fn panicked(code: &'static str, public_message: &'static str) -> Self {
+        Self {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            code,
+            error: code.to_string(),
+            public_message: Some(public_message.to_string()),
+        }
+    }
+
+    fn into_api_error(self) -> ApiError {
+        ApiError {
+            status: self.status,
+            code: self.code,
+            error: anyhow::anyhow!(self.error),
+            public_message: self.public_message,
+        }
+    }
+}
+
+struct SingleflightEntry<T> {
+    result: AsyncMutex<Option<std::result::Result<T, SharedApiError>>>,
+    ready: Notify,
+    #[cfg(test)]
+    participants: std::sync::atomic::AtomicUsize,
+}
+
+impl<T> Default for SingleflightEntry<T> {
+    fn default() -> Self {
+        Self {
+            result: AsyncMutex::new(None),
+            ready: Notify::new(),
+            #[cfg(test)]
+            participants: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+struct Singleflight<T> {
+    entries: Arc<AsyncMutex<HashMap<String, Arc<SingleflightEntry<T>>>>>,
+}
+
+impl<T> Clone for Singleflight<T> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: Arc::clone(&self.entries),
+        }
+    }
+}
+
+impl<T> Default for Singleflight<T> {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(AsyncMutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<T> Singleflight<T>
+where
+    T: Clone + Send + 'static,
+{
+    async fn run<F, Fut>(
+        &self,
+        key: String,
+        panic_code: &'static str,
+        panic_public_message: &'static str,
+        load: F,
+    ) -> std::result::Result<T, ApiError>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = std::result::Result<T, ApiError>> + Send + 'static,
+    {
+        let (entry, leader) = {
+            let mut entries = self.entries.lock().await;
+            if let Some(entry) = entries.get(&key) {
+                (Arc::clone(entry), false)
+            } else {
+                let entry = Arc::new(SingleflightEntry::default());
+                entries.insert(key.clone(), Arc::clone(&entry));
+                (entry, true)
+            }
+        };
+        #[cfg(test)]
+        entry
+            .participants
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        if leader {
+            let entries = Arc::clone(&self.entries);
+            let task_entry = Arc::clone(&entry);
+            tokio::spawn(async move {
+                let result = match std::panic::catch_unwind(AssertUnwindSafe(load)) {
+                    Ok(future) => AssertUnwindSafe(future)
+                        .catch_unwind()
+                        .await
+                        .map_err(|_| SharedApiError::panicked(panic_code, panic_public_message))
+                        .and_then(|result| result.map_err(SharedApiError::from_api_error)),
+                    Err(_) => Err(SharedApiError::panicked(panic_code, panic_public_message)),
+                };
+                *task_entry.result.lock().await = Some(result);
+                entries.lock().await.remove(&key);
+                task_entry.ready.notify_waiters();
+            });
+        }
+
+        loop {
+            let ready = entry.ready.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
+            if let Some(result) = entry.result.lock().await.clone() {
+                return result.map_err(SharedApiError::into_api_error);
+            }
+            ready.await;
+        }
+    }
+
+    #[cfg(test)]
+    async fn wait_for_participants(&self, key: &str, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let participants = {
+                    let entries = self.entries.lock().await;
+                    entries.get(key).map_or(0, |entry| {
+                        entry.participants.load(std::sync::atomic::Ordering::SeqCst)
+                    })
+                };
+                if participants >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("singleflight callers did not join the held computation");
+    }
+}
+
+pub(crate) fn read_singleflight_auth_key(operator_id: uuid::Uuid, scopes: &[String]) -> String {
+    let mut scopes = scopes.to_vec();
+    scopes.sort();
+    scopes.dedup();
+    format!("{operator_id}|{}", scopes.join("\u{1f}"))
 }
 
 impl WsInvalidationDriver {

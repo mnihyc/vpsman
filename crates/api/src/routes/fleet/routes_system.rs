@@ -7,7 +7,7 @@ use axum::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use vpsman_common::SuiteConfig;
+use vpsman_common::{GatewayForwardMetricsSnapshot, SuiteConfig};
 
 use crate::{
     error::ApiError,
@@ -117,28 +117,7 @@ pub(crate) async fn collect_system_dashboard_snapshot(
     let mut notes = Vec::new();
     state.refresh_gateway_dispatch_timeouts();
     let gateway_events = match state.gateway.forward_metrics().await {
-        Ok(metrics) => SystemDashboardGatewayEventsView {
-            queued_events: Some(metrics.queued_events),
-            delivered_events: Some(metrics.delivered_events),
-            retry_attempts: Some(metrics.retry_attempts),
-            active_queues: Some(metrics.active_queues),
-            current_queue_depth: Some(metrics.current_queue_depth),
-            oldest_event_age_secs: metrics.oldest_event_age_secs,
-            dropped_events: Some(metrics.dropped_events),
-            telemetry_dropped_events: Some(metrics.telemetry_dropped_events),
-            expired_events: Some(metrics.expired_events),
-            critical_failures: Some(metrics.critical_failures),
-            dropped_by_kind: metrics.dropped_by_kind,
-            dropped_by_reason: metrics.dropped_by_reason,
-            critical_failures_by_reason: metrics.critical_failures_by_reason,
-            retained_output_truncated_events: Some(metrics.retained_output_truncated_events),
-            rejected_agent_connections: Some(metrics.rejected_agent_connections),
-            status: if metrics.unhealthy {
-                "unhealthy".to_string()
-            } else {
-                "live".to_string()
-            },
-        },
+        Ok(metrics) => gateway_events_view(metrics),
         Err(error) => {
             notes.push(format!("gateway event metrics unavailable: {error}"));
             SystemDashboardGatewayEventsView {
@@ -158,6 +137,34 @@ pub(crate) async fn collect_system_dashboard_snapshot(
         repository: snapshot,
         notes,
     })
+}
+
+fn gateway_events_view(metrics: GatewayForwardMetricsSnapshot) -> SystemDashboardGatewayEventsView {
+    SystemDashboardGatewayEventsView {
+        queued_events: Some(metrics.queued_events),
+        delivered_events: Some(metrics.delivered_events),
+        retry_attempts: Some(metrics.retry_attempts),
+        active_queues: Some(metrics.active_queues),
+        current_queue_depth: Some(metrics.current_queue_depth),
+        oldest_event_age_secs: metrics.oldest_event_age_secs,
+        dropped_events: Some(metrics.dropped_events),
+        telemetry_dropped_events: Some(metrics.telemetry_dropped_events),
+        expired_events: Some(metrics.expired_events),
+        critical_failures: Some(metrics.critical_failures),
+        dropped_by_kind: metrics.dropped_by_kind,
+        dropped_by_reason: metrics.dropped_by_reason,
+        critical_failures_by_reason: metrics.critical_failures_by_reason,
+        retained_output_truncated_events: Some(metrics.retained_output_truncated_events),
+        rejected_agent_connections: Some(metrics.rejected_agent_connections),
+        telemetry_admission_limit: Some(metrics.telemetry_admission_limit),
+        telemetry_admission_active: Some(metrics.telemetry_admission_active),
+        telemetry_admission_waiting: Some(metrics.telemetry_admission_waiting),
+        status: if metrics.unhealthy {
+            "unhealthy".to_string()
+        } else {
+            "live".to_string()
+        },
+    }
 }
 
 fn validate_window(value: Option<&str>) -> Result<&'static str, ApiError> {
@@ -240,6 +247,7 @@ fn suite_capacity(state: &AppState) -> SystemDashboardCapacityView {
         worker_db_pool: config.capacity.worker_db_pool,
         dispatcher_batch: Some(dispatcher_config.batch_limit),
         dispatcher_in_flight: Some(dispatcher_config.in_flight),
+        gateway_telemetry_in_flight: config.capacity.gateway_telemetry_in_flight,
         dispatch_ack_secs: Some(dispatcher_config.dispatch_ack_secs),
         event_post_secs: Some(dispatcher_config.event_post_secs),
         internal_http_read_secs: Some(dispatcher_config.internal_http_read_secs),
@@ -350,6 +358,13 @@ fn system_metric_label_unit(metric: &str) -> (&'static str, &'static str) {
         }
         "gateway_events.rejected_agent_connections" => {
             ("Gateway rejected agent connections", "connections")
+        }
+        "gateway_events.telemetry_admission_limit" => {
+            ("Gateway telemetry admission limit", "posts")
+        }
+        "gateway_events.telemetry_admission_active" => ("Gateway telemetry posts active", "posts"),
+        "gateway_events.telemetry_admission_waiting" => {
+            ("Gateway telemetry posts waiting", "posts")
         }
         _ => ("System metric", "count"),
     }

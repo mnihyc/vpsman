@@ -3,6 +3,32 @@ use serde_json::json;
 use super::{redact_suite_config_value, SuiteConfig};
 
 #[test]
+fn suite_config_bounds_gateway_telemetry_admission() {
+    let configured = SuiteConfig::parse(
+        r#"
+version = 1
+
+[capacity]
+gateway_telemetry_in_flight = 8
+"#,
+    )
+    .expect("bounded gateway telemetry admission");
+    assert_eq!(configured.capacity.gateway_telemetry_in_flight, Some(8));
+    assert!(configured
+        .validation_summary()
+        .restart_required_fields
+        .contains(&"capacity.gateway_telemetry_in_flight".to_string()));
+
+    for invalid in [0, 513] {
+        let error = SuiteConfig::parse(&format!(
+            "version = 1\n\n[capacity]\ngateway_telemetry_in_flight = {invalid}\n"
+        ))
+        .unwrap_err();
+        assert_eq!(error, "capacity.gateway_telemetry_in_flight_out_of_range");
+    }
+}
+
+#[test]
 fn suite_config_redaction_hides_credential_urls_and_sensitive_keys() {
     let redacted = redact_suite_config_value(json!({
         "database": {

@@ -43,6 +43,10 @@ import {
   SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS,
   scheduleEventExpressionValidationMessage,
 } from "../src/eventExpression";
+import {
+  ALERT_EVENT_CATEGORIES,
+  ALERT_EVENT_SEVERITIES,
+} from "../src/generated/protocolContracts";
 
 type FixtureCase = {
   expression: string;
@@ -481,6 +485,22 @@ test("webhook suggestions expose only the generic alert lifecycle predicates", (
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_resolved");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_reached");
   expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.state:open");
+  for (const category of ALERT_EVENT_CATEGORIES) {
+    expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain(
+      `alert.category:${category}`,
+    );
+    expect(SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS).toContain(
+      `alert.category:${category}`,
+    );
+  }
+  for (const severity of ALERT_EVENT_SEVERITIES) {
+    expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain(
+      `alert.severity:${severity}`,
+    );
+    expect(SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS).toContain(
+      `alert.severity:${severity}`,
+    );
+  }
 });
 
 test("retired alert and policy-rule expressions fail with canonical guidance", () => {

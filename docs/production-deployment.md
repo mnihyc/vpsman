@@ -297,11 +297,17 @@ docker compose ps
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
 The exact v0.4.4 `0001`–`0009` migration files and checksums may apply
 `0010_disabled_resource_alert_policies.sql`,
-`0011_operational_alert_lifecycle.sql`, and then
-`0012_policy_owned_alerts_event_schedules.sql` in place. The exact v0.3.5
-`0001`–`0008` baseline may apply `0009`, `0010`, `0011`, and then `0012`. Keep any
+`0011_operational_alert_lifecycle.sql`,
+`0012_policy_owned_alerts_event_schedules.sql`, and then
+`0013_revisioned_fleet_alert_state_bulk.sql` in place. The exact v0.3.5
+`0001`–`0008` baseline may apply `0009` through `0013`. Keep any
 earlier or different database with its matching application release, or move
 reviewed data through a separate export/import procedure into a fresh database.
+`0013` deterministically backfills one exact hourly transition ledger from the
+retained traffic-counter rows while writers are stopped. Its runtime scales
+with retained counter volume; budget database/WAL headroom for the new hourly
+rows and the one-time ordered raw-counter pass, allow the migration to finish,
+and never start an old writer against the new trigger-maintained schema.
 
 ## Upgrade and Rollback
 

@@ -41,6 +41,55 @@ fn dashboard_query() -> DashboardOverviewQuery {
 }
 
 #[tokio::test]
+async fn home_snapshot_key_normalizes_relative_time_and_fences_operator_and_custom_bounds() {
+    let state = test_state();
+    let (context, _) = crate::test_auth_context_and_headers(&state).await;
+    let relative = dashboard_query();
+    let first = prepare_dashboard_overview(&relative, 1_700_000_000).unwrap();
+    let second = prepare_dashboard_overview(&relative, 1_700_000_001).unwrap();
+    assert_eq!(
+        home_snapshot_singleflight_key(&context.operator, &relative, Some(&first)),
+        home_snapshot_singleflight_key(&context.operator, &relative, Some(&second)),
+    );
+
+    let mut changed_operator = context.operator.clone();
+    changed_operator.username.push_str("-changed");
+    assert_ne!(
+        home_snapshot_singleflight_key(&context.operator, &relative, Some(&first)),
+        home_snapshot_singleflight_key(&changed_operator, &relative, Some(&first)),
+    );
+
+    let mut custom = dashboard_query();
+    custom.window = None;
+    custom.start_unix = Some(1_700_000_000);
+    custom.end_unix = Some(1_700_003_600);
+    let custom_first = prepare_dashboard_overview(&custom, 1_800_000_000).unwrap();
+    let mut later_custom = dashboard_query();
+    later_custom.window = None;
+    later_custom.start_unix = Some(1_700_000_000);
+    later_custom.end_unix = Some(1_700_003_601);
+    let custom_second = prepare_dashboard_overview(&later_custom, 1_800_000_000).unwrap();
+    assert_ne!(
+        home_snapshot_singleflight_key(&context.operator, &custom, Some(&custom_first)),
+        home_snapshot_singleflight_key(&context.operator, &later_custom, Some(&custom_second),),
+    );
+
+    let now = 1_800_000_000;
+    let mut near_future = dashboard_query();
+    near_future.window = None;
+    near_future.start_unix = Some(now - 100);
+    near_future.end_unix = Some(now + 5);
+    let near_prepared = prepare_dashboard_overview(&near_future, now).unwrap();
+    let mut far_future = near_future.clone();
+    far_future.end_unix = Some(now + 100);
+    let far_prepared = prepare_dashboard_overview(&far_future, now).unwrap();
+    assert_ne!(
+        home_snapshot_singleflight_key(&context.operator, &near_future, Some(&near_prepared),),
+        home_snapshot_singleflight_key(&context.operator, &far_future, Some(&far_prepared),),
+    );
+}
+
+#[tokio::test]
 async fn home_snapshot_projects_every_initial_home_source_in_one_response() {
     let state = test_state();
     let headers = crate::test_auth_headers(&state).await;
@@ -129,6 +178,35 @@ async fn home_snapshot_keeps_scope_failures_local_to_each_source() {
         assert!(value[source]["data"].is_null(), "forbidden source {source}");
         assert_eq!(value[source]["error"], "operator_scope_insufficient");
     }
+}
+
+#[tokio::test]
+async fn home_snapshot_does_not_validate_forbidden_dashboard_parameters() {
+    let state = test_state();
+    let (context, headers) = crate::test_auth_context_and_headers(&state).await;
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!();
+    };
+    memory
+        .operators
+        .write()
+        .await
+        .iter_mut()
+        .find(|operator| operator.id == context.operator.id)
+        .unwrap()
+        .scopes = vec![SCOPE_JOBS_READ.to_string()];
+    let mut invalid_dashboard = dashboard_query();
+    invalid_dashboard.window = Some("not-a-dashboard-window".to_string());
+
+    let Json(snapshot) = home_snapshot(State(state), headers, Query(invalid_dashboard))
+        .await
+        .expect("a forbidden dashboard source must not reject authorized Home sources");
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(
+        value["dashboard_overview"]["error"],
+        "operator_scope_insufficient"
+    );
+    assert!(!value["file_transfers"]["data"].is_null());
 }
 
 #[tokio::test]

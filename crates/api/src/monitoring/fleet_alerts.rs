@@ -84,6 +84,7 @@ impl AppState {
                 None,
                 PolicyAlertSource::CurrentFleet,
                 None,
+                None,
             )
             .await?
             .alerts)
@@ -100,6 +101,7 @@ impl AppState {
                 None,
                 PolicyAlertSource::ConfirmedActive,
                 Some(notification_rules),
+                None,
             )
             .await?
             .alerts)
@@ -171,6 +173,23 @@ impl AppState {
             selector,
             PolicyAlertSource::CurrentFleet,
             None,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn list_fleet_alerts_selected_with_visible_agents(
+        &self,
+        query: FleetAlertQuery,
+        selector: Option<FleetAlertSelector<'_>>,
+        visible_agents: &[AgentView],
+    ) -> Result<FleetAlertSelection> {
+        self.list_fleet_alerts_selected_with_policy_source(
+            query,
+            selector,
+            PolicyAlertSource::CurrentFleet,
+            None,
+            Some(visible_agents),
         )
         .await
     }
@@ -181,11 +200,19 @@ impl AppState {
         selector: Option<FleetAlertSelector<'_>>,
         policy_alert_source: PolicyAlertSource,
         notification_rules: Option<&[FleetAlertNotificationMatchRule]>,
+        visible_agents: Option<&[AgentView]>,
     ) -> Result<FleetAlertSelection> {
         let selector = selector.as_ref();
         let mut alerts = Vec::new();
         let mut source_saturated = false;
-        let visible_agents = self.repo.list_agents().await?;
+        let loaded_visible_agents;
+        let visible_agents = match visible_agents {
+            Some(visible_agents) => visible_agents,
+            None => {
+                loaded_visible_agents = self.repo.list_agents().await?;
+                &loaded_visible_agents
+            }
+        };
         let visible_client_ids = visible_agents
             .iter()
             .map(|agent| agent.id.clone())
@@ -268,6 +295,7 @@ pub(crate) fn apply_alert_states(alerts: &mut [FleetAlertView], states: &[FleetA
         alert.operator_state = effective_state.to_string();
         alert.muted_until_unix = state.muted_until_unix;
         alert.escalation_level = state.escalation_level;
+        alert.state_revision = state.revision;
         alert.state_reason = state.reason.clone();
         alert.state_actor_id = state.actor_id;
         alert.state_updated_at = Some(state.updated_at.clone());

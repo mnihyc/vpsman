@@ -30,6 +30,7 @@ vpsman-common = { path = "../common" }
 
 [dev-dependencies]
 chrono-tz.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]
 vpsman-build-support = { path = "../../build/build-support" }

@@ -630,7 +630,7 @@ function StaleSelectorMaintenancePanel({
     {
       description: (selected) =>
         selected.length > 0
-          ? `Resolve and review ${selected.filter((row) => row.canUpdate).length} updateable saved selector${selected.length === 1 ? "" : "s"}.`
+          ? `Resolve and review ${selected.filter((row) => row.canUpdate).length} updateable saved selector${selected.filter((row) => row.canUpdate).length === 1 ? "" : "s"}.`
           : "Select one or more stale saved selectors.",
       disabled: (selected) => pending || !selected.some((row) => row.canUpdate),
       icon: <Target size={14} />,
@@ -766,7 +766,7 @@ function StaleSelectorMaintenancePanel({
       />
       <ConfirmationPrompt
         confirmLabel="Update targets"
-        detail="Replace only the reviewed frozen target IDs. Saved selector text and every other resource setting remain unchanged."
+        detail="Replace only the reviewed frozen target IDs. Saved selector text and every other resource setting remain unchanged. Schedules update separately; Ping and shared-view batches are each atomic, not cross-resource."
         error={error}
         items={selectorReviewItems(review)}
         onCancel={() => setReview(null)}
@@ -984,50 +984,52 @@ function selectorReviewItems(review: SelectorUpdateReview | null) {
       value: "Frozen VPS target IDs",
     },
     {
+      label: "Write boundary",
+      value: "Not cross-resource atomic",
+    },
+    {
       label: "Target deltas",
       value: (
-        <div className="configurationReviewList">
-          {schedules.map((update) => (
-            <span key={`schedule:${update.schedule.id}`}>
-              <strong>{update.schedule.name}</strong>
-              <small
-                title={targetDeltaTitle(
-                  update.schedule.target_client_ids,
-                  update.nextTargetIds,
-                )}
-              >
-                {targetDeltaLabel(
-                  update.schedule.target_client_ids,
-                  update.nextTargetIds,
-                )}
-              </small>
-            </span>
-          ))}
+        <div
+          className="configurationReviewList"
+          aria-label="Exact added and removed VPS target IDs"
+          tabIndex={0}
+        >
+          {schedules.map((update) => {
+            const delta = targetDelta(
+              update.schedule.target_client_ids,
+              update.nextTargetIds,
+            );
+            return (
+              <span key={`schedule:${update.schedule.id}`}>
+                <strong>
+                  Schedule · {update.schedule.name} ·{" "}
+                  {targetCountLabel(update.nextTargetIds.length)} now
+                </strong>
+                <small>Added: {delta.added.join(", ") || "None"}</small>
+                <small>Removed: {delta.removed.join(", ") || "None"}</small>
+              </span>
+            );
+          })}
           {pingChanges.map((change) => (
             <span key={`ping:${change.target_id}`}>
-              <strong>{change.target_name}</strong>
-              <small
-                title={exactDeltaTitle(
-                  change.added_client_ids,
-                  change.removed_client_ids,
-                )}
-              >
-                +{change.added_client_ids.length} / -
-                {change.removed_client_ids.length}
+              <strong>Ping target · {change.target_name}</strong>
+              <small>
+                Added: {change.added_client_ids.join(", ") || "None"}
+              </small>
+              <small>
+                Removed: {change.removed_client_ids.join(", ") || "None"}
               </small>
             </span>
           ))}
           {shareChanges.map((change) => (
             <span key={`share:${change.share_id}`}>
-              <strong>{change.share_name}</strong>
-              <small
-                title={exactDeltaTitle(
-                  change.added_client_ids,
-                  change.removed_client_ids,
-                )}
-              >
-                +{change.added_client_ids.length} / -
-                {change.removed_client_ids.length}
+              <strong>Shared view · {change.share_name}</strong>
+              <small>
+                Added: {change.added_client_ids.join(", ") || "None"}
+              </small>
+              <small>
+                Removed: {change.removed_client_ids.join(", ") || "None"}
               </small>
             </span>
           ))}
@@ -1062,17 +1064,13 @@ function targetDeltaLabel(current: string[], next: string[]): string {
   return `${targetCountLabel(next.length)} now · +${added} / -${removed}`;
 }
 
-function targetDeltaTitle(current: string[], next: string[]): string {
+function targetDelta(current: string[], next: string[]) {
   const currentSet = new Set(current);
   const nextSet = new Set(next);
-  return exactDeltaTitle(
-    next.filter((id) => !currentSet.has(id)),
-    current.filter((id) => !nextSet.has(id)),
-  );
-}
-
-function exactDeltaTitle(added: string[], removed: string[]): string {
-  return `Add: ${added.join(", ") || "none"}\nRemove: ${removed.join(", ") || "none"}`;
+  return {
+    added: next.filter((id) => !currentSet.has(id)),
+    removed: current.filter((id) => !nextSet.has(id)),
+  };
 }
 
 function targetCountLabel(count: number): string {

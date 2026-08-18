@@ -72,6 +72,7 @@ type FleetMonitorPanelProps = {
   fleetAlertsEvidenceAvailable?: boolean;
   jobs?: JobHistoryRecord[];
   initialMonitoringCards?: SnapshotSource<MonitoringCardView[]> | null;
+  initialMonitoringCardsPending?: boolean;
   maxCards?: number;
   recordBounds: MonitorRecordBounds;
   runningJobCount?: number;
@@ -124,6 +125,7 @@ export function FleetMonitorPanel({
   fleetAlertsEvidenceAvailable = true,
   jobs = [],
   initialMonitoringCards,
+  initialMonitoringCardsPending = false,
   maxCards,
   recordBounds,
   runningJobCount,
@@ -184,6 +186,7 @@ export function FleetMonitorPanel({
   const [monitoringSettledToken, setMonitoringSettledToken] = useState<
     string | null
   >(null);
+  const hiddenMonitoringRefreshPendingRef = useRef(false);
   const monitoringLoading =
     Boolean(apiToken) && monitoringSettledToken !== apiToken;
   useEffect(() => {
@@ -195,11 +198,22 @@ export function FleetMonitorPanel({
     }
     let active = true;
     let inFlight = false;
+    let refreshPending = false;
+    let refreshTimer: number | null = null;
     setMonitoringCards([]);
     setMonitoringError(null);
     setMonitoringSettledToken(null);
-    const loadCards = async () => {
-      if (inFlight) return;
+    const loadCards = async (queueIfInFlight = false) => {
+      if (!active) return;
+      if (document.hidden) {
+        hiddenMonitoringRefreshPendingRef.current = true;
+        return;
+      }
+      if (inFlight) {
+        if (queueIfInFlight) refreshPending = true;
+        return;
+      }
+      refreshPending = false;
       inFlight = true;
       try {
         let offset = 0;
@@ -207,7 +221,7 @@ export function FleetMonitorPanel({
         const loadedIds = new Set<string>();
         for (;;) {
           const page = await apiGet<MonitoringCardsPageView>(
-            `/api/v1/monitoring/cards?limit=1000&offset=${offset}`,
+            `/api/v1/monitoring/cards?limit=1000&offset=${offset}${embedded ? "&include_history=false" : ""}`,
             apiToken,
           );
           if (!active) return;
@@ -260,11 +274,55 @@ export function FleetMonitorPanel({
       } finally {
         inFlight = false;
         if (active) setMonitoringSettledToken(apiToken);
+        if (active && refreshPending && !document.hidden) {
+          refreshPending = false;
+          queueMicrotask(() => void loadCards());
+        }
+      }
+    };
+    const stopRefreshTimer = () => {
+      if (refreshTimer !== null) {
+        window.clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+    };
+    const startRefreshTimer = () => {
+      if (refreshTimer !== null || document.hidden) return;
+      refreshTimer = window.setInterval(
+        () => void loadCards(),
+        MONITORING_REFRESH_INTERVAL_MS,
+      );
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        hiddenMonitoringRefreshPendingRef.current = true;
+        stopRefreshTimer();
+        return;
+      }
+      startRefreshTimer();
+      if (hiddenMonitoringRefreshPendingRef.current) {
+        hiddenMonitoringRefreshPendingRef.current = false;
+        void loadCards(true);
       }
     };
     if (initialMonitoringCards === null) {
+      const trackDeferredVisibility = () => {
+        if (document.hidden) {
+          hiddenMonitoringRefreshPendingRef.current = true;
+        } else if (!initialMonitoringCardsPending) {
+          // If Home has not started yet, its eventual snapshot is already a
+          // post-visibility refresh and no standalone cards read is needed.
+          hiddenMonitoringRefreshPendingRef.current = false;
+        }
+      };
+      document.addEventListener("visibilitychange", trackDeferredVisibility);
+      trackDeferredVisibility();
       return () => {
         active = false;
+        document.removeEventListener(
+          "visibilitychange",
+          trackDeferredVisibility,
+        );
       };
     }
     if (initialMonitoringCards !== undefined) {
@@ -277,18 +335,30 @@ export function FleetMonitorPanel({
         );
       }
       setMonitoringSettledToken(apiToken);
+    } else if (document.hidden) {
+      hiddenMonitoringRefreshPendingRef.current = true;
     } else {
       void loadCards();
     }
-    const refreshTimer = window.setInterval(
-      () => void loadCards(),
-      MONITORING_REFRESH_INTERVAL_MS,
-    );
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    startRefreshTimer();
+    if (document.hidden) {
+      hiddenMonitoringRefreshPendingRef.current = true;
+    } else if (hiddenMonitoringRefreshPendingRef.current) {
+      hiddenMonitoringRefreshPendingRef.current = false;
+      void loadCards(true);
+    }
     return () => {
       active = false;
-      window.clearInterval(refreshTimer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      stopRefreshTimer();
     };
-  }, [apiToken, initialMonitoringCards]);
+  }, [
+    apiToken,
+    embedded,
+    initialMonitoringCards,
+    initialMonitoringCardsPending,
+  ]);
   useEffect(() => {
     if (embedded) return;
     leavingForDetailRef.current = false;

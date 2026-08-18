@@ -75,6 +75,29 @@ same database transaction as the retained JSON payload and long-term rollups.
 Duplicate or stale frames therefore cannot create history, and the JSON payload
 remains the raw audit/export representation.
 
+### Fleet scheduling and gateway admission
+
+An agent does not publish an immediate sample when a gateway session opens. Its
+first tick is deterministically phased from the client ID, process incarnation,
+and effective interval within a window capped at 15 seconds. The phase remains
+stable across reconnects for that process and interval. An effective runtime
+interval change deliberately computes a new phase; a config read and an
+unrelated config update do not rearm collection. Missed Tokio interval ticks are
+skipped instead of replayed as a catch-up burst.
+
+The gateway bounds concurrent telemetry posts to the API at eight by default.
+Set restart-scoped `capacity.gateway_telemetry_in_flight` or
+`VPSMAN_GATEWAY_TELEMETRY_IN_FLIGHT` to a value from 1 through 512. A waiting
+client keeps one latest coalesced telemetry slot, and the permit is acquired
+before that slot is removed. Lifecycle, command-output, and terminal-output
+forwarding for the same client can continue while telemetry waits. The gateway
+keeps the original gateway session, process incarnation, and sequence on every
+delayed sample; if lifecycle overtakes a sample from an ended or replaced
+session, the API session fence rejects it instead of reassigning or reviving it.
+The gateway metrics payload exposes `telemetry_admission_limit`,
+`telemetry_admission_active`, and `telemetry_admission_waiting`; normal queue
+depth and coalescing counters continue to describe pending pressure.
+
 ## Resource Metrics
 
 | Display metric                          | Retained meaning                                                                                                                                                                                                                                                                                                                                                      | Important unavailable state                                                                                                                                                                         |
@@ -226,6 +249,17 @@ state; they never silently sum arbitrary interfaces as billing traffic.
   minute and default to ten years. Pruning preserves one pre-cutoff baseline per
   VPS/source/interface stream, and configured retention cannot be shorter than
   32 days so an active monthly cycle remains computable.
+- Current monthly reads sum an exact hourly transition ledger for completed UTC
+  hours and inspect only the bounded current-hour raw tail. The ledger is
+  backfilled during migration and is repaired in the same database transaction
+  as every raw insert, conflict update, out-of-order import, epoch rewrite, or
+  retention delete; the affected sample and immediate-successor hours are both
+  rebuilt. A per-stream source/materialization revision proves coverage. If any
+  requested stream lacks proven coverage, the whole read uses the original raw
+  counter-window calculation, so optimization failure cannot present stale
+  usage as healthy. Selector, direction, quota, and reset-day edits need no
+  cache invalidation because they are still applied at read time over the exact
+  per-stream ledger.
 
 ### One-time vnStat history import
 

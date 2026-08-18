@@ -20,7 +20,7 @@ pub(crate) struct FleetSnapshotQuery {
     pub(crate) mode: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSnapshotSource<T> {
     pub(crate) data: Option<T>,
     pub(crate) error: Option<String>,
@@ -42,7 +42,7 @@ impl<T> FleetSnapshotSource<T> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetSnapshotResponse {
     pub(crate) mode: String,
     pub(crate) generated_at: String,

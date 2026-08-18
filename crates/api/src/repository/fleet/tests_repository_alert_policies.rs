@@ -27,7 +27,7 @@ use super::{
     traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
     validate_billing_rule_group, NetworkRateSelectorReference, NetworkRateSelectorSpec,
     PolicyAlertQuery, PolicyEvaluation, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
-    PolicyRuleStateRecord, TelemetryRollupView, TrafficCounterRollupRecord,
+    PolicyRuleStateRecord, TelemetryRollupView, TrafficAccountingQuery, TrafficCounterRollupRecord,
     TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
     TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
@@ -1524,6 +1524,63 @@ async fn notification_candidate_limit_is_applied_after_confirmed_active_selectio
     assert_eq!(notification.len(), 1);
     assert_eq!(notification[0].id, active_id);
     assert_eq!(notification[0].lifecycle_state, "triggered");
+}
+
+#[tokio::test]
+async fn snapshot_traffic_prelimit_matches_post_projection_sort_and_limit() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let mut agents = Vec::new();
+    for client_id in ["z-last", "a-first", "m-middle"] {
+        let mut agent = policy_agent(Vec::new());
+        agent.id = client_id.to_string();
+        agent.display_name = client_id.to_string();
+        agents.push(agent);
+    }
+    *memory.agents.write().await = agents.clone();
+    let rules = repo
+        .list_all_vps_rules_for_clients(
+            &agents
+                .iter()
+                .map(|agent| agent.id.clone())
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    let legacy = repo
+        .list_traffic_accounting(&TrafficAccountingQuery {
+            selector_expression: None,
+            client_id: None,
+            state: None,
+            limit: Some(2),
+        })
+        .await
+        .unwrap();
+    let prelimited = repo
+        .list_snapshot_traffic_accounting_with_context(&agents, &rules, 2)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        prelimited
+            .iter()
+            .map(|row| row.client_id.as_str())
+            .collect::<Vec<_>>(),
+        legacy
+            .iter()
+            .map(|row| row.client_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        prelimited
+            .iter()
+            .map(|row| (&row.selectors, &row.state, row.total_bytes))
+            .collect::<Vec<_>>(),
+        legacy
+            .iter()
+            .map(|row| (&row.selectors, &row.state, row.total_bytes))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

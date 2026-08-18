@@ -66,6 +66,7 @@ api_db_pool = 32
 worker_db_pool = 8
 dispatcher_batch = 128
 dispatcher_in_flight = 64
+gateway_telemetry_in_flight = 8
 
 [timeout]
 max_job_timeout_secs = 3600

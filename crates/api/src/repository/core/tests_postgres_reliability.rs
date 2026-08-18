@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, fs, path::Path, str::FromStr, time::Duration};
 
-use axum::http::{header::AUTHORIZATION, HeaderMap};
+use axum::{
+    body::{to_bytes, Body},
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, Request, StatusCode},
+};
 use chrono::{Datelike, Utc};
 use serde_json::{json, Value};
 use sqlx::{
@@ -9,6 +12,7 @@ use sqlx::{
     PgPool, Row,
 };
 use tokio::sync::{broadcast, oneshot};
+use tower::ServiceExt;
 use uuid::Uuid;
 use vpsman_common::{
     pair_port_expressions, parse_expression, payload_hash, plan_tunnel, validate_template,
@@ -22,6 +26,101 @@ use vpsman_common::{
     TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
     TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
 };
+
+#[tokio::test]
+async fn postgres_telemetry_tunnel_listing_uses_the_evidence_acceptance_timestamp() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let left_client_id = "tunnel-list-left";
+    let right_client_id = "tunnel-list-right";
+    for (client_id, key_byte) in [(left_client_id, 101_u8), (right_client_id, 102_u8)] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (id, display_name, public_key, status)
+            VALUES ($1, $1, $2, 'online')
+            "#,
+        )
+        .bind(client_id)
+        .bind(vec![key_byte; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let plan_id = Uuid::new_v4();
+    let mut input = postgres_alert_test_tunnel_input();
+    input.name = "tunnel-list-plan".to_string();
+    input.interface_name = "gre-list".to_string();
+    input.left_client_id = left_client_id.to_string();
+    input.right_client_id = right_client_id.to_string();
+    let plan = plan_tunnel(&input).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO tunnel_plans (
+            id, name, kind, enabled, left_client_id, right_client_id,
+            input, plan, ospf_status, left_ospf_status, right_ospf_status
+        ) VALUES (
+            $1, $2, 'gre', true, $3, $4, $5, $6,
+            'disabled', 'disabled', 'disabled'
+        )
+        "#,
+    )
+    .bind(plan_id)
+    .bind(&input.name)
+    .bind(left_client_id)
+    .bind(right_client_id)
+    .bind(SqlJson(&input))
+    .bind(SqlJson(&plan))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let observed_unix = 1_700_000_000_u64;
+    let accepted_unix = observed_unix + 60;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_plan_runtime_manager, telemetry_endpoint_side,
+            telemetry_peer_client_id, traffic_status, updated_at
+        ) VALUES (
+            $1, to_timestamp($2::double precision), $3, 'gre',
+            'custom_adapter', 'managed_desired', 'telemetry', $4, $5,
+            'custom_adapter', 'left', $6, 'ok',
+            to_timestamp($7::double precision)
+        )
+        "#,
+    )
+    .bind(left_client_id)
+    .bind(observed_unix as f64)
+    .bind(&input.interface_name)
+    .bind(plan_id.to_string())
+    .bind(&input.name)
+    .bind(right_client_id)
+    .bind(accepted_unix as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let tunnels = db
+        .repo
+        .list_telemetry_tunnels(10, Some(left_client_id), Some(&input.interface_name))
+        .await
+        .unwrap();
+    assert_eq!(tunnels.len(), 1);
+    assert_eq!(tunnels[0].client_id, left_client_id);
+    assert_eq!(
+        crate::util::parse_timestamp_unix(&tunnels[0].observed_at),
+        Some(observed_unix)
+    );
+    assert_eq!(
+        crate::util::parse_timestamp_unix(&tunnels[0].accepted_at),
+        Some(accepted_unix)
+    );
+    db.cleanup().await;
+}
 
 #[tokio::test]
 async fn postgres_alert_expression_canonicalization_is_atomic_audited_and_idempotent() {
@@ -1552,6 +1651,7 @@ use crate::{
         VpsRulesDryRunRequest, VPS_RULE_KEY_NETWORK_PORT_SPEED, VPS_RULE_KEY_PRODUCT_NAME,
         VPS_RULE_KEY_TRAFFIC_RESET_DAY,
     },
+    model_alert_states::UpdateFleetAlertStateRequest,
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
@@ -1561,7 +1661,9 @@ use crate::{
     model_terminal::TerminalSessionView,
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
     repository::Repository,
-    repository_alert_policies::NO_RESET_TRAFFIC_COUNTER_USAGE_SQL,
+    repository_alert_policies::{
+        MONTHLY_TRAFFIC_COUNTER_USAGE_SQL, NO_RESET_TRAFFIC_COUNTER_USAGE_SQL,
+    },
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     repository_network_observations::NetworkObservationFilter,
@@ -1570,6 +1672,172 @@ use crate::{
     runtime_config_workspace::{preview_runtime_config_override, runtime_config_override_revision},
     state::{AppState, DispatcherRuntimeConfig, DEFAULT_ARTIFACT_MAX_BYTES},
 };
+
+#[tokio::test]
+async fn postgres_fleet_alert_bulk_route_is_atomic_cas_and_batch_audited() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "alert-bulk-admin".to_string(),
+            password: "alert-bulk-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let router = crate::routes::build_router(postgres_app_state(&db));
+    let request = |body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/fleet-alert-states/bulk")
+            .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let response = router
+        .clone()
+        .oneshot(request(json!({
+            "action": "acknowledge",
+            "items": [
+                {"alert_id": "alert:pg-bulk-b", "expected_revision": 0},
+                {"alert_id": "alert:pg-bulk-a", "expected_revision": 0}
+            ],
+            "reason": "one reviewed batch",
+            "confirmed": true
+        })))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let batch_id = response["batch_id"].as_str().unwrap();
+    assert_eq!(response["states"].as_array().unwrap().len(), 2);
+    assert!(response["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|state| state["revision"] == 1));
+    let audit_batch_ids = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT metadata->>'batch_id'
+        FROM audit_logs
+        WHERE action = 'fleet.alert_state_updated'
+        ORDER BY 1
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit_batch_ids.len(), 1);
+    assert_eq!(audit_batch_ids[0], batch_id);
+
+    let stale = router
+        .oneshot(request(json!({
+            "action": "escalate",
+            "items": [
+                {"alert_id": "alert:pg-bulk-a", "expected_revision": 0},
+                {"alert_id": "alert:pg-placeholder-must-rollback", "expected_revision": 0}
+            ],
+            "confirmed": true
+        })))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale: Value =
+        serde_json::from_slice(&to_bytes(stale.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(stale["error"], "fleet_alert_state_snapshot_stale");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fleet_alert_states WHERE alert_id = 'alert:pg-placeholder-must-rollback'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, i32, i64)>(
+            "SELECT state, escalation_level, revision FROM fleet_alert_states WHERE alert_id = 'alert:pg-bulk-a'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("acknowledged".to_string(), 0, 1)
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.alert_state_updated'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_concurrent_fleet_alert_escalations_serialize_without_lost_levels() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    db.repo
+        .update_fleet_alert_state(
+            &UpdateFleetAlertStateRequest {
+                alert_id: "alert:pg-concurrent-escalation".to_string(),
+                action: "acknowledge".to_string(),
+                muted_for_secs: None,
+                reason: None,
+                expected_revision: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let request = UpdateFleetAlertStateRequest {
+        alert_id: "alert:pg-concurrent-escalation".to_string(),
+        action: "escalate".to_string(),
+        muted_for_secs: None,
+        reason: Some("concurrent escalation".to_string()),
+        expected_revision: None,
+        confirmed: true,
+    };
+    let left_repo = db.repo.clone();
+    let left_operator = operator.clone();
+    let left_request = UpdateFleetAlertStateRequest {
+        alert_id: request.alert_id.clone(),
+        action: request.action.clone(),
+        muted_for_secs: request.muted_for_secs,
+        reason: request.reason.clone(),
+        expected_revision: request.expected_revision,
+        confirmed: request.confirmed,
+    };
+    let right_repo = db.repo.clone();
+    let (left, right) = tokio::join!(
+        left_repo.update_fleet_alert_state(&left_request, &left_operator),
+        right_repo.update_fleet_alert_state(&request, &operator),
+    );
+    let mut levels = [
+        left.unwrap().escalation_level,
+        right.unwrap().escalation_level,
+    ];
+    levels.sort_unstable();
+    assert_eq!(levels, [1, 2]);
+    assert_eq!(
+        sqlx::query_as::<_, (i32, i64)>(
+            "SELECT escalation_level, revision FROM fleet_alert_states WHERE alert_id = 'alert:pg-concurrent-escalation'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (2, 3)
+    );
+    db.cleanup().await;
+}
 
 #[tokio::test]
 async fn postgres_single_host_ip_views_never_expose_prefix_lengths() {
@@ -9031,6 +9299,453 @@ async fn filter_limit_regression_postgres_rules_and_policies() {
     db.cleanup().await;
 }
 
+async fn query_monthly_traffic_usage(
+    pool: &PgPool,
+    client_ids: Vec<String>,
+    cycle_start_unix: i64,
+    now_unix: i64,
+) -> Vec<(String, i64, i64, i64, i64, i64)> {
+    let row_count = client_ids.len();
+    sqlx::query(MONTHLY_TRAFFIC_COUNTER_USAGE_SQL)
+        .bind(client_ids)
+        .bind(vec!["host".to_string(); row_count])
+        .bind(vec!["eth0".to_string(); row_count])
+        .bind(vec![cycle_start_unix; row_count])
+        .bind(now_unix)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.get("client_id"),
+                row.get("cycle_rx"),
+                row.get("cycle_tx"),
+                row.get("latest_rx"),
+                row.get("latest_tx"),
+                row.get("rx_counter_epochs_seen"),
+            )
+        })
+        .collect()
+}
+
+async fn assert_hourly_traffic_ledger_matches_raw(pool: &PgPool, client_id: &str) {
+    let mismatches: i64 = sqlx::query_scalar(
+        r#"
+        WITH sequenced AS (
+            SELECT
+                sample.*,
+                lag(rx_bytes) OVER stream AS previous_rx_bytes,
+                lag(tx_bytes) OVER stream AS previous_tx_bytes,
+                lag(rx_counter_epoch) OVER stream AS previous_rx_counter_epoch,
+                lag(tx_counter_epoch) OVER stream AS previous_tx_counter_epoch,
+                lag(sample_source) OVER stream AS previous_sample_source
+            FROM traffic_counter_samples sample
+            WHERE sample.client_id = $1
+            WINDOW stream AS (
+                PARTITION BY client_id, source_kind, interface
+                ORDER BY observed_at
+            )
+        ), expected AS (
+            SELECT
+                client_id,
+                source_kind,
+                interface,
+                date_bin(
+                    interval '1 hour', observed_at,
+                    TIMESTAMPTZ '1970-01-01 00:00:00+00'
+                ) AS bucket_start,
+                COALESCE(sum(CASE
+                    WHEN rx_counter_epoch = previous_rx_counter_epoch
+                     AND rx_bytes >= previous_rx_bytes
+                    THEN rx_bytes - previous_rx_bytes ELSE 0 END
+                ), 0)::bigint AS rx_bytes,
+                COALESCE(sum(CASE
+                    WHEN tx_counter_epoch = previous_tx_counter_epoch
+                     AND tx_bytes >= previous_tx_bytes
+                    THEN tx_bytes - previous_tx_bytes ELSE 0 END
+                ), 0)::bigint AS tx_bytes,
+                count(*) FILTER (
+                    WHERE previous_rx_counter_epoch IS NOT NULL
+                      AND rx_counter_epoch <> previous_rx_counter_epoch
+                      AND NOT (
+                          previous_sample_source LIKE 'vnstat_import:%'
+                          AND sample_source NOT LIKE 'vnstat_import:%'
+                      )
+                )::integer AS rx_reset_count,
+                count(*) FILTER (
+                    WHERE previous_tx_counter_epoch IS NOT NULL
+                      AND tx_counter_epoch <> previous_tx_counter_epoch
+                      AND NOT (
+                          previous_sample_source LIKE 'vnstat_import:%'
+                          AND sample_source NOT LIKE 'vnstat_import:%'
+                      )
+                )::integer AS tx_reset_count,
+                count(*)::integer AS sample_count,
+                min(observed_at) AS first_observed_at,
+                max(observed_at) AS latest_observed_at
+            FROM sequenced
+            GROUP BY client_id, source_kind, interface, bucket_start
+        ), actual AS (
+            SELECT
+                client_id,
+                source_kind,
+                interface,
+                bucket_start,
+                rx_bytes,
+                tx_bytes,
+                rx_reset_count,
+                tx_reset_count,
+                sample_count,
+                first_observed_at,
+                latest_observed_at
+            FROM traffic_counter_hourly_usage
+            WHERE client_id = $1
+        ), differences AS (
+            (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+            UNION ALL
+            (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+        )
+        SELECT count(*) FROM differences
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(mismatches, 0, "hourly transition ledger diverged from raw");
+}
+
+fn explain_relation_rows(plan: &Value, relation: &str) -> f64 {
+    let mut rows = 0.0;
+    if plan.get("Relation Name").and_then(Value::as_str) == Some(relation) {
+        rows += plan
+            .get("Actual Rows")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            * plan
+                .get("Actual Loops")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+    }
+    if let Some(children) = plan.get("Plans").and_then(Value::as_array) {
+        rows += children
+            .iter()
+            .map(|child| explain_relation_rows(child, relation))
+            .sum::<f64>();
+    }
+    rows
+}
+
+#[tokio::test]
+async fn postgres_monthly_traffic_fast_path_tracks_out_of_order_and_fallback() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "traffic-hourly-mutation-parity";
+    insert_client(&db.pool, client_id, None).await;
+    let current_hour: i64 = sqlx::query_scalar(
+        r#"
+        SELECT extract(epoch FROM date_bin(
+            interval '1 hour', now(), TIMESTAMPTZ '1970-01-01 00:00:00+00'
+        ))::bigint
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let cycle_start = current_hour - 3 * 3_600;
+    let now_unix = Utc::now().timestamp().div_euclid(60) * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        ) VALUES
+            ($1, 'host', 'eth0', to_timestamp($2 - 60),
+                100, 200, 0, 0, 'agent_networks'),
+            ($1, 'host', 'eth0', to_timestamp($2 + 300),
+                130, 240, 0, 0, 'agent_networks'),
+            ($1, 'host', 'eth0', to_timestamp($2 + 3900),
+                160, 280, 0, 0, 'vnstat_import:test'),
+            ($1, 'host', 'eth0', to_timestamp($2 + 7200),
+                10, 20, 1, 1, 'agent_networks'),
+            ($1, 'host', 'eth0', to_timestamp($2 + 7800),
+                25, 35, 1, 1, 'agent_networks'),
+            ($1, 'host', 'eth0', to_timestamp($2 + 10800),
+                5, 7, 2, 2, 'agent_networks')
+        "#,
+    )
+    .bind(client_id)
+    .bind(cycle_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    assert_eq!(
+        query_monthly_traffic_usage(&db.pool, vec![client_id.to_string()], cycle_start, now_unix,)
+            .await,
+        vec![(client_id.to_string(), 75, 95, 5, 7, 2)]
+    );
+    assert_eq!(
+        query_monthly_traffic_usage(
+            &db.pool,
+            vec![client_id.to_string()],
+            cycle_start + 30,
+            now_unix,
+        )
+        .await,
+        vec![(client_id.to_string(), 75, 95, 5, 7, 2)],
+        "non-hour-aligned callers must take the exact raw fallback"
+    );
+
+    // Inserting between two retained samples and then changing its value must
+    // repair both its own transition and the transition into its successor.
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        ) VALUES (
+            $1, 'host', 'eth0', to_timestamp($2 + 1800),
+            145, 260, 0, 0, 'agent_networks'
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(cycle_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    sqlx::query(
+        r#"
+        UPDATE traffic_counter_samples
+        SET rx_bytes = 200, tx_bytes = 300
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND observed_at = to_timestamp($2 + 1800)
+        "#,
+    )
+    .bind(client_id)
+    .bind(cycle_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    assert_eq!(
+        query_monthly_traffic_usage(&db.pool, vec![client_id.to_string()], cycle_start, now_unix,)
+            .await[0]
+            .1,
+        115
+    );
+    sqlx::query(
+        r#"
+        DELETE FROM traffic_counter_samples
+        WHERE client_id = $1
+          AND source_kind = 'host'
+          AND interface = 'eth0'
+          AND observed_at = to_timestamp($2 + 1800)
+        "#,
+    )
+    .bind(client_id)
+    .bind(cycle_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+
+    // A dirty coverage revision must select the retained raw-LAG oracle and
+    // return the same complete result, never a stale hourly approximation.
+    sqlx::query(
+        r#"
+        UPDATE traffic_counter_hourly_usage_streams
+        SET source_revision = source_revision + 1
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        DELETE FROM traffic_counter_hourly_usage
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+          AND bucket_start = (
+              SELECT min(bucket_start)
+              FROM traffic_counter_hourly_usage
+              WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+          )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        query_monthly_traffic_usage(&db.pool, vec![client_id.to_string()], cycle_start, now_unix,)
+            .await,
+        vec![(client_id.to_string(), 75, 95, 5, 7, 2)]
+    );
+
+    // The next raw mutation sees the dirty revision and performs a whole-stream
+    // repair before marking coverage healthy again.
+    sqlx::query(
+        r#"
+        UPDATE traffic_counter_samples
+        SET rx_bytes = rx_bytes
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+          AND observed_at = to_timestamp($2 + 10800)
+        "#,
+    )
+    .bind(client_id)
+    .bind(cycle_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    assert!(sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT source_revision = materialized_revision
+        FROM traffic_counter_hourly_usage_streams
+        WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    sqlx::query("DELETE FROM clients WHERE id = $1")
+        .bind(client_id)
+        .execute(&db.pool)
+        .await
+        .expect("traffic derivation triggers must not block client cascade deletion");
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64, i64)>(
+            r#"
+            SELECT
+                (SELECT count(*) FROM traffic_counter_samples WHERE client_id = $1),
+                (SELECT count(*) FROM traffic_counter_hourly_usage WHERE client_id = $1),
+                (SELECT count(*) FROM traffic_counter_hourly_usage_streams WHERE client_id = $1)
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (0, 0, 0)
+    );
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monthly_traffic_fast_path_bounds_raw_work_for_128_clients() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_count = 128_i64;
+    let minute_count = 24 * 60_i64;
+    let (current_hour, current_minute): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            extract(epoch FROM date_bin(
+                interval '1 hour', now(), TIMESTAMPTZ '1970-01-01 00:00:00+00'
+            ))::bigint,
+            extract(epoch FROM date_trunc('minute', now()))::bigint
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let cycle_start = current_hour - minute_count * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key)
+        SELECT
+            format('traffic-fast-%s', client_number),
+            format('traffic-fast-%s', client_number),
+            decode(md5(format('traffic-fast-%s', client_number)), 'hex')
+        FROM generate_series(1, $1::bigint) client_number
+        "#,
+    )
+    .bind(client_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        )
+        SELECT
+            format('traffic-fast-%s', client_number),
+            'host',
+            'eth0',
+            to_timestamp($2 + minute_number * 60),
+            minute_number * 100,
+            minute_number * 200,
+            0,
+            0,
+            'agent_networks'
+        FROM generate_series(1, $1::bigint) client_number
+        CROSS JOIN generate_series(0, $3::bigint) minute_number
+        "#,
+    )
+    .bind(client_count)
+    .bind((cycle_start - 60) as f64)
+    .bind(minute_count)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "ANALYZE traffic_counter_samples, traffic_counter_hourly_usage, traffic_counter_hourly_usage_streams",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let client_ids = (1..=client_count)
+        .map(|client_number| format!("traffic-fast-{client_number}"))
+        .collect::<Vec<_>>();
+    let usage =
+        query_monthly_traffic_usage(&db.pool, client_ids.clone(), cycle_start, current_minute)
+            .await;
+    assert_eq!(usage.len(), client_count as usize);
+    assert!(usage.iter().all(|row| {
+        row.1 == minute_count * 100
+            && row.2 == minute_count * 200
+            && row.3 == minute_count * 100
+            && row.4 == minute_count * 200
+            && row.5 == 1
+    }));
+
+    let explain_sql =
+        format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {MONTHLY_TRAFFIC_COUNTER_USAGE_SQL}");
+    let plan: Value = sqlx::query_scalar(&explain_sql)
+        .bind(client_ids)
+        .bind(vec!["host".to_string(); client_count as usize])
+        .bind(vec!["eth0".to_string(); client_count as usize])
+        .bind(vec![cycle_start; client_count as usize])
+        .bind(current_minute)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let plan_text = plan.to_string();
+    assert!(
+        plan_text.contains("traffic_counter_hourly_usage"),
+        "{plan_text}"
+    );
+    let raw_rows = explain_relation_rows(&plan[0]["Plan"], "traffic_counter_samples");
+    let seeded_rows = client_count as f64 * (minute_count + 1) as f64;
+    assert!(
+        raw_rows < seeded_rows / 4.0,
+        "fast path visited {raw_rows} raw rows out of {seeded_rows}: {plan_text}"
+    );
+    db.cleanup().await;
+}
+
 #[tokio::test]
 async fn postgres_traffic_accounting_ignores_more_than_200k_unrelated_old_rows() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
@@ -10577,6 +11292,71 @@ async fn exact_v044_migration_test_db() -> Option<(PgReliabilityTestDb, std::pat
     Some((db, baseline_dir))
 }
 
+#[tokio::test]
+async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
+    let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
+        return;
+    };
+    let client_id = "traffic-upgrade-hourly-backfill";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO traffic_counter_samples (
+            client_id, source_kind, interface, observed_at,
+            rx_bytes, tx_bytes, rx_counter_epoch, tx_counter_epoch, sample_source
+        ) VALUES
+            ($1, 'host', 'eth0', '2020-01-01 00:59:00+00',
+                100, 200, 0, 0, 'agent_networks'),
+            ($1, 'host', 'eth0', '2020-01-01 01:05:00+00',
+                130, 240, 0, 0, 'agent_networks'),
+            ($1, 'host', 'eth0', '2020-01-01 02:05:00+00',
+                160, 280, 0, 0, 'vnstat_import:upgrade'),
+            ($1, 'host', 'eth0', '2020-01-01 03:00:00+00',
+                10, 20, 1, 1, 'agent_networks')
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 through 0013 must backfill exact traffic usage");
+    assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
+    assert_eq!(
+        sqlx::query_as::<_, (i64, i64)>(
+            r#"
+            SELECT source_revision, materialized_revision
+            FROM traffic_counter_hourly_usage_streams
+            WHERE client_id = $1 AND source_kind = 'host' AND interface = 'eth0'
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (0, 0)
+    );
+    let cycle_start = chrono::DateTime::parse_from_rfc3339("2020-01-01T01:00:00Z")
+        .unwrap()
+        .timestamp();
+    let now_unix = chrono::DateTime::parse_from_rfc3339("2020-01-01T03:30:00Z")
+        .unwrap()
+        .timestamp();
+    assert_eq!(
+        query_monthly_traffic_usage(&db.pool, vec![client_id.to_string()], cycle_start, now_unix,)
+            .await,
+        vec![(client_id.to_string(), 60, 80, 10, 20, 1)]
+    );
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
 async fn insert_policy_migration_state(
     pool: &PgPool,
     policy_rule_id: Uuid,
@@ -11273,13 +12053,20 @@ async fn postgres_exact_v044_operational_lifecycle_backfill_is_quiet_and_idempot
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010, 0011, and 0012 must apply to exact v0.4.4");
+        .expect("0010 through 0013 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        12
+        13
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fleet_alert_states WHERE revision = 1",)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        3
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, bool)>(
@@ -12404,13 +13191,13 @@ async fn postgres_exact_v044_resource_policy_upgrade_preserves_operator_intent()
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010, 0011, and 0012 must apply after exact v0.4.4 migration checksums");
+        .expect("0010 through 0013 must apply after exact v0.4.4 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         sqlx::query_scalar::<_, Value>(
@@ -12623,13 +13410,13 @@ async fn postgres_exact_v044_policy_upgrade_resets_only_saturation_state_and_kee
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010, 0011, and 0012 lifecycle migrations must apply to exact v0.4.4");
+        .expect("0010 through 0013 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        12
+        13
     );
 
     let affected_after = sqlx::query_as::<_, (i32, String, String, String, String, Option<Value>)>(
@@ -13051,13 +13838,13 @@ async fn postgres_exact_v035_baseline_applies_supported_migrations_in_place() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0009 through 0012 must apply after exact v0.3.5 migration checksums");
+        .expect("0009 through 0013 must apply after exact v0.3.5 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        12
+        13
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool)>(

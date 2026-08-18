@@ -2572,10 +2572,10 @@ impl Repository {
                 let rows = sqlx::query(
                     r#"
                     SELECT
-                        client_id,
-                        observed_at::text AS observed_at,
-                        updated_at::text AS accepted_at,
-                        interface,
+                        telemetry.client_id,
+                        telemetry.observed_at::text AS observed_at,
+                        telemetry.updated_at::text AS accepted_at,
+                        telemetry.interface,
                         telemetry.kind AS kind,
                         ownership_mode,
                         mutation_policy,

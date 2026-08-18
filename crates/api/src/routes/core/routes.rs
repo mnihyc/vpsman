@@ -8,9 +8,10 @@ use crate::{
     backup_upload_sessions::MAX_BACKUP_ARTIFACT_UPLOAD_CHUNK_BYTES,
     privilege::verify_privilege_unlock,
     routes_alerts::{
-        bulk_unset_vps_rules, bulk_upsert_vps_rules, delete_fleet_alert_notification_channel,
-        delete_fleet_alert_policy, dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy,
-        dry_run_vps_rules, export_fleet_alerts, get_effective_vps_rules, get_fleet_alert_policy,
+        bulk_unset_vps_rules, bulk_update_fleet_alert_states, bulk_upsert_vps_rules,
+        delete_fleet_alert_notification_channel, delete_fleet_alert_policy,
+        dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy, dry_run_vps_rules,
+        export_fleet_alerts, get_effective_vps_rules, get_fleet_alert_policy,
         get_traffic_accounting, list_fleet_alert_events, list_fleet_alert_history,
         list_fleet_alert_notification_channels, list_fleet_alert_notifications,
         list_fleet_alert_policies, list_fleet_alert_states, list_fleet_alerts, list_policy_alerts,
@@ -249,6 +250,10 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route(
             "/api/v1/fleet-alert-states",
             get(list_fleet_alert_states).post(update_fleet_alert_state),
+        )
+        .route(
+            "/api/v1/fleet-alert-states/bulk",
+            post(bulk_update_fleet_alert_states),
         )
         .route(
             "/api/v1/fleet-alert-policies",

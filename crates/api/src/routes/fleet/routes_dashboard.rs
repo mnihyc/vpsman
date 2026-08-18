@@ -40,7 +40,7 @@ const DASHBOARD_TOP_DEGRADED: usize = 5;
 const NETWORK_SNAPSHOT_COHERENCE_SECS: u64 = 180;
 const DASHBOARD_MAX_NETWORK_POINTS: usize = 80;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct DashboardOverviewQuery {
     pub(crate) window: Option<String>,
     pub(crate) start_unix: Option<u64>,
@@ -301,30 +301,121 @@ pub(crate) async fn dashboard_overview(
     Query(query): Query<DashboardOverviewQuery>,
 ) -> Result<Json<DashboardOverviewView>, ApiError> {
     let operator = state.require_operator_scope(&headers, "fleet:read").await?;
-    Ok(Json(
-        load_dashboard_overview(&state, &query, &operator.operator.preferences).await?,
-    ))
+    let request = prepare_dashboard_overview(&query, unix_now())?;
+    let dashboard_key = dashboard_overview_prepared_singleflight_key(&query, &request);
+    let key = serde_json::json!({
+        "endpoint": "dashboard_overview",
+        "auth": crate::state::read_singleflight_auth_key(
+            operator.operator.id,
+            &operator.operator.scopes,
+        ),
+        "dashboard": dashboard_key,
+        "preferences": {
+            "curve_exclusions": &operator.operator.preferences.dashboard_curve_exclusions,
+            "resource_top_limit": operator.operator.preferences.dashboard_resource_top_limit,
+            "network_top_limit": operator.operator.preferences.dashboard_network_top_limit,
+        },
+    })
+    .to_string();
+    let preferences = operator.operator.preferences;
+    let events = state.events.clone();
+    let response = events
+        .singleflight_dashboard_overview(key, move || async move {
+            let _admission = state.events.acquire_heavy_read_permit().await?;
+            let request = prepare_dashboard_overview(&query, unix_now())?;
+            build_dashboard_overview(
+                &state,
+                request.range,
+                request.scope,
+                request.group_by,
+                request.resource_metric,
+                request.chart_points,
+                request.snapshot_unix,
+                &preferences,
+            )
+            .await
+        })
+        .await?;
+    Ok(Json(response))
 }
 
-pub(crate) async fn load_dashboard_overview(
-    state: &AppState,
+pub(crate) struct PreparedDashboardOverview {
+    range: DashboardRange,
+    scope: DashboardScope,
+    group_by: DashboardGroupBy,
+    resource_metric: DashboardResourceMetric,
+    chart_points: u32,
+    snapshot_unix: u64,
+}
+
+pub(crate) fn prepare_dashboard_overview(
     query: &DashboardOverviewQuery,
+    now: u64,
+) -> Result<PreparedDashboardOverview, ApiError> {
+    Ok(PreparedDashboardOverview {
+        range: validate_dashboard_range(query, now)?,
+        scope: validate_dashboard_scope(query)?,
+        group_by: validate_dashboard_group_by(query.group_by.as_deref())?,
+        resource_metric: validate_dashboard_resource_metric(query.resource_metric.as_deref())?,
+        chart_points: validate_dashboard_chart_points(query.chart_points)?,
+        snapshot_unix: now,
+    })
+}
+
+fn dashboard_overview_range_singleflight_key(
+    query: &DashboardOverviewQuery,
+    request: &PreparedDashboardOverview,
+) -> serde_json::Value {
+    if request.range.mode != "custom" {
+        return serde_json::json!({
+            "mode": request.range.mode,
+            "window": request.range.window.map(|window| window.label),
+        });
+    }
+    let requested_end_unix = match (query.end_unix, query.end_at.as_deref()) {
+        (Some(timestamp), _) => Some(timestamp),
+        (None, Some(timestamp)) => parse_timestamp_unix(timestamp),
+        (None, None) => None,
+    };
+    serde_json::json!({
+        "mode": "custom",
+        "start_unix": request.range.start_unix,
+        // Keep the caller's canonical explicit bound rather than the
+        // request-time clamp to `now`: an admitted leader revalidates after
+        // waiting and two different future bounds must never share data.
+        "end_unix": requested_end_unix,
+    })
+}
+
+pub(crate) fn dashboard_overview_prepared_singleflight_key(
+    query: &DashboardOverviewQuery,
+    request: &PreparedDashboardOverview,
+) -> serde_json::Value {
+    serde_json::json!({
+        "range": dashboard_overview_range_singleflight_key(query, request),
+        "scope": {
+            "kind": request.scope.kind.as_str(),
+            "value": request.scope.value.as_deref(),
+        },
+        "group_by": request.group_by.as_str(),
+        "resource_metric": request.resource_metric.as_str(),
+        "chart_points": request.chart_points,
+    })
+}
+
+pub(crate) async fn load_prepared_dashboard_overview(
+    state: &AppState,
+    request: PreparedDashboardOverview,
     preferences: &OperatorPreferences,
 ) -> Result<DashboardOverviewView, ApiError> {
-    let now = unix_now();
-    let range = validate_dashboard_range(query, now)?;
-    let group_by = validate_dashboard_group_by(query.group_by.as_deref())?;
-    let resource_metric = validate_dashboard_resource_metric(query.resource_metric.as_deref())?;
-    let scope = validate_dashboard_scope(query)?;
-    let chart_points = validate_dashboard_chart_points(query.chart_points)?;
     build_dashboard_overview(
         state,
-        range,
-        scope,
-        group_by,
-        resource_metric,
-        chart_points,
-        now,
+        request.range,
+        request.scope,
+        request.group_by,
+        request.resource_metric,
+        request.chart_points,
+        request.snapshot_unix,
         preferences,
     )
     .await
@@ -365,8 +456,8 @@ async fn build_dashboard_overview(
         .iter()
         .map(|agent| (agent.id.clone(), agent.clone()))
         .collect::<HashMap<_, _>>();
-    let alert_selection = state
-        .list_fleet_alerts_selected(
+    let (alert_selection, telemetry_range, network_rate_selection) = tokio::join!(
+        state.list_fleet_alerts_selected_with_visible_agents(
             FleetAlertQuery {
                 limit: Some(DASHBOARD_LIMIT),
                 client_id: None,
@@ -380,76 +471,92 @@ async fn build_dashboard_overview(
                 end_unix: range.end_unix,
                 include_global: scope.kind == DashboardScopeKind::All,
             }),
-        )
-        .await?;
-    let alerts = alert_selection.alerts;
-    let alerts_truncated = alert_selection.truncated;
-    let telemetry_range = if range.mode == "all" {
-        DashboardRange {
-            start_unix: state
+            &agents,
+        ),
+        async {
+            if range.mode == "all" {
+                Ok::<DashboardRange, ApiError>(DashboardRange {
+                    start_unix: state
+                        .repo
+                        .dashboard_telemetry_start_unix(&scoped_client_id_list)
+                        .await
+                        .map_err(ApiError::internal_mapper(
+                            "dashboard_history_range_unavailable",
+                            "The available dashboard-history range could not be loaded.",
+                        ))?
+                        .unwrap_or(range.end_unix),
+                    ..range
+                })
+            } else {
+                Ok(range)
+            }
+        },
+        async {
+            state
                 .repo
-                .dashboard_telemetry_start_unix(&scoped_client_id_list)
+                .network_rate_interface_selection_for_clients(&scoped_client_id_list)
                 .await
                 .map_err(ApiError::internal_mapper(
-                    "dashboard_history_range_unavailable",
-                    "The available dashboard-history range could not be loaded.",
-                ))?
-                .unwrap_or(range.end_unix),
-            ..range
-        }
-    } else {
-        range
-    };
+                    "network_interface_selection_unavailable",
+                    "Network-interface selection could not be loaded.",
+                ))
+        },
+    );
+    let alert_selection = alert_selection?;
+    let alerts = alert_selection.alerts;
+    let alerts_truncated = alert_selection.truncated;
+    let telemetry_range = telemetry_range?;
+    let network_rate_selection = network_rate_selection?;
     let chart_step_secs = dashboard_chart_step_secs(&telemetry_range, chart_points);
-    let rollups = load_dashboard_rollups(
-        state,
-        &telemetry_range,
-        chart_step_secs,
-        chart_points,
-        &scoped_client_id_list,
-    )
-    .await?;
-    let network_rate_selection = state
-        .repo
-        .network_rate_interface_selection_for_clients(&scoped_client_id_list)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "network_interface_selection_unavailable",
-            "Network-interface selection could not be loaded.",
-        ))?;
-    let network_rates = load_dashboard_network_rates(
-        state,
-        &telemetry_range,
-        chart_step_secs,
-        chart_points,
-        &network_rate_selection,
-    )
-    .await?;
-    let mut running_jobs = state
-        .repo
-        .list_dashboard_running_jobs(&scoped_client_id_list, DASHBOARD_LIMIT + 1)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "dashboard_jobs_unavailable",
-            "Dashboard job evidence could not be loaded.",
-        ))?;
+    let (rollups, network_rates, running_jobs, backup_requests) = tokio::join!(
+        load_dashboard_rollups(
+            state,
+            &telemetry_range,
+            chart_step_secs,
+            chart_points,
+            &scoped_client_id_list,
+        ),
+        load_dashboard_network_rates(
+            state,
+            &telemetry_range,
+            chart_step_secs,
+            chart_points,
+            &network_rate_selection,
+        ),
+        async {
+            state
+                .repo
+                .list_dashboard_running_jobs(&scoped_client_id_list, DASHBOARD_LIMIT + 1)
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "dashboard_jobs_unavailable",
+                    "Dashboard job evidence could not be loaded.",
+                ))
+        },
+        async {
+            state
+                .repo
+                .list_dashboard_backup_requests(
+                    &scoped_client_id_list,
+                    range.start_unix,
+                    range.end_unix,
+                    DASHBOARD_LIMIT + 1,
+                )
+                .await
+                .map_err(ApiError::internal_mapper(
+                    "dashboard_backups_unavailable",
+                    "Dashboard backup evidence could not be loaded.",
+                ))
+        },
+    );
+    let rollups = rollups?;
+    let network_rates = network_rates?;
+    let mut running_jobs = running_jobs?;
+    let mut backup_requests = backup_requests?;
     let running_jobs_truncated = running_jobs.len() > DASHBOARD_LIMIT as usize;
     running_jobs.truncate(DASHBOARD_LIMIT as usize);
     let running_job_targets =
         running_job_targets_by_client(state, &running_jobs, &scoped_client_id_list).await?;
-    let mut backup_requests = state
-        .repo
-        .list_dashboard_backup_requests(
-            &scoped_client_id_list,
-            range.start_unix,
-            range.end_unix,
-            DASHBOARD_LIMIT + 1,
-        )
-        .await
-        .map_err(ApiError::internal_mapper(
-            "dashboard_backups_unavailable",
-            "Dashboard backup evidence could not be loaded.",
-        ))?;
     let backups_truncated = backup_requests.len() > DASHBOARD_LIMIT as usize;
     backup_requests.truncate(DASHBOARD_LIMIT as usize);
     let latest_rollups = latest_rollups_by_client(&rollups);

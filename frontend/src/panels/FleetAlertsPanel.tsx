@@ -27,10 +27,13 @@ import type {
   AgentView,
   FleetAlertRecord,
   FleetAlertResolveRequest,
-  FleetAlertStateRecord,
+  FleetAlertStateBulkRequest,
+  FleetAlertStateBulkResponse,
   FleetAlertStateRequest,
 } from "../types";
 import { formatCompactTime, formatFullTime, formatVpsName } from "../utils";
+
+const MAX_ALERT_STATE_BULK_ITEMS = 1_000;
 
 type FleetAlertsPanelProps = {
   agents: AgentView[];
@@ -55,7 +58,9 @@ type FleetAlertsPanelProps = {
     alertId: string,
     request: FleetAlertResolveRequest,
   ) => Promise<FleetAlertRecord>;
-  onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
+  onUpdateBulk: (
+    request: FleetAlertStateBulkRequest,
+  ) => Promise<FleetAlertStateBulkResponse>;
 };
 
 export function FleetAlertsPanel({
@@ -78,7 +83,7 @@ export function FleetAlertsPanel({
   onLoadOlderEvents,
   onRefreshEvents,
   onResolve,
-  onUpdate,
+  onUpdateBulk,
 }: FleetAlertsPanelProps) {
   const currentAlerts = useMemo(
     // Manual review rows can outlive a snapshot refresh. Put authoritative
@@ -160,7 +165,7 @@ export function FleetAlertsPanel({
           onLoadOlderEvents={onLoadOlderEvents}
           onRefreshEvents={onRefreshEvents}
           onResolve={onResolve}
-          onUpdate={onUpdate}
+          onUpdateBulk={onUpdateBulk}
         />
       </div>
     </section>
@@ -213,7 +218,7 @@ function FleetAlertList({
   onLoadOlderEvents,
   onRefreshEvents,
   onResolve,
-  onUpdate,
+  onUpdateBulk,
 }: {
   agents: AgentView[];
   alerts: FleetAlertRecord[];
@@ -236,14 +241,16 @@ function FleetAlertList({
     alertId: string,
     request: FleetAlertResolveRequest,
   ) => Promise<FleetAlertRecord>;
-  onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
+  onUpdateBulk: (
+    request: FleetAlertStateBulkRequest,
+  ) => Promise<FleetAlertStateBulkResponse>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
   const [pending, setPending] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [reviewSnapshot, setReviewSnapshot] = useState<{
     action: FleetAlertStateRequest["action"];
-    requests: FleetAlertStateRequest[];
+    request: FleetAlertStateBulkRequest;
     rows: FleetAlertRecord[];
   } | null>(null);
   const [resolveSnapshot, setResolveSnapshot] =
@@ -440,6 +447,7 @@ function FleetAlertList({
           !latest.malformed &&
           latest.operatorState === reviewed.operatorState &&
           latest.lifecycleState === reviewed.lifecycleState &&
+          latestAlert.state_revision === reviewedAlert.state_revision &&
           latestAlert.lifecycle.trigger_generation ===
             reviewedAlert.lifecycle.trigger_generation
         );
@@ -469,16 +477,29 @@ function FleetAlertList({
     rows: FleetAlertRecord[],
     action: FleetAlertStateRequest["action"],
   ) {
-    if (!canManageAlertLifecycle || rows.length === 0 || pending) {
+    if (
+      !canManageAlertLifecycle ||
+      rows.length === 0 ||
+      rows.length > MAX_ALERT_STATE_BULK_ITEMS ||
+      pending
+    ) {
+      if (rows.length > MAX_ALERT_STATE_BULK_ITEMS) {
+        setActionError(
+          `Select at most ${MAX_ALERT_STATE_BULK_ITEMS.toLocaleString()} alerts for one triage update.`,
+        );
+      }
       return;
     }
     setActionError(null);
     setReviewSnapshot({
       action,
       rows,
-      requests: rows.map((alert) => ({
-        alert_id: alert.id,
+      request: {
         action,
+        items: rows.map((alert) => ({
+          alert_id: alert.id,
+          expected_revision: alert.state_revision ?? 0,
+        })),
         muted_for_secs: action === "mute" ? 4 * 60 * 60 : null,
         reason:
           action === "mute"
@@ -489,7 +510,7 @@ function FleetAlertList({
                 ? "panel escalation"
                 : "panel triage reset to open",
         confirmed: true,
-      })),
+      },
     });
   }
 
@@ -498,15 +519,9 @@ function FleetAlertList({
     if (!canManageAlertLifecycle || !snapshot || pending) {
       return;
     }
-    setPending(
-      `${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`,
-    );
-    let updatedCount = 0;
+    setPending(`${snapshot.action}:${snapshot.rows.length}`);
     try {
-      for (const request of snapshot.requests) {
-        await onUpdate(request);
-        updatedCount += 1;
-      }
+      await onUpdateBulk(snapshot.request);
       setActionError(null);
       setReviewSnapshot(null);
     } catch (error) {
@@ -515,9 +530,7 @@ function FleetAlertList({
           ? error.message
           : "The alert update failed without diagnostic detail.";
       setActionError(
-        updatedCount > 0
-          ? `${updatedCount} of ${snapshot.requests.length} alerts updated before the failure: ${detail}`
-          : `No alerts were updated: ${detail}`,
+        `The reviewed batch is atomic (all or none). A current-state refresh was attempted after the request failed: ${detail}`,
       );
     } finally {
       setPending(null);
@@ -686,8 +699,13 @@ function FleetAlertList({
           {
             label: "Acknowledge Open triage",
             description: (rows) =>
-              `Acknowledge ${openRows(rows).length} selected alerts whose operator triage is Open.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
+              bulkActionDescription(
+                "Acknowledge",
+                openRows(rows),
+                "whose operator triage is Open",
+              ),
+            disabled: (rows) =>
+              pending != null || !validAlertStateBulk(openRows(rows)),
             hidden: () => !canManageAlertLifecycle,
             icon: <Check size={14} />,
             onSelect: (rows) =>
@@ -696,8 +714,13 @@ function FleetAlertList({
           {
             label: "Mute Open triage 4h",
             description: (rows) =>
-              `Mute ${openRows(rows).length} selected alerts whose operator triage is Open for four hours.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
+              bulkActionDescription(
+                "Mute",
+                openRows(rows),
+                "whose operator triage is Open for four hours",
+              ),
+            disabled: (rows) =>
+              pending != null || !validAlertStateBulk(openRows(rows)),
             hidden: () => !canManageAlertLifecycle,
             icon: <VolumeX size={14} />,
             onSelect: (rows) => reviewAlertUpdate(openRows(rows), "mute"),
@@ -705,8 +728,13 @@ function FleetAlertList({
           {
             label: "Escalate Open triage",
             description: (rows) =>
-              `Escalate ${openRows(rows).length} selected alerts whose operator triage is Open.`,
-            disabled: (rows) => pending != null || openRows(rows).length === 0,
+              bulkActionDescription(
+                "Escalate",
+                openRows(rows),
+                "whose operator triage is Open",
+              ),
+            disabled: (rows) =>
+              pending != null || !validAlertStateBulk(openRows(rows)),
             hidden: () => !canManageAlertLifecycle,
             icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => reviewAlertUpdate(openRows(rows), "escalate"),
@@ -714,9 +742,13 @@ function FleetAlertList({
           {
             label: "Reset triage to Open",
             description: (rows) =>
-              `Reset operator triage to Open for ${triagedRows(rows).length} selected fleet alerts. This does not resolve their lifecycle.`,
+              bulkActionDescription(
+                "Reset operator triage to Open for",
+                triagedRows(rows),
+                "without resolving their lifecycle",
+              ),
             disabled: (rows) =>
-              pending != null || triagedRows(rows).length === 0,
+              pending != null || !validAlertStateBulk(triagedRows(rows)),
             hidden: () => !canManageAlertLifecycle,
             icon: <CircleCheck size={14} />,
             onSelect: (rows) => reviewAlertUpdate(triagedRows(rows), "clear"),
@@ -938,11 +970,17 @@ function FleetAlertList({
           const selectedOpen = openRows(rows).length;
           const selectedTriaged = triagedRows(rows).length;
           const selectedResolvable = resolvableRows(rows).length;
+          const exceedsBulkLimit =
+            selectedOpen > MAX_ALERT_STATE_BULK_ITEMS ||
+            selectedTriaged > MAX_ALERT_STATE_BULK_ITEMS;
           return (
             <span>
               {rows.length} selected · {selectedOpen} current with Open triage ·{" "}
               {selectedTriaged} current triaged · {selectedResolvable}{" "}
               resolvable occurrence{selectedResolvable === 1 ? "" : "s"}
+              {exceedsBulkLimit
+                ? ` · Atomic triage limit is ${MAX_ALERT_STATE_BULK_ITEMS.toLocaleString()}; narrow the selection.`
+                : ""}
             </span>
           );
         }}
@@ -974,11 +1012,19 @@ function FleetAlertList({
       />
       <ConfirmationPrompt
         confirmLabel={fleetAlertActionLabel(reviewSnapshot?.action)}
-        detail="Applies only the reviewed operator triage update. It does not change the alert lifecycle."
+        detail="Applies the reviewed operator triage updates atomically. It does not change alert lifecycles."
         items={[
           {
             label: "Action",
             value: fleetAlertActionLabel(reviewSnapshot?.action),
+          },
+          {
+            label: "Batch",
+            value: `${(reviewSnapshot?.rows.length ?? 0).toLocaleString()} alerts`,
+          },
+          {
+            label: "Commit",
+            value: "Atomic · all or none",
           },
           {
             label: "Alerts",
@@ -1067,6 +1113,21 @@ function fleetAlertActionLabel(
     default:
       return "Confirm";
   }
+}
+
+function validAlertStateBulk(rows: FleetAlertRecord[]): boolean {
+  return rows.length > 0 && rows.length <= MAX_ALERT_STATE_BULK_ITEMS;
+}
+
+function bulkActionDescription(
+  action: string,
+  rows: FleetAlertRecord[],
+  detail: string,
+): string {
+  if (rows.length > MAX_ALERT_STATE_BULK_ITEMS) {
+    return `${rows.length.toLocaleString()} alerts match. Select at most ${MAX_ALERT_STATE_BULK_ITEMS.toLocaleString()} for one atomic update.`;
+  }
+  return `${action} ${rows.length.toLocaleString()} selected alert${rows.length === 1 ? "" : "s"} ${detail}. The update commits all or none.`;
 }
 
 function alertTone(severity: string): "critical" | "warning" | "info" {
@@ -1191,12 +1252,35 @@ function selectedRecordSummary<T>(
   if (selectedRows.length === 0) {
     return `0 ${pluralLabel}`;
   }
-  const names = selectedRows.map(getName).join(", ");
-  const ids = selectedRows.map(getId).join(", ");
+  const visibleRows = selectedRows.slice(0, 8);
+  const remaining = selectedRows.length - visibleRows.length;
   return (
-    <span title={ids}>
-      {selectedRows.length}{" "}
-      {selectedRows.length === 1 ? singularLabel : pluralLabel}: {names}
-    </span>
+    <div
+      className="configurationReviewList"
+      aria-label={`${selectedRows.length} ${selectedRows.length === 1 ? singularLabel : pluralLabel} in the atomic selection`}
+      tabIndex={0}
+    >
+      <span>
+        <strong>
+          {selectedRows.length.toLocaleString()}{" "}
+          {selectedRows.length === 1 ? singularLabel : pluralLabel}
+        </strong>
+        <small>
+          One exact atomic selection; the update commits all or none.
+        </small>
+      </span>
+      {visibleRows.map((row) => (
+        <span key={getId(row)}>
+          <strong>{getName(row)}</strong>
+          <small>{getId(row)}</small>
+        </span>
+      ))}
+      {remaining > 0 && (
+        <span>
+          <strong>{remaining.toLocaleString()} more alerts</strong>
+          <small>Included in this exact reviewed selection.</small>
+        </span>
+      )}
+    </div>
   );
 }

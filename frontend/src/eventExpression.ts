@@ -8,15 +8,18 @@ import {
   ALERT_EVENT_SEVERITIES,
 } from "./generated/protocolContracts";
 
+const ALERT_CATEGORY_SUGGESTIONS = ALERT_EVENT_CATEGORIES.map(
+  (category) => `alert.category:${category}`,
+);
+const ALERT_SEVERITY_SUGGESTIONS = ALERT_EVENT_SEVERITIES.map(
+  (severity) => `alert.severity:${severity}`,
+);
+
 export const DURABLE_EVENT_EXPRESSION_SUGGESTIONS: string[] = [
   "alert.triggered",
   "alert.resolved",
-  "alert.severity:critical",
-  "alert.category:agent_status",
-  "alert.category:backup",
-  "alert.category:network",
-  "alert.category:resource",
-  "alert.category:traffic",
+  ...ALERT_SEVERITY_SUGGESTIONS,
+  ...ALERT_CATEGORY_SUGGESTIONS,
   "job.created",
   "job.status:completed",
   "job.status:failed",
@@ -46,15 +49,8 @@ export const WEBHOOK_EXPRESSION_SUGGESTIONS: string[] = [
 export const SCHEDULE_ALERT_EVENT_EXPRESSION_SUGGESTIONS: string[] = [
   "alert.triggered",
   "alert.resolved",
-  "alert.severity:critical",
-  "alert.severity:warning",
-  "alert.category:agent_status",
-  "alert.category:backup",
-  "alert.category:capability_degraded",
-  "alert.category:job",
-  "alert.category:network",
-  "alert.category:resource",
-  "alert.category:traffic",
+  ...ALERT_SEVERITY_SUGGESTIONS,
+  ...ALERT_CATEGORY_SUGGESTIONS,
   "alert.record_kind = condition",
   "alert.record_kind = event",
 ];

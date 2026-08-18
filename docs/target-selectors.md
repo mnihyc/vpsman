@@ -519,6 +519,17 @@ closure can resolve either record kind; normal condition recovery and elapsed
 occurrence expiry remain type-specific. Operator triage (`open`,
 `acknowledged`, `muted`, `escalated`) is independent from lifecycle.
 
+Fleet > Alerts bulk triage has one canonical write:
+`POST /api/v1/fleet-alert-states/bulk`. A request carries one action and 1–1000
+unique `{ alert_id, expected_revision }` items. Each `expected_revision` must
+match the alert's displayed `state_revision`; revision `0` means that no triage
+state row exists yet. The backend locks in stable order and commits every state
+and audit change or none, returning all updated states and revisions. A stale
+item rejects the whole batch with HTTP 409. The console applies a successful
+response locally without reloading the Fleet snapshot; after a conflict or
+transport error it makes one best-effort recovery read because a lost response
+can follow a committed transaction and the client must not infer the outcome.
+
 ### Why one rule cannot duplicate an episode edge
 
 Deduplication is part of the durable model, not a timing assumption:
@@ -705,6 +716,29 @@ the fixed no-op argv `["/bin/true"]`; a custom array containing
 
 ```json
 ["/bin/true"]
+```
+
+The HTTP API and stored definition use that JSON-array shape. The console's
+Cron schedule, Alert-event schedule, and Job Dispatch **Argv** text boxes are a
+compact authoring form for the same array: unquoted whitespace separates
+elements; single or double quotes group one element and are removed; and `''`
+or `""` creates an empty element. Outside quotes, a backslash quotes the next
+character and a backslash-newline continues the same element. Inside double
+quotes, backslash removes its special meaning only before `$`, backtick, `"`,
+or `\`; before any other character the backslash is preserved. Single-quoted
+text is literal until its closing quote. An unmatched quote or trailing
+backslash is rejected. There is no variable, glob, command, or shell expansion,
+and the parsed card shows the exact JSON array before review. For example,
+console text
+
+```text
+/usr/bin/printf '%s %s\n' 'hello world' tail
+```
+
+becomes
+
+```json
+["/usr/bin/printf", "%s %s\\n", "hello world", "tail"]
 ```
 
 Each saved element remains exactly one argv element. Literal text and direct

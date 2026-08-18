@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Context, Result};
 use serde_json::json;
@@ -7,7 +7,10 @@ use uuid::Uuid;
 
 use crate::{
     model::{AuditLogView, AuthContext},
-    model_alert_states::{FleetAlertStateView, UpdateFleetAlertStateRequest},
+    model_alert_states::{
+        BulkFleetAlertStateItem, BulkUpdateFleetAlertStatesRequest,
+        BulkUpdateFleetAlertStatesResponse, FleetAlertStateView, UpdateFleetAlertStateRequest,
+    },
     repository::Repository,
     unix_now,
 };
@@ -54,6 +57,7 @@ impl Repository {
                         state,
                         muted_until_unix,
                         escalation_level,
+                        revision,
                         reason,
                         actor_id,
                         created_at::text AS created_at,
@@ -102,6 +106,7 @@ impl Repository {
                         state,
                         muted_until_unix,
                         escalation_level,
+                        revision,
                         reason,
                         actor_id,
                         created_at::text AS created_at,
@@ -124,107 +129,285 @@ impl Repository {
         request: &UpdateFleetAlertStateRequest,
         operator: &AuthContext,
     ) -> Result<FleetAlertStateView> {
-        let next = alert_state_from_request(request, operator)?;
+        anyhow::ensure!(request.confirmed, "fleet_alert_state_confirmation_required");
+        let item = BulkFleetAlertStateItem {
+            alert_id: request.alert_id.clone(),
+            expected_revision: request.expected_revision.unwrap_or(0),
+        };
+        let batch_id = Uuid::new_v4();
+        let mut states = self
+            .mutate_fleet_alert_states(
+                request.action.trim(),
+                std::slice::from_ref(&item),
+                request.muted_for_secs,
+                request.reason.as_deref(),
+                request.expected_revision.is_some(),
+                batch_id,
+                operator,
+            )
+            .await?;
+        states
+            .pop()
+            .context("fleet alert state mutation returned no row")
+    }
+
+    pub(crate) async fn bulk_update_fleet_alert_states(
+        &self,
+        request: &BulkUpdateFleetAlertStatesRequest,
+        operator: &AuthContext,
+    ) -> Result<BulkUpdateFleetAlertStatesResponse> {
+        anyhow::ensure!(request.confirmed, "fleet_alert_state_confirmation_required");
+        let batch_id = Uuid::new_v4();
+        let states = self
+            .mutate_fleet_alert_states(
+                request.action.trim(),
+                &request.items,
+                request.muted_for_secs,
+                request.reason.as_deref(),
+                true,
+                batch_id,
+                operator,
+            )
+            .await?;
+        Ok(BulkUpdateFleetAlertStatesResponse { batch_id, states })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn mutate_fleet_alert_states(
+        &self,
+        action: &str,
+        items: &[BulkFleetAlertStateItem],
+        muted_for_secs: Option<i64>,
+        reason: Option<&str>,
+        enforce_expected_revision: bool,
+        batch_id: Uuid,
+        operator: &AuthContext,
+    ) -> Result<Vec<FleetAlertStateView>> {
+        let items = normalize_mutation_items(items)?;
+        validate_alert_state_action(action, muted_for_secs)?;
+        validate_alert_reason(reason)?;
+        let now_unix = unix_now();
+        let now = now_unix.to_string();
         match self {
             Self::Memory(memory) => {
-                let now = unix_now().to_string();
                 let mut states = memory.fleet_alert_states.write().await;
-                let state = if let Some(stored) = states
-                    .iter_mut()
-                    .find(|stored| stored.alert_id == next.alert_id)
-                {
-                    stored.state = next.state.clone();
-                    stored.muted_until_unix = next.muted_until_unix;
-                    stored.escalation_level = next.escalation_level;
-                    stored.reason = next.reason.clone();
-                    stored.actor_id = next.actor_id;
-                    stored.updated_at = now.clone();
-                    stored.clone()
-                } else {
-                    states.push(next.clone());
-                    next
-                };
-                drop(states);
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(alert_state_audit(&state, operator, now));
-                Ok(state)
+                validate_expected_revisions(&states, &items, enforce_expected_revision)?;
+                let mut next_states = states.clone();
+                let mut changed = Vec::with_capacity(items.len());
+                for item in &items {
+                    let current = next_states
+                        .iter()
+                        .find(|state| state.alert_id == item.alert_id)
+                        .cloned();
+                    let next = transition_alert_state(
+                        current.as_ref(),
+                        &item.alert_id,
+                        action,
+                        muted_for_secs,
+                        reason,
+                        now_unix,
+                        &now,
+                        operator,
+                    )?;
+                    if let Some(stored) = next_states
+                        .iter_mut()
+                        .find(|state| state.alert_id == item.alert_id)
+                    {
+                        *stored = next.clone();
+                    } else {
+                        next_states.push(next.clone());
+                    }
+                    changed.push(next);
+                }
+                let mut audits = memory.audits.write().await;
+                *states = next_states;
+                audits.extend(changed.iter().map(|state| {
+                    alert_state_audit(state, operator, now.clone(), batch_id, items.len(), action)
+                }));
+                Ok(changed)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let row = sqlx::query(
+                let alert_ids = items
+                    .iter()
+                    .map(|item| item.alert_id.clone())
+                    .collect::<Vec<_>>();
+                sqlx::query(
                     r#"
                     INSERT INTO fleet_alert_states (
-                        alert_id,
-                        state,
-                        muted_until_unix,
-                        escalation_level,
-                        reason,
-                        actor_id
+                        alert_id, state, muted_until_unix, escalation_level,
+                        revision, reason, actor_id
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (alert_id) DO UPDATE SET
-                        state = EXCLUDED.state,
-                        muted_until_unix = EXCLUDED.muted_until_unix,
-                        escalation_level = EXCLUDED.escalation_level,
-                        reason = EXCLUDED.reason,
-                        actor_id = EXCLUDED.actor_id,
-                        updated_at = now()
-                    RETURNING
+                    SELECT alert_id, 'open', NULL, 0, 0, NULL, NULL
+                    FROM unnest($1::TEXT[]) AS input(alert_id)
+                    ORDER BY alert_id
+                    ON CONFLICT (alert_id) DO NOTHING
+                    "#,
+                )
+                .bind(&alert_ids)
+                .execute(&mut *tx)
+                .await?;
+                let rows = sqlx::query(
+                    r#"
+                    SELECT
                         alert_id,
                         state,
                         muted_until_unix,
                         escalation_level,
+                        revision,
                         reason,
                         actor_id,
                         created_at::text AS created_at,
                         updated_at::text AS updated_at
+                    FROM fleet_alert_states
+                    WHERE alert_id = ANY($1::TEXT[])
+                    ORDER BY alert_id
+                    FOR UPDATE
                     "#,
                 )
-                .bind(&next.alert_id)
-                .bind(&next.state)
-                .bind(next.muted_until_unix)
-                .bind(next.escalation_level)
-                .bind(&next.reason)
-                .bind(operator.operator.id)
-                .fetch_one(&mut *tx)
+                .bind(&alert_ids)
+                .fetch_all(&mut *tx)
                 .await?;
-                let state = alert_state_from_row(row)?;
+                let current = rows
+                    .into_iter()
+                    .map(alert_state_from_row)
+                    .collect::<Result<Vec<_>>>()?;
+                anyhow::ensure!(
+                    current.len() == items.len(),
+                    "fleet_alert_state_lock_incomplete"
+                );
+                validate_expected_revisions(&current, &items, enforce_expected_revision)?;
+                let mut candidates = Vec::with_capacity(items.len());
+                for item in &items {
+                    let stored = current
+                        .iter()
+                        .find(|state| state.alert_id == item.alert_id)
+                        .context("fleet_alert_state_lock_incomplete")?;
+                    candidates.push(transition_alert_state(
+                        Some(stored),
+                        &item.alert_id,
+                        action,
+                        muted_for_secs,
+                        reason,
+                        now_unix,
+                        &now,
+                        operator,
+                    )?);
+                }
+                let mutations = serde_json::Value::Array(
+                    candidates
+                        .iter()
+                        .map(|candidate| {
+                            json!({
+                                "alert_id": candidate.alert_id,
+                                "state": candidate.state,
+                                "muted_until_unix": candidate.muted_until_unix,
+                                "escalation_level": candidate.escalation_level,
+                                "reason": candidate.reason,
+                                "expected_revision": candidate.revision - 1,
+                            })
+                        })
+                        .collect(),
+                );
+                let rows = sqlx::query(
+                    r#"
+                    UPDATE fleet_alert_states AS stored
+                    SET state = mutation.state,
+                        muted_until_unix = mutation.muted_until_unix,
+                        escalation_level = mutation.escalation_level,
+                        revision = stored.revision + 1,
+                        reason = mutation.reason,
+                        actor_id = $2,
+                        updated_at = now()
+                    FROM jsonb_to_recordset($1::JSONB) AS mutation(
+                        alert_id TEXT,
+                        state TEXT,
+                        muted_until_unix BIGINT,
+                        escalation_level INTEGER,
+                        reason TEXT,
+                        expected_revision BIGINT
+                    )
+                    WHERE stored.alert_id = mutation.alert_id
+                      AND stored.revision = mutation.expected_revision
+                    RETURNING
+                        stored.alert_id,
+                        stored.state,
+                        stored.muted_until_unix,
+                        stored.escalation_level,
+                        stored.revision,
+                        stored.reason,
+                        stored.actor_id,
+                        stored.created_at::text AS created_at,
+                        stored.updated_at::text AS updated_at
+                    "#,
+                )
+                .bind(mutations)
+                .bind(operator.operator.id)
+                .fetch_all(&mut *tx)
+                .await?;
+                anyhow::ensure!(
+                    rows.len() == items.len(),
+                    "fleet_alert_state_snapshot_stale"
+                );
+                let mut changed = rows
+                    .into_iter()
+                    .map(alert_state_from_row)
+                    .collect::<Result<Vec<_>>>()?;
+                changed.sort_by(|left, right| left.alert_id.cmp(&right.alert_id));
+                let audit_rows = serde_json::Value::Array(
+                    changed
+                        .iter()
+                        .map(|state| {
+                            json!({
+                                "id": Uuid::new_v4(),
+                                "target": format!("fleet_alert:{}", state.alert_id),
+                                "metadata": alert_state_metadata(
+                                    state,
+                                    operator,
+                                    batch_id,
+                                    items.len(),
+                                    action,
+                                ),
+                            })
+                        })
+                        .collect(),
+                );
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
                         id, actor_id, action, target, command_hash, metadata
                     )
-                    VALUES ($1, $2, $3, $4, NULL, $5)
+                    SELECT audit.id, $2, 'fleet.alert_state_updated',
+                        audit.target, NULL, audit.metadata
+                    FROM jsonb_to_recordset($1::JSONB) AS audit(
+                        id UUID,
+                        target TEXT,
+                        metadata JSONB
+                    )
                     "#,
                 )
-                .bind(Uuid::new_v4())
+                .bind(audit_rows)
                 .bind(operator.operator.id)
-                .bind("fleet.alert_state_updated")
-                .bind(format!("fleet_alert:{}", state.alert_id))
-                .bind(alert_state_metadata(&state, operator))
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                Ok(state)
+                Ok(changed)
             }
         }
     }
 }
 
-fn alert_state_from_request(
-    request: &UpdateFleetAlertStateRequest,
+fn transition_alert_state(
+    current: Option<&FleetAlertStateView>,
+    alert_id: &str,
+    action: &str,
+    muted_for_secs: Option<i64>,
+    reason: Option<&str>,
+    now_unix: u64,
+    now: &str,
     operator: &AuthContext,
 ) -> Result<FleetAlertStateView> {
-    anyhow::ensure!(request.confirmed, "fleet_alert_state_confirmation_required");
-    validate_alert_id(&request.alert_id)?;
-    validate_alert_reason(request.reason.as_deref())?;
-    let alert_id = request.alert_id.trim().to_string();
-    let action = request.action.trim();
-    let now = unix_now() as i64;
-    let current_escalation = 0;
+    let current_escalation = current.map_or(0, |state| state.escalation_level);
     let (state, muted_until_unix, escalation_level) = match action {
         ACTION_ACKNOWLEDGE => (
             ALERT_STATE_ACKNOWLEDGED.to_string(),
@@ -232,40 +415,111 @@ fn alert_state_from_request(
             current_escalation,
         ),
         ACTION_MUTE => {
-            let seconds = request.muted_for_secs.unwrap_or(DEFAULT_MUTE_SECS);
-            anyhow::ensure!(
-                (60..=MAX_MUTE_SECS).contains(&seconds),
-                "fleet_alert_mute_duration_invalid"
-            );
+            let seconds = muted_for_secs.unwrap_or(DEFAULT_MUTE_SECS);
             (
                 ALERT_STATE_MUTED.to_string(),
-                Some(now.saturating_add(seconds)),
+                Some((now_unix as i64).saturating_add(seconds)),
                 current_escalation,
             )
         }
         ACTION_ESCALATE => (
             ALERT_STATE_ESCALATED.to_string(),
             None,
-            current_escalation + 1,
+            current_escalation
+                .checked_add(1)
+                .context("fleet_alert_escalation_level_overflow")?,
         ),
         ACTION_CLEAR => (ALERT_STATE_OPEN.to_string(), None, 0),
         _ => anyhow::bail!("fleet_alert_state_action_invalid"),
     };
+    let revision = current
+        .map_or(0, |state| state.revision)
+        .checked_add(1)
+        .context("fleet_alert_state_revision_overflow")?;
     Ok(FleetAlertStateView {
-        alert_id,
+        alert_id: alert_id.to_string(),
         state,
         muted_until_unix,
         escalation_level,
-        reason: request
-            .reason
-            .as_deref()
+        revision,
+        reason: reason
             .map(str::trim)
             .filter(|reason| !reason.is_empty())
             .map(ToOwned::to_owned),
         actor_id: Some(operator.operator.id),
-        created_at: now.to_string(),
+        created_at: current
+            .map(|state| state.created_at.clone())
+            .unwrap_or_else(|| now.to_string()),
         updated_at: now.to_string(),
     })
+}
+
+fn normalize_mutation_items(
+    items: &[BulkFleetAlertStateItem],
+) -> Result<Vec<BulkFleetAlertStateItem>> {
+    anyhow::ensure!(!items.is_empty(), "fleet_alert_state_items_invalid");
+    anyhow::ensure!(items.len() <= 1_000, "fleet_alert_state_items_invalid");
+    let mut normalized = Vec::with_capacity(items.len());
+    let mut alert_ids = BTreeSet::new();
+    for item in items {
+        validate_alert_id(&item.alert_id)?;
+        anyhow::ensure!(
+            item.expected_revision >= 0,
+            "fleet_alert_state_expected_revision_invalid"
+        );
+        let alert_id = item.alert_id.trim().to_string();
+        anyhow::ensure!(
+            alert_ids.insert(alert_id.clone()),
+            "fleet_alert_state_duplicate_item"
+        );
+        normalized.push(BulkFleetAlertStateItem {
+            alert_id,
+            expected_revision: item.expected_revision,
+        });
+    }
+    normalized.sort_by(|left, right| left.alert_id.cmp(&right.alert_id));
+    Ok(normalized)
+}
+
+fn validate_expected_revisions(
+    states: &[FleetAlertStateView],
+    items: &[BulkFleetAlertStateItem],
+    enforce: bool,
+) -> Result<()> {
+    if !enforce {
+        return Ok(());
+    }
+    for item in items {
+        let current_revision = states
+            .iter()
+            .find(|state| state.alert_id == item.alert_id)
+            .map_or(0, |state| state.revision);
+        anyhow::ensure!(
+            current_revision == item.expected_revision,
+            "fleet_alert_state_snapshot_stale"
+        );
+    }
+    Ok(())
+}
+
+fn validate_alert_state_action(action: &str, muted_for_secs: Option<i64>) -> Result<()> {
+    match action {
+        ACTION_MUTE => {
+            let seconds = muted_for_secs.unwrap_or(DEFAULT_MUTE_SECS);
+            anyhow::ensure!(
+                (60..=MAX_MUTE_SECS).contains(&seconds),
+                "fleet_alert_mute_duration_invalid"
+            );
+        }
+        ACTION_ACKNOWLEDGE | ACTION_ESCALATE | ACTION_CLEAR => {
+            anyhow::ensure!(
+                muted_for_secs.is_none(),
+                "fleet_alert_mute_duration_unexpected"
+            );
+        }
+        _ => anyhow::bail!("fleet_alert_state_action_invalid"),
+    }
+    Ok(())
 }
 
 fn validate_alert_id(alert_id: &str) -> Result<()> {
@@ -330,6 +584,7 @@ fn alert_state_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertStateVie
         state: row.try_get("state")?,
         muted_until_unix: row.try_get("muted_until_unix")?,
         escalation_level: row.try_get("escalation_level")?,
+        revision: row.try_get("revision")?,
         reason: row.try_get("reason")?,
         actor_id: row.try_get("actor_id")?,
         created_at: row.try_get("created_at")?,
@@ -341,6 +596,9 @@ fn alert_state_audit(
     state: &FleetAlertStateView,
     operator: &AuthContext,
     created_at: String,
+    batch_id: Uuid,
+    batch_size: usize,
+    batch_action: &str,
 ) -> AuditLogView {
     AuditLogView {
         id: Uuid::new_v4(),
@@ -348,18 +606,28 @@ fn alert_state_audit(
         action: "fleet.alert_state_updated".to_string(),
         target: format!("fleet_alert:{}", state.alert_id),
         command_hash: None,
-        metadata: alert_state_metadata(state, operator),
+        metadata: alert_state_metadata(state, operator, batch_id, batch_size, batch_action),
         created_at,
     }
 }
 
-fn alert_state_metadata(state: &FleetAlertStateView, operator: &AuthContext) -> serde_json::Value {
+fn alert_state_metadata(
+    state: &FleetAlertStateView,
+    operator: &AuthContext,
+    batch_id: Uuid,
+    batch_size: usize,
+    batch_action: &str,
+) -> serde_json::Value {
     json!({
         "alert_id": state.alert_id,
         "state": state.state,
         "muted_until_unix": state.muted_until_unix,
         "escalation_level": state.escalation_level,
+        "revision": state.revision,
         "reason": state.reason,
+        "batch_id": batch_id,
+        "batch_size": batch_size,
+        "batch_action": batch_action,
         "result": "succeeded",
         "operator_id": operator.operator.id,
         "operator_username": operator.operator.username,

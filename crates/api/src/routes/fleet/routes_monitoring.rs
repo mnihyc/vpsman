@@ -64,11 +64,12 @@ const MAX_SHARE_SELECTOR_BYTES: usize = 65_535;
 const MAX_SHARE_TARGETS: usize = 1_000;
 const CURRENT_NETWORK_RATE_MAX_AGE_SECS: u64 = 180;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(crate) struct MonitoringCardsQuery {
     pub(crate) selector_expression: Option<String>,
     pub(crate) limit: Option<usize>,
     pub(crate) offset: Option<usize>,
+    pub(crate) include_history: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -98,35 +99,75 @@ pub(crate) async fn list_monitoring_cards(
     let operator = state
         .require_operator_scope(&headers, SCOPE_FLEET_READ)
         .await?;
-    if let Some(selector) = query
+    let selector_expression = query
         .selector_expression
         .as_deref()
-        .filter(|selector| !selector.trim().is_empty())
-    {
+        .map(str::trim)
+        .filter(|selector| !selector.is_empty())
+        .map(str::to_string);
+    if let Some(selector) = selector_expression.as_deref() {
         let expression = parse_selector_expression(selector)
             .map_err(|_| ApiError::bad_request("invalid_selector_expression"))?
             .ok_or_else(|| ApiError::bad_request("invalid_selector_expression"))?;
         require_vps_rule_selector_scope(&operator.operator.scopes, &expression)?;
     }
-    let mut agents = monitoring_agents(&state, query.selector_expression.as_deref()).await?;
+    let limit = query.limit.unwrap_or(1_000).clamp(1, 1_000);
+    let requested_offset = query.offset.unwrap_or(0);
+    let include_history = query.include_history.unwrap_or(true);
+    let key = serde_json::json!({
+        "endpoint": "monitoring_cards",
+        "auth": crate::state::read_singleflight_auth_key(
+            operator.operator.id,
+            &operator.operator.scopes,
+        ),
+        "selector_expression": selector_expression,
+        "limit": limit,
+        "offset": requested_offset,
+        "include_history": include_history,
+    })
+    .to_string();
+    let events = state.events.clone();
+    let response = events
+        .singleflight_monitoring_cards(key, move || async move {
+            let _admission = state.events.acquire_heavy_read_permit().await?;
+            build_monitoring_cards_page(
+                &state,
+                selector_expression.as_deref(),
+                limit,
+                requested_offset,
+                include_history,
+            )
+            .await
+        })
+        .await?;
+    Ok(Json(response))
+}
+
+async fn build_monitoring_cards_page(
+    state: &AppState,
+    selector_expression: Option<&str>,
+    limit: usize,
+    requested_offset: usize,
+    include_history: bool,
+) -> Result<MonitoringCardsPageView, ApiError> {
+    let mut agents = monitoring_agents(state, selector_expression).await?;
     sort_monitoring_agents(&mut agents);
     let total = agents.len();
-    let offset = query.offset.unwrap_or(0).min(total);
-    let limit = query.limit.unwrap_or(1_000).clamp(1, 1_000);
+    let offset = requested_offset.min(total);
     let page = agents
         .into_iter()
         .skip(offset)
         .take(limit)
         .collect::<Vec<_>>();
-    let items = monitoring_cards_for_agents(&state, page).await?;
+    let items = monitoring_cards_for_agents_projection(state, page, include_history).await?;
     let consumed = offset.saturating_add(items.len());
-    Ok(Json(MonitoringCardsPageView {
+    Ok(MonitoringCardsPageView {
         items,
         offset,
         limit,
         total,
         next_offset: (consumed < total).then_some(consumed),
-    }))
+    })
 }
 
 pub(crate) async fn get_client_monitoring(
@@ -1054,6 +1095,14 @@ pub(crate) async fn monitoring_cards_for_agents(
     state: &AppState,
     agents: Vec<AgentView>,
 ) -> Result<Vec<MonitoringCardView>, ApiError> {
+    monitoring_cards_for_agents_projection(state, agents, true).await
+}
+
+pub(crate) async fn monitoring_cards_for_agents_projection(
+    state: &AppState,
+    agents: Vec<AgentView>,
+    include_history: bool,
+) -> Result<Vec<MonitoringCardView>, ApiError> {
     if agents.is_empty() {
         return Ok(Vec::new());
     }
@@ -1061,26 +1110,55 @@ pub(crate) async fn monitoring_cards_for_agents(
         .iter()
         .map(|agent| agent.id.clone())
         .collect::<Vec<_>>();
-    let network_rate_selection = state
+    let rules = state
         .repo
-        .network_rate_interface_selection_for_clients(&client_ids)
+        .list_all_vps_rules_for_clients(&client_ids)
         .await
         .map_err(ApiError::internal_mapper(
-            "network_interface_selection_unavailable",
-            "Network-interface selection could not be loaded.",
+            "vps_rules_unavailable",
+            "VPS display rules could not be loaded.",
         ))?;
-    let mut system_information = state
-        .repo
-        .monitoring_system_information_for_clients(&client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "monitoring_system_information_unavailable",
-            "VPS system information could not be loaded.",
-        ))?;
-    let resources = state
-        .repo
-        .list_latest_telemetry_rollups_for_clients(&client_ids, None)
-        .await
+    let network_rate_selection =
+        Repository::network_rate_interface_selection_from_rules(&client_ids, &rules).map_err(
+            ApiError::internal_mapper(
+                "network_interface_selection_unavailable",
+                "Network-interface selection could not be loaded.",
+            ),
+        )?;
+    let history_end = crate::unix_now();
+    let history_start = history_end.saturating_sub(15 * 60);
+    let (system_information, resources, resource_history_rows, network_rows) = tokio::join!(
+        state
+            .repo
+            .monitoring_system_information_for_clients(&client_ids),
+        state
+            .repo
+            .list_latest_telemetry_rollups_for_clients(&client_ids, None),
+        async {
+            if include_history {
+                state
+                    .repo
+                    .list_dashboard_raw_telemetry_rollups(
+                        16,
+                        history_start,
+                        history_end,
+                        60,
+                        &client_ids,
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        state
+            .repo
+            .list_latest_telemetry_network_rates_for_selection(&network_rate_selection),
+    );
+    let mut system_information = system_information.map_err(ApiError::internal_mapper(
+        "monitoring_system_information_unavailable",
+        "VPS system information could not be loaded.",
+    ))?;
+    let resources = resources
         .map_err(ApiError::internal_mapper(
             "monitoring_resources_unavailable",
             "VPS resource metrics could not be loaded.",
@@ -1088,28 +1166,18 @@ pub(crate) async fn monitoring_cards_for_agents(
         .into_iter()
         .map(|row| (row.client_id.clone(), row))
         .collect::<HashMap<_, _>>();
-    let history_end = crate::unix_now();
-    let history_start = history_end.saturating_sub(15 * 60);
     let mut resource_history = HashMap::<String, Vec<TelemetryRollupView>>::new();
-    for row in state
-        .repo
-        .list_dashboard_raw_telemetry_rollups(16, history_start, history_end, 60, &client_ids)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "monitoring_resource_history_unavailable",
-            "VPS resource history could not be loaded.",
-        ))?
-    {
+    for row in resource_history_rows.map_err(ApiError::internal_mapper(
+        "monitoring_resource_history_unavailable",
+        "VPS resource history could not be loaded.",
+    ))? {
         resource_history
             .entry(row.client_id.clone())
             .or_default()
             .push(row);
     }
     let mut network = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
-    for row in state
-        .repo
-        .list_latest_telemetry_network_rates_for_selection(&network_rate_selection)
-        .await
+    for row in network_rows
         .map_err(ApiError::internal_mapper(
             "monitoring_network_rates_unavailable",
             "VPS network rates could not be loaded.",
@@ -1119,31 +1187,55 @@ pub(crate) async fn monitoring_cards_for_agents(
     {
         network.entry(row.client_id.clone()).or_default().push(row);
     }
+    let (network_history_rows, traffic, primary_ping, primary_ping_history_rows) = tokio::join!(
+        async {
+            if include_history {
+                state
+                    .repo
+                    .list_dashboard_raw_telemetry_network_rates_selected(
+                        16,
+                        history_start,
+                        history_end,
+                        60,
+                        &network_rate_selection,
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+        state
+            .repo
+            .list_traffic_accounting_for_agents_with_rules(&agents, &rules),
+        state.repo.current_primary_ping_for_clients(&client_ids),
+        async {
+            if include_history {
+                state
+                    .repo
+                    .list_raw_primary_ping_results_for_clients(
+                        &client_ids,
+                        history_start,
+                        history_end,
+                        16,
+                        60,
+                    )
+                    .await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+    );
     let mut network_history = HashMap::<String, Vec<TelemetryNetworkRateView>>::new();
-    for row in state
-        .repo
-        .list_dashboard_raw_telemetry_network_rates_selected(
-            16,
-            history_start,
-            history_end,
-            60,
-            &network_rate_selection,
-        )
-        .await
-        .map_err(ApiError::internal_mapper(
-            "monitoring_network_history_unavailable",
-            "VPS network history could not be loaded.",
-        ))?
-    {
+    for row in network_history_rows.map_err(ApiError::internal_mapper(
+        "monitoring_network_history_unavailable",
+        "VPS network history could not be loaded.",
+    ))? {
         network_history
             .entry(row.client_id.clone())
             .or_default()
             .push(row);
     }
-    let traffic = state
-        .repo
-        .list_traffic_accounting_for_client_ids(&client_ids)
-        .await
+    let traffic = traffic
         .map_err(ApiError::internal_mapper(
             "traffic_accounting_unavailable",
             "Traffic accounting could not be loaded.",
@@ -1154,23 +1246,15 @@ pub(crate) async fn monitoring_cards_for_agents(
     let mut billing_rules = HashMap::<String, HashMap<String, serde_json::Value>>::new();
     let mut port_speeds = HashMap::<String, PortSpeedView>::new();
     let mut product_names = HashMap::<String, String>::new();
-    for row in state
-        .repo
-        .list_vps_rules_for_clients(
-            &client_ids,
-            &[
-                VPS_RULE_KEY_BILLING_PRICE,
-                VPS_RULE_KEY_BILLING_CYCLE,
-                VPS_RULE_KEY_NETWORK_PORT_SPEED,
-                VPS_RULE_KEY_PRODUCT_NAME,
-            ],
+    for row in rules.into_iter().filter(|row| {
+        matches!(
+            row.key.as_str(),
+            VPS_RULE_KEY_BILLING_PRICE
+                | VPS_RULE_KEY_BILLING_CYCLE
+                | VPS_RULE_KEY_NETWORK_PORT_SPEED
+                | VPS_RULE_KEY_PRODUCT_NAME
         )
-        .await
-        .map_err(ApiError::internal_mapper(
-            "vps_rules_unavailable",
-            "VPS display rules could not be loaded.",
-        ))?
-    {
+    }) {
         if row.key == VPS_RULE_KEY_PRODUCT_NAME {
             product_names.insert(row.client_id, row.value_raw);
         } else if row.key == VPS_RULE_KEY_NETWORK_PORT_SPEED {
@@ -1204,10 +1288,7 @@ pub(crate) async fn monitoring_cards_for_agents(
             Ok((client_id, plan))
         })
         .collect::<Result<HashMap<_, _>, ApiError>>()?;
-    let primary_ping = state
-        .repo
-        .current_primary_ping_for_clients(&client_ids)
-        .await
+    let primary_ping = primary_ping
         .map_err(ApiError::internal_mapper(
             "monitoring_ping_status_unavailable",
             "Primary Ping status could not be loaded.",
@@ -1215,15 +1296,10 @@ pub(crate) async fn monitoring_cards_for_agents(
         .into_iter()
         .collect::<HashMap<_, _>>();
     let mut primary_ping_history = HashMap::<String, Vec<PingRollupView>>::new();
-    for row in state
-        .repo
-        .list_raw_primary_ping_results_for_clients(&client_ids, history_start, history_end, 16, 60)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "monitoring_ping_history_unavailable",
-            "Primary Ping history could not be loaded.",
-        ))?
-    {
+    for row in primary_ping_history_rows.map_err(ApiError::internal_mapper(
+        "monitoring_ping_history_unavailable",
+        "Primary Ping history could not be loaded.",
+    ))? {
         primary_ping_history
             .entry(row.client_id.clone())
             .or_default()
