@@ -19,11 +19,15 @@ export function buildSearchValueSuggestions<T>(
     for (const value of valuesForItem(item)) {
       collectSearchValueSuggestion(suggestions, value);
       if (suggestions.size >= limit) {
-        return Array.from(suggestions).sort((left, right) => left.localeCompare(right));
+        return Array.from(suggestions).sort((left, right) =>
+          left.localeCompare(right),
+        );
       }
     }
   }
-  return Array.from(suggestions).sort((left, right) => left.localeCompare(right));
+  return Array.from(suggestions).sort((left, right) =>
+    left.localeCompare(right),
+  );
 }
 
 export function buildParseableSearchValueSuggestions<T>(
@@ -32,7 +36,11 @@ export function buildParseableSearchValueSuggestions<T>(
   fieldsForItem: (item: T) => SearchFields,
   limit = MAX_SEARCH_VALUE_SUGGESTIONS,
 ): string[] {
-  const candidates = buildSearchValueSuggestions(items, valuesForItem, limit * 3);
+  const candidates = buildSearchValueSuggestions(
+    items,
+    valuesForItem,
+    limit * 3,
+  );
   const indexedItems = items.map((item) => ({
     fields: fieldsForItem(item),
     item,
@@ -67,7 +75,9 @@ export function isParseableSearchSuggestion(value: string): boolean {
   return parseSearchExpression(value).error === null;
 }
 
-export function searchFieldsForSearchValues(values: SearchValue[]): SearchFields {
+export function searchFieldsForSearchValues(
+  values: SearchValue[],
+): SearchFields {
   const all: string[] = [];
   const namespaces: Record<string, string[]> = {};
   const events: string[] = [];
@@ -117,7 +127,10 @@ function addSearchValueSuggestion(suggestions: Set<string>, value: string) {
   suggestions.add(trimmed);
 }
 
-function collectNamespacedTerm(namespaces: Record<string, string[]>, rawTerm: string) {
+function collectNamespacedTerm(
+  namespaces: Record<string, string[]>,
+  rawTerm: string,
+) {
   const term = rawTerm.replace(/^[([{]+|[)\]},.;]+$/g, "");
   const separator = term.indexOf(":");
   if (separator <= 0 || separator === term.length - 1) {
@@ -155,6 +168,10 @@ function collectEventTerm(events: string[], rawTerm: string) {
       "vps.tag_changed",
       "job.created",
       "alert.open",
+      "alert.policy_triggered",
+      "alert.policy_resolved",
+      "alert.policy_reached",
+      "alert.resolved",
       "telemetry.rollup",
       "telemetry.network_rate",
       "telemetry.tunnel",
@@ -164,7 +181,11 @@ function collectEventTerm(events: string[], rawTerm: string) {
   }
 }
 
-function addNamespaceValue(namespaces: Record<string, string[]>, namespace: string, value: string) {
+function addNamespaceValue(
+  namespaces: Record<string, string[]>,
+  namespace: string,
+  value: string,
+) {
   const values = namespaces[namespace] ?? [];
   if (!values.includes(value)) {
     values.push(value);

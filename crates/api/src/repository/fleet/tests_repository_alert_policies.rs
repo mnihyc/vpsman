@@ -1,20 +1,30 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{TimeZone, Utc};
 use serde_json::json;
+use vpsman_common::AgentCapabilitySnapshot;
+
+use crate::{
+    model::AgentView,
+    repository::{MemoryState, Repository},
+};
 
 use super::{
     aggregate_memory_raw_traffic_history, aggregate_memory_traffic_counter_usage,
     aggregate_memory_traffic_history, claim_traffic_selector_directions, derive_cycle_usage,
-    network_rate_selector_spec_from_rule, next_policy_rule_state, parse_billing_cycle,
-    parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
+    evaluate_rule_for_client, network_rate_selector_spec_from_rule, next_policy_rule_state,
+    parse_billing_cycle, parse_billing_price, parse_byte_size, parse_network_rate_interfaces,
     parse_persisted_traffic_selector_list, parse_port_speed, parse_traffic_selector,
-    parse_traffic_selector_list, parse_vps_rule_value, policy_identifier_value,
-    policy_state_is_alert_eligible, policy_webhook_repair_is_recent,
-    resolve_network_rate_interface_selection, traffic_accounting_for_client,
+    parse_traffic_selector_list, parse_vps_rule_value, policy_alert_for_evaluation,
+    policy_alert_resolution_timestamp, policy_alert_resolved_webhook_event,
+    policy_identifier_value, policy_state_is_alert_eligible, policy_vps_rule_inputs,
+    policy_webhook_repair_is_recent, resolve_memory_policy_alerts_for_rules,
+    resolve_memory_policy_states_outside_scope, resolve_network_rate_interface_selection,
+    resolve_policy_alert, traffic_accounting_for_client,
     traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
     validate_billing_rule_group, NetworkRateSelectorReference, NetworkRateSelectorSpec,
-    PolicyEvaluation, PolicyRuleRecord, PolicyRuleStateRecord, TrafficCounterRollupRecord,
+    PolicyAlertQuery, PolicyEvaluation, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
+    PolicyRuleStateRecord, TelemetryRollupView, TrafficCounterRollupRecord,
     TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
     TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
     VPS_RULE_KEY_NETWORK_RATE_INTERFACES, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
@@ -835,6 +845,69 @@ fn stale_traffic_fails_policy_evaluation_closed() {
 }
 
 #[test]
+fn cpu_utilization_policy_uses_rollup_max_and_missing_is_incomplete() {
+    let rollup = policy_resource_rollup();
+    let rule = PolicyRuleRequest {
+        id: None,
+        name: "cpu busy".to_string(),
+        enabled: true,
+        traffic_selector: None,
+        condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
+        window_secs: 0,
+        severity: "warning".to_string(),
+    };
+    let evaluation = evaluate_rule_for_client(&rule, None, Some(&rollup));
+
+    assert!(evaluation.condition_true);
+    assert!(!evaluation.incomplete);
+    assert_eq!(evaluation.actual_value, Some(0.82));
+    assert_eq!(evaluation.threshold_value, Some(0.75));
+
+    let mut missing_utilization = rollup.clone();
+    missing_utilization.cpu_usage_sample_count = 0;
+    missing_utilization.cpu_usage_avg = None;
+    missing_utilization.cpu_usage_max = None;
+    let incomplete = evaluate_rule_for_client(&rule, None, Some(&missing_utilization));
+    assert!(!incomplete.condition_true);
+    assert!(incomplete.incomplete);
+    assert_eq!(
+        incomplete.incomplete_reasons,
+        vec!["cpu.utilization_ratio missing".to_string()]
+    );
+
+    let mut load_incomplete = Vec::new();
+    let raw_load = policy_identifier_value("cpu.load_1", None, Some(&rollup), &mut load_incomplete);
+    assert_eq!(raw_load, Some(0.1));
+    assert_eq!(
+        policy_identifier_value(
+            "cpu.load_saturation",
+            None,
+            Some(&rollup),
+            &mut load_incomplete,
+        ),
+        Some(0.025)
+    );
+    assert!(load_incomplete.is_empty());
+
+    let mut no_cores = rollup;
+    no_cores.cpu_cores_max = 0;
+    let mut no_cores_incomplete = Vec::new();
+    assert_eq!(
+        policy_identifier_value(
+            "cpu.load_saturation",
+            None,
+            Some(&no_cores),
+            &mut no_cores_incomplete,
+        ),
+        None
+    );
+    assert_eq!(
+        no_cores_incomplete,
+        vec!["cpu.load_saturation missing".to_string()]
+    );
+}
+
+#[test]
 fn mixed_stream_freshness_uses_the_oldest_selected_sample() {
     let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
     let rules = traffic_rules("eth0,eth1");
@@ -900,6 +973,509 @@ fn sustained_true_policy_state_remains_eligible_for_outbox_repair_without_refiri
 }
 
 #[test]
+fn unknown_policy_evidence_pauses_dwell_without_resolving_or_rearming() {
+    let mut rule = policy_rule(1);
+    rule.window_secs = 300;
+    let started_at = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let started = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        None,
+        0,
+        started_at,
+    )
+    .unwrap();
+    assert_eq!(started.trigger_generation, 1);
+    assert!(!started.window_satisfied);
+
+    let confirmed_at = started_at + chrono::Duration::seconds(100);
+    let confirmed = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&started),
+        1,
+        confirmed_at,
+    )
+    .unwrap();
+    assert!(!confirmed.window_satisfied);
+
+    let unknown_at = started_at + chrono::Duration::seconds(200);
+    let unknown = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &unknown_policy_evaluation(),
+        Some(&confirmed),
+        1,
+        unknown_at,
+    )
+    .unwrap();
+    assert!(unknown.condition_true);
+    assert!(unknown.incomplete);
+    assert_eq!(unknown.trigger_generation, 1);
+    assert!(!unknown.window_satisfied);
+
+    let resumed_at = unknown_at + chrono::Duration::seconds(200);
+    let resumed = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&unknown),
+        1,
+        resumed_at,
+    )
+    .unwrap();
+    assert_eq!(resumed.trigger_generation, 1);
+    assert!(!resumed.window_satisfied);
+
+    let satisfied = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&resumed),
+        1,
+        resumed_at + chrono::Duration::seconds(200),
+    )
+    .unwrap();
+    assert!(satisfied.window_satisfied);
+
+    let recovered = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &PolicyEvaluation {
+            condition_true: false,
+            incomplete: false,
+            incomplete_reasons: Vec::new(),
+            actual_value: Some(0.0),
+            threshold_value: Some(1.0),
+            category: "resource".to_string(),
+            payload: json!({}),
+        },
+        Some(&satisfied),
+        1,
+        resumed_at + chrono::Duration::seconds(360),
+    )
+    .unwrap();
+    assert!(!recovered.condition_true);
+    assert_eq!(recovered.trigger_generation, 1);
+
+    let recurred = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&recovered),
+        1,
+        resumed_at + chrono::Duration::seconds(420),
+    )
+    .unwrap();
+    assert_eq!(recurred.trigger_generation, 2);
+    assert!(!recurred.window_satisfied);
+}
+
+#[test]
+fn repeated_fractional_unknown_intervals_do_not_leak_into_policy_dwell() {
+    let mut rule = policy_rule(1);
+    rule.window_secs = 300;
+    let started_at = Utc
+        .timestamp_opt(2_000_000_000, 100_000_000)
+        .single()
+        .unwrap();
+    let mut state = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        None,
+        0,
+        started_at,
+    )
+    .unwrap();
+
+    for interval in 1..=334 {
+        state = next_policy_rule_state(
+            &rule,
+            "edge-a",
+            &unknown_policy_evaluation(),
+            Some(&state),
+            1,
+            started_at + chrono::Duration::milliseconds(900 * interval),
+        )
+        .unwrap();
+        assert!(!state.window_satisfied);
+    }
+
+    let resumed_at = started_at + chrono::Duration::milliseconds(900 * 335);
+    state = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&state),
+        1,
+        resumed_at,
+    )
+    .unwrap();
+    assert!(
+        !state.window_satisfied,
+        "fractional Unknown intervals must pause rather than accrue dwell"
+    );
+
+    let almost_satisfied = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&state),
+        1,
+        resumed_at + chrono::Duration::seconds(299),
+    )
+    .unwrap();
+    assert!(!almost_satisfied.window_satisfied);
+    let satisfied = next_policy_rule_state(
+        &rule,
+        "edge-a",
+        &true_policy_evaluation(),
+        Some(&almost_satisfied),
+        1,
+        resumed_at + chrono::Duration::seconds(300),
+    )
+    .unwrap();
+    assert!(satisfied.window_satisfied);
+}
+
+#[tokio::test]
+async fn stale_matching_snapshot_cannot_persist_after_current_selector_exit() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let group = policy_group("tag:monitored");
+    memory.policy_groups.write().await.push(group.clone());
+    memory.agents.write().await.push(policy_agent(Vec::new()));
+    let stale_matching_agent = policy_agent(vec!["monitored".to_string()]);
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+
+    assert!(!repo
+        .persist_policy_evaluation(
+            &group,
+            &group.rules[0],
+            &stale_matching_agent,
+            &[],
+            true_policy_evaluation(),
+            now,
+        )
+        .await
+        .unwrap());
+    assert!(memory.policy_rule_states.read().await.is_empty());
+    assert!(memory.policy_alerts.read().await.is_empty());
+    assert!(memory.webhook_events.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn stale_vps_rule_inputs_cannot_persist_a_policy_evaluation() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let group = policy_group("status:online");
+    let evaluated_rules = vec![parsed_rule_for(
+        "edge-a",
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        "1GB",
+    )];
+    let evaluated_inputs = policy_vps_rule_inputs(&evaluated_rules, "edge-a");
+    memory.policy_groups.write().await.push(group.clone());
+    memory.agents.write().await.push(policy_agent(Vec::new()));
+    memory.vps_rule_values.write().await.push(parsed_rule_for(
+        "edge-a",
+        VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        "2GB",
+    ));
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+
+    assert!(!repo
+        .persist_policy_evaluation(
+            &group,
+            &group.rules[0],
+            &policy_agent(Vec::new()),
+            &evaluated_inputs,
+            true_policy_evaluation(),
+            now,
+        )
+        .await
+        .unwrap());
+    assert!(memory.policy_rule_states.read().await.is_empty());
+    assert!(memory.policy_alerts.read().await.is_empty());
+    assert!(memory.webhook_events.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn stale_nonmatching_snapshot_cannot_resolve_after_current_selector_entry() {
+    let memory = MemoryState::default();
+    let group = policy_group("tag:monitored");
+    let agent = policy_agent(vec!["monitored".to_string()]);
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let state = policy_state(1, true, &now.to_rfc3339());
+    let alert = policy_alert_for_evaluation(
+        &group,
+        &group.rules[0],
+        &agent,
+        &state,
+        &true_policy_evaluation(),
+        &now.to_rfc3339(),
+    );
+    memory.policy_groups.write().await.push(group.clone());
+    memory.agents.write().await.push(agent);
+    memory.policy_rule_states.write().await.push(state);
+    memory.policy_alerts.write().await.push(alert);
+
+    // The evaluator's earlier match set was empty; scope reconciliation must
+    // derive membership again from current agent tags instead of trusting it.
+    resolve_memory_policy_states_outside_scope(&memory, &group, &group.rules[0])
+        .await
+        .unwrap();
+
+    assert_eq!(memory.policy_rule_states.read().await.len(), 1);
+    let alerts = memory.policy_alerts.read().await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].lifecycle_state, "triggered");
+    assert!(alerts[0].resolved_at.is_none());
+    assert_eq!(
+        alerts[0].payload.pointer("/alert/trigger_generation"),
+        Some(&json!(1))
+    );
+    let mut resolved = alerts[0].clone();
+    drop(alerts);
+    let resolved_at = now + chrono::Duration::seconds(1);
+    resolve_policy_alert(&mut resolved, resolved_at, None, "condition_recovered").unwrap();
+    assert_eq!(
+        policy_alert_resolved_webhook_event(&resolved)
+            .payload
+            .pointer("/alert/trigger_generation"),
+        Some(&json!(1))
+    );
+    assert!(memory.webhook_events.read().await.is_empty());
+}
+
+#[tokio::test]
+async fn memory_scope_exit_resolution_and_event_follow_locked_episode_evidence() {
+    let memory = MemoryState::default();
+    let group = policy_group("tag:monitored");
+    let agent = policy_agent(Vec::new());
+    let confirmed_at = Utc.timestamp_opt(4_102_444_800, 0).single().unwrap();
+    let state_evaluated_at = confirmed_at + chrono::Duration::seconds(20);
+    let state = policy_state(1, true, &state_evaluated_at.to_rfc3339());
+    let alert = policy_alert_for_evaluation(
+        &group,
+        &group.rules[0],
+        &agent,
+        &state,
+        &true_policy_evaluation(),
+        &confirmed_at.to_rfc3339(),
+    );
+    memory.policy_groups.write().await.push(group.clone());
+    memory.agents.write().await.push(agent);
+    memory.policy_rule_states.write().await.push(state);
+    memory.policy_alerts.write().await.push(alert);
+
+    resolve_memory_policy_states_outside_scope(&memory, &group, &group.rules[0])
+        .await
+        .unwrap();
+
+    assert!(memory.policy_rule_states.read().await.is_empty());
+    let alerts = memory.policy_alerts.read().await;
+    let resolved_at = policy_alert_resolution_timestamp(&alerts[0]).unwrap();
+    assert!(resolved_at >= confirmed_at);
+    assert!(resolved_at >= state_evaluated_at);
+    assert_eq!(
+        alerts[0].resolution_reason.as_deref(),
+        Some("policy_scope_exited")
+    );
+    drop(alerts);
+
+    let events = memory.webhook_events.read().await;
+    assert_eq!(events.len(), 1);
+    let event_occurred_at = super::parse_policy_lifecycle_timestamp(
+        &events[0].occurred_at,
+        "webhook event occurred_at",
+    )
+    .unwrap();
+    let payload_occurred_at = super::parse_policy_lifecycle_timestamp(
+        events[0]
+            .payload
+            .pointer("/event/occurred_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap(),
+        "webhook payload event occurred_at",
+    )
+    .unwrap();
+    assert_eq!(event_occurred_at, resolved_at);
+    assert_eq!(payload_occurred_at, resolved_at);
+}
+
+#[tokio::test]
+async fn memory_policy_change_resolution_clamps_each_episode_to_current_state() {
+    let memory = MemoryState::default();
+    let group = policy_group("status:online");
+    let agent = policy_agent(Vec::new());
+    let confirmed_at = Utc.timestamp_opt(4_102_444_800, 0).single().unwrap();
+    let state_evaluated_at = confirmed_at + chrono::Duration::seconds(30);
+    let state = policy_state(1, true, &state_evaluated_at.to_rfc3339());
+    let alert = policy_alert_for_evaluation(
+        &group,
+        &group.rules[0],
+        &agent,
+        &state,
+        &true_policy_evaluation(),
+        &confirmed_at.to_rfc3339(),
+    );
+    memory.policy_rule_states.write().await.push(state);
+    memory.policy_alerts.write().await.push(alert);
+
+    resolve_memory_policy_alerts_for_rules(
+        &memory,
+        &HashSet::from([group.rules[0].id]),
+        "policy_changed",
+    )
+    .await
+    .unwrap();
+
+    let alerts = memory.policy_alerts.read().await;
+    let resolved_at = policy_alert_resolution_timestamp(&alerts[0]).unwrap();
+    assert!(resolved_at >= confirmed_at);
+    assert!(resolved_at >= state_evaluated_at);
+    assert_eq!(
+        alerts[0].resolution_reason.as_deref(),
+        Some("policy_changed")
+    );
+    drop(alerts);
+    let events = memory.webhook_events.read().await;
+    let event_occurred_at = super::parse_policy_lifecycle_timestamp(
+        &events[0].occurred_at,
+        "webhook event occurred_at",
+    )
+    .unwrap();
+    let payload_occurred_at = super::parse_policy_lifecycle_timestamp(
+        events[0]
+            .payload
+            .pointer("/event/occurred_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap(),
+        "webhook payload event occurred_at",
+    )
+    .unwrap();
+    assert_eq!(event_occurred_at, resolved_at);
+    assert_eq!(payload_occurred_at, resolved_at);
+}
+
+#[tokio::test]
+async fn policy_summary_counts_only_confirmed_triggered_or_persisting_episodes() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let group = policy_group("tag:monitored");
+    let agent = policy_agent(vec!["monitored".to_string()]);
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let state = policy_state(1, true, &now.to_rfc3339());
+    let mut alert = policy_alert_for_evaluation(
+        &group,
+        &group.rules[0],
+        &agent,
+        &state,
+        &true_policy_evaluation(),
+        &now.to_rfc3339(),
+    );
+    memory.policy_rule_states.write().await.push(state);
+
+    let summarize = |repo: Repository, group: PolicyGroupRecord, agent: AgentView| async move {
+        let mut groups = vec![group];
+        repo.enrich_policy_group_summaries_with_rule_contexts(
+            &mut groups,
+            &[agent],
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        groups.remove(0)
+    };
+
+    let summary = summarize(repo.clone(), group.clone(), agent.clone()).await;
+    assert_eq!(summary.active_warning_count, 0);
+
+    alert.lifecycle_state = "unknown".to_string();
+    alert.last_confirmed_at = None;
+    memory.policy_alerts.write().await.push(alert.clone());
+    let summary = summarize(repo.clone(), group.clone(), agent.clone()).await;
+    assert_eq!(summary.active_warning_count, 0);
+
+    alert.last_confirmed_at = Some(now.to_rfc3339());
+    memory.policy_alerts.write().await[0] = alert.clone();
+    let summary = summarize(repo.clone(), group.clone(), agent.clone()).await;
+    assert_eq!(summary.active_warning_count, 0);
+
+    alert.lifecycle_state = "persisting".to_string();
+    memory.policy_alerts.write().await[0] = alert;
+    let summary = summarize(repo, group, agent).await;
+    assert_eq!(summary.active_warning_count, 1);
+}
+
+#[tokio::test]
+async fn notification_candidate_limit_is_applied_after_confirmed_active_selection() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let group = policy_group("status:online");
+    let agent = policy_agent(Vec::new());
+    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
+    let state = policy_state(1, true, &now.to_rfc3339());
+    let active = policy_alert_for_evaluation(
+        &group,
+        &group.rules[0],
+        &agent,
+        &state,
+        &true_policy_evaluation(),
+        &now.to_rfc3339(),
+    );
+    let active_id = active.id;
+    memory.agents.write().await.push(agent);
+    let mut alerts = vec![active];
+    let unknown_template = alerts[0].clone();
+    alerts.extend((1..=201).map(|index| {
+        let mut unknown = unknown_template.clone();
+        unknown.id = uuid::Uuid::new_v4();
+        unknown.trigger_generation = i64::from(index) + 1;
+        unknown.severity = "critical".to_string();
+        unknown.lifecycle_state = "unknown".to_string();
+        unknown.observed_at = (now + chrono::Duration::seconds(i64::from(index))).to_rfc3339();
+        unknown.created_at = unknown.observed_at.clone();
+        unknown
+    }));
+    *memory.policy_alerts.write().await = alerts;
+    let query = PolicyAlertQuery {
+        limit: None,
+        client_id: None,
+        severity: None,
+        category: None,
+        policy_group_id: None,
+    };
+
+    let current_fleet = repo
+        .list_policy_alert_candidates(&query, 201, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(current_fleet.len(), 201);
+    assert_eq!(current_fleet[0].id, active_id);
+    assert_eq!(current_fleet[0].lifecycle_state, "triggered");
+    assert_eq!(
+        current_fleet
+            .iter()
+            .filter(|alert| alert.lifecycle_state == "unknown")
+            .count(),
+        200
+    );
+
+    let notification = repo
+        .list_policy_alert_notification_candidates(&query, 200, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(notification.len(), 1);
+    assert_eq!(notification[0].id, active_id);
+    assert_eq!(notification[0].lifecycle_state, "triggered");
+}
+
+#[test]
 fn webhook_repair_is_bounded_so_retention_does_not_redeliver_old_alerts() {
     let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
     assert!(policy_webhook_repair_is_recent(
@@ -916,6 +1492,47 @@ fn webhook_repair_is_bounded_so_retention_does_not_redeliver_old_alerts() {
             .to_rfc3339(),
         now,
     ));
+}
+
+fn policy_agent(tags: Vec<String>) -> AgentView {
+    AgentView {
+        id: "edge-a".to_string(),
+        display_name: "Edge A".to_string(),
+        status: "online".to_string(),
+        tags,
+        registration_ip: None,
+        last_ip: None,
+        last_seen_at: None,
+        arch: None,
+        internal_build_number: 1,
+        process_incarnation_id: None,
+        stale_since: None,
+        stale_reason: None,
+        capabilities: AgentCapabilitySnapshot::default(),
+    }
+}
+
+fn policy_group(selector_expression: &str) -> PolicyGroupRecord {
+    PolicyGroupRecord {
+        id: uuid::Uuid::from_u128(2),
+        name: "resource policy".to_string(),
+        enabled: true,
+        selector_expression: selector_expression.to_string(),
+        notes: None,
+        matched_vps_count: 0,
+        rule_count: 1,
+        enabled_rule_count: 1,
+        active_info_count: 0,
+        active_warning_count: 0,
+        active_critical_count: 0,
+        incomplete_vps_count: 0,
+        last_evaluated_at: None,
+        rules: vec![policy_rule(1)],
+        created_by: None,
+        updated_by: None,
+        created_at: "test".to_string(),
+        updated_at: "test".to_string(),
+    }
 }
 
 fn policy_rule(rule_version: i32) -> PolicyRuleRecord {
@@ -947,6 +1564,18 @@ fn true_policy_evaluation() -> PolicyEvaluation {
     }
 }
 
+fn unknown_policy_evaluation() -> PolicyEvaluation {
+    PolicyEvaluation {
+        condition_true: false,
+        incomplete: true,
+        incomplete_reasons: vec!["cpu.utilization_ratio missing".to_string()],
+        actual_value: None,
+        threshold_value: Some(0.75),
+        category: "resource".to_string(),
+        payload: json!({}),
+    }
+}
+
 fn policy_state(
     trigger_generation: i64,
     condition_true: bool,
@@ -970,6 +1599,49 @@ fn policy_state(
         last_fired_at: condition_true.then(|| evaluated_at.to_string()),
         trigger_generation,
         updated_at: evaluated_at.to_string(),
+    }
+}
+
+fn policy_resource_rollup() -> TelemetryRollupView {
+    TelemetryRollupView {
+        client_id: "edge-a".to_string(),
+        bucket_start: "100".to_string(),
+        bucket_secs: 60,
+        sample_count: 3,
+        cpu_usage_sample_count: 3,
+        cpu_usage_avg: Some(0.2),
+        cpu_usage_max: Some(0.82),
+        cpu_cores_max: 4,
+        cpu_load_1_avg: 0.05,
+        cpu_load_1_max: 0.1,
+        cpu_load_5_avg: 0.05,
+        cpu_load_5_max: 0.1,
+        cpu_load_15_avg: 0.05,
+        cpu_load_15_max: 0.1,
+        memory_total_bytes_max: 1000,
+        memory_available_bytes_avg: 400,
+        memory_available_bytes_min: 300,
+        memory_used_ratio_avg: 0.6,
+        memory_used_ratio_max: 0.7,
+        swap_sample_count: 0,
+        swap_total_bytes_max: None,
+        swap_available_bytes_avg: None,
+        swap_available_bytes_min: None,
+        swap_used_ratio_avg: None,
+        swap_used_ratio_max: None,
+        disk_total_bytes_max: 2000,
+        disk_available_bytes_avg: 1000,
+        disk_available_bytes_min: 800,
+        disk_used_ratio_avg: 0.5,
+        disk_used_ratio_max: 0.6,
+        network_rx_bytes_max: 0,
+        network_tx_bytes_max: 0,
+        connections_sample_count: 0,
+        tcp_sockets_latest: None,
+        udp_sockets_latest: None,
+        connections_observed_at: None,
+        latest_observed_at: "120".to_string(),
+        updated_at: "121".to_string(),
     }
 }
 

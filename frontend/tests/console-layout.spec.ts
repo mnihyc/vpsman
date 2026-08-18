@@ -146,6 +146,13 @@ test.beforeEach(async ({ page }, testInfo) => {
           : undefined;
   await installConsoleApiMock(page, {
     ...options,
+    alertDomainDuplicateCoverage: testInfo.tags.includes(
+      "@alert-domain-deduplication",
+    ),
+    alertLifecycleMalformed: testInfo.tags.includes(
+      "@alert-lifecycle-malformed",
+    ),
+    alertScopedGlobalCoverage: testInfo.tags.includes("@alert-scoped-global"),
     bulkResolveDelayMs: testInfo.tags.includes("@bulk-resolve-delay")
       ? 250
       : undefined,
@@ -159,6 +166,36 @@ test.beforeEach(async ({ page }, testInfo) => {
     fleetAlertStateFailure: testInfo.tags.includes(
       "@fleet-alert-state-failure",
     ),
+    fleetAlertHistorySaturated: testInfo.tags.includes(
+      "@fleet-alert-history-saturated",
+    ),
+    fleetAlertEventReviewFailure: testInfo.tags.includes(
+      "@fleet-alert-event-review-failure",
+    ),
+    fleetAlertEventReviewRefreshAddsNew: testInfo.tags.includes(
+      "@fleet-alert-event-review-saturated",
+    ),
+    fleetAlertEventReviewSaturated: testInfo.tags.includes(
+      "@fleet-alert-event-review-saturated",
+    ),
+    fleetAlertSourceFailure: testInfo.tags.includes(
+      "@fleet-alert-current-unavailable",
+    )
+      ? "current"
+      : testInfo.tags.includes("@fleet-alert-history-unavailable")
+        ? "history"
+        : testInfo.tags.includes("@fleet-alert-sources-unavailable")
+          ? "both"
+          : undefined,
+    policyAlertHistorySaturated: testInfo.tags.includes(
+      "@policy-alert-history-saturated",
+    ),
+    operatorRoleOverride: testInfo.tags.includes("@alert-read-only")
+      ? "operator"
+      : undefined,
+    operatorScopesOverride: testInfo.tags.includes("@alert-read-only")
+      ? ["fleet:read", "backups:read"]
+      : undefined,
     fleetSnapshotAfterDeleteDelayMs: testInfo.tags.includes(
       "@uptime-delete-refresh-delay",
     )
@@ -837,7 +874,7 @@ test("renders an operational cloud-console fleet workspace", async ({
     page
       .locator(".homeReviewPanel")
       .filter({ has: page.getByRole("heading", { name: "Recent issues" }) })
-      .getByRole("button", { name: /Tunnel adapter status failed/ }),
+      .getByRole("button", { name: /Transfer .* aborted/ }),
   ).toBeVisible();
   await expect(page.getByLabel("Home fleet scan")).toBeVisible();
   await expect(page.getByLabel("Home telemetry widgets")).toBeVisible();
@@ -3189,6 +3226,17 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await page.goto("/");
   await openConsoleSubpage(page, "Observability", "Alerts");
 
+  const lifecycle = page.getByLabel("Policy alert lifecycle");
+  await expect(lifecycle).toContainText(
+    "traffic-quota starter is an ordinary disabled policy",
+  );
+  await expect(lifecycle).toContainText("Triggered");
+  await expect(lifecycle).toContainText("Persisting on confirmation");
+  await expect(lifecycle).toContainText("Resolved");
+  await expect(lifecycle).toContainText("Unknown");
+  await expect(lifecycle).toContainText("Unknown neither resolves nor re-arms");
+  await expect(lifecycle).toContainText("new generation");
+
   const grid = page.getByLabel("Policy groups data grid");
   await expect(grid.getByText("1 of 1 policy")).toBeVisible();
   await expect(grid.getByRole("columnheader", { name: "Actions" })).toHaveCount(
@@ -3231,6 +3279,10 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   await expect(belowDetail).toContainText("traffic.cycle.total");
   await expect(belowDetail).toContainText("traffic.quota.total * 0.8");
   await expect(belowDetail).toContainText("Traffic quota threshold reached");
+  await expect(belowDetail).toContainText("Recent policy alert history");
+  await expect(belowDetail).toContainText("Persisting");
+  await expect(belowDetail).toContainText("Resolved");
+  await expect(belowDetail).toContainText("Condition Recovered");
   await page.getByLabel("Close detail panel").click();
   await expect(page.getByText("Alert policy details")).toHaveCount(0);
   await expect(page).toHaveURL(/#\/observability\/alerts$/);
@@ -3302,6 +3354,57 @@ test("keeps fleet alert policy actions selection-scoped", async ({
 });
 
 test(
+  "keeps current policy state independent from capped alert history",
+  { tag: "@policy-alert-history-saturated" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "current/history policy evidence is covered in the desktop fleet grids",
+    );
+
+    await page.goto("/");
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    const historyTile = page
+      .locator(".metricCard", { hasText: "Policy alert history" })
+      .first();
+    await expect(historyTile.locator("strong")).toHaveText("200+");
+    await expect(historyTile).toContainText(
+      "1 active warning or critical alerts",
+    );
+    await expect(historyTile).toContainText("in the loaded history");
+
+    const policyGrid = page.getByLabel("Policy groups data grid");
+    const policyRow = policyGrid
+      .locator(".gridBody [role=row]", { hasText: "edge-resource-policy" })
+      .first();
+    await checkControl(policyRow.getByLabel("Select Policy groups row"));
+    await policyGrid.getByRole("button", { name: "Action" }).click();
+    await page.getByRole("menuitem", { name: "Details" }).click();
+    const policyDetail = page.locator(".consoleDetailPanel").last();
+    await expect(policyDetail).toContainText("Recent policy alert history");
+    await expect(policyDetail).toContainText("Resolved");
+    await expect(policyDetail).not.toContainText("Persisting");
+    await page.getByLabel("Close detail panel").click();
+
+    await openConsoleSubpage(page, "Fleet", "Instances");
+    const fleetGrid = page.getByLabel("VPS instance records data grid");
+    const fleetRow = fleetGrid
+      .locator(".gridBody [role=row]", { hasText: "edge-sfo-01" })
+      .first();
+    await expect(fleetRow).toContainText("1 warning");
+    await checkControl(fleetRow.getByLabel("Select VPS instance records row"));
+    await runGridAction(page, "VPS instance records", "Open detail");
+    const canonicalDetail = page.getByLabel("Canonical VPS detail");
+    await canonicalDetail.getByRole("tab", { name: "Network" }).click();
+    const matchedPolicies = canonicalDetail
+      .locator(".vpsDetailBlock", { hasText: "Matched policies" })
+      .first();
+    await expect(matchedPolicies).toContainText("Persisting");
+    await expect(matchedPolicies).toContainText("Resolved");
+  },
+);
+
+test(
   "keeps a failed fleet alert triage inside its reviewed confirmation",
   { tag: "@fleet-alert-state-failure" },
   async ({ page }, testInfo) => {
@@ -3313,7 +3416,7 @@ test(
     await page.goto("/");
     await openConsoleSubpage(page, "Fleet", "Alerts");
 
-    const grid = page.getByLabel("Fleet alerts data grid");
+    const grid = page.getByLabel("Current alert episodes data grid");
     const alertRow = grid
       .getByRole("row")
       .filter({ hasText: "Tunnel adapter status failed" })
@@ -3322,7 +3425,7 @@ test(
     await grid.getByRole("button", { name: "Actions", exact: true }).click();
     await activate(
       page.getByRole("menuitem", {
-        name: "Acknowledge open",
+        name: "Acknowledge Open triage",
         exact: true,
       }),
     );
@@ -3585,6 +3688,18 @@ test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", asy
   await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
     "traffic",
   );
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "Persisting",
+  );
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "CPU utilization evidence unavailable",
+  );
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "2 critical / 5 warning / 1 info active",
+  );
+  await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
+    "3 actionable · 2 Unknown · 5+ current triaged",
+  );
 
   await openConsoleSubpage(page, "Observability", "Event webhooks");
   await expect(
@@ -3593,7 +3708,512 @@ test("shows issued policy alerts in Fleet Alerts and webhook rule fixtures", asy
   await expect(page.getByLabel("Webhook rules data grid")).toContainText(
     "edge-interval-webhook",
   );
+  await expect(page.getByLabel("Webhook rules data grid")).toContainText(
+    "alert-lifecycle-webhook",
+  );
+  await expect(page.getByLabel("Webhook rules data grid")).toContainText(
+    "alert.triggered || alert.resolved",
+  );
+  await page.getByRole("tab", { name: /Deliveries/ }).click();
+  const deliveryGrid = page.getByLabel("Webhook delivery history data grid");
+  await expect(deliveryGrid).toContainText("alert.triggered");
+  await expect(deliveryGrid).toContainText("alert.resolved");
+  await expect(deliveryGrid).toContainText(
+    "fleet-alert:12121212-3434-4567-8787-121212121212:triggered",
+  );
+  await expect(deliveryGrid).toContainText(
+    "fleet-alert:12121212-3434-4567-8787-121212121212:resolved",
+  );
+  const lifecycleDeliveries = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/webhook-deliveries?limit=200");
+    return (await response.json()) as Array<Record<string, unknown>>;
+  });
+  const paired = lifecycleDeliveries.filter(
+    (delivery) => delivery.rule_name === "alert-lifecycle-webhook",
+  );
+  expect(paired.map((delivery) => delivery.event_kind)).toEqual([
+    "alert.resolved",
+    "alert.triggered",
+  ]);
+  for (const delivery of paired) {
+    const payload = delivery.payload as {
+      alert: Record<string, unknown>;
+      event: Record<string, unknown>;
+    };
+    expect(payload.alert).toMatchObject({
+      category: "backup",
+      id: "operational-alert:12121212-3434-4567-8787-121212121212",
+      record_kind: "event",
+      source_status: "execution_failed",
+      trigger_generation: 3,
+    });
+    expect(payload.event.id).toBe(delivery.event_id);
+    if (delivery.event_kind === "alert.resolved") {
+      expect(payload.alert.lifecycle_state).toBe("resolved");
+      expect(payload.alert.resolved_at).toBe(payload.event.occurred_at);
+    } else {
+      expect(payload.alert.lifecycle_state).toBe("triggered");
+      expect(payload.alert.triggered_at).toBe(payload.event.occurred_at);
+    }
+  }
 });
+
+test("presents unified alert lifecycle and resolves only occurrences", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await openConsoleSubpage(page, "Fleet", "Alerts");
+
+  const current = page.getByLabel("Current alert episodes data grid");
+  const alertRecord = (grid: Locator, title: string) =>
+    (testInfo.project.name.includes("mobile")
+      ? grid.locator('[role="group"][aria-label*=" mobile card "]')
+      : grid.getByRole("row")
+    )
+      .filter({ hasText: title })
+      .first();
+  for (const [title, kind, lifecycle] of [
+    ["Tunnel adapter status failed", "Condition", "Triggered"],
+    ["Tunnel traffic evidence unavailable", "Condition", "Unknown"],
+    ["Agent is not online", "Condition", "Persisting"],
+    ["Agent access revoked", "Condition", "Triggered"],
+    ["Backup request failed", "Occurrence", "Persisting"],
+    ["Traffic quota threshold reached", "Condition", "Persisting"],
+    ["CPU utilization evidence unavailable", "Condition", "Unknown"],
+    ["Agent update timed out", "Occurrence", "Triggered"],
+    ["Terminal job partially succeeded", "Occurrence", "Persisting"],
+    ["Job target skipped", "Occurrence", "Triggered"],
+  ]) {
+    const row = alertRecord(current, title);
+    await expect(row).toContainText(kind);
+    await expect(row).toContainText(lifecycle);
+  }
+  for (const label of [
+    "Agent status",
+    "Network",
+    "Backup",
+    "Traffic",
+    "Resource",
+    "Agent update",
+    "Job",
+    "Capability degraded",
+  ]) {
+    await expect(current).toContainText(label);
+  }
+
+  const history = page.getByLabel("Alert episode history data grid");
+  const historySearch = history.getByLabel("Alert episode history search");
+  for (const [title, kind] of [
+    ["Tunnel adapter recovered", "Condition"],
+    ["Tunnel traffic recovered", "Condition"],
+    ["Backup incident resolved", "Occurrence"],
+  ]) {
+    await historySearch.fill(title);
+    const row = alertRecord(history, title);
+    await expect(row).toContainText(kind);
+    await expect(row).toContainText("Resolved");
+    await expect(row).toContainText(
+      kind === "Condition" ? "Automatic resolution" : "Actor 99999999",
+    );
+  }
+  await historySearch.fill("");
+
+  const unknownRow = alertRecord(
+    current,
+    "CPU utilization evidence unavailable",
+  );
+  await unknownRow.getByRole("checkbox").check();
+  await expect(current).toContainText("1 current with Open triage");
+  await expect(current).toContainText("0 resolvable occurrences");
+  await current.getByRole("button", { name: "Actions", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "Acknowledge Open triage" }),
+  ).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await unknownRow.getByRole("checkbox").uncheck();
+
+  const incidentRow = alertRecord(current, "Backup request failed");
+  await incidentRow.getByRole("checkbox").check();
+  await current.getByRole("button", { name: "Actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Resolve incident" }).click();
+  const prompt = page.getByLabel("Confirm incident resolution");
+  const confirm = prompt.getByRole("button", { name: "Resolve incident" });
+  await expect(confirm).toBeDisabled();
+  await prompt
+    .getByLabel("Incident resolution reason")
+    .fill("Reviewed and replaced by a successful backup.");
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+
+  await expect(current).not.toContainText("Backup request failed");
+  await expect(history).toContainText("Resolved");
+  await expect(history).toContainText("Operator Resolved");
+  await expect(history).toContainText(
+    "Reviewed and replaced by a successful backup.",
+  );
+  await expect(
+    page.getByText(
+      "Resolved occurrence Backup request failed, generation 1. Operator triage was not changed.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  const repeatedResolution = await page.evaluate(async () => {
+    const response = await fetch(
+      "/api/v1/fleet-alerts/fleet-alert-backup-agent-sfo-01/resolve",
+      {
+        body: JSON.stringify({
+          confirmed: true,
+          reason: "Reviewed and replaced by a successful backup.",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      },
+    );
+    return {
+      body: (await response.json()) as {
+        id: string;
+        lifecycle: { state: string };
+      },
+      status: response.status,
+    };
+  });
+  expect(repeatedResolution.status).toBe(200);
+  expect(repeatedResolution.body).toMatchObject({
+    id: "fleet-alert-backup-agent-sfo-01",
+    lifecycle: { state: "resolved" },
+  });
+  const resolutionRequests = await page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __vpsmanTestRequests: {
+            fleetAlertResolutions: Array<Record<string, unknown>>;
+          };
+        }
+      ).__vpsmanTestRequests.fleetAlertResolutions,
+  );
+  expect(resolutionRequests.at(-1)).toMatchObject({
+    alert_id: "fleet-alert-backup-agent-sfo-01",
+    confirmed: true,
+    reason: "Reviewed and replaced by a successful backup.",
+  });
+});
+
+test(
+  "manually reaches incidents beyond the current cap and refreshes after terminal cursor",
+  { tag: "@fleet-alert-event-review-saturated" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "the bounded cursor walk and mutation sequence is covered in the desktop data grid",
+    );
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+
+    const grid = page.getByLabel("Current alert episodes data grid");
+    const review = page.getByLabel("Older current incident review");
+    await expect(grid).not.toContainText("Older incident beyond snapshot cap");
+    await review
+      .getByRole("button", { name: "Load older current incidents" })
+      .click();
+    await expect(review).toContainText(
+      "occurrence feed has reached its explicit end",
+    );
+
+    const search = grid.getByLabel("Current alert episodes search");
+    await search.fill("Older incident beyond snapshot cap");
+    await expect(grid).toContainText("Older incident beyond snapshot cap");
+    await search.fill("Paged terminal incident 000");
+    await expect(
+      grid.getByRole("row").filter({ hasText: "Paged terminal incident 000" }),
+    ).toContainText("Operator triage: Acknowledged");
+
+    await search.fill("Older incident beyond snapshot cap");
+    const olderRow = () =>
+      grid
+        .getByRole("row")
+        .filter({ hasText: "Older incident beyond snapshot cap" })
+        .first();
+    const applyTriage = async (
+      action: string,
+      confirmLabel: string,
+      expectedState: string,
+    ) => {
+      const checkbox = olderRow().getByRole("checkbox");
+      if (!(await checkbox.isChecked())) await checkbox.check();
+      await grid.getByRole("button", { name: "Actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: action }).click();
+      await page
+        .getByLabel("Confirm fleet alert triage")
+        .getByRole("button", { name: confirmLabel, exact: true })
+        .click();
+      await expect(olderRow()).toContainText(
+        `Operator triage: ${expectedState}`,
+      );
+    };
+    await applyTriage("Mute Open triage 4h", "Mute", "Muted");
+    await applyTriage("Reset triage to Open", "Reset triage to Open", "Open");
+    await applyTriage("Escalate Open triage", "Escalate", "Escalated");
+    await applyTriage("Reset triage to Open", "Reset triage to Open", "Open");
+    await applyTriage("Acknowledge Open triage", "Acknowledge", "Acknowledged");
+
+    await review
+      .getByRole("button", { name: "Refresh unresolved occurrences" })
+      .click();
+    await search.fill("New incident after review reached end");
+    await expect(grid).toContainText("New incident after review reached end");
+    await search.fill("Older incident beyond snapshot cap");
+    await expect(
+      grid
+        .getByRole("row")
+        .filter({ hasText: "Older incident beyond snapshot cap" }),
+    ).toHaveCount(0);
+    await review
+      .getByRole("button", { name: "Load older current incidents" })
+      .click();
+    await expect(
+      grid
+        .getByRole("row")
+        .filter({ hasText: "Older incident beyond snapshot cap" }),
+    ).toHaveCount(0);
+
+    const reviewRequests = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertEventReviews: Array<{ cursor: string | null }>;
+            };
+          }
+        ).__vpsmanTestRequests.fleetAlertEventReviews,
+    );
+    expect(reviewRequests.map((request) => request.cursor)).toEqual([
+      null,
+      "fixture-event-cursor:200",
+      null,
+      "fixture-event-cursor:200",
+    ]);
+  },
+);
+
+test(
+  "shows explicit incident-review source failure without changing current rows",
+  { tag: "@fleet-alert-event-review-failure" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    const grid = page.getByLabel("Current alert episodes data grid");
+    const review = page.getByLabel("Older current incident review");
+    await expect(grid).toContainText("Backup request failed");
+    await review
+      .getByRole("button", { name: "Load older current incidents" })
+      .click();
+    await expect(review).toContainText(
+      "Simulated unresolved occurrence review failure.",
+    );
+    await expect(
+      review.getByRole("button", { name: "Retry older current incidents" }),
+    ).toBeVisible();
+    await expect(grid).toContainText("Backup request failed");
+  },
+);
+
+test(
+  "keeps lifecycle controls read-only without the complete alert authority",
+  { tag: "@alert-read-only" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect(
+      page.getByLabel("Fleet alert read-only boundary"),
+    ).toContainText("fleet:read, backups:read, and integrations:write");
+    await expect(
+      page.getByRole("button", { name: "View alert policies" }),
+    ).toBeVisible();
+    const grid = page.getByLabel("Current alert episodes data grid");
+    await expect(grid.getByRole("checkbox")).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Resolve incident" }),
+    ).toHaveCount(0);
+    const mutationRequests = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __vpsmanTestRequests: {
+              fleetAlertResolutions: unknown[];
+              fleetAlertStates: unknown[];
+            };
+          }
+        ).__vpsmanTestRequests,
+    );
+    expect(mutationRequests.fleetAlertResolutions).toEqual([]);
+    expect(mutationRequests.fleetAlertStates).toEqual([]);
+  },
+);
+
+test(
+  "does not attribute a global incident to a scoped fleet",
+  { tag: "@alert-scoped-global" },
+  async ({ page }, testInfo) => {
+    test.skip(
+      testInfo.project.name.includes("mobile"),
+      "desktop scope editing provides direct scoped-global coverage",
+    );
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    await expect(
+      page.getByText("Whole-fleet job incident").first(),
+    ).toBeVisible();
+    await page.getByRole("combobox", { name: "Search fleet" }).fill("sfo");
+    await expect(page.getByText("Whole-fleet job incident")).toHaveCount(0);
+    const shellAlerts = page
+      .getByLabel("Fleet status summary")
+      .locator(".metric")
+      .filter({ hasText: "Alerts" });
+    await expect(shellAlerts.locator("strong")).toHaveText("≥1");
+  },
+);
+
+test(
+  "fails closed for malformed event and policy alert lifecycles",
+  { tag: "@alert-lifecycle-malformed" },
+  async ({ page }, testInfo) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    const grid = page.getByLabel("Current alert episodes data grid");
+    const alertRecord = (title: string) =>
+      (testInfo.project.name.includes("mobile")
+        ? grid.locator('[role="group"][aria-label*=" mobile card "]')
+        : grid.getByRole("row")
+      )
+        .filter({ hasText: title })
+        .first();
+    await expect(grid).toContainText("Malformed event lifecycle fixture");
+    const malformedPolicy = alertRecord("Malformed policy lifecycle fixture");
+    await expect(malformedPolicy).toContainText("Condition");
+    await expect(malformedPolicy).toContainText("Lifecycle unavailable");
+    await expect(grid).toContainText("Lifecycle unavailable");
+    await expect(
+      page.getByLabel("Fleet alerts", { exact: true }),
+    ).toContainText("2 malformed");
+    const row = alertRecord("Malformed event lifecycle fixture");
+    await row.getByRole("checkbox").check();
+    await expect(grid).toContainText("0 resolvable occurrences");
+    await grid.getByRole("button", { name: "Actions", exact: true }).click();
+    await expect(
+      page.getByRole("menuitem", { name: "Resolve incident" }),
+    ).toBeDisabled();
+  },
+);
+
+test(
+  "keeps alert source unavailability separate from exact and truncated bounds",
+  { tag: "@fleet-alert-current-unavailable" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect(
+      page.getByLabel("Fleet alerts", { exact: true }),
+    ).toContainText("Current alert evidence unavailable");
+    await expect(
+      page.getByLabel("Current alert episodes data grid"),
+    ).toContainText("Current alert evidence is unavailable");
+    const history = page.getByLabel("Alert episode history data grid");
+    await history
+      .getByLabel("Alert episode history search")
+      .fill("Tunnel adapter recovered");
+    await expect(history).toContainText("Tunnel adapter recovered");
+
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    const summary = page.getByLabel("Alert routing summary");
+    const currentTile = summary
+      .locator(".metricCard")
+      .filter({ hasText: "Current alert episodes" });
+    await expect(currentTile.locator("strong")).toHaveText("Unknown");
+    const historyTile = summary
+      .locator(".metricCard")
+      .filter({ hasText: "Alert episode history" });
+    await expect(historyTile.locator("strong")).toHaveText("13");
+  },
+);
+
+test(
+  "keeps alert history unavailability separate from available current episodes",
+  { tag: "@fleet-alert-history-unavailable" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect(
+      page.getByLabel("Current alert episodes data grid"),
+    ).toContainText("Backup request failed");
+    await expect(page.getByText(/Alert history is unavailable/)).toBeVisible();
+    await expect(
+      page.getByLabel("Alert episode history data grid"),
+    ).toContainText("Alert episode history is unavailable");
+
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    const historyTile = page
+      .getByLabel("Alert routing summary")
+      .locator(".metricCard")
+      .filter({ hasText: "Alert episode history" });
+    await expect(historyTile.locator("strong")).toHaveText("Unknown");
+  },
+);
+
+test(
+  "renders an explicit lower bound for saturated alert history",
+  { tag: "@fleet-alert-history-saturated" },
+  async ({ page }) => {
+    await page.goto("/");
+    await openConsoleSubpage(page, "Fleet", "Alerts");
+    await expect(
+      page.getByLabel("Alert episode history data grid"),
+    ).toContainText("200 loaded; more may exist");
+    await openConsoleSubpage(page, "Observability", "Alerts");
+    const historyTile = page
+      .getByLabel("Alert routing summary")
+      .locator(".metricCard")
+      .filter({ hasText: "Alert episode history" });
+    await expect(historyTile.locator("strong")).toHaveText("200+");
+  },
+);
+
+test(
+  "uses lifecycle episodes as canonical Home attention and keeps native outcomes historical",
+  { tag: "@alert-domain-deduplication" },
+  async ({ page }) => {
+    await page.goto("/");
+    await waitForConsoleShell(page);
+    const attention = page
+      .getByRole("heading", { name: "Needs attention", exact: true })
+      .locator("xpath=ancestor::section[1]");
+    await expect(
+      attention.getByRole("button", { name: /Agent is not online/ }),
+    ).toHaveCount(1);
+    await expect(
+      attention.locator('[title*="backup-nyc-03 needs review"]'),
+    ).toHaveCount(0);
+    await expect(
+      attention.locator('button[title*="fixture-update-job-01"]'),
+    ).toHaveCount(0);
+    await expect(
+      attention.locator('button[title*="fixture-backup-01"]'),
+    ).toHaveCount(0);
+
+    const recent = page
+      .getByRole("heading", { name: "Recent issues", exact: true })
+      .locator("xpath=ancestor::section[1]");
+    await expect(
+      recent.getByRole("button", { name: /Agent is not online/ }),
+    ).toHaveCount(0);
+    await expect(
+      recent.locator('button[title*="fixture-update-job-01"]'),
+    ).toHaveCount(1);
+    await expect(
+      recent.locator('button[title*="fixture-backup-01"]'),
+    ).toHaveCount(1);
+  },
+);
 
 test("keeps console layout usable on desktop and mobile widths", async ({
   page,
@@ -3841,6 +4461,14 @@ test("keeps control-plane metrics in System pages", async ({ page }) => {
   await expect(page.getByLabel("API suite config fields")).toContainText(
     "Private HTTP API bind address",
   );
+  await page.getByRole("button", { name: "Advanced TOML" }).click();
+  await expect(
+    page.getByText(/Legacy resource alert threshold settings are ignored/),
+  ).toContainText("api.alert_cpu_load_warning");
+  await expect(
+    page.getByText(/Legacy resource alert threshold settings are ignored/),
+  ).toContainText("Observability / Alerts");
+  await page.getByRole("button", { name: "Fields", exact: true }).click();
   await configSections.getByRole("button", { name: /Network/ }).click();
   await expect(page.getByLabel("Tunnel IPv4 allocation pool")).toHaveValue("");
   await page.getByLabel("Tunnel IPv4 allocation pool").fill("10.250.0.0/16");

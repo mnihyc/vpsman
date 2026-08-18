@@ -295,11 +295,12 @@ docker compose ps
 ```
 
 Do not bypass SQLx migration checksum failures or edit `_sqlx_migrations`.
-The sole supported in-place schema step is applying
-`0009_fleet_tag_settings.sql` to a database with the exact v0.3.5
-`0001`–`0008` migration files and checksums. Keep any earlier or different
-database with its matching application release, or move reviewed data through
-a separate export/import procedure into a fresh database.
+The exact v0.4.4 `0001`–`0009` migration files and checksums may apply
+`0010_disabled_resource_alert_policies.sql` and then
+`0011_operational_alert_lifecycle.sql` in place. The exact v0.3.5
+`0001`–`0008` baseline may apply `0009`, `0010`, and then `0011`. Keep any
+earlier or different database with its matching application release, or move
+reviewed data through a separate export/import procedure into a fresh database.
 
 ## Upgrade and Rollback
 

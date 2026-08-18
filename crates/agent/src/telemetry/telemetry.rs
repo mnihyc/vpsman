@@ -221,6 +221,7 @@ fn classify_virtualization(evidence: &str) -> Option<&'static str> {
 pub(crate) struct TelemetryRuntimeState {
     cpu_time_counters: Option<CpuTimeCounters>,
     connection_collection_failed: bool,
+    disk_collection_failed: bool,
     last_adapter_check_unix: HashMap<String, u64>,
     last_latency_check_unix: HashMap<String, u64>,
     cached_adapter_tunnels: HashMap<String, RuntimeTunnelStat>,
@@ -272,7 +273,45 @@ fn collect_linux_metrics(
     runtime_state: &mut TelemetryRuntimeState,
 ) -> Result<AgentMetrics> {
     let proc_root = Path::new(&config.telemetry.proc_root);
+    let effective_uid = unsafe { libc::geteuid() } as u32;
     let networks = network_stats(proc_root)?;
+    let disks = match disk_stats(proc_root) {
+        Ok(collection) => {
+            if let Some((failure_count, first_error)) = collection.warning_summary(effective_uid) {
+                if !runtime_state.disk_collection_failed {
+                    tracing::warn!(
+                        failed_mounts = failure_count,
+                        first_error,
+                        "some Linux storage mounts are unavailable; publishing the available telemetry parts"
+                    );
+                }
+                runtime_state.disk_collection_failed = true;
+            } else {
+                if runtime_state.disk_collection_failed {
+                    tracing::info!("Linux disk telemetry collection recovered");
+                }
+                runtime_state.disk_collection_failed = false;
+            }
+            collection.disks
+        }
+        Err(error) => {
+            if effective_uid != 0 && error_is_permission_denied(&error) {
+                if runtime_state.disk_collection_failed {
+                    tracing::info!("Linux disk telemetry collection recovered");
+                }
+                runtime_state.disk_collection_failed = false;
+            } else {
+                if !runtime_state.disk_collection_failed {
+                    tracing::warn!(
+                        %error,
+                        "Linux disk telemetry is unavailable; publishing the available telemetry parts"
+                    );
+                }
+                runtime_state.disk_collection_failed = true;
+            }
+            Vec::new()
+        }
+    };
     let connections = match connection_stats(proc_root) {
         Ok(connections) => {
             if runtime_state.connection_collection_failed {
@@ -303,7 +342,7 @@ fn collect_linux_metrics(
             utilization_ratio: cpu_utilization_ratio(proc_root, runtime_state),
         },
         memory: memory_stat(proc_root)?,
-        disks: disk_stats(proc_root)?,
+        disks,
         networks,
         connections,
         tunnels: Vec::new(),
@@ -1028,6 +1067,9 @@ async fn runtime_status_telemetry_stat(
         rx_bytes: 0,
         tx_bytes: 0,
         plan_id: telemetry_plan.plan_id.clone(),
+        topology_identity_hash: Some(telemetry_plan.topology_identity_hash.clone()),
+        runtime_evidence_identity_hash: (!telemetry_plan.runtime_evidence_identity_hash.is_empty())
+            .then(|| telemetry_plan.runtime_evidence_identity_hash.clone()),
         plan_name: Some(plan.name.clone()),
         plan_runtime_manager: Some(manager.to_string()),
         endpoint_side: Some(endpoint_side_label(telemetry_plan.endpoint_side).to_string()),
@@ -1688,6 +1730,8 @@ fn merge_runtime_status_tunnel(metrics: &mut AgentMetrics, mut stat: RuntimeTunn
         existing.traffic_reason = stat.traffic_reason.take();
         existing.traffic_checked_unix = stat.traffic_checked_unix.take();
         existing.plan_id = stat.plan_id.take();
+        existing.topology_identity_hash = stat.topology_identity_hash.take();
+        existing.runtime_evidence_identity_hash = stat.runtime_evidence_identity_hash.take();
         existing.plan_name = stat.plan_name.take();
         existing.plan_runtime_manager = stat.plan_runtime_manager.take();
         existing.endpoint_side = stat.endpoint_side.take();
@@ -1725,9 +1769,10 @@ fn skipped_adapter_health(
 fn runtime_status_telemetry_key(plan: &AgentRuntimeStatusTelemetryPlan) -> String {
     let plan_identity = plan.plan_id.as_deref().unwrap_or(&plan.plan.name);
     format!(
-        "{}:{}:{}",
+        "{}:{}:{}:{}",
         plan_identity,
         plan.topology_identity_hash,
+        plan.runtime_evidence_identity_hash,
         endpoint_side_label(plan.endpoint_side)
     )
 }
@@ -1822,7 +1867,60 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn disk_stats(proc_root: &Path) -> Result<Vec<DiskStat>> {
+#[derive(Debug, Default)]
+struct DiskCollection {
+    disks: Vec<DiskStat>,
+    failure_count: usize,
+    first_error: Option<String>,
+    permission_denied_count: usize,
+    first_non_permission_error: Option<String>,
+}
+
+impl DiskCollection {
+    fn record_failure(&mut self, error: impl Into<String>, permission_denied: bool) {
+        let error = error.into();
+        self.failure_count = self.failure_count.saturating_add(1);
+        if self.first_error.is_none() {
+            self.first_error = Some(error.clone());
+        }
+        if permission_denied {
+            self.permission_denied_count = self.permission_denied_count.saturating_add(1);
+        } else if self.first_non_permission_error.is_none() {
+            self.first_non_permission_error = Some(error);
+        }
+    }
+
+    fn warning_summary(&self, effective_uid: u32) -> Option<(usize, &str)> {
+        let ignored_permission_denied = if effective_uid == 0 {
+            0
+        } else {
+            self.permission_denied_count
+        };
+        let warning_count = self.failure_count.saturating_sub(ignored_permission_denied);
+        if warning_count == 0 {
+            return None;
+        }
+        let first_error = if effective_uid == 0 {
+            self.first_error.as_deref()
+        } else {
+            self.first_non_permission_error.as_deref()
+        };
+        Some((warning_count, first_error.unwrap_or("unknown")))
+    }
+}
+
+fn error_is_permission_denied(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| {
+                error.kind() == std::io::ErrorKind::PermissionDenied
+                    || matches!(error.raw_os_error(), Some(code) if code == libc::EACCES || code == libc::EPERM)
+            })
+    })
+}
+
+fn disk_stats(proc_root: &Path) -> Result<DiskCollection> {
     let contents = read_proc_file(proc_root, "mounts")?;
     let ignored = HashSet::from([
         "proc",
@@ -1839,35 +1937,51 @@ fn disk_stats(proc_root: &Path) -> Result<Vec<DiskStat>> {
         "tracefs",
         "debugfs",
         "overlay",
+        // Linux exposes network namespaces as nsfs mounts under paths such as
+        // /run/docker/netns/*. They are namespace handles, not storage.
+        "nsfs",
+        // Docker/rootless Docker overlay layers are container implementation
+        // detail rather than independently reportable host filesystems.
+        "fuse-overlayfs",
+        "fuse.fuse-overlayfs",
     ]);
     let mut seen_sources = HashSet::new();
-    let mut disks = Vec::new();
+    let mut collection = DiskCollection::default();
 
     for (index, line) in contents.lines().enumerate() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        ensure!(
-            fields.len() >= 3,
-            "telemetry mounts row {} is incomplete",
-            index + 1
-        );
-        if ignored.contains(fields[2])
-            || !seen_sources.insert((fields[0].to_string(), fields[2].to_string()))
-        {
+        if fields.len() < 3 {
+            collection.record_failure(
+                format!("telemetry mounts row {} is incomplete", index + 1),
+                false,
+            );
+            continue;
+        }
+        let source_key = (fields[0].to_string(), fields[2].to_string());
+        if ignored.contains(fields[2]) || seen_sources.contains(&source_key) {
             continue;
         }
         let mountpoint = decode_proc_mount_field(fields[1]);
-        let stat = statvfs(&mountpoint)?;
-        disks.push(DiskStat {
-            mountpoint,
-            total_bytes: stat.0,
-            available_bytes: stat.1,
-        });
-        if disks.len() == MAX_TELEMETRY_DISKS {
-            break;
+        match statvfs(&mountpoint) {
+            Ok(stat) => {
+                seen_sources.insert(source_key);
+                collection.disks.push(DiskStat {
+                    mountpoint,
+                    total_bytes: stat.0,
+                    available_bytes: stat.1,
+                });
+                if collection.disks.len() == MAX_TELEMETRY_DISKS {
+                    break;
+                }
+            }
+            Err(error) => {
+                let permission_denied = error_is_permission_denied(&error);
+                collection.record_failure(format!("{error:#}"), permission_denied);
+            }
         }
     }
 
-    Ok(disks)
+    Ok(collection)
 }
 
 fn decode_proc_mount_field(value: &str) -> String {

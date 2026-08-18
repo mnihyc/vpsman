@@ -67,6 +67,11 @@ import {
 } from "../hooks/useReviewGenerationGuard";
 import { useProjectedMonitoringMetadata } from "../hooks/useProjectedMonitoringMetadata";
 import { WEBHOOK_RULE_DELIVERY_HISTORY_STATUSES } from "../generated/protocolContracts";
+import {
+  alertLifecycleLabel,
+  alertLifecycleTone,
+  isActivePolicyAlert,
+} from "../alertPresentation";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import {
   ExecutionResultPanel,
@@ -313,7 +318,11 @@ export function FleetWorkspace({
   fleetAlertStates,
   fleetPageResetKey,
   fleetAlertPolicies,
+  currentPolicyAlerts,
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
   policyAlerts,
+  policyAlertsEvidenceAvailable,
   trafficAccounting,
   vpsRuleValues,
   fleetAlertNotificationChannels,
@@ -371,7 +380,11 @@ export function FleetWorkspace({
   fleetAlertStates: FleetAlertStateRecord[];
   fleetPageResetKey: string;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
+  currentPolicyAlerts: PolicyAlertRecord[];
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsEvidenceAvailable: boolean;
   trafficAccounting: TrafficAccountingRecord[];
   vpsRuleValues: VpsRuleValueRecord[];
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
@@ -466,7 +479,7 @@ export function FleetWorkspace({
   const formatBytes = useByteCountFormatter();
   const fleetAlertPoliciesTruncated =
     fleetAlertPolicies.length >= FLEET_DETAIL_LIMIT;
-  const policyAlertsTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
+  const policyAlertHistoryTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
   const trafficAccountingTruncated =
     trafficAccounting.length >= FLEET_DETAIL_LIMIT;
   const notificationChannelsTruncated =
@@ -491,7 +504,8 @@ export function FleetWorkspace({
     telemetryTunnelsTruncated;
   const fleetLoadBoundaryLabels = [
     fleetAlertPoliciesTruncated ? "alert policies" : null,
-    policyAlertsTruncated ? "policy alerts" : null,
+    policyAlertHistoryTruncated ? "policy alert history" : null,
+    currentPolicyAlertsTruncated ? "current policy alerts" : null,
     trafficAccountingTruncated ? "traffic accounting" : null,
     notificationChannelsTruncated ? "notification channels" : null,
     alertNotificationsTruncated ? "notification deliveries" : null,
@@ -584,7 +598,16 @@ export function FleetWorkspace({
     }
     return selected;
   }, [agents, vpsRulesByClient]);
-  const policyAlertsByClient = useMemo(() => {
+  const currentPolicyAlertsByClient = useMemo(() => {
+    const map = new Map<string, PolicyAlertRecord[]>();
+    for (const alert of currentPolicyAlerts) {
+      const rows = map.get(alert.client_id) ?? [];
+      rows.push(alert);
+      map.set(alert.client_id, rows);
+    }
+    return map;
+  }, [currentPolicyAlerts]);
+  const policyAlertHistoryByClient = useMemo(() => {
     const map = new Map<string, PolicyAlertRecord[]>();
     for (const alert of policyAlerts) {
       const rows = map.get(alert.client_id) ?? [];
@@ -595,11 +618,11 @@ export function FleetWorkspace({
   }, [policyAlerts]);
   const latestRollupsRef = useRef(latestRollups);
   const trafficByClientRef = useRef(trafficByClient);
-  const policyAlertsByClientRef = useRef(policyAlertsByClient);
+  const currentPolicyAlertsByClientRef = useRef(currentPolicyAlertsByClient);
   const uptimeByClientRef = useRef(uptimeByClient);
   latestRollupsRef.current = latestRollups;
   trafficByClientRef.current = trafficByClient;
-  policyAlertsByClientRef.current = policyAlertsByClient;
+  currentPolicyAlertsByClientRef.current = currentPolicyAlertsByClient;
   uptimeByClientRef.current = uptimeByClient;
   const tagDisplayOrder = useMemo(() => buildTagDisplayOrder(tags), [tags]);
   const fleetSubpageBase = activeSubpage.split(":")[0];
@@ -897,20 +920,40 @@ export function FleetWorkspace({
         sortValue: (agent) =>
           trafficStateForClient(
             trafficByClientRef.current.get(agent.id),
-            policyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsTruncated,
+            currentPolicyAlertsEvidenceAvailable,
           ),
         searchValue: (agent) =>
           trafficStateForClient(
             trafficByClientRef.current.get(agent.id),
-            policyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsTruncated,
+            currentPolicyAlertsEvidenceAvailable,
           ),
         cell: (agent) => {
+          const alerts = currentPolicyAlertsByClientRef.current.get(agent.id);
           const state = trafficStateForClient(
             trafficByClientRef.current.get(agent.id),
-            policyAlertsByClientRef.current.get(agent.id),
+            alerts,
+            currentPolicyAlertsTruncated,
+            currentPolicyAlertsEvidenceAvailable,
           );
+          const currentTrafficStateUnknown =
+            currentPolicyAlertsEvidenceAvailable &&
+            currentPolicyAlertsTruncated &&
+            !(alerts ?? []).some((alert) => alert.category === "traffic");
           return (
-            <ConsoleStatusBadge tone={trafficStateTone(state)}>
+            <ConsoleStatusBadge
+              title={
+                !currentPolicyAlertsEvidenceAvailable
+                  ? "Current policy alert evidence is unavailable"
+                  : currentTrafficStateUnknown
+                    ? "Unknown in loaded current policy-alert page; more may exist"
+                    : undefined
+              }
+              tone={trafficStateTone(state)}
+            >
               {state}
             </ConsoleStatusBadge>
           );
@@ -1046,15 +1089,37 @@ export function FleetWorkspace({
         size: 82,
         minSize: 72,
         sortValue: (agent) =>
-          policyAlertsByClientRef.current.get(agent.id)?.length ?? 0,
+          (currentPolicyAlertsByClientRef.current.get(agent.id) ?? []).filter(
+            isActivePolicyAlert,
+          ).length,
         searchValue: (agent) =>
           activePolicyAlertSummary(
-            policyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsByClientRef.current.get(agent.id),
+            currentPolicyAlertsTruncated,
+            currentPolicyAlertsEvidenceAvailable,
           ),
-        cell: (agent) =>
-          activePolicyAlertSummary(
-            policyAlertsByClientRef.current.get(agent.id),
-          ),
+        cell: (agent) => {
+          const alerts = currentPolicyAlertsByClientRef.current.get(agent.id);
+          return (
+            <span
+              title={
+                !currentPolicyAlertsEvidenceAvailable
+                  ? "Current policy alert evidence is unavailable"
+                  : currentPolicyAlertsTruncated
+                    ? alerts?.length
+                      ? "Current policy-alert page is capped; this per-VPS count is a lower bound and more may exist"
+                      : "Unknown in loaded current policy-alert page; more may exist"
+                    : undefined
+              }
+            >
+              {activePolicyAlertSummary(
+                alerts,
+                currentPolicyAlertsTruncated,
+                currentPolicyAlertsEvidenceAvailable,
+              )}
+            </span>
+          );
+        },
       },
     ],
     [
@@ -1062,6 +1127,8 @@ export function FleetWorkspace({
       preferences.show_country_flags,
       preferences.fleet_location_display_mode,
       formatBytes,
+      currentPolicyAlertsEvidenceAvailable,
+      currentPolicyAlertsTruncated,
       tagDisplayOrder,
       vpsNameDisplayMode,
     ],
@@ -1642,8 +1709,18 @@ export function FleetWorkspace({
               onUpdateAgentAlias={onUpdateAgentAlias}
               policies={fleetAlertPolicies}
               policiesTruncated={fleetAlertPoliciesTruncated}
-              policyAlerts={policyAlertsByClient.get(agent.id) ?? []}
-              policyAlertsTruncated={policyAlertsTruncated}
+              currentPolicyAlerts={
+                currentPolicyAlertsByClient.get(agent.id) ?? []
+              }
+              currentPolicyAlertsEvidenceAvailable={
+                currentPolicyAlertsEvidenceAvailable
+              }
+              currentPolicyAlertsTruncated={currentPolicyAlertsTruncated}
+              policyAlertHistory={
+                policyAlertHistoryByClient.get(agent.id) ?? []
+              }
+              policyAlertHistoryTruncated={policyAlertHistoryTruncated}
+              policyAlertsEvidenceAvailable={policyAlertsEvidenceAvailable}
               privilegeMaterial={privilegeMaterial}
               requestedTab={null}
               configurationSources={configurationSources.filter(
@@ -1690,6 +1767,8 @@ export function FleetWorkspace({
           <ConsoleFreshnessBanner error={apiError} />
           <FleetAlertPolicyManager
             agents={targetAgents}
+            alertsEvidenceAvailable={policyAlertsEvidenceAvailable}
+            alertsTruncated={policyAlertHistoryTruncated}
             onDryRun={onDryRunFleetAlertPolicy}
             onDelete={onDeleteFleetAlertPolicy}
             onUpsert={onUpsertFleetAlertPolicy}
@@ -2119,8 +2198,12 @@ function FleetInstanceDetail({
   apiToken,
   configurationSources,
   lastLiveEvent,
-  policyAlerts,
-  policyAlertsTruncated,
+  currentPolicyAlerts,
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
+  policyAlertHistory,
+  policyAlertHistoryTruncated,
+  policyAlertsEvidenceAvailable,
   policies,
   policiesTruncated,
   requestedTab,
@@ -2157,8 +2240,12 @@ function FleetInstanceDetail({
   apiToken: string;
   configurationSources: ConfigurationSourceView[];
   lastLiveEvent: string;
-  policyAlerts: PolicyAlertRecord[];
-  policyAlertsTruncated: boolean;
+  currentPolicyAlerts: PolicyAlertRecord[];
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
+  policyAlertHistory: PolicyAlertRecord[];
+  policyAlertHistoryTruncated: boolean;
+  policyAlertsEvidenceAvailable: boolean;
   policies: FleetAlertPolicyRecord[];
   policiesTruncated: boolean;
   requestedTab: FleetDetailTab | null;
@@ -2811,8 +2898,14 @@ function FleetInstanceDetail({
         {activeDetailTab === "Traffic & Rules" && (
           <TrafficRulesDetail
             agent={agent}
-            policyAlerts={policyAlerts}
-            policyAlertsTruncated={policyAlertsTruncated}
+            currentPolicyAlerts={currentPolicyAlerts}
+            currentPolicyAlertsEvidenceAvailable={
+              currentPolicyAlertsEvidenceAvailable
+            }
+            currentPolicyAlertsTruncated={currentPolicyAlertsTruncated}
+            policyAlertHistory={policyAlertHistory}
+            policyAlertHistoryTruncated={policyAlertHistoryTruncated}
+            policyAlertsEvidenceAvailable={policyAlertsEvidenceAvailable}
             policies={policies}
             policiesTruncated={policiesTruncated}
             onNavigatePanel={onNavigatePanel}
@@ -3036,8 +3129,12 @@ function ConfigPreviewBlock({
 function TrafficRulesDetail({
   agent,
   onNavigatePanel,
-  policyAlerts,
-  policyAlertsTruncated,
+  currentPolicyAlerts,
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
+  policyAlertHistory,
+  policyAlertHistoryTruncated,
+  policyAlertsEvidenceAvailable,
   policies,
   policiesTruncated,
   trafficAccounting,
@@ -3051,8 +3148,12 @@ function TrafficRulesDetail({
     subpage: string,
     targetClientId?: string,
   ) => void;
-  policyAlerts: PolicyAlertRecord[];
-  policyAlertsTruncated: boolean;
+  currentPolicyAlerts: PolicyAlertRecord[];
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
+  policyAlertHistory: PolicyAlertRecord[];
+  policyAlertHistoryTruncated: boolean;
+  policyAlertsEvidenceAvailable: boolean;
   policies: FleetAlertPolicyRecord[];
   policiesTruncated: boolean;
   trafficAccounting: TrafficAccountingRecord | null;
@@ -3062,11 +3163,14 @@ function TrafficRulesDetail({
 }) {
   const formatBytes = useByteCountFormatter();
   const policyById = new Map(policies.map((policy) => [policy.id, policy]));
-  const alertByRule = new Map(
-    policyAlerts.map((alert) => [alert.policy_rule_id, alert]),
-  );
+  const alertByRule = new Map<string, PolicyAlertRecord>();
+  for (const alert of currentPolicyAlerts) {
+    if (!alertByRule.has(alert.policy_rule_id)) {
+      alertByRule.set(alert.policy_rule_id, alert);
+    }
+  }
   const matchedPolicyIds = new Set(
-    policyAlerts.map((alert) => alert.policy_group_id),
+    currentPolicyAlerts.map((alert) => alert.policy_group_id),
   );
   const matchedPolicyRows = policies
     .filter((policy) => matchedPolicyIds.has(policy.id))
@@ -3081,7 +3185,12 @@ function TrafficRulesDetail({
   const trafficMissingUnderCap =
     trafficAccounting === null && trafficAccountingTruncated;
   const unknownTrafficPage = "Unknown in loaded traffic page; more may exist";
-  const selectedPolicyId = matchedPolicyRows[0]?.policy.id;
+  const unknownCurrentPolicyAlertsPage =
+    "Unknown in loaded current policy-alert page; more may exist";
+  const selectedPolicyId =
+    matchedPolicyRows[0]?.policy.id ??
+    currentPolicyAlerts[0]?.policy_group_id ??
+    policyAlertHistory[0]?.policy_group_id;
   const trafficColumns = useMemo<
     ConsoleDataGridColumn<TrafficAccountingSelectorBreakdown>[]
   >(
@@ -3289,8 +3398,25 @@ function TrafficRulesDetail({
         header: "Current state",
         size: 130,
         minSize: 110,
-        sortValue: (row) => (row.alert ? 1 : 0),
-        cell: (row) => (row.alert ? "true" : "false"),
+        sortValue: (row) =>
+          row.alert
+            ? alertLifecycleLabel(row.alert.lifecycle_state)
+            : "No current episode",
+        cell: (row) => {
+          if (!row.alert) {
+            return (
+              <ConsoleStatusBadge tone="neutral">
+                No current episode
+              </ConsoleStatusBadge>
+            );
+          }
+          const lifecycleState = row.alert.lifecycle_state;
+          return (
+            <ConsoleStatusBadge tone={alertLifecycleTone(lifecycleState)}>
+              {alertLifecycleLabel(lifecycleState)}
+            </ConsoleStatusBadge>
+          );
+        },
       },
       {
         id: "window",
@@ -3310,7 +3436,7 @@ function TrafficRulesDetail({
           <span
             data-tooltip-empty-reason={
               row.alert?.actual_value == null
-                ? "No active alert has reported an actual metric value for this rule"
+                ? "No current lifecycle record has reported an actual metric value for this rule"
                 : undefined
             }
           >
@@ -3336,11 +3462,9 @@ function TrafficRulesDetail({
         minSize: 110,
         sortValue: (row) => row.policy.last_evaluated_at ?? "",
         cell: (row) =>
-          row.alert?.observed_at
-            ? formatCompactTime(row.alert.observed_at)
-            : row.policy.last_evaluated_at
-              ? formatCompactTime(row.policy.last_evaluated_at)
-              : "never",
+          row.policy.last_evaluated_at
+            ? formatCompactTime(row.policy.last_evaluated_at)
+            : "never",
       },
     ],
     [formatBytes],
@@ -3349,11 +3473,35 @@ function TrafficRulesDetail({
     () => [
       {
         id: "time",
-        header: "Time",
+        header: "Triggered",
         size: 135,
         minSize: 110,
         sortValue: (row) => row.observed_at,
         cell: (row) => formatCompactTime(row.observed_at),
+      },
+      {
+        id: "lifecycle",
+        header: "Lifecycle",
+        size: 115,
+        minSize: 100,
+        sortValue: (row) => alertLifecycleLabel(row.lifecycle_state),
+        searchValue: (row) => alertLifecycleLabel(row.lifecycle_state),
+        cell: (row) => (
+          <ConsoleStatusBadge tone={alertLifecycleTone(row.lifecycle_state)}>
+            {alertLifecycleLabel(row.lifecycle_state)}
+          </ConsoleStatusBadge>
+        ),
+      },
+      {
+        id: "last_confirmed",
+        header: "Last confirmed",
+        size: 145,
+        minSize: 120,
+        sortValue: (row) => row.last_confirmed_at ?? "",
+        cell: (row) =>
+          row.last_confirmed_at
+            ? formatCompactTime(row.last_confirmed_at)
+            : "Not recorded",
       },
       {
         id: "severity",
@@ -3443,11 +3591,25 @@ function TrafficRulesDetail({
         ),
       },
       {
-        id: "state",
-        header: "State",
-        size: 95,
-        minSize: 80,
-        cell: () => "open",
+        id: "resolution",
+        header: "Resolution",
+        size: 220,
+        minSize: 170,
+        sortValue: (row) => row.resolved_at ?? "",
+        searchValue: (row) => row.resolution_reason ?? "",
+        cell: (row) =>
+          row.resolved_at ? (
+            <span className="historyPrimary">
+              <strong>{formatCompactTime(row.resolved_at)}</strong>
+              <small>
+                {row.resolution_reason
+                  ? readableToken(row.resolution_reason)
+                  : "Reason not recorded"}
+              </small>
+            </span>
+          ) : (
+            "—"
+          ),
       },
     ],
     [formatBytes, policyById],
@@ -3553,9 +3715,22 @@ function TrafficRulesDetail({
         <Metric
           label="Traffic state"
           value={
-            trafficMissingUnderCap && policyAlerts.length === 0
-              ? unknownTrafficPage
-              : trafficStateForClient(trafficAccounting, policyAlerts)
+            !currentPolicyAlertsEvidenceAvailable
+              ? "Current evidence unavailable"
+              : currentPolicyAlerts.length === 0 && currentPolicyAlertsTruncated
+                ? unknownCurrentPolicyAlertsPage
+                : trafficMissingUnderCap &&
+                    !currentPolicyAlerts.some(
+                      (alert) =>
+                        alert.category === "traffic" &&
+                        isActivePolicyAlert(alert),
+                    )
+                  ? unknownTrafficPage
+                  : trafficStateForClient(
+                      trafficAccounting,
+                      currentPolicyAlerts,
+                      currentPolicyAlertsTruncated,
+                    )
           }
           tone="green"
         />
@@ -3663,14 +3838,18 @@ function TrafficRulesDetail({
           columns={policyColumns}
           defaultPageSize={6}
           empty={
-            policiesTruncated || policyAlertsTruncated
-              ? "No matched policy state for this VPS appears in the loaded pages; more records may exist."
-              : "No matched policy rule state for this VPS."
+            !currentPolicyAlertsEvidenceAvailable
+              ? "Current policy alert evidence is unavailable; no stale episode is presented as current."
+              : currentPolicyAlerts.length === 0 && currentPolicyAlertsTruncated
+                ? unknownCurrentPolicyAlertsPage
+                : policiesTruncated
+                  ? "No matched policy state for this VPS appears in the loaded pages; more records may exist."
+                  : "No matched policy rule state for this VPS."
           }
           getRowId={(row) => `${row.policy.id}:${row.rule.id}`}
           itemLabel="policy rules"
           rows={matchedPolicyRows}
-          rowsTruncated={policiesTruncated || policyAlertsTruncated}
+          rowsTruncated={policiesTruncated || currentPolicyAlertsTruncated}
           searchPlaceholder="Search matched policy rules"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.policies.${agent.id}`}
@@ -3682,14 +3861,16 @@ function TrafficRulesDetail({
           columns={alertColumns}
           defaultPageSize={6}
           empty={
-            policyAlertsTruncated
-              ? "No policy alerts for this VPS appear in the loaded global page; more records may exist."
-              : "No issued policy alerts."
+            !policyAlertsEvidenceAvailable
+              ? "Policy alert history is unavailable; retained rows may be stale."
+              : policyAlertHistoryTruncated
+                ? "No policy alerts for this VPS appear in the loaded policy alert history; more records may exist."
+                : "No issued policy alerts."
           }
           getRowId={(row) => row.id}
           itemLabel="alerts"
-          rows={policyAlerts}
-          rowsTruncated={policyAlertsTruncated}
+          rows={policyAlertHistory}
+          rowsTruncated={policyAlertHistoryTruncated}
           searchPlaceholder="Search recent policy alerts"
           selectable={false}
           storageKey={`vpsman.grid.fleet.traffic.alerts.${agent.id}`}
@@ -4607,13 +4788,23 @@ function policyRequestRulesSummary(policy: FleetAlertPolicyRequest): string {
 }
 
 function policyActiveSummary(policy: FleetAlertPolicyRecord): string {
-  if (policy.active_critical_count > 0) {
-    return `${policy.active_critical_count} critical`;
+  const total =
+    policy.active_critical_count +
+    policy.active_warning_count +
+    policy.active_info_count;
+  if (total === 0) {
+    return "0";
   }
-  if (policy.active_warning_count > 0) {
-    return `${policy.active_warning_count} warning`;
-  }
-  return "0";
+  const breakdown = [
+    policy.active_critical_count > 0
+      ? `${policy.active_critical_count} critical`
+      : null,
+    policy.active_warning_count > 0
+      ? `${policy.active_warning_count} warning`
+      : null,
+    policy.active_info_count > 0 ? `${policy.active_info_count} info` : null,
+  ].filter((part): part is string => part !== null);
+  return `${total} · ${breakdown.join(" / ")}`;
 }
 
 function policyRuleLabel(rule: {
@@ -4927,6 +5118,8 @@ function policyDraftValidationMessage(
 
 export function FleetAlertPolicyManager({
   agents,
+  alertsEvidenceAvailable = true,
+  alertsTruncated = false,
   editorMode = "inline",
   onEditorOpenChange,
   onPolicyFocusChange,
@@ -4940,6 +5133,8 @@ export function FleetAlertPolicyManager({
   onUpsert,
 }: {
   agents: AgentView[];
+  alertsEvidenceAvailable?: boolean;
+  alertsTruncated?: boolean;
   editorMode?: "inline" | "focused";
   onEditorOpenChange?: (open: boolean) => void;
   onPolicyFocusChange?: (policyId: string | null) => void;
@@ -5118,7 +5313,9 @@ export function FleetAlertPolicyManager({
         size: 130,
         minSize: 105,
         sortValue: (policy) =>
-          policy.active_critical_count * 1000 + policy.active_warning_count,
+          policy.active_critical_count * 1_000_000 +
+          policy.active_warning_count * 1_000 +
+          policy.active_info_count,
         cell: (policy) => policyActiveSummary(policy),
       },
       {
@@ -5694,13 +5891,15 @@ export function FleetAlertPolicyManager({
                 Edit policy
               </button>
             }
-            description="Policy group metadata, rule rows, and recent issued alerts."
+            description="Policy group metadata, rule rows, and retained alert lifecycle history."
             onClose={closePolicyDetails}
             title="Alert policy details"
           >
             <PolicyDetailGrid policy={detailPolicy} />
             <IssuedPolicyAlertList
               alerts={alertsByPolicy.get(detailPolicy.id) ?? []}
+              evidenceAvailable={alertsEvidenceAvailable}
+              rowsTruncated={alertsTruncated}
               agentNameById={agentNameById}
             />
           </ConsoleDetailPanel>
@@ -5965,7 +6164,7 @@ export function FleetAlertPolicyManager({
                       <ConsoleField
                         label="Condition expression"
                         className="fieldFull"
-                        labelTitle="Supported metrics: traffic quota/cycle values, cpu.load_1, cpu.load_saturation, memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
+                        labelTitle="Supported metrics: traffic quota/cycle values, cpu.utilization_ratio (busy-time ratio), cpu.load_saturation (load per core), cpu.load_1 (raw load), memory.available_ratio, and disk.available_ratio. Operators: >, >=, <, <=, =, !=, arithmetic, &&, ||, and parentheses."
                       >
                         <textarea
                           aria-label="Rule condition expression"
@@ -6043,7 +6242,7 @@ export function FleetAlertPolicyManager({
       </div>
       <ConfirmationPrompt
         confirmLabel="Delete alert policies"
-        detail="Deletes selected policy groups. Issued policy alerts remain available in Fleet alerts."
+        detail="Deletes selected policy groups. Current episodes are Resolved with policy_deleted; issued rows remain in alert history."
         items={[
           {
             label: "Policies",
@@ -6193,19 +6392,43 @@ function PolicyMatchSummary({
 function IssuedPolicyAlertList({
   alerts,
   agentNameById,
+  evidenceAvailable,
+  rowsTruncated,
 }: {
   alerts: PolicyAlertRecord[];
   agentNameById: Map<string, string>;
+  evidenceAvailable: boolean;
+  rowsTruncated: boolean;
 }) {
   return (
     <div className="gridBlock">
-      <h4>Recent issued alerts</h4>
+      <h4>Recent policy alert history</h4>
+      {!evidenceAvailable ? (
+        <p className="mutedText">
+          Policy alert history is unavailable. Retained rows below may be stale.
+        </p>
+      ) : rowsTruncated ? (
+        <p className="mutedText">
+          The loaded policy alert history is truncated; more episodes may exist.
+        </p>
+      ) : null}
       {alerts.length === 0 ? (
-        <p className="mutedText">No issued alerts for this policy.</p>
+        <p className="mutedText">
+          {evidenceAvailable
+            ? rowsTruncated
+              ? "No episodes for this policy appear in the loaded history."
+              : "No alert history for this policy."
+            : "No retained policy alert rows are available."}
+        </p>
       ) : (
         <div className="miniTable">
           {alerts.slice(0, 8).map((alert) => (
             <div className="miniTableRow" key={alert.id}>
+              <ConsoleStatusBadge
+                tone={alertLifecycleTone(alert.lifecycle_state)}
+              >
+                {alertLifecycleLabel(alert.lifecycle_state)}
+              </ConsoleStatusBadge>
               <ConsoleStatusBadge
                 tone={
                   alert.severity === "critical"
@@ -6221,13 +6444,28 @@ function IssuedPolicyAlertList({
                 {agentNameById.get(alert.client_id) ?? alert.client_id}
               </strong>
               <span>{alert.title}</span>
-              <span>{formatCompactTime(alert.observed_at)}</span>
+              <span>Triggered {formatCompactTime(alert.observed_at)}</span>
+              <span>{policyAlertLifecycleEvidence(alert)}</span>
             </div>
           ))}
         </div>
       )}
     </div>
   );
+}
+
+function policyAlertLifecycleEvidence(alert: PolicyAlertRecord): string {
+  if (alert.resolved_at) {
+    return `Resolved ${formatCompactTime(alert.resolved_at)}${
+      alert.resolution_reason
+        ? ` · ${readableToken(alert.resolution_reason)}`
+        : ""
+    }`;
+  }
+  if (alert.last_confirmed_at) {
+    return `Last confirmed ${formatCompactTime(alert.last_confirmed_at)}`;
+  }
+  return "Last confirmed not recorded";
 }
 
 type NotificationRegistryTab =
@@ -7902,8 +8140,8 @@ const ALERT_NOTIFICATION_PAYLOAD_EXAMPLE = `{
     "channel_id": "...",
     "channel_name": "Production alerts",
     "alert_id": "...",
-    "alert_severity": "critical",
-    "alert_category": "resource",
+    "alert_severity": "warning",
+    "alert_category": "backup",
     "dedupe_key": "fleet-alert-notification:...",
     "attempt": 1,
     "created_at": "2026-08-05T00:00:00Z"
@@ -7919,17 +8157,28 @@ const ALERT_NOTIFICATION_PAYLOAD_EXAMPLE = `{
       "target": "https://alerts.example.net/vpsman"
     },
     "alert": {
-      "id": "...",
-      "severity": "critical",
-      "category": "resource",
-      "target_kind": "agent",
-      "target_id": "v-1",
+      "id": "operational-alert:...",
+      "record_kind": "event",
+      "severity": "warning",
+      "category": "backup",
+      "target_kind": "backup_request",
+      "target_id": "backup-request-id",
       "client_id": "v-1",
-      "title": "CPU load critical",
-      "detail": "...",
-      "status": "firing",
+      "title": "Backup request failed",
+      "detail": "Backup request reached execution_failed",
+      "status": "execution_failed",
       "evidence": {},
       "observed_at": "2026-08-05T00:00:00Z",
+      "lifecycle": {
+        "state": "persisting",
+        "trigger_generation": 1,
+        "triggered_at": "2026-08-05T00:00:00Z",
+        "last_confirmed_at": "2026-08-05T00:02:00Z",
+        "resolved_at": null,
+        "resolution_reason": null,
+        "resolution_note": null,
+        "resolution_actor_id": null
+      },
       "operator_state": "open",
       "muted_until_unix": null,
       "escalation_level": 0,
@@ -9149,7 +9398,7 @@ export function WebhookRuleManager({
               <ConsoleField
                 label="Expression"
                 className="fieldFull"
-                hint="Example: interval.30sec && tag:edge"
+                hint="All alert producers emit generic alert.triggered and alert.resolved lifecycle edges. Policy rules also expose alert.policy_triggered and alert.policy_resolved; alert.policy_reached remains a compatibility alias. Persisting and Unknown emit no edge."
               >
                 <SearchExpressionInput
                   agents={agents}
@@ -10412,13 +10661,27 @@ function cycleUsageSummary(
 function trafficStateForClient(
   traffic: TrafficAccountingRecord | null | undefined,
   alerts?: PolicyAlertRecord[] | null,
+  currentPolicyAlertsTruncated = false,
+  currentPolicyAlertsEvidenceAvailable = true,
 ): string {
-  const activeAlerts = alerts ?? [];
+  if (!currentPolicyAlertsEvidenceAvailable) {
+    return "unavailable";
+  }
+  const trafficAlerts = (alerts ?? []).filter(
+    (alert) => alert.category === "traffic",
+  );
+  if (trafficAlerts.length === 0 && currentPolicyAlertsTruncated) {
+    return "unknown";
+  }
+  const activeAlerts = trafficAlerts.filter(isActivePolicyAlert);
   if (activeAlerts.some((alert) => alert.severity === "critical")) {
     return "critical";
   }
   if (activeAlerts.some((alert) => alert.severity === "warning")) {
     return "warning";
+  }
+  if (trafficAlerts.some((alert) => alert.lifecycle_state === "unknown")) {
+    return "unknown";
   }
   if (!traffic) {
     return "incomplete";
@@ -10503,20 +10766,30 @@ function selectorSummary(
 
 function activePolicyAlertSummary(
   alerts: PolicyAlertRecord[] | null | undefined,
+  currentPolicyAlertsTruncated = false,
+  currentPolicyAlertsEvidenceAvailable = true,
 ): string {
-  const rows = alerts ?? [];
+  if (!currentPolicyAlertsEvidenceAvailable) {
+    return "Unavailable";
+  }
+  const rows = (alerts ?? []).filter(isActivePolicyAlert);
   if (rows.length === 0) {
-    return "0";
+    return (alerts ?? []).length === 0 && currentPolicyAlertsTruncated
+      ? "Unknown"
+      : currentPolicyAlertsTruncated
+        ? "≥0"
+        : "0";
   }
+  const lowerBoundPrefix = currentPolicyAlertsTruncated ? "≥" : "";
   const critical = rows.filter((alert) => alert.severity === "critical").length;
-  if (critical > 0) {
-    return `${critical} critical`;
-  }
   const warning = rows.filter((alert) => alert.severity === "warning").length;
-  if (warning > 0) {
-    return `${warning} warning`;
-  }
-  return `${rows.length} info`;
+  const info = rows.length - critical - warning;
+  const breakdown = [
+    critical > 0 ? `${critical} critical` : null,
+    warning > 0 ? `${warning} warning` : null,
+    info > 0 ? `${info} info` : null,
+  ].filter((part): part is string => part !== null);
+  return `${lowerBoundPrefix}${rows.length} · ${breakdown.join(" / ")}`;
 }
 
 type NetworkInterfacesSnapshot = {

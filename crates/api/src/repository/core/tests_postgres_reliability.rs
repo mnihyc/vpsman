@@ -5,6 +5,7 @@ use chrono::{Datelike, Utc};
 use serde_json::{json, Value};
 use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions},
+    types::Json as SqlJson,
     PgPool, Row,
 };
 use tokio::sync::{broadcast, oneshot};
@@ -45,7 +46,8 @@ use crate::{
         CreateFleetAlertPolicyRequest, NetworkRateInterfaceSelection, PolicyAlertQuery,
         PolicyDryRunRequest, PolicyRuleRequest, VpsRuleQuery, VpsRulesBulkUnsetRequest,
         VpsRulesBulkUpsertRequest, VpsRulesDryRunRequest, VPS_RULE_KEY_NETWORK_PORT_SPEED,
-        VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_RESET_DAY,
+        VPS_RULE_KEY_PRODUCT_NAME, VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL,
+        VPS_RULE_KEY_TRAFFIC_RESET_DAY,
     },
     model_command_templates::UpsertCommandTemplateRequest,
     model_history::UpsertHistoryRetentionPolicyRequest,
@@ -6078,12 +6080,14 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
         r#"
         INSERT INTO policy_alerts (
             id, policy_group_id, policy_rule_id, client_id, trigger_generation,
-            severity, category, title, detail, payload, observed_at, created_at
+            severity, category, title, detail, payload, lifecycle_state,
+            last_confirmed_at, observed_at, created_at
         )
         VALUES (
             $1, $2, $3, 'alert-target-a', 0,
             'warning', 'resource', 'Older scoped alert',
             'must survive unrelated newer rows', '{"regression":"policy_candidate"}'::jsonb,
+            'triggered', '2020-01-01T00:00:00Z',
             '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'
         )
         "#,
@@ -6098,13 +6102,15 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
         r#"
         INSERT INTO policy_alerts (
             id, policy_group_id, policy_rule_id, client_id, trigger_generation,
-            severity, category, title, detail, payload, observed_at, created_at
+            severity, category, title, detail, payload, lifecycle_state,
+            last_confirmed_at, observed_at, created_at
         )
         SELECT
             md5('fleet-policy-filler-' || value::text)::uuid,
             $1, $2, 'alert-filler', value,
             'critical', 'resource', 'Newer filler', 'outside requested client',
-            '{}'::jsonb, now() + value * interval '1 second',
+            '{}'::jsonb, 'triggered', now() + value * interval '1 second',
+            now() + value * interval '1 second',
             now() + value * interval '1 second'
         FROM generate_series(1, 200) AS generated(value)
         "#,
@@ -6258,27 +6264,42 @@ async fn postgres_fleet_alert_candidates_survive_public_caps_and_parse_real_skip
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &operator)
         .await
         .unwrap();
+    let tunnel_evidence_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+        saved_tunnel.id,
+        &saved_tunnel.plan,
+        saved_tunnel
+            .builtin_credentials
+            .as_ref()
+            .map(vpsman_common::TunnelBuiltinCredentials::generation),
+    );
+    let tunnel_topology_identity =
+        vpsman_common::tunnel_topology_identity_hash(saved_tunnel.id, &saved_tunnel.plan);
     sqlx::query(
         r#"
         INSERT INTO telemetry_tunnels (
             client_id, observed_at, interface, kind, ownership_mode,
             mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_topology_identity_hash, telemetry_runtime_evidence_identity_hash,
             telemetry_plan_runtime_manager, telemetry_endpoint_side,
             telemetry_peer_client_id, adapter_health
         )
         VALUES (
             'alert-target-a', '2020-01-01T00:00:00Z', 'gre42', 'gre',
             'custom_adapter', 'adapter_owned', 'telemetry',
-            $1, $2, 'custom_adapter', 'left', 'alert-target-b',
-            '{"status":"failed"}'::jsonb
+            $1, $2, $3, $4, 'custom_adapter', 'left', 'alert-target-b',
+            '{"status":"failed","success":false}'::jsonb
         )
         "#,
     )
     .bind(saved_tunnel.id.to_string())
     .bind(&saved_tunnel.name)
+    .bind(&tunnel_topology_identity)
+    .bind(&tunnel_evidence_identity)
     .execute(&db.pool)
     .await
     .unwrap();
+
+    db.repo.reconcile_operational_alerts().await.unwrap();
     sqlx::query(
         r#"
         INSERT INTO telemetry_tunnels (
@@ -6520,19 +6541,30 @@ async fn postgres_tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
             .record_tunnel_plan(&input, &plan, true, &operator)
             .await
             .unwrap();
+        let tunnel_evidence_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+            saved.id,
+            &saved.plan,
+            saved
+                .builtin_credentials
+                .as_ref()
+                .map(vpsman_common::TunnelBuiltinCredentials::generation),
+        );
+        let tunnel_topology_identity =
+            vpsman_common::tunnel_topology_identity_hash(saved.id, &saved.plan);
         sqlx::query(
             r#"
             INSERT INTO telemetry_tunnels (
                 client_id, observed_at, interface, kind, ownership_mode,
                 mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+                telemetry_topology_identity_hash, telemetry_runtime_evidence_identity_hash,
                 telemetry_plan_runtime_manager, telemetry_endpoint_side,
                 telemetry_peer_client_id, traffic_status, adapter_health
             )
             VALUES (
                 $1, '2020-01-01T00:00:00Z', $2, 'wireguard', $3,
-                'managed_desired', 'telemetry', $4, $5, $6, 'left', $7, 'ok',
+                'managed_desired', 'telemetry', $4, $5, $6, $7, $8, 'left', $9, 'ok',
                 jsonb_build_object(
-                    'status', $8::text,
+                    'status', $10::text,
                     'configured', false,
                     'success', false
                 )
@@ -6544,12 +6576,16 @@ async fn postgres_tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
         .bind(manager_label)
         .bind(saved.id.to_string())
         .bind(&saved.name)
+        .bind(&tunnel_topology_identity)
+        .bind(&tunnel_evidence_identity)
         .bind(stored_manager)
         .bind(&right_client_id)
         .bind(health_status)
         .execute(&db.pool)
         .await
         .unwrap();
+
+        db.repo.reconcile_operational_alerts().await.unwrap();
 
         let candidates = db
             .repo
@@ -6581,6 +6617,389 @@ async fn postgres_tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
             "{manager_label}"
         );
     }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tunnel_runtime_boundary_rejects_pre_reenable_evidence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let left_client_id = "runtime-boundary-a";
+    let right_client_id = "runtime-boundary-b";
+    for (client_id, key_byte) in [(left_client_id, 140_u8), (right_client_id, 141_u8)] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (id, display_name, public_key, status)
+            VALUES ($1, $1, $2, 'online')
+            "#,
+        )
+        .bind(client_id)
+        .bind(vec![key_byte; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let mut input =
+        crate::tests_network::test_plan_input(RuntimeTunnelManager::CustomAdapter, false);
+    input.name = "runtime-boundary".to_string();
+    input.interface_name = "rtb0".to_string();
+    input.left_client_id = left_client_id.to_string();
+    input.right_client_id = right_client_id.to_string();
+    input.address_pool_cidr = "10.24.0.0/29".to_string();
+    input.ipv4_tunnel = Some(TunnelAddressPair {
+        left: "10.24.0.0".to_string(),
+        right: "10.24.0.1".to_string(),
+        prefix_len: 31,
+    });
+    crate::tests_network::seed_test_plan_adapter_definitions(&db.repo, &input).await;
+    let plan = plan_tunnel(&input).unwrap();
+    let saved = db
+        .repo
+        .record_tunnel_plan(&input, &plan, true, &operator)
+        .await
+        .unwrap();
+    let topology_identity = vpsman_common::tunnel_topology_identity_hash(saved.id, &saved.plan);
+    let runtime_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+        saved.id,
+        &saved.plan,
+        saved
+            .builtin_credentials
+            .as_ref()
+            .map(vpsman_common::TunnelBuiltinCredentials::generation),
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_topology_identity_hash, telemetry_runtime_evidence_identity_hash,
+            telemetry_plan_runtime_manager, telemetry_endpoint_side,
+            telemetry_peer_client_id, traffic_status, adapter_health
+        ) VALUES (
+            $1, clock_timestamp(), $2, 'gre', 'custom_adapter',
+            'managed_desired', 'telemetry', $3, $4, $5, $6,
+            'custom_adapter', 'left', $7, 'degraded',
+            '{"status":"failed","configured":true,"success":false}'::jsonb
+        )
+        "#,
+    )
+    .bind(left_client_id)
+    .bind(&input.interface_name)
+    .bind(saved.id.to_string())
+    .bind(&saved.name)
+    .bind(&topology_identity)
+    .bind(&runtime_identity)
+    .bind(right_client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo.reconcile_operational_alerts().await.unwrap();
+
+    let initial: (Uuid, i64) = sqlx::query_as(
+        r#"
+        SELECT id, trigger_generation
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND client_id = $1
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(left_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let boundary_before_assessment: String = sqlx::query_scalar(
+        "SELECT operational_alert_runtime_boundary_at::text FROM tunnel_plans WHERE id = $1",
+    )
+    .bind(saved.id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let assessed = db
+        .repo
+        .update_tunnel_connection_assessment(
+            saved.id,
+            saved.revision,
+            "disconnected",
+            Some("metadata-only review"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT operational_alert_runtime_boundary_at::text FROM tunnel_plans WHERE id = $1",
+        )
+        .bind(saved.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        boundary_before_assessment,
+        "assessment-only revision must preserve the runtime-evidence boundary"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operational_alert_episodes WHERE id = $1 AND resolved_at IS NULL",
+        )
+        .bind(initial.0)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let disabled = db
+        .repo
+        .set_tunnel_plan_enabled(saved.id, assessed.revision, false, &operator)
+        .await
+        .unwrap();
+    let reenabled = db
+        .repo
+        .set_tunnel_plan_enabled(saved.id, disabled.revision, true, &operator)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*) FROM operational_alert_episodes
+            WHERE producer_kind = 'tunnel_adapter'
+              AND client_id = $1
+              AND resolved_at IS NULL
+            "#,
+        )
+        .bind(left_client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "same-hash telemetry accepted before re-enable must not retrigger"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE telemetry_tunnels
+        SET observed_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE client_id = $1 AND interface = $2
+        "#,
+    )
+    .bind(left_client_id)
+    .bind(&input.interface_name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    let recurrent: (i64, String, String) = sqlx::query_as(
+        r#"
+        SELECT trigger_generation, lifecycle_state,
+               evidence->>'runtime_boundary_at'
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND client_id = $1
+          AND resolved_at IS NULL
+        "#,
+    )
+    .bind(left_client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(recurrent.0, initial.1 + 1);
+    assert_eq!(recurrent.1, "triggered");
+    assert_eq!(
+        recurrent.2,
+        sqlx::query_scalar::<_, String>(
+            "SELECT operational_alert_runtime_boundary_at::text FROM tunnel_plans WHERE id = $1",
+        )
+        .bind(reenabled.id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap()
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_policy_dwell_parses_native_timestamps_and_pauses_unknown_evidence() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let client_id = "postgres-policy-dwell";
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status)
+        VALUES ($1, 'Postgres Policy Dwell', $2, 'online')
+        "#,
+    )
+    .bind(client_id)
+    .bind(vec![80_u8; 32])
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_resource_latest (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            cpu_usage_sample_count, cpu_usage_sum, cpu_usage_avg, cpu_usage_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_sum, disk_available_bytes_min,
+            disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        VALUES (
+            $1, date_trunc('minute', now()), 60, 1,
+            2.0, 2.0, 2.0, 1, 0.8, 0.8, 0.8,
+            1000, 500, 500, 500, 0.5, 0.5, 0.5,
+            2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0, now()
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let policy_id = Uuid::new_v4();
+    let rule_id = Uuid::new_v4();
+    db.repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: Some(policy_id),
+                name: "postgres-policy-dwell".to_string(),
+                enabled: true,
+                selector_expression: format!("id:{client_id}"),
+                rules: vec![PolicyRuleRequest {
+                    id: Some(rule_id),
+                    name: "sustained load".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
+                    window_secs: 300,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2",
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE policy_rule_states
+        SET first_true_at = now() - interval '100 seconds',
+            last_evaluated_at = now() - interval '50 seconds'
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE telemetry_resource_latest
+        SET cpu_usage_sample_count = 0,
+            cpu_usage_sum = 0,
+            cpu_usage_avg = NULL,
+            cpu_usage_max = NULL
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT incomplete FROM policy_rule_states WHERE policy_rule_id = $1 AND client_id = $2",
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+
+    sqlx::query(
+        r#"
+        UPDATE telemetry_resource_latest
+        SET cpu_usage_sample_count = 1,
+            cpu_usage_sum = 0.8,
+            cpu_usage_avg = 0.8,
+            cpu_usage_max = 0.8
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2",
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "Unknown wall time must not satisfy the dwell window"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE policy_rule_states
+        SET first_true_at = now() - interval '301 seconds',
+            last_evaluated_at = now() - interval '1 second',
+            incomplete = FALSE
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 1);
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String)>(
+            r#"
+            SELECT trigger_generation, lifecycle_state
+            FROM policy_alerts
+            WHERE policy_rule_id = $1 AND client_id = $2
+            "#,
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (1, "persisting".to_string())
+    );
 
     db.cleanup().await;
 }
@@ -6684,6 +7103,30 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
     .await
     .unwrap();
     assert_eq!(generations, vec![1, 2]);
+    let lifecycle = sqlx::query_as::<_, (i64, String, Option<String>)>(
+        r#"
+        SELECT trigger_generation, lifecycle_state, resolution_reason
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        ORDER BY trigger_generation
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle,
+        vec![
+            (
+                1,
+                "resolved".to_string(),
+                Some("policy_changed".to_string())
+            ),
+            (2, "persisting".to_string(), None),
+        ]
+    );
 
     let latest_alert_id = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -6715,6 +7158,19 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
     .await
     .unwrap();
     assert_eq!(repaired, 1);
+    let persisting = sqlx::query_as::<_, (String, Option<String>, bool)>(
+        r#"
+        SELECT lifecycle_state, resolution_reason, resolved_at IS NOT NULL
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2 AND trigger_generation = 2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisting, ("persisting".to_string(), None, false));
 
     sqlx::query(
         "UPDATE telemetry_resource_latest SET cpu_load_1_avg = 0.0, cpu_load_1_max = 0.0 WHERE client_id = $1",
@@ -6724,6 +7180,33 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
     .await
     .unwrap();
     assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    let recovered = sqlx::query_as::<_, (String, Option<String>, bool)>(
+        r#"
+        SELECT lifecycle_state, resolution_reason, resolved_at IS NOT NULL
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2 AND trigger_generation = 2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        recovered,
+        (
+            "resolved".to_string(),
+            Some("condition_recovered".to_string()),
+            true,
+        )
+    );
+    let resolved_event_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM webhook_events WHERE kind = 'alert.policy_resolved'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(resolved_event_count, 2);
     sqlx::query(
         r#"
         CREATE FUNCTION reject_policy_webhook_event() RETURNS trigger
@@ -6805,6 +7288,17 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
     .await
     .unwrap();
     assert_eq!(final_counts, (3, 3));
+    let triggered_alias_recorded = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT bool_and(event_predicates @> ARRAY['alert.policy_triggered']::text[])
+        FROM webhook_events
+        WHERE kind = 'alert.policy_reached'
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(triggered_alias_recorded);
 
     let retained_alert_id = sqlx::query_scalar::<_, Uuid>(
         r#"
@@ -6843,6 +7337,416 @@ async fn postgres_policy_alert_state_and_webhook_event_commit_atomically_and_rep
     assert_eq!(
         retained_event_count, 0,
         "normal event retention must not redeliver an old sustained alert"
+    );
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_policy_resolved_webhook_event() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.kind = 'alert.policy_resolved' THEN
+                RAISE EXCEPTION 'forced policy resolved webhook failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_policy_resolved_webhook_event
+        BEFORE INSERT ON webhook_events
+        FOR EACH ROW EXECUTE FUNCTION reject_policy_resolved_webhook_event()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE telemetry_resource_latest SET cpu_load_1_avg = 0.0, cpu_load_1_max = 0.0 WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = db.repo.evaluate_policy_rules().await.unwrap_err();
+    assert!(format!("{error:#}").contains("forced policy resolved webhook failure"));
+    let retained_state = sqlx::query_as::<_, (bool, i64)>(
+        r#"
+        SELECT condition_true, trigger_generation
+        FROM policy_rule_states
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained_state, (true, 3));
+    let retained_lifecycle =
+        sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM policy_alerts WHERE id = $1")
+            .bind(retained_alert_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(retained_lifecycle, "persisting");
+    let rejected_resolution_count = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM webhook_events WHERE kind = 'alert.policy_resolved' AND event_id = $1",
+    )
+    .bind(format!("policy-alert:{retained_alert_id}:resolved"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rejected_resolution_count, 0);
+
+    sqlx::query("DROP TRIGGER reject_policy_resolved_webhook_event ON webhook_events")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_policy_resolved_webhook_event()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    let committed_resolution = sqlx::query_as::<_, (String, Option<String>, i64)>(
+        r#"
+        SELECT
+            lifecycle_state,
+            resolution_reason,
+            (
+                SELECT count(*)
+                FROM webhook_events
+                WHERE kind = 'alert.policy_resolved'
+                  AND event_id = $2
+            )
+        FROM policy_alerts
+        WHERE id = $1
+        "#,
+    )
+    .bind(retained_alert_id)
+    .bind(format!("policy-alert:{retained_alert_id}:resolved"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        committed_resolution,
+        (
+            "resolved".to_string(),
+            Some("condition_recovered".to_string()),
+            1,
+        )
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_policy_commit_revalidates_current_selector_membership_and_vps_rule_inputs() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let client_id = "policy-membership-race";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_resource_latest (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_sum, disk_available_bytes_min,
+            disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        )
+        VALUES (
+            $1, date_trunc('minute', now()), 60, 1,
+            2.0, 2.0, 2.0, 1000, 500, 500, 500, 0.5, 0.5, 0.5,
+            2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0, now()
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let tag_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO tags (id, name, display_order) VALUES ($1, 'monitored', 0)")
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let policy = db
+        .repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "membership race policy".to_string(),
+                enabled: true,
+                selector_expression: "tag:monitored".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "load threshold".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.load_1 >= 1".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let rule_id = policy.rules[0].id;
+    sqlx::query("INSERT INTO client_tags (client_id, tag_id) VALUES ($1, $2)")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let (mut identity_gate, evaluation) =
+        postgres_policy_evaluation_waiting_on_identity(&db.pool, &db.repo).await;
+    sqlx::query("DELETE FROM client_tags WHERE client_id = $1 AND tag_id = $2")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&mut *identity_gate)
+        .await
+        .unwrap();
+    identity_gate.commit().await.unwrap();
+    assert_eq!(evaluation.await.unwrap().unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_alerts WHERE policy_rule_id = $1 AND client_id = $2",
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "a removed matching tag must prevent a stale trigger commit"
+    );
+
+    sqlx::query("INSERT INTO client_tags (client_id, tag_id) VALUES ($1, $2)")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 1);
+    sqlx::query("DELETE FROM client_tags WHERE client_id = $1 AND tag_id = $2")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let (mut identity_gate, evaluation) =
+        postgres_policy_evaluation_waiting_on_identity(&db.pool, &db.repo).await;
+    sqlx::query("INSERT INTO client_tags (client_id, tag_id) VALUES ($1, $2)")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&mut *identity_gate)
+        .await
+        .unwrap();
+    identity_gate.commit().await.unwrap();
+    assert_eq!(evaluation.await.unwrap().unwrap(), 0);
+    let lifecycle = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"
+        SELECT lifecycle_state, resolution_reason
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(lifecycle, ("triggered".to_string(), None));
+
+    sqlx::query(
+        r#"
+        INSERT INTO vps_rule_values (client_id, key, value_raw, value_json)
+        VALUES ($1, $2, '1GB', '{"bytes":1000000000}'::jsonb)
+        "#,
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let evaluated_at = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT last_evaluated_at::text
+        FROM policy_rule_states
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let (mut identity_gate, evaluation) =
+        postgres_policy_evaluation_waiting_on_identity(&db.pool, &db.repo).await;
+    sqlx::query(
+        r#"
+        UPDATE vps_rule_values
+        SET value_raw = '2GB', value_json = '{"bytes":2000000000}'::jsonb
+        WHERE client_id = $1 AND key = $2
+        "#,
+    )
+    .bind(client_id)
+    .bind(VPS_RULE_KEY_TRAFFIC_QUOTA_TOTAL)
+    .execute(&mut *identity_gate)
+    .await
+    .unwrap();
+    identity_gate.commit().await.unwrap();
+    assert_eq!(evaluation.await.unwrap().unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT last_evaluated_at::text
+            FROM policy_rule_states
+            WHERE policy_rule_id = $1 AND client_id = $2
+            "#,
+        )
+        .bind(rule_id)
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        evaluated_at,
+        "a changed VPS-rule input must reject the stale evaluation before state writes"
+    );
+    let policy_query = PolicyAlertQuery {
+        limit: Some(200),
+        client_id: Some(client_id.to_string()),
+        severity: None,
+        category: None,
+        policy_group_id: None,
+    };
+    assert_eq!(
+        db.repo
+            .list_policy_alerts(&policy_query)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.repo
+            .list_policy_alert_notification_candidates(&policy_query, 200, None, None, None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let active_alert_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2 AND resolved_at IS NULL
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let (mut identity_gate, evaluation) =
+        postgres_policy_evaluation_waiting_on_identity(&db.pool, &db.repo).await;
+    let (advanced_confirmation_at, advanced_evaluation_at) = sqlx::query_as::<_, (String, String)>(
+        r#"
+            SELECT
+                (clock_timestamp() + interval '10 seconds')::text,
+                (clock_timestamp() + interval '20 seconds')::text
+            "#,
+    )
+    .fetch_one(&mut *identity_gate)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE policy_alerts
+        SET lifecycle_state = 'persisting',
+            last_confirmed_at = $2::timestamptz
+        WHERE id = $1
+        "#,
+    )
+    .bind(active_alert_id)
+    .bind(&advanced_confirmation_at)
+    .execute(&mut *identity_gate)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE policy_rule_states
+        SET last_evaluated_at = $3::timestamptz
+        WHERE policy_rule_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(rule_id)
+    .bind(client_id)
+    .bind(&advanced_evaluation_at)
+    .execute(&mut *identity_gate)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM client_tags WHERE client_id = $1 AND tag_id = $2")
+        .bind(client_id)
+        .bind(tag_id)
+        .execute(&mut *identity_gate)
+        .await
+        .unwrap();
+    identity_gate.commit().await.unwrap();
+    assert_eq!(evaluation.await.unwrap().unwrap(), 0);
+
+    let causal_resolution = sqlx::query_as::<_, (bool, bool, bool, bool, bool, String)>(
+        r#"
+        SELECT
+            alert.resolved_at >= alert.last_confirmed_at,
+            alert.resolved_at >= $3::timestamptz,
+            event.occurred_at = alert.resolved_at,
+            (event.payload #>> '{event,occurred_at}')::timestamptz = alert.resolved_at,
+            (event.payload #>> '{alert,resolved_at}')::timestamptz = alert.resolved_at,
+            alert.resolution_reason
+        FROM policy_alerts AS alert
+        JOIN webhook_events AS event
+          ON event.kind = 'alert.policy_resolved'
+         AND event.event_id = $2
+        WHERE alert.id = $1
+        "#,
+    )
+    .bind(active_alert_id)
+    .bind(format!("policy-alert:{active_alert_id}:resolved"))
+    .bind(&advanced_evaluation_at)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        causal_resolution,
+        (
+            true,
+            true,
+            true,
+            true,
+            true,
+            "policy_scope_exited".to_string()
+        ),
+        "scope exit must publish one resolution timestamp after all locked episode evidence"
     );
 
     db.cleanup().await;
@@ -9448,8 +10352,1953 @@ async fn postgres_telemetry_sample_prune_shares_limit_with_ping_facts_atomically
     db.cleanup().await;
 }
 
+async fn exact_v044_migration_test_db() -> Option<(PgReliabilityTestDb, std::path::PathBuf)> {
+    let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!("skipping Postgres migration test: VPSMAN_TEST_POSTGRES_URL is unset");
+            return None;
+        }
+    };
+    let baseline_dir = std::env::temp_dir().join(format!(
+        "vpsman-v044-migrations-{}",
+        Uuid::new_v4().simple()
+    ));
+    fs::create_dir_all(&baseline_dir).unwrap();
+    let migrations_dir = workspace_migrations_dir();
+    for (name, expected_sha256) in [
+        (
+            "0001_identity_access.sql",
+            "884f950940275597749a575ab30780369ea2a5adb17889e1c29c5dd1b2fd1167",
+        ),
+        (
+            "0002_jobs_schedules_commands.sql",
+            "031f27cfbdce3b593dcfc144b122c7d2bff4d56e7a4c074fea373da9e0f04883",
+        ),
+        (
+            "0003_telemetry_alerts_history.sql",
+            "f1408e33815cb10b98b1061d1d0275874357ed7803218252796846572e7c7e3b",
+        ),
+        (
+            "0004_backups_restores.sql",
+            "120ebf2284a7035f7ad51f9989e79e871c93f9b5690a0681abcc0248165833e9",
+        ),
+        (
+            "0005_network_tunnels.sql",
+            "dc77d215b22080f9036b43afcc8a15f0bc6295bfab0a0884dd116271b0f35131",
+        ),
+        (
+            "0006_agent_updates.sql",
+            "150ec74e23db6fe98c6ba6de723c369ea219c8c12ab2295dda5e4ceea78a2158",
+        ),
+        (
+            "0007_configuration_presets_file_transfer.sql",
+            "6ff29337a5408b8a9f34536a53be4fa189c0d326251abb53bdbd4b489f99fe8c",
+        ),
+        (
+            "0008_system_metrics.sql",
+            "83fb85dd37b217e2f94995074c851fddbf852c3327b062ecc534d1058763e8a8",
+        ),
+        (
+            "0009_fleet_tag_settings.sql",
+            "b0c0deaa0ad9bcf98dc0b6e2af1e8295155568b01c5d7cb2d5491cdd345caa9d",
+        ),
+    ] {
+        let bytes = fs::read(migrations_dir.join(name)).unwrap();
+        assert_eq!(payload_hash(&bytes), expected_sha256, "migration: {name}");
+        fs::copy(migrations_dir.join(name), baseline_dir.join(name)).unwrap();
+    }
+    let db = PgReliabilityTestDb::new_with_migrations(&base_url, &baseline_dir)
+        .await
+        .expect("failed to create exact v0.4.4 baseline database");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        9
+    );
+    Some((db, baseline_dir))
+}
+
+async fn insert_policy_migration_state(
+    pool: &PgPool,
+    policy_rule_id: Uuid,
+    client_id: &str,
+    rule_version: i32,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO policy_rule_states (
+            policy_rule_id, client_id, rule_version, condition_true,
+            previous_condition_true, window_satisfied, first_true_at,
+            last_true_at, last_evaluated_at, incomplete, last_actual_value,
+            last_threshold_value, last_fired_at, trigger_generation
+        ) VALUES (
+            $1, $2, $3, TRUE, FALSE, TRUE, now(), now(), now(), FALSE,
+            1.0, 0.75, now(), 1
+        )
+        "#,
+    )
+    .bind(policy_rule_id)
+    .bind(client_id)
+    .bind(rule_version)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn insert_policy_migration_alert(
+    pool: &PgPool,
+    alert_id: Uuid,
+    policy_group_id: Uuid,
+    policy_rule_id: Uuid,
+    client_id: &str,
+) {
+    sqlx::query(
+        r#"
+        INSERT INTO policy_alerts (
+            id, policy_group_id, policy_rule_id, client_id,
+            trigger_generation, severity, category, title, detail,
+            actual_value, threshold_value, payload, observed_at
+        ) VALUES (
+            $1, $2, $3, $4, 1, 'warning', 'resource',
+            'Retained migration alert', 'historical policy evidence',
+            1.0, 0.75, '{}'::jsonb, now()
+        )
+        "#,
+    )
+    .bind(alert_id)
+    .bind(policy_group_id)
+    .bind(policy_rule_id)
+    .bind(client_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
-async fn postgres_exact_v035_baseline_applies_fleet_tag_settings_in_place() {
+async fn postgres_fresh_schema_has_operational_alert_lifecycle_invariants() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT to_regclass('public.operational_alert_episodes') IS NOT NULL",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    let meta: (bool, Option<String>, bool) = sqlx::query_as(
+        r#"
+        SELECT backfill_completed, completed_at::text,
+               event_source_cutoff_at IS NOT NULL
+        FROM operational_alert_lifecycle_meta
+        WHERE singleton
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(meta, (false, None, true));
+
+    let columns = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT table_name || '.' || column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND (table_name, column_name) IN (
+            ('clients', 'operational_alert_status_at'),
+            ('clients', 'operational_alert_legacy_status'),
+            ('clients', 'operational_alert_tunnel_boundary_at'),
+            ('telemetry_tunnels', 'telemetry_topology_identity_hash'),
+            ('telemetry_tunnels', 'telemetry_runtime_evidence_identity_hash'),
+            ('telemetry_tunnels', 'operational_alert_legacy_identity'),
+            ('tunnel_plans', 'operational_alert_legacy_runtime_identity'),
+            ('tunnel_plans', 'operational_alert_runtime_boundary_at'),
+            ('jobs', 'alert_terminal_at'),
+            ('job_targets', 'capability_alert_at'),
+            ('backup_requests', 'terminal_at')
+          )
+        ORDER BY table_name, column_name
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(columns.len(), 11, "all cutover evidence columns must exist");
+
+    for trigger in [
+        "clients_operational_alert_boundaries_insert_trigger",
+        "clients_operational_alert_boundaries_update_trigger",
+        "gateway_sessions_operational_alert_boundary_trigger",
+        "tunnel_plans_legacy_runtime_identity_trigger",
+    ] {
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal)",
+            )
+            .bind(trigger)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            "missing lifecycle provenance trigger {trigger}"
+        );
+    }
+
+    for index in [
+        "operational_alert_episodes_one_current_idx",
+        "operational_alert_episodes_event_source_once_idx",
+        "operational_alert_episodes_unresolved_event_cursor_idx",
+        "operational_alert_episodes_unresolved_event_client_cursor_idx",
+        "jobs_alert_terminal_at_idx",
+        "job_targets_capability_alert_at_idx",
+        "backup_requests_failed_terminal_idx",
+    ] {
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+                .bind(index)
+                .fetch_one(&db.pool)
+                .await
+                .unwrap(),
+            "missing lifecycle index {index}"
+        );
+    }
+
+    let invalid = sqlx::query(
+        r#"
+        INSERT INTO operational_alert_episodes (
+            id, public_id, producer_kind, natural_key, record_kind,
+            trigger_generation, trigger_severity, trigger_category,
+            severity, category, target_kind, target_id, title, detail,
+            source_status, evidence, lifecycle_state, triggered_at,
+            last_confirmed_at, resolved_at, resolution_reason
+        ) VALUES (
+            $1, 'invalid-condition-resolution', 'agent_status', 'invalid', 'condition',
+            1, 'warning', 'agent_status', 'warning', 'agent_status',
+            'agent', 'invalid', 'invalid', 'invalid', 'offline', '{}'::jsonb,
+            'resolved', now(), now(), now(), 'operator_resolved'
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await;
+    assert!(
+        invalid.is_err(),
+        "condition episodes cannot be operator-resolved"
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_gateway_session_boundary_advances_only_for_real_session_transitions() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "gateway-alert-boundary";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        "UPDATE clients SET operational_alert_tunnel_boundary_at = '2020-01-01T00:00:00Z' WHERE id = $1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let session_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO gateway_sessions (id, gateway_id, client_id, status)
+        VALUES ($1, 'gateway-a', $2, 'active')
+        "#,
+    )
+    .bind(session_id)
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let first_boundary: String = sqlx::query_scalar(
+        "SELECT operational_alert_tunnel_boundary_at::text FROM clients WHERE id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_ne!(first_boundary, "2020-01-01 00:00:00+00");
+
+    sqlx::query("UPDATE gateway_sessions SET status = 'active' WHERE id = $1")
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT operational_alert_tunnel_boundary_at::text FROM clients WHERE id = $1",
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        first_boundary,
+        "an idempotent replay of the same active session must preserve the boundary"
+    );
+
+    sqlx::query("UPDATE gateway_sessions SET status = 'ended' WHERE id = $1")
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE gateway_sessions SET status = 'active' WHERE id = $1")
+        .bind(session_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let reactivated_boundary: String = sqlx::query_scalar(
+        "SELECT operational_alert_tunnel_boundary_at::text FROM clients WHERE id = $1",
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_ne!(reactivated_boundary, first_boundary);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_exact_v044_operational_lifecycle_backfill_is_quiet_and_idempotent() {
+    let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
+        return;
+    };
+    let client_id = "legacy-operational-alert";
+    let public_key = hex::decode(payload_hash(client_id.as_bytes())).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO clients (id, display_name, public_key, status, capabilities)
+        VALUES ($1, 'Legacy operational alert', $2, 'never', '{}'::jsonb)
+        "#,
+    )
+    .bind(client_id)
+    .bind(public_key)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for (client_id, key_byte) in [("legacy-tunnel-a", 151_u8), ("legacy-tunnel-b", 152_u8)] {
+        sqlx::query(
+            r#"
+            INSERT INTO clients (
+                id, display_name, public_key, status, created_at, last_seen_at
+            ) VALUES (
+                $1, $1, $2, 'online', '2020-01-01T00:00:00Z',
+                '2020-01-01T00:00:00Z'
+            )
+            "#,
+        )
+        .bind(client_id)
+        .bind(vec![key_byte; 32])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO client_status_history (
+            id, client_id, from_status, to_status, reason, created_at
+        ) VALUES (
+            $1, 'legacy-tunnel-a', 'online', 'online',
+            'legacy session confirmation', '2020-01-04T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let legacy_job_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs, created_at, completed_at
+        ) VALUES (
+            $1, 'shell', false, 'failed', 1, repeat('a', 64),
+            $2, 30, '2020-01-02T00:00:00Z', '2020-01-02T00:01:00Z'
+        )
+        "#,
+    )
+    .bind(legacy_job_id)
+    .bind(format!("legacy-job-{legacy_job_id}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs, created_at, completed_at
+        )
+        SELECT
+            md5('legacy-operational-job-' || value::text)::uuid,
+            'shell', false, 'failed', 1, repeat('d', 64),
+            'legacy-operational-job-' || value::text, 30,
+            '2019-01-01T00:00:00Z'::timestamptz + value * interval '1 second',
+            '2019-01-01T00:00:00Z'::timestamptz + value * interval '1 second'
+        FROM generate_series(1, 201) AS generated(value)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let legacy_capability_job_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, privileged, status, target_count, payload_hash,
+            request_fingerprint, max_timeout_secs, created_at, completed_at
+        ) VALUES (
+            $1, 'agent_update', true, 'skipped', 1, repeat('b', 64),
+            $2, 30, '2020-01-03T00:00:00Z', '2020-01-03T00:01:00Z'
+        )
+        "#,
+    )
+    .bind(legacy_capability_job_id)
+    .bind(format!("legacy-capability-{legacy_capability_job_id}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO job_targets (
+            job_id, client_id, status, message, started_at, completed_at,
+            capability_degraded_reason, capability_degraded_hint
+        ) VALUES (
+            $1, 'legacy-tunnel-a', 'skipped', 'legacy capability skip',
+            '2020-01-03T00:00:30Z', '2020-01-03T00:01:00Z',
+            'target_agent_lacks_agent_update_capability',
+            'Upgrade the target agent before retrying.'
+        )
+        "#,
+    )
+    .bind(legacy_capability_job_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let legacy_backup_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO backup_requests (
+            id, client_id, paths, include_config, status, payload_hash,
+            command_scope, created_at
+        ) VALUES (
+            $1, 'legacy-tunnel-a', ARRAY['/srv/legacy'], true,
+            'execution_failed', repeat('c', 64), 'client:legacy-tunnel-a',
+            '2020-01-04T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(legacy_backup_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let legacy_tunnel_id = Uuid::new_v4();
+    let mut legacy_tunnel_input = postgres_alert_test_tunnel_input();
+    legacy_tunnel_input.name = "legacy-alert-tunnel".to_string();
+    legacy_tunnel_input.left_client_id = "legacy-tunnel-a".to_string();
+    legacy_tunnel_input.right_client_id = "legacy-tunnel-b".to_string();
+    let legacy_tunnel_plan = plan_tunnel(&legacy_tunnel_input).unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO tunnel_plans (
+            id, name, kind, enabled, left_client_id, right_client_id,
+            input, plan, ospf_status, left_ospf_status, right_ospf_status,
+            created_at, updated_at
+        ) VALUES (
+            $1, $2, 'gre', true, $3, $4, $5, $6,
+            'disabled', 'disabled', 'disabled',
+            '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(legacy_tunnel_id)
+    .bind(&legacy_tunnel_input.name)
+    .bind(&legacy_tunnel_input.left_client_id)
+    .bind(&legacy_tunnel_input.right_client_id)
+    .bind(SqlJson(&legacy_tunnel_input))
+    .bind(SqlJson(&legacy_tunnel_plan))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_plan_runtime_manager, telemetry_endpoint_side,
+            telemetry_peer_client_id, traffic_status, traffic_reason,
+            adapter_health, updated_at
+        ) VALUES (
+            'legacy-tunnel-a', '2020-01-05T00:00:00Z', $1, 'gre',
+            'custom_adapter', 'managed_desired', 'telemetry', $2, $3,
+            'custom_adapter', 'left', 'legacy-tunnel-b', 'degraded',
+            'legacy counters unavailable',
+            '{"status":"failed","configured":true,"success":false,"reason":"legacy adapter failure"}'::jsonb,
+            '2020-01-05T00:00:00Z'
+        )
+        "#,
+    )
+    .bind(&legacy_tunnel_input.interface_name)
+    .bind(legacy_tunnel_id.to_string())
+    .bind(&legacy_tunnel_input.name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let legacy_unattributed_tunnel_id = Uuid::new_v4();
+    let mut legacy_unattributed_input = postgres_alert_test_tunnel_input();
+    legacy_unattributed_input.name = "legacy-unattributed-alert-tunnel".to_string();
+    legacy_unattributed_input.interface_name = "gre43".to_string();
+    legacy_unattributed_input.left_client_id = "legacy-tunnel-a".to_string();
+    legacy_unattributed_input.right_client_id = "legacy-tunnel-b".to_string();
+    let legacy_unattributed_plan = plan_tunnel(&legacy_unattributed_input).unwrap();
+    let legacy_unattributed_healthy_tunnel_id = Uuid::new_v4();
+    let mut legacy_unattributed_healthy_input = postgres_alert_test_tunnel_input();
+    legacy_unattributed_healthy_input.name = "legacy-unattributed-healthy-alert-tunnel".to_string();
+    legacy_unattributed_healthy_input.interface_name = "gre44".to_string();
+    legacy_unattributed_healthy_input.left_client_id = "legacy-tunnel-a".to_string();
+    legacy_unattributed_healthy_input.right_client_id = "legacy-tunnel-b".to_string();
+    let legacy_unattributed_healthy_plan = plan_tunnel(&legacy_unattributed_healthy_input).unwrap();
+    let legacy_pre_boundary_tunnel_id = Uuid::new_v4();
+    let mut legacy_pre_boundary_input = postgres_alert_test_tunnel_input();
+    legacy_pre_boundary_input.name = "legacy-pre-boundary-alert-tunnel".to_string();
+    legacy_pre_boundary_input.interface_name = "gre46".to_string();
+    legacy_pre_boundary_input.left_client_id = "legacy-tunnel-a".to_string();
+    legacy_pre_boundary_input.right_client_id = "legacy-tunnel-b".to_string();
+    let legacy_pre_boundary_plan = plan_tunnel(&legacy_pre_boundary_input).unwrap();
+    let unmarked_unattributed_tunnel_id = Uuid::new_v4();
+    let mut unmarked_unattributed_input = postgres_alert_test_tunnel_input();
+    unmarked_unattributed_input.name = "unmarked-unattributed-alert-tunnel".to_string();
+    unmarked_unattributed_input.interface_name = "gre45".to_string();
+    unmarked_unattributed_input.left_client_id = "legacy-tunnel-a".to_string();
+    unmarked_unattributed_input.right_client_id = "legacy-tunnel-b".to_string();
+    let unmarked_unattributed_plan = plan_tunnel(&unmarked_unattributed_input).unwrap();
+    for (plan_id, input, plan, updated_at) in [
+        (
+            legacy_unattributed_tunnel_id,
+            &legacy_unattributed_input,
+            &legacy_unattributed_plan,
+            "2020-01-06T00:00:00Z",
+        ),
+        (
+            legacy_unattributed_healthy_tunnel_id,
+            &legacy_unattributed_healthy_input,
+            &legacy_unattributed_healthy_plan,
+            "2020-01-06T00:00:00Z",
+        ),
+        (
+            unmarked_unattributed_tunnel_id,
+            &unmarked_unattributed_input,
+            &unmarked_unattributed_plan,
+            "2020-01-01T00:00:00Z",
+        ),
+        (
+            legacy_pre_boundary_tunnel_id,
+            &legacy_pre_boundary_input,
+            &legacy_pre_boundary_plan,
+            "2020-01-01T00:00:00Z",
+        ),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO tunnel_plans (
+                id, name, kind, enabled, left_client_id, right_client_id,
+                input, plan, ospf_status, left_ospf_status, right_ospf_status,
+                created_at, updated_at
+            ) VALUES (
+                $1, $2, 'gre', true, $3, $4, $5, $6,
+                'disabled', 'disabled', 'disabled',
+                '2020-01-01T00:00:00Z', $7::timestamptz
+            )
+            "#,
+        )
+        .bind(plan_id)
+        .bind(&input.name)
+        .bind(&input.left_client_id)
+        .bind(&input.right_client_id)
+        .bind(SqlJson(input))
+        .bind(SqlJson(plan))
+        .bind(updated_at)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    for (input, plan_id, traffic_status, traffic_reason, adapter_health, observed_at) in [
+        (
+            &legacy_unattributed_input,
+            legacy_unattributed_tunnel_id,
+            "degraded",
+            "retained legacy counters unavailable",
+            json!({
+                "status": "failed",
+                "configured": true,
+                "success": false,
+                "reason": "retained legacy adapter failure",
+            }),
+            "2020-01-05T00:00:00Z",
+        ),
+        (
+            &legacy_unattributed_healthy_input,
+            legacy_unattributed_healthy_tunnel_id,
+            "ok",
+            "",
+            json!({
+                "status": "healthy",
+                "configured": true,
+                "success": true,
+            }),
+            "2020-01-05T00:00:00Z",
+        ),
+        (
+            &legacy_pre_boundary_input,
+            legacy_pre_boundary_tunnel_id,
+            "degraded",
+            "pre-boundary legacy counters unavailable",
+            json!({
+                "status": "failed",
+                "configured": true,
+                "success": false,
+                "reason": "pre-boundary legacy adapter failure",
+            }),
+            "2020-01-03T00:00:00Z",
+        ),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_tunnels (
+                client_id, observed_at, interface, kind, ownership_mode,
+                mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+                telemetry_plan_runtime_manager, telemetry_endpoint_side,
+                telemetry_peer_client_id, traffic_status, traffic_reason,
+                adapter_health, updated_at
+            ) VALUES (
+                'legacy-tunnel-a', $7::timestamptz, $1, 'gre',
+                'custom_adapter', 'managed_desired', 'telemetry', $2, $3,
+                'custom_adapter', 'left', 'legacy-tunnel-b', $4, NULLIF($5, ''),
+                $6, $7::timestamptz
+            )
+            "#,
+        )
+        .bind(&input.interface_name)
+        .bind(plan_id.to_string())
+        .bind(&input.name)
+        .bind(traffic_status)
+        .bind(traffic_reason)
+        .bind(SqlJson(adapter_health))
+        .bind(observed_at)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+    let legacy_fingerprint = json!({
+        "severity": "warning",
+        "category": "agent_status",
+        "target_kind": "agent",
+        "target_id": client_id,
+        "title": "Agent is not online",
+        "status": "never",
+    });
+    let legacy_hash = payload_hash(legacy_fingerprint.to_string().as_bytes());
+    let legacy_public_id = format!("agent_status:agent:{}", &legacy_hash[..16]);
+    let retained_adapter_fingerprint = json!({
+        "severity": "critical",
+        "category": "network",
+        "target_kind": "tunnel",
+        "target_id": format!(
+            "legacy-tunnel-a:{}",
+            legacy_unattributed_input.interface_name
+        ),
+        "title": "Tunnel adapter status failed",
+        "status": "tunnel_adapter_degraded",
+    });
+    let retained_adapter_hash = payload_hash(retained_adapter_fingerprint.to_string().as_bytes());
+    let retained_adapter_public_id = format!("network:tunnel:{}", &retained_adapter_hash[..16]);
+    let pre_boundary_adapter_fingerprint = json!({
+        "severity": "critical",
+        "category": "network",
+        "target_kind": "tunnel",
+        "target_id": format!(
+            "legacy-tunnel-a:{}",
+            legacy_pre_boundary_input.interface_name
+        ),
+        "title": "Tunnel adapter status failed",
+        "status": "tunnel_adapter_degraded",
+    });
+    let pre_boundary_adapter_hash =
+        payload_hash(pre_boundary_adapter_fingerprint.to_string().as_bytes());
+    let pre_boundary_adapter_public_id =
+        format!("network:tunnel:{}", &pre_boundary_adapter_hash[..16]);
+    sqlx::query(
+        r#"
+        INSERT INTO fleet_alert_states (alert_id, state, reason)
+        VALUES ($1, 'acknowledged', 'preserve this operator triage'),
+               ($2, 'escalated', 'preserve retained tunnel triage'),
+               ($3, 'acknowledged', 'preserve pre-boundary tunnel triage'),
+               ('webhook_delivery:00000000-0000-4000-8000-000000000001',
+                'acknowledged', 'remove machine-owned orphan')
+        "#,
+    )
+    .bind(&legacy_public_id)
+    .bind(&retained_adapter_public_id)
+    .bind(&pre_boundary_adapter_public_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 and 0011 must apply to exact v0.4.4");
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_tunnels (
+            client_id, observed_at, interface, kind, ownership_mode,
+            mutation_policy, source, telemetry_plan_id, telemetry_plan_name,
+            telemetry_plan_runtime_manager, telemetry_endpoint_side,
+            telemetry_peer_client_id, traffic_status, traffic_reason,
+            adapter_health, updated_at
+        ) VALUES (
+            'legacy-tunnel-a', clock_timestamp(), $1, 'gre',
+            'custom_adapter', 'managed_desired', 'telemetry', $2, $3,
+            'custom_adapter', 'left', 'legacy-tunnel-b', 'degraded',
+            'post-cutover counters unavailable',
+            '{"status":"failed","configured":true,"success":false,
+              "reason":"post-cutover adapter failure"}'::jsonb,
+            clock_timestamp()
+        )
+        "#,
+    )
+    .bind(&unmarked_unattributed_input.interface_name)
+    .bind(unmarked_unattributed_tunnel_id.to_string())
+    .bind(&unmarked_unattributed_input.name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    assert!(!sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT operational_alert_legacy_identity
+        FROM telemetry_tunnels
+        WHERE client_id = 'legacy-tunnel-a' AND interface = $1
+        "#,
+    )
+    .bind(&unmarked_unattributed_input.interface_name)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fleet_alert_states WHERE alert_id LIKE 'webhook_delivery:%'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM fleet_alert_states WHERE alert_id = $1",
+        )
+        .bind(&legacy_public_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "acknowledged"
+    );
+
+    let first_repo = db.repo.clone();
+    let concurrent_repo = db.repo.clone();
+    let (first_reconcile, concurrent_reconcile) = tokio::join!(
+        first_repo.reconcile_operational_alerts(),
+        concurrent_repo.reconcile_operational_alerts(),
+    );
+    first_reconcile.unwrap();
+    concurrent_reconcile.unwrap();
+    let episode: (String, String, bool, i64) = sqlx::query_as(
+        r#"
+        SELECT public_id, lifecycle_state, backfilled, trigger_generation
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'agent_status' AND client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        episode,
+        (legacy_public_id.clone(), "persisting".to_string(), true, 1)
+    );
+    let producer_counts = sqlx::query_as::<_, (String, i64)>(
+        r#"
+        SELECT producer_kind, count(*)
+        FROM operational_alert_episodes
+        GROUP BY producer_kind
+        ORDER BY producer_kind
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        producer_counts,
+        vec![
+            ("agent_status".to_string(), 1),
+            ("backup_request".to_string(), 1),
+            ("capability_degraded".to_string(), 1),
+            ("job".to_string(), 200),
+            ("tunnel_adapter".to_string(), 3),
+            ("tunnel_traffic".to_string(), 3),
+        ]
+    );
+    let retained_adapter = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            bool,
+            String,
+        ),
+    >(
+        r#"
+        SELECT
+            public_id,
+            lifecycle_state,
+            source_status,
+            title,
+            detail,
+            backfilled,
+            EXTRACT(EPOCH FROM last_confirmed_at)::bigint,
+            evidence->>'retain_unknown_backfill' = 'true',
+            evidence->>'evidence_status'
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_unattributed_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        retained_adapter,
+        (
+            retained_adapter_public_id.clone(),
+            "unknown".to_string(),
+            "tunnel_adapter_degraded".to_string(),
+            "Tunnel adapter status failed".to_string(),
+            "retained legacy adapter failure".to_string(),
+            true,
+            1_578_182_400,
+            true,
+            "retained_degradation_current_attribution_unavailable".to_string(),
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM fleet_alert_states WHERE alert_id = $1",
+        )
+        .bind(&retained_adapter_public_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "escalated",
+        "the legacy public ID must keep operator triage attached"
+    );
+    let pre_boundary_adapter = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            bool,
+            String,
+        ),
+    >(
+        r#"
+        SELECT
+            public_id,
+            lifecycle_state,
+            source_status,
+            title,
+            detail,
+            backfilled,
+            EXTRACT(EPOCH FROM last_confirmed_at)::bigint,
+            evidence->>'retain_unknown_backfill' = 'true',
+            evidence->>'evidence_status'
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_pre_boundary_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        pre_boundary_adapter,
+        (
+            pre_boundary_adapter_public_id.clone(),
+            "unknown".to_string(),
+            "tunnel_adapter_degraded".to_string(),
+            "Tunnel adapter status failed".to_string(),
+            "pre-boundary legacy adapter failure".to_string(),
+            true,
+            1_578_009_600,
+            true,
+            "retained_degradation_current_attribution_unavailable".to_string(),
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM fleet_alert_states WHERE alert_id = $1",
+        )
+        .bind(&pre_boundary_adapter_public_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        "acknowledged",
+        "the status-boundary fallback must keep legacy triage attached"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM operational_alert_episodes
+            WHERE target_id = $1
+            "#,
+        )
+        .bind(format!(
+            "legacy-tunnel-a:{}",
+            legacy_unattributed_healthy_input.interface_name
+        ))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "unattributed healthy legacy evidence must not invent an incident"
+    );
+    let unmarked_retained_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM operational_alert_episodes
+        WHERE target_id = $1
+          AND producer_kind IN ('tunnel_adapter', 'tunnel_traffic')
+          AND lifecycle_state = 'unknown'
+          AND backfilled
+          AND evidence->>'retain_unknown_backfill' = 'true'
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        unmarked_unattributed_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        unmarked_retained_count, 0,
+        "post-migration unmarked evidence is outside the maintenance-gated backfill"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (bool, bool)>(
+            r#"
+            SELECT backfill_completed, completed_at IS NOT NULL
+            FROM operational_alert_lifecycle_meta
+            WHERE singleton
+            "#,
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (true, true)
+    );
+    let invalid_lifecycle_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM operational_alert_episodes
+        WHERE (
+                producer_kind IN ('tunnel_adapter', 'tunnel_traffic')
+                AND lifecycle_state <> 'unknown'
+              )
+           OR (
+                producer_kind NOT IN ('tunnel_adapter', 'tunnel_traffic')
+                AND lifecycle_state <> 'persisting'
+              )
+           OR backfilled IS NOT TRUE
+           OR trigger_generation <> 1
+        "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(invalid_lifecycle_rows, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'alert.triggered'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "migration backfill must not flood lifecycle webhooks"
+    );
+
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    let retained_adapter_after_repairs = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            bool,
+            String,
+        ),
+    >(
+        r#"
+        SELECT
+            public_id,
+            lifecycle_state,
+            source_status,
+            title,
+            detail,
+            backfilled,
+            EXTRACT(EPOCH FROM last_confirmed_at)::bigint,
+            evidence->>'retain_unknown_backfill' = 'true',
+            evidence->>'evidence_status'
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_unattributed_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained_adapter_after_repairs, retained_adapter);
+    let pre_boundary_adapter_after_repairs = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            bool,
+            i64,
+            bool,
+            String,
+        ),
+    >(
+        r#"
+        SELECT
+            public_id,
+            lifecycle_state,
+            source_status,
+            title,
+            detail,
+            backfilled,
+            EXTRACT(EPOCH FROM last_confirmed_at)::bigint,
+            evidence->>'retain_unknown_backfill' = 'true',
+            evidence->>'evidence_status'
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter'
+          AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_pre_boundary_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(pre_boundary_adapter_after_repairs, pre_boundary_adapter);
+    let exact_runtime_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+        legacy_pre_boundary_tunnel_id,
+        &legacy_pre_boundary_plan,
+        None,
+    );
+    let exact_topology_identity = vpsman_common::tunnel_topology_identity_hash(
+        legacy_pre_boundary_tunnel_id,
+        &legacy_pre_boundary_plan,
+    );
+    sqlx::query(
+        r#"
+        UPDATE telemetry_tunnels
+        SET observed_at = clock_timestamp(),
+            updated_at = clock_timestamp(),
+            telemetry_topology_identity_hash = $1,
+            telemetry_runtime_evidence_identity_hash = $2,
+            traffic_status = 'degraded',
+            traffic_reason = 'fresh exact counters unavailable',
+            adapter_health = '{"status":"failed","configured":true,"success":false,
+                "reason":"fresh exact adapter failure"}'::jsonb
+        WHERE client_id = 'legacy-tunnel-a' AND interface = $3
+        "#,
+    )
+    .bind(exact_topology_identity)
+    .bind(exact_runtime_identity)
+    .bind(&legacy_pre_boundary_input.interface_name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    let persisted_exact: (Uuid, String, String, i64) = sqlx::query_as(
+        r#"
+        SELECT id, public_id, lifecycle_state, trigger_generation
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter' AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_pre_boundary_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(persisted_exact.1, pre_boundary_adapter_public_id);
+    assert_eq!(persisted_exact.2, "persisting");
+    assert_eq!(persisted_exact.3, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'alert.triggered'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "fresh confirmation of a retained episode must not forge a trigger edge"
+    );
+    sqlx::query(
+        r#"
+        UPDATE telemetry_tunnels
+        SET observed_at = clock_timestamp(),
+            updated_at = clock_timestamp(),
+            traffic_status = 'ok',
+            traffic_reason = NULL,
+            adapter_health = '{"status":"healthy","configured":true,"success":true}'::jsonb
+        WHERE client_id = 'legacy-tunnel-a' AND interface = $1
+        "#,
+    )
+    .bind(&legacy_pre_boundary_input.interface_name)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    let resolved_exact: (Uuid, String, String, i64, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT id, public_id, lifecycle_state, trigger_generation, resolution_reason
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'tunnel_adapter' AND target_id = $1
+        "#,
+    )
+    .bind(format!(
+        "legacy-tunnel-a:{}",
+        legacy_pre_boundary_input.interface_name
+    ))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(resolved_exact.0, persisted_exact.0);
+    assert_eq!(resolved_exact.1, pre_boundary_adapter_public_id);
+    assert_eq!(resolved_exact.2, "resolved");
+    assert_eq!(resolved_exact.3, 1);
+    assert_eq!(resolved_exact.4.as_deref(), Some("condition_recovered"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'alert.resolved'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2,
+        "adapter and traffic recovery must each resolve their retained episode once"
+    );
+    db.repo.reconcile_operational_alerts().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'alert.resolved'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2,
+        "resolved edge repair must remain idempotent"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operational_alert_episodes WHERE client_id = $1",
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM operational_alert_episodes")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        209,
+        "repair must neither duplicate nor slowly ingest legacy sources beyond the bounded horizon"
+    );
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
+#[tokio::test]
+async fn postgres_fresh_schema_has_disabled_resource_policy_starters() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let groups = sqlx::query_as::<_, (Uuid, String, bool, String)>(
+        r#"
+        SELECT id, name, enabled, selector_expression
+        FROM policy_groups
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id
+        "#,
+    )
+    .bind(vec![
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4").unwrap(),
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5").unwrap(),
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6").unwrap(),
+    ])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        groups,
+        vec![
+            (
+                Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4").unwrap(),
+                "Predefined CPU utilization".to_string(),
+                false,
+                "status:online".to_string(),
+            ),
+            (
+                Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5").unwrap(),
+                "Predefined memory availability".to_string(),
+                false,
+                "status:online".to_string(),
+            ),
+            (
+                Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6").unwrap(),
+                "Predefined disk availability".to_string(),
+                false,
+                "status:online".to_string(),
+            ),
+        ]
+    );
+
+    let rules = sqlx::query_as::<_, (String, i32, String, i64, String)>(
+        r#"
+        SELECT groups.name, rules.sort_order, rules.condition_expression,
+               rules.window_secs, rules.severity
+        FROM policy_rules AS rules
+        JOIN policy_groups AS groups ON groups.id = rules.group_id
+        WHERE groups.id = ANY($1::uuid[])
+        ORDER BY groups.id, rules.sort_order
+        "#,
+    )
+    .bind(vec![
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4").unwrap(),
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5").unwrap(),
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6").unwrap(),
+    ])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rules,
+        vec![
+            (
+                "Predefined CPU utilization".to_string(),
+                0,
+                "cpu.utilization_ratio >= 0.75 && cpu.utilization_ratio < 0.90".to_string(),
+                300,
+                "warning".to_string(),
+            ),
+            (
+                "Predefined CPU utilization".to_string(),
+                1,
+                "cpu.utilization_ratio >= 0.90".to_string(),
+                300,
+                "critical".to_string(),
+            ),
+            (
+                "Predefined memory availability".to_string(),
+                0,
+                "memory.available_ratio <= 0.20 && memory.available_ratio > 0.10".to_string(),
+                300,
+                "warning".to_string(),
+            ),
+            (
+                "Predefined memory availability".to_string(),
+                1,
+                "memory.available_ratio <= 0.10".to_string(),
+                300,
+                "critical".to_string(),
+            ),
+            (
+                "Predefined disk availability".to_string(),
+                0,
+                "disk.available_ratio <= 0.20 && disk.available_ratio > 0.10".to_string(),
+                300,
+                "warning".to_string(),
+            ),
+            (
+                "Predefined disk availability".to_string(),
+                1,
+                "disk.available_ratio <= 0.10".to_string(),
+                300,
+                "critical".to_string(),
+            ),
+        ]
+    );
+    let legacy_resource_starters = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM policy_groups WHERE id = ANY($1::uuid[])",
+    )
+    .bind(vec![
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1").unwrap(),
+        Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2").unwrap(),
+    ])
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy_resource_starters, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let lifecycle_columns = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        r#"
+        SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'policy_alerts'
+          AND column_name IN (
+              'lifecycle_state', 'last_confirmed_at',
+              'resolved_at', 'resolution_reason'
+          )
+        ORDER BY column_name
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        lifecycle_columns,
+        vec![
+            (
+                "last_confirmed_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "YES".to_string(),
+                None,
+            ),
+            (
+                "lifecycle_state".to_string(),
+                "text".to_string(),
+                "NO".to_string(),
+                Some("'triggered'::text".to_string()),
+            ),
+            (
+                "resolution_reason".to_string(),
+                "text".to_string(),
+                "YES".to_string(),
+                None,
+            ),
+            (
+                "resolved_at".to_string(),
+                "timestamp with time zone".to_string(),
+                "YES".to_string(),
+                None,
+            ),
+        ]
+    );
+    let lifecycle_constraint = sqlx::query_scalar::<_, String>(
+        r#"
+            SELECT pg_get_constraintdef(oid)
+            FROM pg_constraint
+            WHERE conrelid = 'policy_alerts'::regclass
+              AND conname = 'policy_alerts_lifecycle_check'
+            "#,
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(
+        lifecycle_constraint.contains("resolved_at >= last_confirmed_at"),
+        "resolved policy alerts must preserve causal timestamp ordering: {lifecycle_constraint}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String)>(
+            r#"
+            SELECT pg_class.relname,
+                   pg_get_expr(pg_index.indpred, pg_index.indrelid)
+            FROM pg_index
+            JOIN pg_class ON pg_class.oid = pg_index.indexrelid
+            WHERE pg_class.relname IN (
+                'policy_alerts_current_fleet_priority_idx',
+                'policy_alerts_current_client_fleet_priority_idx'
+            )
+              AND pg_index.indisvalid
+            ORDER BY pg_class.relname
+            "#,
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap(),
+        vec![
+            (
+                "policy_alerts_current_client_fleet_priority_idx".to_string(),
+                "((resolved_at IS NULL) AND (last_confirmed_at IS NOT NULL))".to_string(),
+            ),
+            (
+                "policy_alerts_current_fleet_priority_idx".to_string(),
+                "((resolved_at IS NULL) AND (last_confirmed_at IS NOT NULL))".to_string(),
+            ),
+        ]
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_exact_v044_resource_policy_upgrade_preserves_operator_intent() {
+    let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
+        return;
+    };
+    let cpu_group_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1").unwrap();
+    let cpu_rule_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1").unwrap();
+    let memory_group_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2").unwrap();
+    sqlx::query(
+        r#"
+        UPDATE policy_groups
+        SET name = 'Operator CPU policy',
+            enabled = TRUE,
+            notes = 'operator-owned threshold'
+        WHERE id = $1
+        "#,
+    )
+    .bind(cpu_group_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE policy_rules
+        SET name = 'Operator CPU load threshold',
+            condition_expression = 'cpu.load_1 >= 3'
+        WHERE id = $1
+        "#,
+    )
+    .bind(cpu_rule_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM policy_groups WHERE id = $1")
+        .bind(memory_group_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let cpu_group_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_group) FROM policy_groups AS policy_group WHERE id = $1",
+    )
+    .bind(cpu_group_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let cpu_rule_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = $1",
+    )
+    .bind(cpu_rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let traffic_group_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_group) FROM policy_groups AS policy_group WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let traffic_rule_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 and 0011 must apply after exact v0.4.4 migration checksums");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_group) FROM policy_groups AS policy_group WHERE id = $1",
+        )
+        .bind(cpu_group_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        cpu_group_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = $1",
+        )
+        .bind(cpu_rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        cpu_rule_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_group) FROM policy_groups AS policy_group WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        traffic_group_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        traffic_rule_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa5'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "an operator-deleted memory starter must stay deleted"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_groups WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa6'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
+#[tokio::test]
+async fn postgres_exact_v044_policy_upgrade_resets_only_saturation_state_and_keeps_history() {
+    let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
+        return;
+    };
+    let client_id = "migration-policy-state-client";
+    insert_client(&db.pool, client_id, None).await;
+
+    let legacy_cpu_group_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1").unwrap();
+    let legacy_cpu_rule_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1").unwrap();
+    let legacy_alert_id = Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1").unwrap();
+    insert_policy_migration_state(&db.pool, legacy_cpu_rule_id, client_id, 1).await;
+    insert_policy_migration_alert(
+        &db.pool,
+        legacy_alert_id,
+        legacy_cpu_group_id,
+        legacy_cpu_rule_id,
+        client_id,
+    )
+    .await;
+    sqlx::query("INSERT INTO fleet_alert_states (alert_id, state) VALUES ($1, 'acknowledged')")
+        .bind(format!("policy-alert:{legacy_alert_id}"))
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let restored_memory_group_id = Uuid::parse_str("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2").unwrap();
+    let restored_memory_rule_id = Uuid::parse_str("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2").unwrap();
+    sqlx::query(
+        "UPDATE policy_groups SET updated_at = created_at + interval '1 second' WHERE id = $1",
+    )
+    .bind(restored_memory_group_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE policy_rules SET updated_at = created_at + interval '1 second' WHERE id = $1",
+    )
+    .bind(restored_memory_rule_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let custom_group_id = Uuid::parse_str("cccccccc-cccc-4ccc-8ccc-ccccccccccc1").unwrap();
+    let affected_rule_id = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-ddddddddddd1").unwrap();
+    let unaffected_rule_id = Uuid::parse_str("dddddddd-dddd-4ddd-8ddd-ddddddddddd2").unwrap();
+    let affected_alert_id = Uuid::parse_str("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee2").unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO policy_groups (id, name, enabled, selector_expression, notes)
+        VALUES ($1, 'Operator saturation policy', TRUE, 'status:online', 'retained')
+        "#,
+    )
+    .bind(custom_group_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO policy_rules (
+            id, group_id, rule_version, sort_order, name, enabled,
+            condition_expression, window_secs, severity
+        ) VALUES
+            ($1, $3, 7, 0, 'Saturation', TRUE,
+             'cpu.load_saturation >= 0.75', 0, 'warning'),
+            ($2, $3, 4, 1, 'Raw load', TRUE,
+             'cpu.load_1 >= 2', 300, 'warning')
+        "#,
+    )
+    .bind(affected_rule_id)
+    .bind(unaffected_rule_id)
+    .bind(custom_group_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    insert_policy_migration_state(&db.pool, affected_rule_id, client_id, 7).await;
+    insert_policy_migration_state(&db.pool, unaffected_rule_id, client_id, 4).await;
+    insert_policy_migration_alert(
+        &db.pool,
+        affected_alert_id,
+        custom_group_id,
+        affected_rule_id,
+        client_id,
+    )
+    .await;
+    let unaffected_rule_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = $1",
+    )
+    .bind(unaffected_rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let unaffected_state_before = sqlx::query_scalar::<_, Value>(
+        "SELECT to_jsonb(policy_state) FROM policy_rule_states AS policy_state WHERE policy_rule_id = $1",
+    )
+    .bind(unaffected_rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 and 0011 lifecycle migrations must apply to exact v0.4.4");
+
+    let affected_after = sqlx::query_as::<_, (i32, String)>(
+        "SELECT rule_version, condition_expression FROM policy_rules WHERE id = $1",
+    )
+    .bind(affected_rule_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        affected_after,
+        (8, "cpu.load_saturation >= 0.75".to_string())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_rule_states WHERE policy_rule_id = $1",
+        )
+        .bind(affected_rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_alerts WHERE id = $1")
+            .bind(affected_alert_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            r#"
+            SELECT lifecycle_state, last_confirmed_at::text,
+                   resolved_at::text, resolution_reason
+            FROM policy_alerts
+            WHERE id = $1
+            "#,
+        )
+        .bind(affected_alert_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("unknown".to_string(), None, None, None),
+        "pre-0010 policy alerts must enter the lifecycle conservatively"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_rule) FROM policy_rules AS policy_rule WHERE id = $1",
+        )
+        .bind(unaffected_rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        unaffected_rule_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Value>(
+            "SELECT to_jsonb(policy_state) FROM policy_rule_states AS policy_state WHERE policy_rule_id = $1",
+        )
+        .bind(unaffected_rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        unaffected_state_before
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_groups WHERE id = $1")
+            .bind(legacy_cpu_group_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1,
+        "a pristine starter with history must not be removed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM policy_rule_states WHERE policy_rule_id = $1",
+        )
+        .bind(legacy_cpu_rule_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_alerts WHERE id = $1")
+            .bind(legacy_alert_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+            r#"
+            SELECT lifecycle_state, last_confirmed_at::text,
+                   resolved_at::text, resolution_reason
+            FROM policy_alerts
+            WHERE id = $1
+            "#,
+        )
+        .bind(legacy_alert_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("unknown".to_string(), None, None, None),
+        "legacy starter history must not acquire invented lifecycle evidence"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fleet_alert_states WHERE alert_id = $1")
+            .bind(format!("policy-alert:{legacy_alert_id}"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_groups WHERE id = $1")
+            .bind(restored_memory_group_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1,
+        "a restored canonical group with operator update history must not be removed"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_rules WHERE id = $1")
+            .bind(restored_memory_rule_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1,
+        "a restored canonical rule with operator update history must not be removed"
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_resource_latest (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_usage_sample_count, cpu_usage_sum, cpu_usage_avg,
+            cpu_usage_max, cpu_cores_max,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_sum, disk_available_bytes_min,
+            disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        ) VALUES (
+            $1, date_trunc('minute', now()), 60, 1,
+            1, 0.5, 0.5, 0.5, 4,
+            0.0, 0.0, 0.0,
+            1000, 500, 500, 500, 0.5, 0.5, 0.5,
+            2000, 1500, 1500, 1500, 0.25, 0.25, 0.25,
+            0, 0, now()
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(db.repo.evaluate_policy_rules().await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            r#"
+            SELECT lifecycle_state, last_confirmed_at::text, resolved_at::text
+            FROM policy_alerts
+            WHERE id = $1
+            "#,
+        )
+        .bind(affected_alert_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        ("unknown".to_string(), None, None),
+        "a below-threshold evaluation must not invent a recovery for unconfirmed legacy history"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE event_id = $1 OR event_id = $2",
+        )
+        .bind(format!("policy-alert:{affected_alert_id}"))
+        .bind(format!("policy-alert:{affected_alert_id}:resolved"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0,
+        "legacy Unknown history must not emit or repair lifecycle edges"
+    );
+
+    sqlx::query(
+        r#"
+        UPDATE telemetry_resource_latest
+        SET cpu_load_1_avg = 4.0,
+            cpu_load_1_sum = 4.0,
+            cpu_load_1_max = 4.0,
+            latest_observed_at = now()
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo.evaluate_policy_rules().await.unwrap();
+    let affected_lifecycle = sqlx::query_as::<_, (i64, String, bool)>(
+        r#"
+        SELECT trigger_generation, lifecycle_state, last_confirmed_at IS NOT NULL
+        FROM policy_alerts
+        WHERE policy_rule_id = $1 AND client_id = $2
+        ORDER BY trigger_generation
+        "#,
+    )
+    .bind(affected_rule_id)
+    .bind(client_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        affected_lifecycle,
+        vec![
+            (1, "unknown".to_string(), false),
+            (2, "triggered".to_string(), true),
+        ],
+        "a later measured rise must create a new confirmed generation"
+    );
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
+#[tokio::test]
+async fn postgres_exact_v035_baseline_applies_supported_migrations_in_place() {
     let base_url = match std::env::var("VPSMAN_TEST_POSTGRES_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
@@ -9537,13 +12386,13 @@ async fn postgres_exact_v035_baseline_applies_fleet_tag_settings_in_place() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0009 must apply after exact v0.3.5 migration checksums");
+        .expect("0009, 0010, and 0011 must apply after exact v0.3.5 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        9
+        11
     );
     let setting: (serde_json::Value, Option<Uuid>) = sqlx::query_as(
         r#"
@@ -9692,6 +12541,49 @@ impl PgReliabilityTestDb {
     }
 }
 
+async fn postgres_policy_evaluation_waiting_on_identity<'a>(
+    pool: &'a PgPool,
+    repo: &Repository,
+) -> (
+    sqlx::Transaction<'a, sqlx::Postgres>,
+    tokio::task::JoinHandle<anyhow::Result<usize>>,
+) {
+    let mut identity_gate = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('vpsman.agent_key_lifecycle'))")
+        .execute(&mut *identity_gate)
+        .await
+        .unwrap();
+    let repo = repo.clone();
+    let evaluation = tokio::spawn(async move { repo.evaluate_policy_rules().await });
+    let mut waiting = false;
+    for _ in 0..1_000 {
+        waiting = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND wait_event_type = 'Lock'
+                  AND wait_event = 'advisory'
+                  AND query LIKE '%vpsman.agent_key_lifecycle%'
+            )
+            "#,
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        waiting,
+        "policy evaluator did not reach the identity lifecycle commit barrier"
+    );
+    (identity_gate, evaluation)
+}
+
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -9747,7 +12639,6 @@ fn postgres_app_state(db: &PgReliabilityTestDb) -> AppState {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

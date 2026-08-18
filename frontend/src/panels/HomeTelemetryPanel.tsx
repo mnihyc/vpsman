@@ -55,6 +55,7 @@ import {
   type ByteRateFormatter,
 } from "../panelDisplay";
 import { formatCompactTime } from "../utils";
+import { alertCategoryLabel } from "../alertPresentation";
 import {
   ACCESS_REVOKED_RECOVERY_DETAIL,
   agentStatusPresentation,
@@ -63,6 +64,7 @@ import {
 type HomeTelemetryPanelProps = {
   agents: AgentView[];
   error: string | null;
+  includeGlobalAlerts: boolean;
   loading: boolean;
   onNavigate: (drilldown: DashboardDrilldownRecord) => void;
   onPreferencesChange: (patch: Partial<DashboardPreferences>) => void;
@@ -124,6 +126,7 @@ const refreshIntervalOptions: Array<{
 export function HomeTelemetryPanel({
   agents,
   error,
+  includeGlobalAlerts,
   loading,
   onNavigate,
   onPreferencesChange,
@@ -188,9 +191,10 @@ export function HomeTelemetryPanel({
     () =>
       (operations?.recent_alerts ?? []).filter(
         (alert) =>
-          alert.client_id === null || visibleAgentIds.has(alert.client_id),
+          (includeGlobalAlerts && alert.client_id === null) ||
+          (alert.client_id !== null && visibleAgentIds.has(alert.client_id)),
       ),
-    [operations?.recent_alerts, visibleAgentIds],
+    [includeGlobalAlerts, operations?.recent_alerts, visibleAgentIds],
   );
   const visibleDegradedAgents = useMemo(
     () =>
@@ -557,13 +561,17 @@ export function HomeTelemetryPanel({
               }
             />
             <HomeMetricCard
-              detail={`${operations?.critical_alerts ?? 0} critical, ${operations?.warning_alerts ?? 0} warning`}
+              detail={
+                operations
+                  ? `${operations.critical_alerts} critical, ${operations.warning_alerts} warning`
+                  : "Operational alert evidence unavailable"
+              }
               icon={<AlertTriangle size={19} />}
               label="Active alerts"
               onClick={() =>
                 openDrawer({
                   description:
-                    "Open fleet alerts generated from agent, resource, backup, update, and network state.",
+                    "Review active fleet alert episodes generated from agent, resource, traffic, backup, update, job, capability, and network evidence.",
                   drilldown: {
                     label: "Review alerts",
                     query: null,
@@ -573,18 +581,36 @@ export function HomeTelemetryPanel({
                   metrics: [
                     {
                       label: "Active",
-                      tone: operations?.active_alerts ? "warning" : "ok",
-                      value: String(operations?.active_alerts ?? 0),
+                      tone: operations
+                        ? operations.active_alerts
+                          ? "warning"
+                          : "ok"
+                        : "neutral",
+                      value: operations
+                        ? String(operations.active_alerts)
+                        : "No data",
                     },
                     {
                       label: "Critical",
-                      tone: operations?.critical_alerts ? "critical" : "ok",
-                      value: String(operations?.critical_alerts ?? 0),
+                      tone: operations
+                        ? operations.critical_alerts
+                          ? "critical"
+                          : "ok"
+                        : "neutral",
+                      value: operations
+                        ? String(operations.critical_alerts)
+                        : "No data",
                     },
                     {
                       label: "Warning",
-                      tone: operations?.warning_alerts ? "warning" : "ok",
-                      value: String(operations?.warning_alerts ?? 0),
+                      tone: operations
+                        ? operations.warning_alerts
+                          ? "warning"
+                          : "ok"
+                        : "neutral",
+                      value: operations
+                        ? String(operations.warning_alerts)
+                        : "No data",
                     },
                   ],
                   title: "Active alerts",
@@ -595,9 +621,11 @@ export function HomeTelemetryPanel({
                   ? "critical"
                   : operations && operations.warning_alerts > 0
                     ? "warning"
-                    : "ok"
+                    : operations
+                      ? "ok"
+                      : "neutral"
               }
-              value={String(operations?.active_alerts ?? 0)}
+              value={operations ? String(operations.active_alerts) : "No data"}
             />
             <HomeMetricCard
               detail="Pending or running"
@@ -830,26 +858,6 @@ export function HomeTelemetryPanel({
                             preferences.resourceMetric,
                             series.peak,
                           ),
-                        },
-                        {
-                          label: "Warning",
-                          tone: "warning",
-                          value: formatResourceValue(
-                            preferences.resourceMetric,
-                            series.warning_threshold,
-                          ),
-                        },
-                        {
-                          label: "Critical",
-                          tone: "critical",
-                          value: formatResourceValue(
-                            preferences.resourceMetric,
-                            series.critical_threshold,
-                          ),
-                        },
-                        {
-                          label: "Direction",
-                          value: series.threshold_direction,
                         },
                       ],
                       title: series.label,
@@ -1197,7 +1205,7 @@ export function HomeTelemetryPanel({
               aria-label="Operational lists"
             >
               <div>
-                <h2>Recent Alerts</h2>
+                <h2>Recent active alerts</h2>
                 <div className="dashboardList">
                   {visibleRecentAlerts.map((alert) => (
                     <button
@@ -1205,7 +1213,7 @@ export function HomeTelemetryPanel({
                       key={alert.id}
                       onClick={() =>
                         openDrawer({
-                          description: `${alert.category} observed ${formatCompactTime(alert.observed_at)}`,
+                          description: `${alertCategoryLabel(alert.category)} observed ${formatCompactTime(alert.observed_at)}`,
                           drilldown: alert.drilldown,
                           metrics: [
                             {
@@ -1213,7 +1221,10 @@ export function HomeTelemetryPanel({
                               tone: severityTone(alert.severity),
                               value: alert.severity,
                             },
-                            { label: "Category", value: alert.category },
+                            {
+                              label: "Category",
+                              value: alertCategoryLabel(alert.category),
+                            },
                             {
                               label: "Client",
                               value: alert.client_label
@@ -1400,7 +1411,9 @@ function ClusterButton({
         <strong>{cluster.label}</strong>
         <em>{clusterSummary(cluster)}</em>
       </span>
-      <b title={`${cluster.warnings} open alerts`}>{cluster.warnings} alerts</b>
+      <b title={`${cluster.warnings} active alert episodes`}>
+        {cluster.warnings} alerts
+      </b>
     </button>
   );
 }

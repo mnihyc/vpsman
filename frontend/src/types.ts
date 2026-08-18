@@ -483,6 +483,7 @@ export type DashboardAgentSummaryRecord = {
 
 export type FleetAlertRecord = {
   id: string;
+  record_kind: "condition" | "event" | string;
   severity: "critical" | "warning" | "info" | string;
   category: string;
   target_kind: string;
@@ -493,6 +494,16 @@ export type FleetAlertRecord = {
   status: string;
   evidence: JsonValue;
   observed_at: string;
+  lifecycle: {
+    state: "triggered" | "persisting" | "unknown" | "resolved" | string;
+    trigger_generation: number;
+    triggered_at: string;
+    last_confirmed_at: string | null;
+    resolved_at: string | null;
+    resolution_reason: string | null;
+    resolution_note: string | null;
+    resolution_actor_id: string | null;
+  };
   operator_state: "open" | "acknowledged" | "muted" | "escalated" | string;
   muted_until_unix: number | null;
   escalation_level: number;
@@ -518,6 +529,17 @@ export type FleetAlertStateRequest = {
   muted_for_secs?: number | null;
   reason?: string | null;
   confirmed: boolean;
+};
+
+export type FleetAlertResolveRequest = {
+  confirmed: boolean;
+  reason: string;
+};
+
+export type FleetAlertEventPage = {
+  items: FleetAlertRecord[];
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 export type VpsRuleValueRecord = GeneratedVpsRuleValueRecord;

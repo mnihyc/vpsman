@@ -145,6 +145,8 @@ mod repository_network_observations;
 mod repository_network_recommendations;
 #[path = "repository/network/repository_network_traffic_import.rs"]
 mod repository_network_traffic_import;
+#[path = "repository/fleet/repository_operational_alerts.rs"]
+mod repository_operational_alerts;
 #[path = "repository/access/repository_operator_totp.rs"]
 mod repository_operator_totp;
 #[path = "repository/network/repository_port_forwarding.rs"]
@@ -254,7 +256,6 @@ mod webhook_rules;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use fleet_alerts::FleetAlertPolicy;
 use gateway_client::{GatewayClientTimeouts, GatewayDispatchClient};
 use object_store::{BackupObjectStore, S3BackupObjectStoreSettings};
 use repository::Repository;
@@ -263,7 +264,7 @@ use state::{
     remember_suite_config, AppState, UpdateReleasePolicy, WsEventBus, DEFAULT_ARTIFACT_MAX_BYTES,
 };
 use tokio::time;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::fmt::writer::MakeWriterExt;
 use vpsman_common::{
     read_secret_file_ref, SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS,
@@ -435,33 +436,41 @@ struct Args {
     )]
     require_registered_agent_updates: bool,
     #[arg(
-        long,
+        long = "alert-memory-available-warning-ratio",
         env = "VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO",
-        default_value_t = 0.20
+        hide = true
     )]
-    alert_memory_available_warning_ratio: f64,
+    deprecated_alert_memory_available_warning_ratio: Option<f64>,
     #[arg(
-        long,
+        long = "alert-memory-available-critical-ratio",
         env = "VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO",
-        default_value_t = 0.10
+        hide = true
     )]
-    alert_memory_available_critical_ratio: f64,
+    deprecated_alert_memory_available_critical_ratio: Option<f64>,
     #[arg(
-        long,
+        long = "alert-disk-available-warning-ratio",
         env = "VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO",
-        default_value_t = 0.20
+        hide = true
     )]
-    alert_disk_available_warning_ratio: f64,
+    deprecated_alert_disk_available_warning_ratio: Option<f64>,
     #[arg(
-        long,
+        long = "alert-disk-available-critical-ratio",
         env = "VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO",
-        default_value_t = 0.10
+        hide = true
     )]
-    alert_disk_available_critical_ratio: f64,
-    #[arg(long, env = "VPSMAN_ALERT_CPU_LOAD_WARNING", default_value_t = 2.0)]
-    alert_cpu_load_warning: f64,
-    #[arg(long, env = "VPSMAN_ALERT_CPU_LOAD_CRITICAL", default_value_t = 4.0)]
-    alert_cpu_load_critical: f64,
+    deprecated_alert_disk_available_critical_ratio: Option<f64>,
+    #[arg(
+        long = "alert-cpu-load-warning",
+        env = "VPSMAN_ALERT_CPU_LOAD_WARNING",
+        hide = true
+    )]
+    deprecated_alert_cpu_load_warning: Option<f64>,
+    #[arg(
+        long = "alert-cpu-load-critical",
+        env = "VPSMAN_ALERT_CPU_LOAD_CRITICAL",
+        hide = true
+    )]
+    deprecated_alert_cpu_load_critical: Option<f64>,
     #[arg(
         long,
         env = "VPSMAN_POLICY_EVALUATION_INTERVAL_SECS",
@@ -582,39 +591,6 @@ impl Args {
                 self.require_registered_agent_updates = value;
             }
         }
-        if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO")
-            && env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO")
-        {
-            if let (Some(warning), Some(critical)) = (
-                config.api.alert_memory_available_warning_ratio,
-                config.api.alert_memory_available_critical_ratio,
-            ) {
-                self.alert_memory_available_warning_ratio = warning;
-                self.alert_memory_available_critical_ratio = critical;
-            }
-        }
-        if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO")
-            && env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO")
-        {
-            if let (Some(warning), Some(critical)) = (
-                config.api.alert_disk_available_warning_ratio,
-                config.api.alert_disk_available_critical_ratio,
-            ) {
-                self.alert_disk_available_warning_ratio = warning;
-                self.alert_disk_available_critical_ratio = critical;
-            }
-        }
-        if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING")
-            && env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL")
-        {
-            if let (Some(warning), Some(critical)) = (
-                config.api.alert_cpu_load_warning,
-                config.api.alert_cpu_load_critical,
-            ) {
-                self.alert_cpu_load_warning = warning;
-                self.alert_cpu_load_critical = critical;
-            }
-        }
         if env_absent("VPSMAN_API_DB_MAX_CONNECTIONS") {
             if let Some(value) = config.capacity.api_db_pool {
                 std::env::set_var("VPSMAN_API_DB_MAX_CONNECTIONS", value.to_string());
@@ -633,6 +609,41 @@ impl Args {
                 read_secret_file_ref(config.secrets.object_secret_key_file.as_deref())?;
         }
         Ok(())
+    }
+
+    fn deprecated_resource_alert_threshold_fields(&self) -> Vec<&'static str> {
+        [
+            (
+                "--alert-memory-available-warning-ratio",
+                self.deprecated_alert_memory_available_warning_ratio
+                    .is_some(),
+            ),
+            (
+                "--alert-memory-available-critical-ratio",
+                self.deprecated_alert_memory_available_critical_ratio
+                    .is_some(),
+            ),
+            (
+                "--alert-disk-available-warning-ratio",
+                self.deprecated_alert_disk_available_warning_ratio.is_some(),
+            ),
+            (
+                "--alert-disk-available-critical-ratio",
+                self.deprecated_alert_disk_available_critical_ratio
+                    .is_some(),
+            ),
+            (
+                "--alert-cpu-load-warning",
+                self.deprecated_alert_cpu_load_warning.is_some(),
+            ),
+            (
+                "--alert-cpu-load-critical",
+                self.deprecated_alert_cpu_load_critical.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, present)| present.then_some(field))
+        .collect()
     }
 }
 
@@ -718,22 +729,27 @@ async fn main() -> Result<()> {
         .init();
 
     let mut args = Args::parse();
-    // Keep the non-suite startup policy as the hot-reload baseline. Suite
-    // values are applied on every read, so deleting a suite key restores the
-    // CLI/environment/default value instead of retaining a stale suite value.
-    let fleet_alert_policy = FleetAlertPolicy::new(
-        args.alert_memory_available_warning_ratio,
-        args.alert_memory_available_critical_ratio,
-        args.alert_disk_available_warning_ratio,
-        args.alert_disk_available_critical_ratio,
-        args.alert_cpu_load_warning,
-        args.alert_cpu_load_critical,
-    )?;
+    let deprecated_cli_alert_thresholds = args.deprecated_resource_alert_threshold_fields();
     let suite_config =
         SuiteConfig::load_optional(&args.suite_config).map_err(anyhow::Error::msg)?;
+    let deprecated_toml_alert_thresholds = suite_config
+        .api
+        .deprecated_resource_alert_threshold_fields();
     remember_suite_config(&args.suite_config, &suite_config);
     args.apply_suite_config(&suite_config)
         .map_err(anyhow::Error::msg)?;
+    if !deprecated_cli_alert_thresholds.is_empty() {
+        warn!(
+            fields = ?deprecated_cli_alert_thresholds,
+            "legacy CLI/environment resource alert threshold settings are ignored; configure enabled resource threshold policies in Observability / Alerts"
+        );
+    }
+    if !deprecated_toml_alert_thresholds.is_empty() {
+        warn!(
+            fields = ?deprecated_toml_alert_thresholds,
+            "legacy TOML resource alert threshold settings are ignored; remove them and configure enabled resource threshold policies in Observability / Alerts"
+        );
+    }
     info!(
         version = build_info::release_version(),
         release_tag = ?build_info::release_tag(),
@@ -742,6 +758,9 @@ async fn main() -> Result<()> {
     );
     reject_api_privilege_verifier_env()?;
     let repo = Repository::connect(args.postgres_url.as_deref(), &args.migrations_dir).await?;
+    repo.reconcile_operational_alerts()
+        .await
+        .context("failed to initialize operational Fleet-alert lifecycle")?;
     let (events, ws_invalidations) = WsEventBus::new(256);
     let internal_token = required_internal_token(args.internal_token.as_deref())?;
     let gateway = GatewayDispatchClient::new_with_timeouts(
@@ -764,14 +783,6 @@ async fn main() -> Result<()> {
     );
     let update_release_policy =
         UpdateReleasePolicy::new(args.agent_update_allowed_channels.clone())?;
-    FleetAlertPolicy::new(
-        args.alert_memory_available_warning_ratio,
-        args.alert_memory_available_critical_ratio,
-        args.alert_disk_available_warning_ratio,
-        args.alert_disk_available_critical_ratio,
-        args.alert_cpu_load_warning,
-        args.alert_cpu_load_critical,
-    )?;
     info!(
         allowed_channels = args.agent_update_allowed_channels.len(),
         "agent update release policy configured"
@@ -783,7 +794,6 @@ async fn main() -> Result<()> {
         gateway,
         backup_object_store: Some(backup_object_store),
         update_release_policy,
-        fleet_alert_policy,
         job_output_artifact_min_bytes: args.job_output_artifact_min_bytes,
         artifact_max_bytes: args.artifact_max_bytes,
         require_registered_agent_updates: args.require_registered_agent_updates,
@@ -826,6 +836,10 @@ async fn main() -> Result<()> {
     job_dispatcher::spawn_job_dispatcher(state.clone());
     network_ospf_controller::spawn_automatic_ospf_controller(state.clone());
     spawn_policy_evaluator(
+        state.repo.clone(),
+        args.policy_evaluation_interval_secs.clamp(5, 3600),
+    );
+    spawn_operational_alert_reconciler(
         state.repo.clone(),
         args.policy_evaluation_interval_secs.clamp(5, 3600),
     );
@@ -894,6 +908,22 @@ fn spawn_policy_evaluator(repo: Repository, interval_secs: u64) {
             ticker.tick().await;
             if let Err(error) = repo.evaluate_policy_rules().await {
                 tracing::warn!(%error, "failed to evaluate fleet alert policies");
+            }
+        }
+    });
+}
+
+fn spawn_operational_alert_reconciler(repo: Repository, interval_secs: u64) {
+    tokio::spawn(async move {
+        let mut ticker = time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        // Startup reconciliation completed synchronously before the listener was
+        // bound, so avoid an immediate duplicate pass.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(error) = repo.reconcile_operational_alerts().await {
+                tracing::warn!(%error, "failed to reconcile operational Fleet-alert lifecycle");
             }
         }
     });

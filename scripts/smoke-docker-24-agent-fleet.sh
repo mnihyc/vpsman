@@ -505,7 +505,7 @@ smoke_fleet_log "validating alert notification, network plan, backup metadata, a
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
   --selector 'tag:role:edge' \
-  --rule 'cpu.load_1 >= 0.5' \
+  --rule 'cpu.utilization_ratio >= 0.75' \
   --severity warning \
   --notes docker-fleet-live-review \
   --confirmed)"
@@ -514,7 +514,7 @@ jq -e '
   .selector_expression == "tag:role:edge" and
   .enabled == true and
   (.rules | length) == 1 and
-  .rules[0].condition_expression == "cpu.load_1 >= 0.5"
+  .rules[0].condition_expression == "cpu.utilization_ratio >= 0.75"
 ' <<<"$alert_policy_json" >/dev/null
 
 alert_notification_channel_json="$(vpsctl_json fleet-alert-notification-channel-upsert \

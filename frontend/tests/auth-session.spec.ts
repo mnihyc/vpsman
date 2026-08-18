@@ -416,7 +416,7 @@ async function installAuthSessionApiMock(
       });
       return;
     }
-    const available = <T,>(data: T) => ({ data, error: null });
+    const available = <T>(data: T) => ({ data, error: null });
     const unavailable = (error: string) => ({ data: null, error });
     await route.fulfill({
       contentType: "application/json",
@@ -526,6 +526,7 @@ async function installAuthSessionApiMock(
         "fleet_alert_policies",
         "fleet_alert_states",
         "fleet_alerts",
+        "current_policy_alerts",
         "policy_alerts",
         "traffic_accounting",
         "vps_rule_values",
@@ -534,6 +535,7 @@ async function installAuthSessionApiMock(
       ]) {
         response[key] = available([]);
       }
+      response.current_policy_alerts_truncated = false;
     }
     await route.fulfill({ contentType: "application/json", json: response });
   });

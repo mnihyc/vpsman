@@ -114,7 +114,7 @@ export const viewSubpages: Record<ActiveView, readonly ConsoleSubpage[]> = {
     {
       id: "alerts",
       label: "Alerts",
-      description: "Active fleet-resource alert queue and triage",
+      description: "Operational and policy-issued fleet alert triage",
     },
     {
       id: "instance_detail",
@@ -505,10 +505,6 @@ export const FLEET_DETAIL_LIMIT = 200;
 export const FLEET_TELEMETRY_SNAPSHOT_LIMIT = 5_000;
 export const HISTORY_DETAIL_LIMIT = 1_000;
 export const TOPOLOGY_EVIDENCE_LIMIT = 50;
-
-export function isActionableFleetAlertState(operatorState: string): boolean {
-  return operatorState === "open" || operatorState === "escalated";
-}
 
 export function formatBoundedCount(value: number, truncated = false): string {
   return `${value}${truncated ? "+" : ""}`;

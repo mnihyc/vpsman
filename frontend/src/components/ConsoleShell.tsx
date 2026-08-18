@@ -1139,10 +1139,10 @@ export function ConsoleShell({
                 {!fleetAlertsEvidenceAvailable
                   ? "Alert evidence unavailable"
                   : alertCounts.total > 0
-                    ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} open · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
+                    ? `${formatLowerBoundCount(alertCounts.total, alertCounts.truncated)} actionable · ${alertCounts.critical} critical · ${alertCounts.warning} warning · ${alertCounts.info} info${alertCounts.truncated ? " in loaded alerts" : ""}`
                     : alertCounts.truncated
                       ? "No matching alerts in the loaded page · more may exist"
-                      : "No active alerts"}
+                      : "No actionable alerts"}
               </span>
               <small
                 className={fleetCoreEvidenceAvailable ? undefined : "unknown"}

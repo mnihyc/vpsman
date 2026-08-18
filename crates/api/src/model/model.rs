@@ -30,8 +30,22 @@ pub(crate) struct FleetSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertLifecycleView {
+    pub(crate) state: String,
+    pub(crate) trigger_generation: i64,
+    pub(crate) triggered_at: String,
+    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) resolved_at: Option<String>,
+    pub(crate) resolution_reason: Option<String>,
+    pub(crate) resolution_note: Option<String>,
+    pub(crate) resolution_actor_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct FleetAlertView {
     pub(crate) id: String,
+    pub(crate) record_kind: String,
+    pub(crate) lifecycle: FleetAlertLifecycleView,
     pub(crate) severity: String,
     pub(crate) category: String,
     pub(crate) target_kind: String,
@@ -50,6 +64,37 @@ pub(crate) struct FleetAlertView {
     pub(crate) state_updated_at: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OperationalAlertEpisodeRecord {
+    pub(crate) id: Uuid,
+    pub(crate) public_id: String,
+    pub(crate) producer_kind: String,
+    pub(crate) natural_key: String,
+    pub(crate) record_kind: String,
+    pub(crate) trigger_generation: i64,
+    pub(crate) trigger_severity: String,
+    pub(crate) trigger_category: String,
+    pub(crate) severity: String,
+    pub(crate) category: String,
+    pub(crate) target_kind: String,
+    pub(crate) target_id: String,
+    pub(crate) client_id: Option<String>,
+    pub(crate) title: String,
+    pub(crate) detail: String,
+    pub(crate) source_status: String,
+    pub(crate) evidence: serde_json::Value,
+    pub(crate) lifecycle_state: String,
+    pub(crate) triggered_at: String,
+    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) resolved_at: Option<String>,
+    pub(crate) resolution_reason: Option<String>,
+    pub(crate) resolution_note: Option<String>,
+    pub(crate) resolution_actor_id: Option<Uuid>,
+    pub(crate) backfilled: bool,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct FleetAlertQuery {
     pub(crate) limit: Option<i64>,
@@ -58,6 +103,44 @@ pub(crate) struct FleetAlertQuery {
     pub(crate) category: Option<String>,
     pub(crate) operator_state: Option<String>,
     pub(crate) include_muted: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FleetAlertHistoryQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) severity: Option<String>,
+    pub(crate) category: Option<String>,
+    pub(crate) operator_state: Option<String>,
+    pub(crate) include_muted: Option<bool>,
+    pub(crate) start_unix: Option<u64>,
+    pub(crate) end_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct FleetAlertEventQuery {
+    pub(crate) limit: Option<i64>,
+    pub(crate) cursor: Option<String>,
+    pub(crate) client_id: Option<String>,
+    pub(crate) severity: Option<String>,
+    pub(crate) category: Option<String>,
+    pub(crate) operator_state: Option<String>,
+    pub(crate) include_muted: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertEventPage {
+    pub(crate) items: Vec<FleetAlertView>,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResolveFleetAlertRequest {
+    pub(crate) reason: String,
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -274,11 +357,14 @@ pub(crate) struct TelemetryTunnelAdapterHealthView {
 pub(crate) struct TelemetryTunnelView {
     pub(crate) client_id: String,
     pub(crate) observed_at: String,
+    pub(crate) accepted_at: String,
     pub(crate) interface: String,
     pub(crate) kind: String,
     pub(crate) ownership_mode: String,
     pub(crate) mutation_policy: String,
     pub(crate) plan_id: Option<Uuid>,
+    pub(crate) topology_identity_hash: Option<String>,
+    pub(crate) runtime_evidence_identity_hash: Option<String>,
     pub(crate) plan_name: Option<String>,
     pub(crate) plan_runtime_manager: Option<String>,
     pub(crate) endpoint_side: Option<String>,

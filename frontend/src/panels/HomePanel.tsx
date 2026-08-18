@@ -19,10 +19,8 @@ import { ActionFeedback } from "../components/ActionFeedback";
 import { VpsCombobox } from "../components/VpsCombobox";
 import type { SnapshotSource } from "../homeSnapshot";
 import { agentDisplayState } from "../agentDisplayState";
-import {
-  formatLowerBoundCount,
-  isActionableFleetAlertState,
-} from "../constants";
+import { formatLowerBoundCount } from "../constants";
+import { alertCategoryLabel, presentFleetAlert } from "../alertPresentation";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -226,8 +224,8 @@ export function HomePanel({
   const activeTransfers = fileTransfers.filter((transfer) =>
     isActiveTransferStatus(transfer.status),
   ).length;
-  const activeAlerts = fleetAlerts.filter((alert) =>
-    isActionableFleetAlertState(alert.operator_state),
+  const activeAlerts = fleetAlerts.filter(
+    (alert) => presentFleetAlert(alert).actionable,
   );
   const criticalAlerts = activeAlerts.filter(
     (alert) => alert.severity === "critical",
@@ -251,34 +249,22 @@ export function HomePanel({
     () =>
       buildAttentionItems({
         agents,
-        backups,
         fileTransfers,
         fleetAlerts,
-        jobs,
-        onOpenBackup,
         onOpenFleetAlerts,
-        onOpenJobDetails,
         onOpenNetworkEvidence,
         onOpenTransfers,
         onOpenSystemCapacity,
-        onOpenVpsDetail,
-        scopeFiltered,
         systemDashboard,
       }),
     [
       agents,
-      backups,
       fileTransfers,
       fleetAlerts,
-      jobs,
-      onOpenBackup,
       onOpenFleetAlerts,
-      onOpenJobDetails,
       onOpenNetworkEvidence,
       onOpenTransfers,
       onOpenSystemCapacity,
-      onOpenVpsDetail,
-      scopeFiltered,
       systemDashboard,
     ],
   );
@@ -341,10 +327,8 @@ export function HomePanel({
       buildRecentFailureItems({
         backups,
         fileTransfers,
-        fleetAlerts,
         jobs,
         onOpenBackups,
-        onOpenFleetAlerts,
         onOpenJobDetails,
         onOpenTransfers,
         scopeFiltered,
@@ -352,10 +336,8 @@ export function HomePanel({
     [
       backups,
       fileTransfers,
-      fleetAlerts,
       jobs,
       onOpenBackups,
-      onOpenFleetAlerts,
       onOpenJobDetails,
       onOpenTransfers,
       scopeFiltered,
@@ -596,7 +578,7 @@ export function HomePanel({
                 ? `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
                 : "Fleet alert evidence is unavailable"
             }
-            label="Open alerts"
+            label="Actionable alerts"
             tone={
               !fleetAlertsEvidenceAvailable
                 ? "neutral"
@@ -694,6 +676,7 @@ export function HomePanel({
           failedJobCount={failedJobs}
           fileTransfers={fileTransfers}
           fleetAlerts={fleetAlerts}
+          fleetAlertsEvidenceAvailable={fleetAlertsEvidenceAvailable}
           jobs={jobs}
           initialMonitoringCards={initialMonitoringCards}
           maxCards={8}
@@ -760,7 +743,7 @@ export function HomePanel({
             emptyIcon={<ShieldAlert size={18} />}
             emptyText={
               homeEvidenceComplete
-                ? "No recent failures or unacknowledged warning alerts in loaded records."
+                ? "No recent failed work or transfer outcomes in loaded records."
                 : "No recent issues found in available evidence; some home sources are unavailable."
             }
             evidenceComplete={homeEvidenceComplete}
@@ -768,8 +751,8 @@ export function HomePanel({
             items={recentFailureItems}
             subtitle={
               scopeFiltered
-                ? "Scoped failures and alerts, plus fleet-wide failed jobs routed to their owner pages."
-                : "Failed work and active warning alerts routed to their owner pages."
+                ? "Scoped failed work and transfer outcomes, plus fleet-wide failed jobs routed to their owner pages."
+                : "Historical failed work and transfer outcomes routed to their owner pages."
             }
             title="Recent issues"
           />
@@ -785,8 +768,8 @@ export function HomePanel({
                 <h2 id="home-attention-title">Needs attention</h2>
                 <span>
                   {scopeFiltered
-                    ? "Scoped VPS evidence plus fleet-wide job and control-plane risks."
-                    : "Failed work, stale agents, backup risk, degraded network, and access capability gaps."}
+                    ? "Scoped actionable alert lifecycles plus transfer and control-plane risks."
+                    : "Actionable alert lifecycles, transfer failures, and control-plane risks."}
                 </span>
               </div>
               <ConsoleStatusBadge
@@ -907,6 +890,7 @@ export function HomePanel({
         <HomeTelemetryPanel
           agents={agents}
           error={telemetryError}
+          includeGlobalAlerts={!scopeFiltered}
           loading={telemetryLoading}
           onNavigate={onDashboardNavigate}
           onPreferencesChange={onDashboardPreferencesChange}
@@ -1015,40 +999,28 @@ function HomeActionPanel({
 
 function buildAttentionItems({
   agents,
-  backups,
   fileTransfers,
   fleetAlerts,
-  jobs,
-  onOpenBackup,
   onOpenFleetAlerts,
-  onOpenJobDetails,
   onOpenNetworkEvidence,
   onOpenTransfers,
   onOpenSystemCapacity,
-  onOpenVpsDetail,
-  scopeFiltered,
   systemDashboard,
 }: {
   agents: AgentView[];
-  backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
-  jobs: JobHistoryRecord[];
-  onOpenBackup: (agent: AgentView) => void;
   onOpenFleetAlerts: () => void;
-  onOpenJobDetails: (jobId: string) => void;
   onOpenNetworkEvidence: (agent?: AgentView) => void;
   onOpenTransfers: () => void;
   onOpenSystemCapacity: () => void;
-  onOpenVpsDetail: (agent: AgentView) => void;
-  scopeFiltered: boolean;
   systemDashboard: SystemDashboardRecord | null;
 }): HomeActionItem[] {
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const alertItems = fleetAlerts
     .filter(
       (alert) =>
-        isActionableFleetAlertState(alert.operator_state) &&
+        presentFleetAlert(alert).actionable &&
         (alert.severity === "critical" || alert.severity === "warning"),
     )
     .map((alert) => {
@@ -1056,11 +1028,11 @@ function buildAttentionItems({
         ? agentById.get(alert.client_id)
         : undefined;
       return {
-        detail: `${alert.category} / ${alert.client_id ? displayNameOrUnnamed(alertAgent?.display_name ?? alert.client_id) : alert.target_id}`,
+        detail: `${alertCategoryLabel(alert.category)} / ${alert.client_id ? displayNameOrUnnamed(alertAgent?.display_name ?? alert.client_id) : alert.target_id}`,
         id: `alert:${alert.id}`,
         label: alert.title,
-        meta: formatCompactTime(alert.observed_at),
-        metaTitle: formatFullTime(alert.observed_at),
+        meta: formatCompactTime(alert.lifecycle.triggered_at),
+        metaTitle: formatFullTime(alert.lifecycle.triggered_at),
         onOpen:
           alert.category === "network"
             ? () => onOpenNetworkEvidence(alertAgent)
@@ -1068,47 +1040,6 @@ function buildAttentionItems({
         tone: alert.severity === "critical" ? "critical" : "warning",
       } satisfies HomeActionItem;
     });
-  const agentItems = agents
-    .map((agent) => ({ agent, displayState: agentDisplayState(agent) }))
-    .filter(
-      ({ agent, displayState }) =>
-        displayState.label !== "Online" ||
-        agent.stale_since ||
-        agent.capabilities.privilege_mode === "unknown",
-    )
-    .map(
-      ({ agent, displayState }) =>
-        ({
-          detail:
-            agent.stale_reason ??
-            `${displayState.detail}; privilege ${agent.capabilities.privilege_mode}`,
-          id: `agent:${agent.id}`,
-          label: `${displayNameOrUnnamed(agent.display_name)} needs review`,
-          meta: agent.last_seen_at
-            ? formatCompactTime(agent.last_seen_at)
-            : "no heartbeat",
-          metaTitle: agent.last_seen_at
-            ? formatFullTime(agent.last_seen_at)
-            : undefined,
-          onOpen: () => onOpenVpsDetail(agent),
-          tone: displayState.label === "Offline" ? "critical" : "warning",
-        }) satisfies HomeActionItem,
-    );
-  const jobItems = jobs
-    .filter((job) => isFailedJobStatus(job.status))
-    .map(
-      (job) =>
-        ({
-          detail: `${job.command_type} / ${job.target_count} target${job.target_count === 1 ? "" : "s"}`,
-          id: `job:${job.id}`,
-          label: `${scopeFiltered ? "Fleet job" : "Job"} ${shortId(job.id)} failed`,
-          labelTitle: `${scopeFiltered ? "Fleet job" : "Job"} ${job.id} failed`,
-          meta: formatCompactTime(job.completed_at ?? job.created_at),
-          metaTitle: formatFullTime(job.completed_at ?? job.created_at),
-          onOpen: () => onOpenJobDetails(job.id),
-          tone: "critical",
-        }) satisfies HomeActionItem,
-    );
   const transferItems = fileTransfers
     .filter(
       (transfer) =>
@@ -1127,33 +1058,11 @@ function buildAttentionItems({
           tone: transfer.status === "unknown" ? "warning" : "critical",
         }) satisfies HomeActionItem,
     );
-  const backupItems = backups
-    .filter((backup) => isFailedBackupStatus(backup.status))
-    .map((backup) => {
-      const agent = agentById.get(backup.client_id);
-      return {
-        detail: `${displayNameOrUnnamed(agent?.display_name ?? backup.client_id)} / ${backup.paths.join(", ")}`,
-        id: `backup:${backup.id}`,
-        label: `Backup ${shortId(backup.id)} failed`,
-        labelTitle: `Backup ${backup.id} failed`,
-        meta: formatCompactTime(backup.created_at),
-        metaTitle: formatFullTime(backup.created_at),
-        onOpen: () => (agent ? onOpenBackup(agent) : undefined),
-        tone: "critical",
-      } satisfies HomeActionItem;
-    });
   const systemItems = buildSystemAttentionItems(
     systemDashboard,
     onOpenSystemCapacity,
   );
-  return [
-    ...alertItems,
-    ...agentItems,
-    ...jobItems,
-    ...transferItems,
-    ...backupItems,
-    ...systemItems,
-  ]
+  return [...alertItems, ...transferItems, ...systemItems]
     .sort(compareAttentionItems)
     .slice(0, 8);
 }
@@ -1306,20 +1215,16 @@ function buildRunningWorkItems({
 function buildRecentFailureItems({
   backups,
   fileTransfers,
-  fleetAlerts,
   jobs,
   onOpenBackups,
-  onOpenFleetAlerts,
   onOpenJobDetails,
   onOpenTransfers,
   scopeFiltered,
 }: {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
-  fleetAlerts: FleetAlertRecord[];
   jobs: JobHistoryRecord[];
   onOpenBackups: () => void;
-  onOpenFleetAlerts: () => void;
   onOpenJobDetails: (jobId: string) => void;
   onOpenTransfers: () => void;
   scopeFiltered: boolean;
@@ -1372,25 +1277,7 @@ function buildRecentFailureItems({
           tone: "critical",
         }) satisfies HomeActionItem,
     );
-  const alertItems = fleetAlerts
-    .filter(
-      (alert) =>
-        isActionableFleetAlertState(alert.operator_state) &&
-        (alert.severity === "critical" || alert.severity === "warning"),
-    )
-    .map(
-      (alert) =>
-        ({
-          detail: `${readableAlertCategory(alert.category)} / ${alert.client_id ?? alert.target_id}`,
-          id: `failure-alert:${alert.id}`,
-          label: alert.title,
-          meta: formatCompactTime(alert.observed_at),
-          metaTitle: formatFullTime(alert.observed_at),
-          onOpen: onOpenFleetAlerts,
-          tone: alert.severity === "critical" ? "critical" : "warning",
-        }) satisfies HomeActionItem,
-    );
-  return [...jobItems, ...transferItems, ...backupItems, ...alertItems]
+  return [...jobItems, ...transferItems, ...backupItems]
     .sort(compareAttentionItems)
     .slice(0, 6);
 }
@@ -1594,11 +1481,4 @@ function readableTransferStatus(status: string) {
     unknown: "status unknown",
   };
   return labels[status] ?? status.replace(/_/g, " ");
-}
-
-function readableAlertCategory(category: string) {
-  return category
-    .replace(/_/g, " ")
-    .replace(/\bospf\b/gi, "OSPF")
-    .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
 }

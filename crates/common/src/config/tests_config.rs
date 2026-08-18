@@ -252,6 +252,7 @@ fn explicit_agent_builtin_plan_needs_no_adapter_snapshot() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
         builtin_credentials: None,
@@ -269,6 +270,7 @@ fn stateful_builtin_runtime_plans_require_uuid_identity() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: None,
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan,
         builtin_credentials: None,
@@ -295,6 +297,7 @@ fn runtime_config_rejects_driver_options_on_the_wrong_tunnel_kind() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan,
         builtin_credentials: None,
@@ -315,6 +318,7 @@ fn custom_adapter_plan_requires_the_bound_adapter_snapshot() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan: plan.clone(),
         builtin_credentials: None,
@@ -346,6 +350,7 @@ fn observed_plan_rejects_an_adapter_snapshot() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
         builtin_credentials: None,
@@ -365,6 +370,7 @@ fn observed_plan_reconcile_does_not_require_mutation() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::ExternalObserved),
         builtin_credentials: None,
@@ -382,6 +388,7 @@ fn managed_plan_reconcile_requires_mutation() {
     config.network.runtime_status_telemetry_plans = vec![AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan: explicit_plan(RuntimeTunnelManager::AgentBuiltin),
         builtin_credentials: None,

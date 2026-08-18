@@ -86,14 +86,22 @@ remains the raw audit/export representation.
 | Aggregate reported-filesystem disk used | `(summed total - summed available) / summed total` per accepted snapshot, then sample-weighted average and maximum across the interval. Capacity maximum and availability average/minimum remain separate evidence. | This is an aggregate of reported filesystems, not a root-volume or quota claim. |
 | TCP/UDP sockets | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry. | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
-The Linux disk collector ignores pseudo filesystems, deduplicates repeated
-source/filesystem pairs, and sums the filesystems it reports. A custom metrics
-provider can replace or augment the Linux snapshot under the configured agent
-contract. A replacement must provide the required load, core, memory, disk, and
-network fields; CPU utilization remains optional. A core procfs or custom-source
-failure rejects that collection so previous evidence ages naturally. A failure
-limited to optional `/proc/stat` utilization resets its delta baseline and leaves
-that field unavailable without discarding otherwise valid telemetry.
+The Linux disk collector ignores non-storage pseudo filesystems, including
+`nsfs` network-namespace handles and Docker `overlay`/`fuse-overlayfs` layers,
+before filesystem inspection. It deduplicates repeated source/filesystem pairs
+and inspects each remaining mount independently.
+A malformed, vanished, or inaccessible mount is reported by the agent but does
+not discard successfully inspected filesystems or the CPU, memory, network, and
+uptime evidence in that sample. No placeholder disk capacity is fabricated; if
+the inventory itself is unavailable, the sample carries no reported disk.
+
+A custom metrics provider can replace or augment the Linux snapshot under the
+configured agent contract. A replacement must provide the required load, core,
+memory, disk, and network fields; CPU utilization remains optional. Other core
+procfs or custom-source failures still reject their atomic source collection so
+previous evidence ages naturally. A failure limited to optional `/proc/stat`
+utilization resets its delta baseline and leaves that field unavailable without
+discarding otherwise valid telemetry.
 
 Cards pair exact CPU, RAM, disk, and load values with proportional tracks or
 small histories. Neutral colors stay stable; warning and danger states come from
@@ -413,17 +421,78 @@ Ping target names appear as entered.
 
 ## Fleet Alert Read-Model Bounds
 
-Fleet alerts are a bounded operational read model, not an unbounded history
-export. The API combines current agent and resource snapshots with at most 200
-matching candidates from each durable event source. Client, category, severity,
-and dashboard-time filters are applied by the source before that horizon. The
-combined result is then merged with operator state, ordered, and limited to the
-requested page.
+Fleet alerts are two bounded, unified read models rather than one active working
+set or an unbounded export:
 
-When any source reaches its horizon, dashboard responses mark the affected
-counts as truncated and the console renders them as lower bounds (`200+` or
-`≥200`) instead of presenting an exact total. An `operator_state` filter applies
-to this same bounded active-alert working set. Use the fleet-alert-state ledger
-for each alert's current durable triage state, the audit log for triage
-transitions, and the owning policy, job, backup, or network workflow for older
-event history.
+- `GET /api/v1/fleet-alerts` returns current, unresolved condition and event
+  episodes. Triggered and Persisting are active. Unknown conditions remain
+  visible as current but are inactive. Resolved episodes are not current.
+- `GET /api/v1/fleet-alert-history` applies the same filters and returns all
+  lifecycle states, including Resolved episodes.
+- `GET /api/v1/fleet-alert-events` is a dedicated manual review feed for
+  unresolved operational events. It orders by `triggered_at DESC, episode UUID
+  DESC` and returns `{items,next_cursor,has_more}` with an opaque exclusive
+  cursor. Filters and triage are applied before pagination.
+
+Both endpoints merge every operational category with policy conditions before
+one source-independent order and cap. Current ordering puts active episodes
+first. Filtering and the final cap are part of the query contract; the UI must
+not reconstruct current state from history or infer a cap merely because the
+returned array happens to equal a familiar page size.
+
+Full fleet snapshots expose the sources separately as `fleet_alerts` and
+`fleet_alert_history`, with independent availability envelopes and explicit
+`fleet_alerts_truncated` and `fleet_alert_history_truncated` sentinels. The Home
+snapshot carries `fleet_alerts_truncated` for its current source as well. A
+truncated source is rendered as a lower bound (`200+` or `≥200`); an unavailable
+source is rendered as unavailable, never as an exact zero. Current rows are
+discarded when their source is unavailable so stale evidence is not promoted to
+current state. Retained history may remain visible with an explicit stale or
+unavailable warning.
+
+The console never polls or uncaps the event review feed. When the unified
+current snapshot is capped or unavailable, an operator can explicitly **Load
+older current incidents**. Pages are merged by stable alert ID and the fresher
+unified snapshot wins any duplicate. An explicit terminal cursor is distinct
+from source failure. After reaching it, **Refresh unresolved occurrences**
+atomically replaces the prior cursor walk from page one, so incidents resolved
+elsewhere disappear and new incidents beyond the unified cap remain
+discoverable.
+
+An episode has a required `record_kind` (`condition` or `event`) and required
+lifecycle with Triggered, Persisting, Unknown, or Resolved state, generation,
+and causal timestamps. Structurally impossible combinations fail closed in the
+console: they are malformed, inactive, non-actionable, and non-resolvable.
+Operational event incidents can be resolved explicitly only while Triggered or
+Persisting and require a separately confirmed reason. Conditions recover or
+leave scope from producer evidence and cannot be manually resolved.
+
+Lifecycle and operator triage are independent. Active means Triggered or
+Persisting; actionable means active with Open or Escalated triage. Unknown
+conditions can still be acknowledged, muted, escalated, or reset because they
+remain current, but they are not active. The API triage action `clear` is shown
+as **Reset triage to Open** and does not resolve lifecycle state. The
+`fleet_alert_states` ledger is the durable triage source and can include legacy
+or orphan records; it is not a visible lifecycle count. Audit records retain
+triage transitions and explicit incident resolutions.
+
+Triage and explicit resolution controls require Operator or Admin role plus
+`fleet:read`, `backups:read`, and `integrations:write` (or `*`). Other readers
+get a labelled read-only lifecycle view rather than enabled controls that fail
+only after submission.
+
+Hidden or deleted subjects are not removed client-side from current event
+incidents or history. Conditions leave scope server-side, while unresolved
+event incidents and resolved history retain their target identity so they stay
+visible and, when authorized, resolvable. Backend authorization remains the
+scope boundary.
+When a Fleet scope is active, `client_id=null` global job episodes are excluded
+from scoped shell and Home counts/lists, matching backend `include_global=false`;
+they are not silently attributed to every tag or provider scope.
+
+Triggered and Resolved lifecycle edges can fire expression webhooks. Delivery
+is at least once and paired edges may arrive out of order; consumers merge by
+episode UUID, generation, lifecycle state, and causal timestamps rather than
+HTTP arrival order. Persisting and Unknown do not emit lifecycle edges. See
+`docs/target-selectors.md` for the all-category source matrix, exact resolution
+reasons, predicates, payload fields, and compatibility aliases.

@@ -33,6 +33,7 @@
 /PROGRESS.md
 /PRODUCT.md
 /DESIGN.md
+/DEVELOPMENT.md
 *.patch
 
 # Local snapshots of intermediary agent/design notes.

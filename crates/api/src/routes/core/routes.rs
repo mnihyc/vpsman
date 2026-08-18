@@ -11,11 +11,12 @@ use crate::{
         bulk_unset_vps_rules, bulk_upsert_vps_rules, delete_fleet_alert_notification_channel,
         delete_fleet_alert_policy, dispatch_fleet_alert_notifications, dry_run_fleet_alert_policy,
         dry_run_vps_rules, export_fleet_alerts, get_effective_vps_rules, get_fleet_alert_policy,
-        get_traffic_accounting, list_fleet_alert_notification_channels,
-        list_fleet_alert_notifications, list_fleet_alert_policies, list_fleet_alert_states,
-        list_fleet_alerts, list_policy_alerts, list_traffic_accounting, list_vps_rules,
-        process_fleet_alert_notifications, update_fleet_alert_state,
-        upsert_fleet_alert_notification_channel, upsert_fleet_alert_policy,
+        get_traffic_accounting, list_fleet_alert_events, list_fleet_alert_history,
+        list_fleet_alert_notification_channels, list_fleet_alert_notifications,
+        list_fleet_alert_policies, list_fleet_alert_states, list_fleet_alerts, list_policy_alerts,
+        list_traffic_accounting, list_vps_rules, process_fleet_alert_notifications,
+        resolve_fleet_alert, update_fleet_alert_state, upsert_fleet_alert_notification_channel,
+        upsert_fleet_alert_policy,
     },
     routes_auth::{
         bootstrap_operator, bootstrap_status, clear_operator_totp, confirm_operator_totp,
@@ -237,6 +238,12 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/v1/fleet/summary", get(fleet_summary))
         .route("/api/v1/fleet/snapshot", get(fleet_snapshot))
         .route("/api/v1/fleet-alerts", get(list_fleet_alerts))
+        .route("/api/v1/fleet-alert-events", get(list_fleet_alert_events))
+        .route("/api/v1/fleet-alert-history", get(list_fleet_alert_history))
+        .route(
+            "/api/v1/fleet-alerts/{alert_id}/resolve",
+            post(resolve_fleet_alert),
+        )
         .route("/api/v1/fleet-alerts/export", get(export_fleet_alerts))
         .route(
             "/api/v1/fleet-alert-states",

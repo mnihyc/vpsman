@@ -1030,6 +1030,11 @@ function isEventPredicate(raw: string): boolean {
     lower === "vps.tag_changed" ||
     lower === "job.created" ||
     lower === "alert.open" ||
+    lower === "alert.triggered" ||
+    lower === "alert.policy_triggered" ||
+    lower === "alert.policy_resolved" ||
+    lower === "alert.policy_reached" ||
+    lower === "alert.resolved" ||
     lower === "telemetry.rollup" ||
     lower === "telemetry.network_rate" ||
     lower === "telemetry.tunnel"

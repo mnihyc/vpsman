@@ -549,7 +549,7 @@ impl Repository {
                     UPDATE fleet_tag_settings
                     SET value_json = to_jsonb($2::boolean),
                         updated_by = $3,
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE setting_key = $1
                     "#,
                 )
@@ -1319,6 +1319,16 @@ impl Repository {
                     }),
                     created_at: deleted_at.clone(),
                 });
+                self.reconcile_memory_agent_alert_transition(client_id, "deleted", &deleted_at)
+                    .await?;
+                let mut affected_tunnel_clients = retired_tunnel_endpoint_pairs
+                    .iter()
+                    .flat_map(|(left, right)| [left.clone(), right.clone()])
+                    .collect::<Vec<_>>();
+                affected_tunnel_clients.sort();
+                affected_tunnel_clients.dedup();
+                self.reconcile_memory_tunnel_alerts_for_clients(&affected_tunnel_clients)
+                    .await?;
                 Ok(DeleteAgentResult {
                     client_id: client_id.to_string(),
                     deleted_at,
@@ -1474,16 +1484,33 @@ impl Repository {
                     .into_iter()
                     .map(|row| {
                         Ok((
-                            row.try_get("left_client_id")?,
-                            row.try_get("right_client_id")?,
+                            row.try_get::<String, _>("left_client_id")?,
+                            row.try_get::<String, _>("right_client_id")?,
                         ))
                     })
                     .collect::<Result<Vec<_>>>()?;
+                let mut affected_tunnel_clients = retired_tunnel_endpoint_pairs
+                    .iter()
+                    .flat_map(|(left, right)| [left.clone(), right.clone()])
+                    .collect::<Vec<_>>();
+                affected_tunnel_clients.sort();
+                affected_tunnel_clients.dedup();
                 let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
                     &mut tx,
                     client_id,
                     "vps_deleted",
                     "vps_deleted: target skipped before dispatch",
+                )
+                .await?;
+                crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+                    &mut tx,
+                    client_id,
+                    "deleted",
+                )
+                .await?;
+                crate::repository_operational_alerts::reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &affected_tunnel_clients,
                 )
                 .await?;
                 sqlx::query(

@@ -682,6 +682,7 @@ export type PolicyGroupRecord = {{
   matched_vps_count: number;
   rule_count: number;
   enabled_rule_count: number;
+  active_info_count: number;
   active_warning_count: number;
   active_critical_count: number;
   incomplete_vps_count: number;
@@ -776,6 +777,10 @@ export type PolicyAlertRecord = {{
   actual_value: number | null;
   threshold_value: number | null;
   payload: GeneratedJsonValue;
+  lifecycle_state: "triggered" | "persisting" | "unknown" | "resolved" | string;
+  last_confirmed_at: string | null;
+  resolved_at: string | null;
+  resolution_reason: string | null;
   observed_at: string;
   created_at: string;
 }};

@@ -58,3 +58,23 @@ pub fn tunnel_topology_identity_hash(plan_id: uuid::Uuid, plan: &TunnelPlan) -> 
     .expect("topology identity payload serializes");
     crate::payload_hash(&payload)
 }
+
+/// Stable identity for the complete runtime-tunnel configuration that can
+/// affect adapter and traffic evidence. Unlike the topology identity above,
+/// this intentionally changes for policy/runtime-control edits and builtin
+/// credential rotation. A telemetry sample carrying this identity therefore
+/// proves that the agent received the exact desired runtime configuration.
+pub fn tunnel_runtime_evidence_identity_hash(
+    plan_id: uuid::Uuid,
+    plan: &TunnelPlan,
+    credential_generation: Option<u64>,
+) -> String {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "schema": 1,
+        "plan_id": plan_id.to_string(),
+        "plan": plan,
+        "builtin_credential_generation": credential_generation,
+    }))
+    .expect("runtime evidence identity payload serializes");
+    crate::payload_hash(&payload)
+}

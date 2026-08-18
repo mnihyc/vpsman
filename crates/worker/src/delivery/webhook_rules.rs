@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -133,6 +133,8 @@ struct VpsRow {
     stale_since: Option<String>,
     stale_reason: Option<String>,
     capabilities: Value,
+    #[serde(skip)]
+    retained_tombstone: bool,
     #[serde(skip)]
     vps_rules: VpsRuleContext,
 }
@@ -399,9 +401,10 @@ fn validated_rule_expression(rule: &RuleRow) -> Result<Expression> {
     Ok(expression)
 }
 
-async fn list_visible_vps(
+async fn list_event_vps(
     tx: &mut Transaction<'_, Postgres>,
     include_vps_rules: bool,
+    explicit_subject_client_ids: &[String],
 ) -> Result<Vec<VpsRow>> {
     let rows = sqlx::query(
         r#"
@@ -416,14 +419,17 @@ async fn list_visible_vps(
             c.stale_since::text AS stale_since,
             c.stale_reason,
             c.capabilities,
+            c.hidden_at IS NOT NULL AS retained_tombstone,
             COALESCE(array_agg(t.name ORDER BY t.name) FILTER (WHERE t.name IS NOT NULL), ARRAY[]::TEXT[]) AS tags
-        FROM visible_clients c
+        FROM clients c
         LEFT JOIN client_tags ct ON ct.client_id = c.id
         LEFT JOIN tags t ON t.id = ct.tag_id
-        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities
+        WHERE c.hidden_at IS NULL OR c.id = ANY($1::TEXT[])
+        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.internal_build_number, c.stale_since, c.stale_reason, c.capabilities, c.hidden_at
         ORDER BY c.id
         "#,
     )
+    .bind(explicit_subject_client_ids)
     .fetch_all(&mut **tx)
     .await?;
     let mut vps_rows = rows
@@ -443,6 +449,7 @@ async fn list_visible_vps(
                 stale_since: row.try_get("stale_since")?,
                 stale_reason: row.try_get("stale_reason")?,
                 capabilities: capabilities.0,
+                retained_tombstone: row.try_get("retained_tombstone")?,
                 vps_rules: VpsRuleContext::default(),
             })
         })
@@ -450,19 +457,24 @@ async fn list_visible_vps(
     if include_vps_rules && !vps_rows.is_empty() {
         let client_ids = vps_rows
             .iter()
+            .filter(|vps| !vps.retained_tombstone)
             .map(|vps| vps.id.clone())
             .collect::<Vec<_>>();
-        let rows = sqlx::query(
-            r#"
+        let rows = if client_ids.is_empty() {
+            Vec::new()
+        } else {
+            sqlx::query(
+                r#"
             SELECT client_id, key, value_raw, value_json
             FROM vps_rule_values
             WHERE client_id = ANY($1::TEXT[])
             ORDER BY client_id ASC, key ASC
             "#,
-        )
-        .bind(&client_ids)
-        .fetch_all(&mut **tx)
-        .await?;
+            )
+            .bind(&client_ids)
+            .fetch_all(&mut **tx)
+            .await?
+        };
         let by_id = vps_rows
             .iter_mut()
             .map(|vps| (vps.id.clone(), &mut vps.vps_rules))
@@ -568,7 +580,30 @@ pub(crate) async fn insert_webhook_event_in_tx(
     subject_client_ids: &[String],
     payload: Value,
 ) -> Result<bool> {
-    let occurred_at = Utc::now();
+    insert_webhook_event_at_in_tx(
+        tx,
+        kind,
+        event_id,
+        event_predicates,
+        subject_client_ids,
+        payload,
+        Utc::now(),
+    )
+    .await
+}
+
+/// Inserts an event at its authoritative source time. Operational alert
+/// lifecycle edges use this entry point so a worker source transaction has the
+/// same occurrence-time and exact-dedupe contract as the API lifecycle owner.
+pub(crate) async fn insert_webhook_event_at_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    kind: &str,
+    event_id: &str,
+    event_predicates: &[String],
+    subject_client_ids: &[String],
+    payload: Value,
+    occurred_at: DateTime<Utc>,
+) -> Result<bool> {
     create_event_partition_in_tx(tx, occurred_at.date_naive()).await?;
     let predicate_refs = event_predicates
         .iter()
@@ -666,7 +701,16 @@ pub(crate) async fn process_webhook_events(
     let include_vps_rules = validated_rules
         .iter()
         .any(|(_, expression)| expression_references_vps_rules(expression));
-    let vps_rows = list_visible_vps(&mut tx, include_vps_rules).await?;
+    let mut explicit_subject_client_ids = rows
+        .iter()
+        .map(|row| row.try_get::<Vec<String>, _>("subject_client_ids"))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    explicit_subject_client_ids.sort();
+    explicit_subject_client_ids.dedup();
+    let vps_rows = list_event_vps(&mut tx, include_vps_rules, &explicit_subject_client_ids).await?;
     let mut skipped_legacy_manual_events = Vec::new();
     for row in rows {
         let event = event_from_row(row)?;
@@ -799,18 +843,32 @@ fn event_candidate_for_validated_rule(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let matched_vps = vps_rows
-        .iter()
-        .filter(|vps| subject_ids.is_empty() || subject_ids.contains(&vps.id))
-        .filter(|vps| {
-            let context = expression_context_for_event(vps, event);
-            expression_matches(&context, expression)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if matched_vps.is_empty() {
-        return Ok(None);
-    }
+    let matched_vps = if subject_ids.is_empty() && generic_alert_lifecycle_edge(&event.kind) {
+        if expression_references_vps(expression)
+            || !expression_matches(&expression_context_for_subjectless_event(event), expression)
+        {
+            return Ok(None);
+        }
+        Vec::new()
+    } else {
+        let requires_live_vps = expression_requires_live_vps(expression);
+        let matched = vps_rows
+            .iter()
+            .filter(|vps| subject_ids.is_empty() || subject_ids.contains(&vps.id))
+            .filter(|vps| {
+                !vps.retained_tombstone || (!subject_ids.is_empty() && !requires_live_vps)
+            })
+            .filter(|vps| {
+                let context = expression_context_for_event(vps, event);
+                expression_matches(&context, expression)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matched.is_empty() {
+            return Ok(None);
+        }
+        matched
+    };
     let referenced_roots = expression_referenced_roots(expression)
         .into_iter()
         .collect::<Vec<_>>();
@@ -864,8 +922,44 @@ fn event_candidate_for_validated_rule(
     }))
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum VpsExpressionDependency {
+    None,
+    StableIdentity,
+    LiveState,
+}
+
+fn expression_requires_live_vps(expression: &Expression) -> bool {
+    expression_vps_dependency(expression) == VpsExpressionDependency::LiveState
+}
+
+fn expression_references_vps(expression: &Expression) -> bool {
+    expression_vps_dependency(expression) != VpsExpressionDependency::None
+}
+
+fn expression_vps_dependency(expression: &Expression) -> VpsExpressionDependency {
+    use vpsman_common::Predicate;
+
+    match expression {
+        Expression::Predicate(Predicate::Event(_)) => VpsExpressionDependency::None,
+        Expression::Predicate(Predicate::Comparison { field, .. })
+        | Expression::Predicate(Predicate::Membership { field, .. }) => match field.as_str() {
+            "vps.id" => VpsExpressionDependency::StableIdentity,
+            field if field.starts_with("vps.") => VpsExpressionDependency::LiveState,
+            _ => VpsExpressionDependency::None,
+        },
+        Expression::Predicate(Predicate::Bare(_) | Predicate::Untagged) => {
+            VpsExpressionDependency::LiveState
+        }
+        Expression::Not(inner) => expression_vps_dependency(inner),
+        Expression::And(left, right) | Expression::Or(left, right) => {
+            expression_vps_dependency(left).max(expression_vps_dependency(right))
+        }
+    }
+}
+
 fn expression_context_for_event(vps: &VpsRow, event: &EventRow) -> ExpressionContext {
-    let mut context = ExpressionContext::for_vps(VpsMetadata {
+    let context = ExpressionContext::for_vps(VpsMetadata {
         id: vps.id.clone(),
         display_name: vps.display_name.clone(),
         status: vps.status.clone(),
@@ -880,8 +974,19 @@ fn expression_context_for_event(vps: &VpsRow, event: &EventRow) -> ExpressionCon
             "capabilities": &vps.capabilities,
         })),
     })
-    .with_vps_rules(vps.vps_rules.clone())
-    .with_event_predicate(&event.kind);
+    .with_vps_rules(vps.vps_rules.clone());
+    expression_context_with_event(context, event)
+}
+
+fn expression_context_for_subjectless_event(event: &EventRow) -> ExpressionContext {
+    expression_context_with_event(ExpressionContext::default(), event)
+}
+
+fn expression_context_with_event(
+    mut context: ExpressionContext,
+    event: &EventRow,
+) -> ExpressionContext {
+    context = context.with_event_predicate(&event.kind);
     for predicate in &event.event_predicates {
         context = context.with_event_predicate(predicate);
     }
@@ -979,6 +1084,7 @@ async fn insert_delivery_candidate(
         suppression.try_get("duplicate")?,
         suppression.try_get("latest_cooldown_until_unix")?,
         candidate.occurred_at_unix,
+        &candidate.event_kind,
     ) {
         return Ok(false);
     }
@@ -1142,7 +1248,7 @@ async fn insert_rule_materialization_failure(
         payload,
         attempt_count: 0,
     };
-    insert_permanent_failure_alert(tx, &delivery, Some(error)).await?;
+    insert_permanent_failure_audit(tx, &delivery, Some(error)).await?;
     Ok(true)
 }
 
@@ -1160,8 +1266,21 @@ fn delivery_candidate_is_suppressed(
     duplicate: bool,
     latest_cooldown_until_unix: i64,
     occurred_at_unix: i64,
+    event_kind: &str,
 ) -> bool {
-    duplicate || latest_cooldown_until_unix > occurred_at_unix
+    duplicate
+        || (!alert_lifecycle_edge(event_kind) && latest_cooldown_until_unix > occurred_at_unix)
+}
+
+fn alert_lifecycle_edge(event_kind: &str) -> bool {
+    matches!(
+        event_kind,
+        "alert.triggered" | "alert.resolved" | "alert.policy_reached" | "alert.policy_resolved"
+    )
+}
+
+fn generic_alert_lifecycle_edge(event_kind: &str) -> bool {
+    matches!(event_kind, "alert.triggered" | "alert.resolved")
 }
 
 async fn process_queued_deliveries(
@@ -1320,7 +1439,7 @@ async fn process_queued_deliveries(
         };
         let recorded_attempt_count: i32 = updated.try_get("attempt_count")?;
         if status == WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED {
-            insert_permanent_failure_alert(&mut tx, &delivery, error.clone()).await?;
+            insert_permanent_failure_audit(&mut tx, &delivery, error.clone()).await?;
         }
         tx.commit().await?;
         outcomes.push(DeliveryOutcome {
@@ -1592,8 +1711,7 @@ async fn prune_deliveries(pool: &PgPool, config: WebhookRuleWorkerConfig) -> Res
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let resolved_alerts = resolve_pruned_delivery_alerts(pool, &pruned).await?;
-    insert_prune_audit(pool, config, &pruned, resolved_alerts).await?;
+    insert_prune_audit(pool, config, &pruned).await?;
     Ok(pruned.len())
 }
 
@@ -1641,32 +1759,11 @@ async fn insert_process_audit(
     Ok(())
 }
 
-async fn insert_permanent_failure_alert(
+async fn insert_permanent_failure_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     delivery: &DeliveryRow,
     error: Option<String>,
 ) -> Result<()> {
-    let reason = error
-        .clone()
-        .unwrap_or_else(|| "webhook delivery permanently failed".to_string());
-    sqlx::query(
-        r#"
-        INSERT INTO fleet_alert_states (
-            alert_id,
-            state,
-            reason
-        )
-        VALUES ($1, 'open', $2)
-        ON CONFLICT (alert_id) DO UPDATE SET
-            state = 'open',
-            reason = EXCLUDED.reason,
-            updated_at = now()
-        "#,
-    )
-    .bind(format!("webhook_delivery:{}", delivery.id))
-    .bind(reason)
-    .execute(&mut **tx)
-    .await?;
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -1693,32 +1790,6 @@ async fn insert_permanent_failure_alert(
     Ok(())
 }
 
-async fn resolve_pruned_delivery_alerts(pool: &PgPool, pruned: &[PrunedDelivery]) -> Result<usize> {
-    let alert_ids = pruned
-        .iter()
-        .filter(|delivery| delivery.status == WEBHOOK_RULE_DELIVERY_STATUS_PERMANENTLY_FAILED)
-        .map(|delivery| format!("webhook_delivery:{}", delivery.id))
-        .collect::<Vec<_>>();
-    if alert_ids.is_empty() {
-        return Ok(0);
-    }
-    let updated = sqlx::query(
-        r#"
-        UPDATE fleet_alert_states
-        SET
-            state = 'acknowledged',
-            reason = 'webhook delivery evidence pruned by retention',
-            updated_at = now()
-        WHERE alert_id = ANY($1)
-          AND state = 'open'
-        "#,
-    )
-    .bind(&alert_ids)
-    .execute(pool)
-    .await?;
-    Ok(updated.rows_affected() as usize)
-}
-
 fn retry_backoff_secs(attempt_count: i32) -> Option<i64> {
     let index = attempt_count.saturating_sub(1) as usize;
     RETRY_BACKOFF_SECS.get(index).copied()
@@ -1729,7 +1800,6 @@ async fn insert_prune_audit(
     pool: &PgPool,
     config: WebhookRuleWorkerConfig,
     pruned: &[PrunedDelivery],
-    resolved_alerts: usize,
 ) -> Result<()> {
     sqlx::query(
         r#"
@@ -1749,7 +1819,6 @@ async fn insert_prune_audit(
         "result": "succeeded",
         "retention_days": config.retention_days,
         "pruned_count": pruned.len(),
-        "resolved_alert_count": resolved_alerts,
         "deliveries": pruned.iter().take(MAX_AUDIT_DELIVERY_ROWS).map(|delivery| json!({
             "id": delivery.id,
             "rule_id": delivery.rule_id,

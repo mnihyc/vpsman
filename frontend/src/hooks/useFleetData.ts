@@ -13,6 +13,8 @@ import type {
   FleetAlertPolicyRecord,
   FleetAlertPolicyRequest,
   FleetAlertRecord,
+  FleetAlertEventPage,
+  FleetAlertResolveRequest,
   FleetAlertNotificationChannelRecord,
   FleetAlertNotificationChannelRequest,
   FleetAlertNotificationDeliveryRecord,
@@ -59,6 +61,7 @@ type HomeFleetSnapshotRecord = {
   telemetry_rollups: SnapshotSource<TelemetryRollupRecord[]>;
   telemetry_network_rates: SnapshotSource<TelemetryNetworkRateRecord[]>;
   fleet_alerts: SnapshotSource<FleetAlertRecord[]>;
+  fleet_alerts_truncated?: boolean;
 };
 
 type HomeFleetHydrationFence = {
@@ -77,11 +80,16 @@ type FleetSnapshotRecord = {
   telemetry_tunnels: FleetSnapshotSource<TelemetryTunnelRecord[]>;
   telemetry_uptimes: FleetSnapshotSource<TelemetryUptimeRecord[]>;
   fleet_alerts?: FleetSnapshotSource<FleetAlertRecord[]>;
+  fleet_alerts_truncated?: boolean;
+  fleet_alert_history?: FleetSnapshotSource<FleetAlertRecord[]>;
+  fleet_alert_history_truncated?: boolean;
   fleet_alert_states?: FleetSnapshotSource<FleetAlertStateRecord[]>;
   fleet_alert_policies?: FleetSnapshotSource<FleetAlertPolicyRecord[]>;
   vps_rule_values?: FleetSnapshotSource<VpsRuleValueRecord[]>;
   traffic_accounting?: FleetSnapshotSource<TrafficAccountingRecord[]>;
   policy_alerts?: FleetSnapshotSource<PolicyAlertRecord[]>;
+  current_policy_alerts?: FleetSnapshotSource<PolicyAlertRecord[]>;
+  current_policy_alerts_truncated?: boolean;
   fleet_alert_notification_channels?: FleetSnapshotSource<
     FleetAlertNotificationChannelRecord[]
   >;
@@ -102,6 +110,7 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     promise: Promise<void>;
   } | null>(null);
   const fleetTelemetryRefreshPending = useRef(false);
+  const fleetAlertEventReviewInFlight = useRef(false);
   const loadFleetTelemetryRef = useRef<() => Promise<void>>(() =>
     Promise.resolve(),
   );
@@ -113,6 +122,26 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const [summary, setSummary] = useState<FleetSummary>(emptySummary);
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [fleetAlerts, setFleetAlerts] = useState<FleetAlertRecord[]>([]);
+  const [fleetAlertsTruncated, setFleetAlertsTruncated] = useState(false);
+  const [fleetAlertHistory, setFleetAlertHistory] = useState<
+    FleetAlertRecord[]
+  >([]);
+  const [fleetAlertHistoryTruncated, setFleetAlertHistoryTruncated] =
+    useState(false);
+  const [fleetAlertEventReviewItems, setFleetAlertEventReviewItems] = useState<
+    FleetAlertRecord[]
+  >([]);
+  const [fleetAlertEventReviewCursor, setFleetAlertEventReviewCursor] =
+    useState<string | null>(null);
+  const [fleetAlertEventReviewHasMore, setFleetAlertEventReviewHasMore] =
+    useState(false);
+  const [fleetAlertEventReviewStarted, setFleetAlertEventReviewStarted] =
+    useState(false);
+  const [fleetAlertEventReviewLoading, setFleetAlertEventReviewLoading] =
+    useState(false);
+  const [fleetAlertEventReviewError, setFleetAlertEventReviewError] = useState<
+    string | null
+  >(null);
   const [fleetAlertStates, setFleetAlertStates] = useState<
     FleetAlertStateRecord[]
   >([]);
@@ -124,6 +153,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     TrafficAccountingRecord[]
   >([]);
   const [policyAlerts, setPolicyAlerts] = useState<PolicyAlertRecord[]>([]);
+  const [currentPolicyAlerts, setCurrentPolicyAlerts] = useState<
+    PolicyAlertRecord[]
+  >([]);
+  const [currentPolicyAlertsTruncated, setCurrentPolicyAlertsTruncated] =
+    useState(false);
   const [fleetAlertNotificationChannels, setFleetAlertNotificationChannels] =
     useState<FleetAlertNotificationChannelRecord[]>([]);
   const [fleetAlertNotifications, setFleetAlertNotifications] = useState<
@@ -150,6 +184,20 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     useState(false);
   const [fleetAlertsEvidenceAvailable, setFleetAlertsEvidenceAvailable] =
     useState(false);
+  const [
+    fleetAlertHistoryEvidenceAvailable,
+    setFleetAlertHistoryEvidenceAvailable,
+  ] = useState(false);
+  const [
+    fleetAlertStatesEvidenceAvailable,
+    setFleetAlertStatesEvidenceAvailable,
+  ] = useState(false);
+  const [policyAlertsEvidenceAvailable, setPolicyAlertsEvidenceAvailable] =
+    useState(false);
+  const [
+    currentPolicyAlertsEvidenceAvailable,
+    setCurrentPolicyAlertsEvidenceAvailable,
+  ] = useState(false);
   const [configPolicyEvidenceAvailable, setConfigPolicyEvidenceAvailable] =
     useState(false);
   const [vpsRuleEvidenceAvailable, setVpsRuleEvidenceAvailable] =
@@ -253,6 +301,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
   const applyFleetDetailSnapshot = useCallback(
     (snapshot: FleetSnapshotRecord) => {
       const fleetAlertsSource = requiredSnapshotSource(snapshot.fleet_alerts);
+      const fleetAlertHistorySource = requiredSnapshotSource(
+        snapshot.fleet_alert_history,
+      );
       const fleetAlertStatesSource = requiredSnapshotSource(
         snapshot.fleet_alert_states,
       );
@@ -266,6 +317,9 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         snapshot.traffic_accounting,
       );
       const policyAlertsSource = requiredSnapshotSource(snapshot.policy_alerts);
+      const currentPolicyAlertsSource = requiredSnapshotSource(
+        snapshot.current_policy_alerts,
+      );
       const notificationChannelsSource = requiredSnapshotSource(
         snapshot.fleet_alert_notification_channels,
       );
@@ -278,6 +332,16 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       );
 
       setFleetAlertsEvidenceAvailable(sourceAvailable(fleetAlertsSource));
+      setFleetAlertHistoryEvidenceAvailable(
+        sourceAvailable(fleetAlertHistorySource),
+      );
+      setFleetAlertStatesEvidenceAvailable(
+        sourceAvailable(fleetAlertStatesSource),
+      );
+      setPolicyAlertsEvidenceAvailable(sourceAvailable(policyAlertsSource));
+      setCurrentPolicyAlertsEvidenceAvailable(
+        sourceAvailable(currentPolicyAlertsSource),
+      );
       setVpsRuleEvidenceAvailable(sourceAvailable(vpsRuleValuesSource));
       setConfigPolicyEvidenceAvailable(
         [
@@ -287,11 +351,18 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         ].every(sourceAvailable),
       );
       if (fleetAlertsSource.data) {
-        setFleetAlerts(
-          withoutDeletedClients(
-            fleetAlertsSource.data,
-            deletedClientIds.current,
-          ),
+        setFleetAlerts(fleetAlertsSource.data);
+        setFleetAlertsTruncated(snapshot.fleet_alerts_truncated !== false);
+      } else {
+        // Current alert episodes are temporal state. Never retain them as
+        // current when the source that can prove their lifecycle is missing.
+        setFleetAlerts([]);
+        setFleetAlertsTruncated(false);
+      }
+      if (fleetAlertHistorySource.data) {
+        setFleetAlertHistory(fleetAlertHistorySource.data);
+        setFleetAlertHistoryTruncated(
+          snapshot.fleet_alert_history_truncated !== false,
         );
       }
       if (fleetAlertStatesSource.data) {
@@ -317,12 +388,18 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         );
       }
       if (policyAlertsSource.data) {
-        setPolicyAlerts(
-          withoutDeletedClients(
-            policyAlertsSource.data,
-            deletedClientIds.current,
-          ),
+        setPolicyAlerts(policyAlertsSource.data);
+      }
+      if (currentPolicyAlertsSource.data) {
+        setCurrentPolicyAlerts(currentPolicyAlertsSource.data);
+        setCurrentPolicyAlertsTruncated(
+          snapshot.current_policy_alerts_truncated !== false,
         );
+      } else {
+        // Missing/unavailable current evidence (including an older API) cannot
+        // retain stale episodes that may since have resolved.
+        setCurrentPolicyAlerts([]);
+        setCurrentPolicyAlertsTruncated(false);
       }
       if (notificationChannelsSource.data) {
         setFleetAlertNotificationChannels(notificationChannelsSource.data);
@@ -342,11 +419,13 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           "Some fleet detail sources are unavailable",
           [
             ["fleet alerts", fleetAlertsSource],
+            ["fleet alert history", fleetAlertHistorySource],
             ["fleet alert states", fleetAlertStatesSource],
             ["fleet alert policies", fleetAlertPoliciesSource],
             ["VPS rules", vpsRuleValuesSource],
             ["traffic accounting", trafficAccountingSource],
-            ["policy alerts", policyAlertsSource],
+            ["policy alert history", policyAlertsSource],
+            ["current policy alerts", currentPolicyAlertsSource],
             ["notification channels", notificationChannelsSource],
             ["notification deliveries", notificationsSource],
             ["webhook rules", webhookRulesSource],
@@ -433,12 +512,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       if (fence.detail === fleetFullGeneration.current) {
         setFleetAlertsEvidenceAvailable(sourceAvailable(snapshot.fleet_alerts));
         if (snapshot.fleet_alerts.data) {
-          setFleetAlerts(
-            withoutDeletedClients(
-              snapshot.fleet_alerts.data,
-              deletedClientIds.current,
-            ),
-          );
+          setFleetAlerts(snapshot.fleet_alerts.data);
+          setFleetAlertsTruncated(snapshot.fleet_alerts_truncated !== false);
+        } else {
+          setFleetAlerts([]);
+          setFleetAlertsTruncated(false);
         }
         publishFleetError(
           "detail",
@@ -496,11 +574,16 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setSummary(emptySummary);
         setAgents([]);
         setFleetAlerts([]);
+        setFleetAlertsTruncated(false);
+        setFleetAlertHistory([]);
+        setFleetAlertHistoryTruncated(false);
         setFleetAlertStates([]);
         setFleetAlertPolicies([]);
         setVpsRuleValues([]);
         setTrafficAccounting([]);
         setPolicyAlerts([]);
+        setCurrentPolicyAlerts([]);
+        setCurrentPolicyAlertsTruncated(false);
         setFleetAlertNotificationChannels([]);
         setFleetAlertNotifications([]);
         setWebhookRules([]);
@@ -511,6 +594,10 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setTelemetryUptimes([]);
         setFleetCoreEvidenceAvailable(false);
         setFleetAlertsEvidenceAvailable(false);
+        setFleetAlertHistoryEvidenceAvailable(false);
+        setFleetAlertStatesEvidenceAvailable(false);
+        setPolicyAlertsEvidenceAvailable(false);
+        setCurrentPolicyAlertsEvidenceAvailable(false);
         setConfigPolicyEvidenceAvailable(false);
         setVpsRuleEvidenceAvailable(false);
         fleetSourceErrors.current = { core: "Operator login required" };
@@ -528,8 +615,16 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
       }
       if (fullLoadIsCurrent) {
         setFleetAlertsEvidenceAvailable(false);
+        setFleetAlerts([]);
+        setFleetAlertsTruncated(false);
+        setFleetAlertHistoryEvidenceAvailable(false);
+        setFleetAlertStatesEvidenceAvailable(false);
+        setPolicyAlertsEvidenceAvailable(false);
+        setCurrentPolicyAlertsEvidenceAvailable(false);
         setConfigPolicyEvidenceAvailable(false);
         setVpsRuleEvidenceAvailable(false);
+        setCurrentPolicyAlerts([]);
+        setCurrentPolicyAlertsTruncated(false);
         publishFleetError("detail", message);
       }
     }
@@ -727,19 +822,11 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
         setAgents((current) =>
           current.filter((agent) => !deletedIds.has(agent.id)),
         );
-        setFleetAlerts((current) =>
-          current.filter(
-            (alert) => !alert.client_id || !deletedIds.has(alert.client_id),
-          ),
-        );
         setVpsRuleValues((current) =>
           current.filter((rule) => !deletedIds.has(rule.client_id)),
         );
         setTrafficAccounting((current) =>
           current.filter((record) => !deletedIds.has(record.client_id)),
-        );
-        setPolicyAlerts((current) =>
-          current.filter((alert) => !deletedIds.has(alert.client_id)),
         );
         setTelemetryRollups((current) =>
           current.filter((record) => !deletedIds.has(record.client_id)),
@@ -881,11 +968,156 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
           right.updated_at.localeCompare(left.updated_at),
         );
       });
+      setFleetAlerts((current) => applyFleetAlertState(current, state));
+      setFleetAlertHistory((current) => applyFleetAlertState(current, state));
+      setFleetAlertEventReviewItems((current) =>
+        applyFleetAlertState(current, state),
+      );
       await loadFleet();
       return state;
     },
     [apiToken, loadFleet],
   );
+
+  const resolveFleetAlert = useCallback(
+    async (alertId: string, request: FleetAlertResolveRequest) => {
+      const alert = await apiPost<FleetAlertRecord>(
+        `/api/v1/fleet-alerts/${encodeURIComponent(alertId)}/resolve`,
+        apiToken,
+        request,
+      );
+      if (apiTokenRef.current !== apiToken) {
+        return alert;
+      }
+      setFleetAlerts((current) =>
+        current.filter((stored) => stored.id !== alert.id),
+      );
+      setFleetAlertEventReviewItems((current) =>
+        current.filter((stored) => stored.id !== alert.id),
+      );
+      setFleetAlertHistory((current) => [
+        alert,
+        ...current.filter((stored) => stored.id !== alert.id),
+      ]);
+      await loadFleet();
+      return alert;
+    },
+    [apiToken, loadFleet],
+  );
+
+  const loadOlderFleetAlertEvents = useCallback(async () => {
+    if (
+      fleetAlertEventReviewInFlight.current ||
+      (fleetAlertEventReviewStarted && !fleetAlertEventReviewHasMore)
+    ) {
+      return;
+    }
+    fleetAlertEventReviewInFlight.current = true;
+    setFleetAlertEventReviewLoading(true);
+    setFleetAlertEventReviewError(null);
+    let cursor = fleetAlertEventReviewStarted
+      ? fleetAlertEventReviewCursor
+      : null;
+    const knownIds = new Set([
+      ...fleetAlerts.map((alert) => alert.id),
+      ...fleetAlertEventReviewItems.map((alert) => alert.id),
+    ]);
+    try {
+      // The unified snapshot contains at most 200 rows. The first review page
+      // can therefore be entirely duplicate; advance one more page in the
+      // same explicit operator action so the first older incident is reachable.
+      for (let pageIndex = 0; pageIndex < 2; pageIndex += 1) {
+        const query = new URLSearchParams({
+          include_muted: "true",
+          limit: "200",
+        });
+        if (cursor) {
+          query.set("cursor", cursor);
+        }
+        const requestedCursor = cursor;
+        const page = await apiGet<FleetAlertEventPage>(
+          `/api/v1/fleet-alert-events?${query.toString()}`,
+          apiToken,
+        );
+        assertFleetAlertEventPage(page, requestedCursor);
+        if (apiTokenRef.current !== apiToken) {
+          return;
+        }
+        const newItems = page.items.filter((alert) => !knownIds.has(alert.id));
+        for (const alert of page.items) {
+          knownIds.add(alert.id);
+        }
+        setFleetAlertEventReviewItems((current) =>
+          dedupeFleetAlertsById([...current, ...page.items]),
+        );
+        cursor = page.next_cursor;
+        setFleetAlertEventReviewCursor(cursor);
+        setFleetAlertEventReviewHasMore(page.has_more);
+        setFleetAlertEventReviewStarted(true);
+        if (newItems.length > 0 || !page.has_more) {
+          break;
+        }
+      }
+    } catch (error) {
+      if (apiTokenRef.current === apiToken) {
+        setFleetAlertEventReviewError(
+          error instanceof Error
+            ? error.message
+            : "Older current incidents could not be loaded.",
+        );
+      }
+    } finally {
+      if (apiTokenRef.current === apiToken) {
+        setFleetAlertEventReviewLoading(false);
+      }
+      fleetAlertEventReviewInFlight.current = false;
+    }
+  }, [
+    apiToken,
+    fleetAlertEventReviewCursor,
+    fleetAlertEventReviewHasMore,
+    fleetAlertEventReviewItems,
+    fleetAlertEventReviewStarted,
+    fleetAlerts,
+  ]);
+
+  const refreshFleetAlertEvents = useCallback(async () => {
+    if (fleetAlertEventReviewInFlight.current) {
+      return;
+    }
+    fleetAlertEventReviewInFlight.current = true;
+    setFleetAlertEventReviewLoading(true);
+    setFleetAlertEventReviewError(null);
+    try {
+      const page = await apiGet<FleetAlertEventPage>(
+        "/api/v1/fleet-alert-events?include_muted=true&limit=200",
+        apiToken,
+      );
+      assertFleetAlertEventPage(page, null);
+      if (apiTokenRef.current !== apiToken) {
+        return;
+      }
+      // Replace the entire prior cursor walk only after a valid page arrives.
+      // This atomically removes events resolved by another operator.
+      setFleetAlertEventReviewItems(dedupeFleetAlertsById(page.items));
+      setFleetAlertEventReviewCursor(page.next_cursor);
+      setFleetAlertEventReviewHasMore(page.has_more);
+      setFleetAlertEventReviewStarted(true);
+    } catch (error) {
+      if (apiTokenRef.current === apiToken) {
+        setFleetAlertEventReviewError(
+          error instanceof Error
+            ? error.message
+            : "Current incidents could not be refreshed.",
+        );
+      }
+    } finally {
+      if (apiTokenRef.current === apiToken) {
+        setFleetAlertEventReviewLoading(false);
+      }
+      fleetAlertEventReviewInFlight.current = false;
+    }
+  }, [apiToken]);
 
   const upsertFleetAlertNotificationChannel = useCallback(
     async (request: FleetAlertNotificationChannelRequest) => {
@@ -1109,16 +1341,28 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     fleetTelemetryGeneration.current += 1;
     fleetTelemetryInFlight.current = null;
     fleetTelemetryRefreshPending.current = false;
+    fleetAlertEventReviewInFlight.current = false;
     fleetSourceErrors.current = {};
     deletedClientIds.current.clear();
     setSummary(emptySummary);
     setAgents([]);
     setFleetAlerts([]);
+    setFleetAlertsTruncated(false);
+    setFleetAlertHistory([]);
+    setFleetAlertHistoryTruncated(false);
+    setFleetAlertEventReviewItems([]);
+    setFleetAlertEventReviewCursor(null);
+    setFleetAlertEventReviewHasMore(false);
+    setFleetAlertEventReviewStarted(false);
+    setFleetAlertEventReviewLoading(false);
+    setFleetAlertEventReviewError(null);
     setFleetAlertStates([]);
     setFleetAlertPolicies([]);
     setVpsRuleValues([]);
     setTrafficAccounting([]);
     setPolicyAlerts([]);
+    setCurrentPolicyAlerts([]);
+    setCurrentPolicyAlertsTruncated(false);
     setFleetAlertNotificationChannels([]);
     setFleetAlertNotifications([]);
     setWebhookRules([]);
@@ -1129,6 +1373,10 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     setTelemetryUptimes([]);
     setFleetCoreEvidenceAvailable(false);
     setFleetAlertsEvidenceAvailable(false);
+    setFleetAlertHistoryEvidenceAvailable(false);
+    setFleetAlertStatesEvidenceAvailable(false);
+    setPolicyAlertsEvidenceAvailable(false);
+    setCurrentPolicyAlertsEvidenceAvailable(false);
     setConfigPolicyEvidenceAvailable(false);
     setVpsRuleEvidenceAvailable(false);
     setApiError(null);
@@ -1143,22 +1391,39 @@ export function useFleetData(apiToken: string, onUnauthorized: () => void) {
     vpsRuleEvidenceAvailable,
     fleetAlertsEvidenceAvailable,
     fleetAlerts,
+    fleetAlertsTruncated,
+    fleetAlertHistory,
+    fleetAlertHistoryTruncated,
+    fleetAlertHistoryEvidenceAvailable,
+    fleetAlertEventReviewItems,
+    fleetAlertEventReviewHasMore,
+    fleetAlertEventReviewStarted,
+    fleetAlertEventReviewLoading,
+    fleetAlertEventReviewError,
     hydrateHomeFleet,
     fleetAlertStates,
+    fleetAlertStatesEvidenceAvailable,
     fleetAlertPolicies,
     vpsRuleValues,
     trafficAccounting,
     policyAlerts,
+    policyAlertsEvidenceAvailable,
+    currentPolicyAlerts,
+    currentPolicyAlertsTruncated,
+    currentPolicyAlertsEvidenceAvailable,
     fleetAlertNotificationChannels,
     fleetAlertNotifications,
     webhookRules,
     webhookRuleDeliveries,
     deleteAgents,
     loadFleet,
+    loadOlderFleetAlertEvents,
+    refreshFleetAlertEvents,
     loadFleetTelemetry,
     fleetCoreEvidenceAvailable,
     replaceFleetSnapshot,
     updateAgentAlias,
+    resolveFleetAlert,
     summary,
     telemetryNetworkRates,
     telemetryRollups,
@@ -1193,6 +1458,71 @@ function requiredSnapshotSource<T>(
   source: FleetSnapshotSource<T> | undefined,
 ): FleetSnapshotSource<T> {
   return source ?? { data: null, error: "snapshot source missing" };
+}
+
+function assertFleetAlertEventPage(
+  value: unknown,
+  requestedCursor: string | null,
+): asserts value is FleetAlertEventPage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Incident review returned an invalid page.");
+  }
+  const page = value as Partial<FleetAlertEventPage>;
+  if (
+    !Array.isArray(page.items) ||
+    typeof page.has_more !== "boolean" ||
+    (page.next_cursor !== null && typeof page.next_cursor !== "string") ||
+    (page.has_more && !page.next_cursor?.trim()) ||
+    (!page.has_more && page.next_cursor !== null) ||
+    (requestedCursor !== null && page.next_cursor === requestedCursor)
+  ) {
+    throw new Error("Incident review returned inconsistent cursor state.");
+  }
+  const ids = new Set<string>();
+  for (const item of page.items) {
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof item.id !== "string" ||
+      !item.id.trim() ||
+      ids.has(item.id) ||
+      item.record_kind !== "event" ||
+      !item.lifecycle ||
+      item.lifecycle.resolved_at !== null
+    ) {
+      throw new Error(
+        "Incident review returned a duplicate, non-event, or resolved record.",
+      );
+    }
+    ids.add(item.id);
+  }
+}
+
+function dedupeFleetAlertsById(alerts: FleetAlertRecord[]): FleetAlertRecord[] {
+  const byId = new Map<string, FleetAlertRecord>();
+  for (const alert of alerts) {
+    byId.set(alert.id, alert);
+  }
+  return Array.from(byId.values());
+}
+
+function applyFleetAlertState(
+  alerts: FleetAlertRecord[],
+  state: FleetAlertStateRecord,
+): FleetAlertRecord[] {
+  return alerts.map((alert) =>
+    alert.id === state.alert_id
+      ? {
+          ...alert,
+          escalation_level: state.escalation_level,
+          muted_until_unix: state.muted_until_unix,
+          operator_state: state.state,
+          state_actor_id: state.actor_id,
+          state_reason: state.reason,
+          state_updated_at: state.updated_at,
+        }
+      : alert,
+  );
 }
 
 function snapshotSourceErrorSummary(

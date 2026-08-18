@@ -30,6 +30,11 @@ use crate::repository_network_observations::reconcile_postgres_automatic_observa
 use crate::repository_network_traffic_import::{
     is_intentional_vnstat_import_boundary, lock_postgres_traffic_counter_streams,
 };
+use crate::repository_operational_alerts::{
+    mark_postgres_tunnel_alerts_unknown_for_clients_in_tx,
+    reconcile_postgres_agent_alert_transition_in_tx,
+    reconcile_postgres_tunnel_alerts_for_clients_in_tx,
+};
 use crate::security::constant_time_eq;
 
 const TELEMETRY_BUCKET_SECS: i32 = 60;
@@ -534,9 +539,16 @@ impl Repository {
                                     agent.status.clone(),
                                     agent.internal_build_number,
                                     agent.stale_reason.clone(),
+                                    agent.process_incarnation_id,
                                 )
                             })
                     };
+                    let prior_session_is_same =
+                        memory.gateway_sessions.read().await.iter().any(|session| {
+                            session.id == event.gateway_session_id
+                                && session.client_id == event.hello.client_id
+                                && session.status == "active"
+                        });
                     upsert_memory_agent_with_remote_ip(
                         &memory.agents,
                         &event.hello,
@@ -567,7 +579,7 @@ impl Repository {
                         None,
                     )
                     .await;
-                    if let Some((prior_status, prior_build, stale_reason)) = prior {
+                    if let Some((prior_status, prior_build, stale_reason, prior_process)) = prior {
                         let resulting_status = memory
                             .agents
                             .read()
@@ -627,6 +639,14 @@ impl Repository {
                                 &resulting_status,
                                 reason,
                                 metadata,
+                            )
+                            .await?;
+                        } else if !prior_session_is_same
+                            || prior_process != Some(event.hello.process_incarnation_id)
+                        {
+                            self.mark_memory_tunnel_alerts_unknown_for_clients(
+                                std::slice::from_ref(&event.hello.client_id),
+                                &Utc::now().to_rfc3339(),
                             )
                             .await?;
                         }
@@ -703,6 +723,21 @@ impl Repository {
                     && event.hello.internal_build_number as i64 != stale_build;
                 let process_incarnation_changed = prior_process_incarnation_id
                     .is_some_and(|prior| prior != event.hello.process_incarnation_id);
+                let prior_session_is_same: bool = sqlx::query_scalar(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM gateway_sessions
+                        WHERE id = $1
+                          AND client_id = $2
+                          AND status = 'active'
+                    )
+                    "#,
+                )
+                .bind(event.gateway_session_id)
+                .bind(&event.hello.client_id)
+                .fetch_one(&mut *tx)
+                .await?;
                 let result = sqlx::query(
                     r#"
                     INSERT INTO clients (
@@ -858,6 +893,13 @@ impl Repository {
                         "agent-ingest",
                     )
                     .await?;
+                } else if accepted_hello && (!prior_session_is_same || process_incarnation_changed)
+                {
+                    mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
+                        &mut tx,
+                        std::slice::from_ref(&event.hello.client_id),
+                    )
+                    .await?;
                 }
 
                 tx.commit().await?;
@@ -959,7 +1001,7 @@ impl Repository {
                         return Ok(TelemetryRecordOutcome::AcceptedStale)
                     }
                 }
-                touch_memory_agent_from_telemetry(
+                let telemetry_agent_status = touch_memory_agent_from_telemetry(
                     &memory.agents,
                     &event.telemetry.client_id,
                     event.remote_ip.as_deref(),
@@ -1017,6 +1059,29 @@ impl Repository {
                         tunnel,
                     )
                 }));
+                drop(tunnels);
+                if let Some((status, status_changed)) = telemetry_agent_status {
+                    let observed_at = Utc::now().to_rfc3339();
+                    if status_changed {
+                        self.reconcile_memory_client_status_alert_transition(
+                            &event.telemetry.client_id,
+                            &status,
+                            &observed_at,
+                        )
+                        .await?;
+                    } else {
+                        self.reconcile_memory_agent_alert_transition(
+                            &event.telemetry.client_id,
+                            &status,
+                            &observed_at,
+                        )
+                        .await?;
+                    }
+                }
+                self.reconcile_memory_tunnel_alerts_for_clients(std::slice::from_ref(
+                    &event.telemetry.client_id,
+                ))
+                .await?;
                 Ok(TelemetryRecordOutcome::Recorded)
             }
             Self::Postgres(pool) => {
@@ -1133,7 +1198,7 @@ impl Repository {
                 .await?;
                 upsert_postgres_telemetry_tunnels(&mut tx, &event.telemetry.client_id, metrics)
                     .await?;
-                sqlx::query(
+                let resulting_status: String = sqlx::query_scalar(
                     r#"
                     UPDATE clients
                     SET
@@ -1143,11 +1208,23 @@ impl Repository {
                         last_seen_at = now()
                     WHERE id = $1 AND hidden_at IS NULL
                       AND status <> 'revoked'
+                    RETURNING status
                     "#,
                 )
                 .bind(&event.telemetry.client_id)
                 .bind(event.remote_ip.as_deref())
-                .execute(&mut *tx)
+                .fetch_one(&mut *tx)
+                .await?;
+                reconcile_postgres_agent_alert_transition_in_tx(
+                    &mut tx,
+                    &event.telemetry.client_id,
+                    &resulting_status,
+                )
+                .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    std::slice::from_ref(&event.telemetry.client_id),
+                )
                 .await?;
                 tx.commit().await?;
                 Ok(TelemetryRecordOutcome::Recorded)
@@ -1371,6 +1448,12 @@ impl Repository {
         reason: &str,
         metadata: serde_json::Value,
     ) -> Result<()> {
+        self.reconcile_memory_client_status_alert_transition(
+            client_id,
+            to_status,
+            &Utc::now().to_rfc3339(),
+        )
+        .await?;
         let event_id = format!(
             "vps.status_changed:{client_id}:{to_status}:{}",
             Uuid::new_v4()
@@ -2853,6 +2936,7 @@ async fn upsert_postgres_telemetry_tunnels(
                 traffic_reason,
                 traffic_checked_unix,
                 telemetry_plan_id,
+                telemetry_topology_identity_hash,
                 telemetry_plan_name,
                 telemetry_plan_runtime_manager,
                 telemetry_endpoint_side,
@@ -2868,6 +2952,7 @@ async fn upsert_postgres_telemetry_tunnels(
                 packet_loss_ratio,
                 latency_healthy_windows,
                 latency_missed_windows,
+                telemetry_runtime_evidence_identity_hash,
                 updated_at
             )
             VALUES (
@@ -2904,7 +2989,9 @@ async fn upsert_postgres_telemetry_tunnels(
                 $31,
                 $32,
                 $33,
-                now()
+                $34,
+                $35,
+                clock_timestamp()
             )
             "#,
         )
@@ -2926,6 +3013,7 @@ async fn upsert_postgres_telemetry_tunnels(
         .bind(&tunnel.traffic_reason)
         .bind(tunnel.traffic_checked_unix.map(u64_to_i64))
         .bind(&tunnel.plan_id)
+        .bind(&tunnel.topology_identity_hash)
         .bind(&tunnel.plan_name)
         .bind(&tunnel.plan_runtime_manager)
         .bind(&tunnel.endpoint_side)
@@ -2941,6 +3029,7 @@ async fn upsert_postgres_telemetry_tunnels(
         .bind(tunnel.packet_loss_ratio)
         .bind(tunnel.latency_healthy_windows.map(i32::from))
         .bind(tunnel.latency_missed_windows.map(i32::from))
+        .bind(&tunnel.runtime_evidence_identity_hash)
         .execute(&mut **tx)
         .await?;
     }
@@ -2959,6 +3048,7 @@ fn telemetry_tunnel_view(
     Some(TelemetryTunnelView {
         client_id: client_id.to_string(),
         observed_at: observed_unix.to_string(),
+        accepted_at: Utc::now().to_rfc3339(),
         interface: tunnel.interface.clone(),
         kind: tunnel.kind.clone(),
         ownership_mode: tunnel.ownership_mode.clone(),
@@ -2967,6 +3057,8 @@ fn telemetry_tunnel_view(
             .plan_id
             .as_deref()
             .and_then(|value| Uuid::parse_str(value).ok()),
+        topology_identity_hash: tunnel.topology_identity_hash.clone(),
+        runtime_evidence_identity_hash: tunnel.runtime_evidence_identity_hash.clone(),
         plan_name: tunnel.plan_name.clone(),
         plan_runtime_manager: tunnel.plan_runtime_manager.clone(),
         endpoint_side: tunnel.endpoint_side.clone(),
@@ -3077,6 +3169,26 @@ fn valid_tunnel(tunnel: &RuntimeTunnelStat) -> bool {
             .as_deref()
             .is_some_and(|value| Uuid::parse_str(value).is_ok())
         && tunnel
+            .topology_identity_hash
+            .as_deref()
+            .is_none_or(|value| {
+                value.len() == 64
+                    && value
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            })
+        && tunnel
+            .runtime_evidence_identity_hash
+            .as_deref()
+            .is_none_or(|value| {
+                value.len() == 64
+                    && value
+                        .as_bytes()
+                        .iter()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            })
+        && tunnel
             .plan_name
             .as_deref()
             .is_some_and(valid_telemetry_name)
@@ -3145,6 +3257,11 @@ pub(crate) async fn record_client_status_transition_in_tx(
     .bind(metadata)
     .execute(&mut **tx)
     .await?;
+    crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+        tx, client_id, to_status,
+    )
+    .await?;
+    mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(tx, &[client_id.to_string()]).await?;
     insert_client_status_webhook_event_in_tx(
         tx,
         client_id,
@@ -3278,11 +3395,10 @@ async fn touch_memory_agent_from_telemetry(
     agents: &Arc<RwLock<Vec<AgentView>>>,
     client_id: &str,
     remote_ip: Option<&str>,
-) {
+) -> Option<(String, bool)> {
     let mut agents = agents.write().await;
-    let Some(agent) = agents.iter_mut().find(|agent| agent.id == client_id) else {
-        return;
-    };
+    let agent = agents.iter_mut().find(|agent| agent.id == client_id)?;
+    let previous_status = agent.status.clone();
     if agent.status != "stale" {
         agent.status = "online".to_string();
         agent.stale_since = None;
@@ -3295,4 +3411,5 @@ async fn touch_memory_agent_from_telemetry(
         agent.last_ip = Some(remote_ip.to_string());
     }
     agent.last_seen_at = Some(crate::unix_now().to_string());
+    Some((agent.status.clone(), agent.status != previous_status))
 }

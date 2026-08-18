@@ -8,8 +8,8 @@ use sqlx::{types::Json as SqlJson, Row};
 use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
-    tunnel_topology_identity_hash, RuntimeTunnelManager, TunnelBuiltinCredentials,
-    TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
+    tunnel_runtime_evidence_identity_hash, tunnel_topology_identity_hash, RuntimeTunnelManager,
+    TunnelBuiltinCredentials, TunnelEndpointSide, TunnelKind, TunnelPlan, TunnelPlanInput,
 };
 
 use crate::{
@@ -21,6 +21,7 @@ use crate::{
         require_visible_postgres_clients_in_tx,
     },
     repository_network_observations::deactivate_postgres_automatic_observation_series_for_plan,
+    repository_operational_alerts::reconcile_postgres_tunnel_alerts_for_clients_in_tx,
     repository_tunnel_credentials::{
         generate_tunnel_builtin_credentials, next_credential_generation,
         reconcile_tunnel_builtin_credentials,
@@ -556,7 +557,7 @@ impl Repository {
             plan: plan.clone(),
             builtin_credentials,
             created_at: unix_now().to_string(),
-            updated_at: unix_now().to_string(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
             deleted_at: None,
             deleted_by: None,
             deleted_reason: None,
@@ -584,6 +585,12 @@ impl Repository {
                     validate_memory_tunnel_plan_adapter_references(&definitions, plan)?;
                 }
                 plans.push(view.clone());
+                drop(plans);
+                memory
+                    .operational_alert_tunnel_plan_boundaries
+                    .write()
+                    .await
+                    .insert(view.id, view.updated_at.clone());
                 view.clone()
             }
             Self::Postgres(pool) => {
@@ -641,12 +648,25 @@ impl Repository {
                     tunnel_plan_metadata(&persisted, operator),
                 )
                 .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        persisted.left_client_id.clone(),
+                        persisted.right_client_id.clone(),
+                    ],
+                )
+                .await?;
                 tx.commit().await?;
                 persisted
             }
         };
 
         if let Self::Memory(memory) = self {
+            self.reconcile_memory_tunnel_alerts_for_clients(&[
+                persisted.left_client_id.clone(),
+                persisted.right_client_id.clone(),
+            ])
+            .await?;
             memory.audits.write().await.push(AuditLogView {
                 id: Uuid::new_v4(),
                 actor_id: persisted_actor_id(operator),
@@ -669,6 +689,19 @@ impl Repository {
         enabled: bool,
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
+        let previous = self
+            .get_tunnel_plan_record(plan_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
+        let mut affected_client_ids = HashSet::from([
+            previous.left_client_id.clone(),
+            previous.right_client_id.clone(),
+            plan.left_client_id.clone(),
+            plan.right_client_id.clone(),
+        ])
+        .into_iter()
+        .collect::<Vec<_>>();
+        affected_client_ids.sort();
         let ospf_endpoint_status = if plan.ospf.is_some() && enabled {
             "unverified"
         } else {
@@ -701,6 +734,23 @@ impl Repository {
                     existing.builtin_credentials.as_ref(),
                     plan,
                 )?;
+                let previous_runtime_identity = tunnel_runtime_evidence_identity_hash(
+                    plan_id,
+                    &existing.plan,
+                    existing
+                        .builtin_credentials
+                        .as_ref()
+                        .map(TunnelBuiltinCredentials::generation),
+                );
+                let next_runtime_identity = tunnel_runtime_evidence_identity_hash(
+                    plan_id,
+                    plan,
+                    builtin_credentials
+                        .as_ref()
+                        .map(TunnelBuiltinCredentials::generation),
+                );
+                let runtime_changed = existing.enabled != enabled
+                    || previous_runtime_identity != next_runtime_identity;
                 validate_memory_tunnel_plan_resource_conflicts(plan, &plans, Some(plan_id))?;
                 {
                     let definitions = memory.network_adapter_definitions.read().await;
@@ -740,12 +790,20 @@ impl Repository {
                     plan: plan.clone(),
                     builtin_credentials,
                     created_at: existing.created_at.clone(),
-                    updated_at: unix_now().to_string(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
                     deleted_at: None,
                     deleted_by: None,
                     deleted_reason: None,
                 };
                 *existing = updated.clone();
+                drop(plans);
+                if runtime_changed {
+                    memory
+                        .operational_alert_tunnel_plan_boundaries
+                        .write()
+                        .await
+                        .insert(updated.id, updated.updated_at.clone());
+                }
                 updated
             }
             Self::Postgres(pool) => {
@@ -850,7 +908,7 @@ impl Repository {
                         connection_assessed_at = NULL,
                         connection_assessed_by = NULL,
                         revision = revision + 1,
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE id = $11
                       AND deleted_at IS NULL
                       AND name = $12
@@ -928,12 +986,16 @@ impl Repository {
                     tunnel_plan_metadata(&updated, operator),
                 )
                 .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(&mut tx, &affected_client_ids)
+                    .await?;
                 tx.commit().await?;
                 updated
             }
         };
 
         if let Self::Memory(memory) = self {
+            self.reconcile_memory_tunnel_alerts_for_clients(&affected_client_ids)
+                .await?;
             memory.audits.write().await.push(AuditLogView {
                 id: Uuid::new_v4(),
                 actor_id: persisted_actor_id(operator),
@@ -966,7 +1028,8 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let now = unix_now().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
+                let runtime_changed;
                 let updated = {
                     let mut plans = memory.tunnel_plans.write().await;
                     let plan = plans
@@ -976,6 +1039,7 @@ impl Repository {
                     if plan.revision != expected_revision {
                         anyhow::bail!("tunnel_plan_snapshot_stale");
                     }
+                    runtime_changed = plan.enabled != enabled;
                     plan.enabled = enabled;
                     plan.revision += 1;
                     reset_ospf_runtime_state(plan, ospf_status);
@@ -983,6 +1047,13 @@ impl Repository {
                     plan.updated_at = now.clone();
                     plan.clone()
                 };
+                if runtime_changed {
+                    memory
+                        .operational_alert_tunnel_plan_boundaries
+                        .write()
+                        .await
+                        .insert(updated.id, now.clone());
+                }
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: Some(operator.operator.id),
@@ -996,6 +1067,11 @@ impl Repository {
                     metadata: tunnel_plan_enabled_metadata(&updated, operator),
                     created_at: now,
                 });
+                self.reconcile_memory_tunnel_alerts_for_clients(&[
+                    updated.left_client_id.clone(),
+                    updated.right_client_id.clone(),
+                ])
+                .await?;
                 Ok(updated)
             }
             Self::Postgres(pool) => {
@@ -1018,7 +1094,7 @@ impl Repository {
                         connection_assessment_note = NULL,
                         connection_assessed_at = NULL,
                         connection_assessed_by = NULL,
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE id = $1 AND deleted_at IS NULL AND revision = $5
                     RETURNING
                         id, name, kind, enabled, revision, left_client_id, right_client_id,
@@ -1067,6 +1143,14 @@ impl Repository {
                 .bind(tunnel_plan_enabled_metadata(&updated, operator))
                 .execute(&mut *tx)
                 .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        existing.left_client_id.clone(),
+                        existing.right_client_id.clone(),
+                    ],
+                )
+                .await?;
                 tx.commit().await?;
                 self.get_tunnel_plan(plan_id)
                     .await?
@@ -1105,7 +1189,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let now = unix_now().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
                 let rotated = {
                     let mut plans = memory.tunnel_plans.write().await;
                     let plan = plans
@@ -1120,6 +1204,11 @@ impl Repository {
                     plan.updated_at = now.clone();
                     plan.clone()
                 };
+                memory
+                    .operational_alert_tunnel_plan_boundaries
+                    .write()
+                    .await
+                    .insert(rotated.id, now.clone());
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: persisted_actor_id(operator),
@@ -1129,6 +1218,11 @@ impl Repository {
                     metadata: tunnel_plan_metadata(&rotated, operator),
                     created_at: now,
                 });
+                self.reconcile_memory_tunnel_alerts_for_clients(&[
+                    rotated.left_client_id.clone(),
+                    rotated.right_client_id.clone(),
+                ])
+                .await?;
                 Ok(rotated)
             }
             Self::Postgres(pool) => {
@@ -1139,7 +1233,7 @@ impl Repository {
                     SET actor_id = $2,
                         builtin_credentials = $3,
                         revision = revision + 1,
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE id = $1
                       AND deleted_at IS NULL
                       AND revision = $4
@@ -1165,6 +1259,14 @@ impl Repository {
                     "network.tunnel_plan_credentials_rotated",
                     &rotated,
                     tunnel_plan_metadata(&rotated, operator),
+                )
+                .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        rotated.left_client_id.clone(),
+                        rotated.right_client_id.clone(),
+                    ],
                 )
                 .await?;
                 tx.commit().await?;
@@ -1285,7 +1387,7 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
-                let now = unix_now().to_string();
+                let now = chrono::Utc::now().to_rfc3339();
                 let deleted = {
                     let mut plans = memory.tunnel_plans.write().await;
                     let plan = plans
@@ -1312,6 +1414,11 @@ impl Repository {
                     plan.updated_at = now.clone();
                     plan.clone()
                 };
+                memory
+                    .operational_alert_tunnel_plan_boundaries
+                    .write()
+                    .await
+                    .insert(deleted.id, now.clone());
                 memory.audits.write().await.push(AuditLogView {
                     id: Uuid::new_v4(),
                     actor_id: persisted_actor_id(operator),
@@ -1321,6 +1428,11 @@ impl Repository {
                     metadata: tunnel_plan_delete_metadata(&deleted, was_enabled, operator),
                     created_at: now,
                 });
+                self.reconcile_memory_tunnel_alerts_for_clients(&[
+                    deleted.left_client_id.clone(),
+                    deleted.right_client_id.clone(),
+                ])
+                .await?;
                 Ok(deleted)
             }
             Self::Postgres(pool) => {
@@ -1335,7 +1447,7 @@ impl Repository {
                         deleted_at = now(),
                         deleted_by = $2,
                         deleted_reason = 'operator_retired',
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE id = $1
                       AND deleted_at IS NULL
                       AND revision = $3
@@ -1375,6 +1487,14 @@ impl Repository {
                     "network.tunnel_plan_deleted",
                     &deleted,
                     tunnel_plan_delete_metadata(&deleted, was_enabled, operator),
+                )
+                .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        deleted.left_client_id.clone(),
+                        deleted.right_client_id.clone(),
+                    ],
                 )
                 .await?;
                 tx.commit().await?;
@@ -1421,7 +1541,7 @@ impl Repository {
                         desired_cost,
                     )?;
                     set_ospf_pending(plan, desired_cost, left_job_id, right_job_id);
-                    plan.updated_at = unix_now().to_string();
+                    plan.updated_at = chrono::Utc::now().to_rfc3339();
                     plan.clone()
                 };
                 memory
@@ -1435,6 +1555,11 @@ impl Repository {
                     right_job_id,
                     operator,
                 ));
+                self.reconcile_memory_tunnel_alerts_for_clients(&[
+                    updated.left_client_id.clone(),
+                    updated.right_client_id.clone(),
+                ])
+                .await?;
                 Ok(updated)
             }
             Self::Postgres(pool) => {
@@ -1450,7 +1575,7 @@ impl Repository {
                         pending_ospf_reconciled_at = NULL,
                         left_ospf_job_id = $4,
                         right_ospf_job_id = $5,
-                        updated_at = now()
+                        updated_at = clock_timestamp()
                     WHERE id = $1
                       AND deleted_at IS NULL
                       AND enabled = TRUE
@@ -1503,6 +1628,14 @@ impl Repository {
                 ))
                 .execute(&mut *tx)
                 .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        updated.left_client_id.clone(),
+                        updated.right_client_id.clone(),
+                    ],
+                )
+                .await?;
                 tx.commit().await?;
                 self.get_tunnel_plan(plan_id)
                     .await?
@@ -1521,20 +1654,28 @@ impl Repository {
     ) -> Result<Option<TunnelPlanView>> {
         match self {
             Self::Memory(memory) => {
-                let mut plans = memory.tunnel_plans.write().await;
-                let Some(plan) = plans
-                    .iter_mut()
-                    .find(|plan| plan.id == plan_id && plan.deleted_at.is_none())
-                else {
-                    return Ok(None);
+                let updated = {
+                    let mut plans = memory.tunnel_plans.write().await;
+                    let Some(plan) = plans
+                        .iter_mut()
+                        .find(|plan| plan.id == plan_id && plan.deleted_at.is_none())
+                    else {
+                        return Ok(None);
+                    };
+                    if !ospf_job_matches(plan, side, job_id) {
+                        return Ok(None);
+                    }
+                    set_endpoint_ospf_result(plan, side, current_cost, succeeded);
+                    plan.ospf_status = aggregate_ospf_status(plan).to_string();
+                    plan.updated_at = chrono::Utc::now().to_rfc3339();
+                    plan.clone()
                 };
-                if !ospf_job_matches(plan, side, job_id) {
-                    return Ok(None);
-                }
-                set_endpoint_ospf_result(plan, side, current_cost, succeeded);
-                plan.ospf_status = aggregate_ospf_status(plan).to_string();
-                plan.updated_at = unix_now().to_string();
-                Ok(Some(plan.clone()))
+                self.reconcile_memory_tunnel_alerts_for_clients(&[
+                    updated.left_client_id.clone(),
+                    updated.right_client_id.clone(),
+                ])
+                .await?;
+                Ok(Some(updated))
             }
             Self::Postgres(pool) => {
                 let (status_column, cost_column, job_column) = match side {
@@ -1550,7 +1691,7 @@ impl Repository {
                     ),
                 };
                 let query = format!(
-                    "UPDATE tunnel_plans SET {status_column} = $3, {cost_column} = $4, updated_at = now() \
+                    "UPDATE tunnel_plans SET {status_column} = $3, {cost_column} = $4, updated_at = clock_timestamp() \
                      WHERE id = $1 AND deleted_at IS NULL AND {job_column} = $2 \
                        AND {status_column} = 'pending' \
                      RETURNING enabled, plan, desired_ospf_cost, \
@@ -1579,11 +1720,25 @@ impl Repository {
                     row.try_get("right_current_ospf_cost")?,
                 );
                 sqlx::query(
-                    "UPDATE tunnel_plans SET ospf_status = $2, updated_at = now() WHERE id = $1",
+                    "UPDATE tunnel_plans SET ospf_status = $2, updated_at = clock_timestamp() WHERE id = $1",
                 )
                 .bind(plan_id)
                 .bind(ospf_status)
                 .execute(&mut *tx)
+                .await?;
+                let endpoints = sqlx::query(
+                    "SELECT left_client_id, right_client_id FROM tunnel_plans WHERE id = $1",
+                )
+                .bind(plan_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                reconcile_postgres_tunnel_alerts_for_clients_in_tx(
+                    &mut tx,
+                    &[
+                        endpoints.try_get("left_client_id")?,
+                        endpoints.try_get("right_client_id")?,
+                    ],
+                )
                 .await?;
                 tx.commit().await?;
                 self.get_tunnel_plan(plan_id).await

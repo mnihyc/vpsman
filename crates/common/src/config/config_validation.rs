@@ -399,6 +399,18 @@ fn validate_runtime_status_telemetry_plans(
                 "network_runtime_status_telemetry_topology_identity_hash_invalid".to_string(),
             );
         }
+        if !plan.runtime_evidence_identity_hash.is_empty()
+            && (plan.runtime_evidence_identity_hash.len() != 64
+                || !plan
+                    .runtime_evidence_identity_hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(
+                "network_runtime_status_telemetry_runtime_evidence_identity_hash_invalid"
+                    .to_string(),
+            );
+        }
         let plan_name = plan.plan.name.trim();
         if plan_name.is_empty()
             || plan.plan.name.len() > 128

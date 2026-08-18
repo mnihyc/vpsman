@@ -119,12 +119,6 @@ export VPSMAN_GATEWAY_CONTROL_URL=http://127.0.0.1:9444
 export VPSMAN_GATEWAY_SPOOL_DIR=.tmp/local-control-plane-gateway-spool
 export VPSMAN_BACKUP_OBJECT_STORE_DIR=.tmp/objects/backups
 export VPSMAN_ARTIFACT_MAX_BYTES=134217728
-export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
-export VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO=0.10
-export VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO=0.20
-export VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO=0.10
-export VPSMAN_ALERT_CPU_LOAD_WARNING=2.0
-export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
 # Optional for manual runs. Set this to the operator config file you intend
 # to use; compose sets its own container path.
 # export VPSMAN_SUITE_CONFIG=.tmp/local-vpsman.toml
@@ -191,7 +185,6 @@ For a broad pre-release pass:
 bash scripts/release-check.sh
 ```
 
-The alert policy variables are fleet-wide startup defaults for built-in
-resource alerts. For per-VPS traffic rules and environment-specific alert
-logic, use Config > Rules or `vpsctl vps-rules`, then Observability > Alerts or
-`vpsctl alert-policy`.
+Resource threshold alerts are issued only by enabled policy groups. Configure
+them in Observability > Alerts or with `vpsctl alert-policy`; newly provided
+starter resource policies remain disabled until an operator enables them.

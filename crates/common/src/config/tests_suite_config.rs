@@ -168,81 +168,36 @@ tunnel_ipv6_allocation_pool_cidr = "fd80::/128"
 }
 
 #[test]
-fn suite_config_validates_alert_threshold_ranges_and_order() {
-    SuiteConfig::parse(
-        r#"
-version = 1
-
-[api]
-alert_memory_available_warning_ratio = 0.2
-alert_memory_available_critical_ratio = 0.1
-alert_disk_available_warning_ratio = 0.25
-alert_disk_available_critical_ratio = 0.05
-alert_cpu_load_warning = 2.0
-alert_cpu_load_critical = 4.0
-"#,
-    )
-    .expect("ordered alert thresholds");
-
-    let memory_error = SuiteConfig::parse(
+fn suite_config_accepts_legacy_alert_threshold_keys_as_parse_only() {
+    let config = SuiteConfig::parse(
         r#"
 version = 1
 
 [api]
 alert_memory_available_warning_ratio = 0.1
 alert_memory_available_critical_ratio = 0.2
-"#,
-    )
-    .unwrap_err();
-    assert_eq!(
-        memory_error,
-        "api.alert_memory_available_critical_above_warning"
-    );
-
-    let cpu_error = SuiteConfig::parse(
-        r#"
-version = 1
-
-[api]
+alert_disk_available_warning_ratio = 1.0
+alert_disk_available_critical_ratio = 0.0
 alert_cpu_load_warning = 4.0
 alert_cpu_load_critical = 2.0
 "#,
     )
-    .unwrap_err();
-    assert_eq!(cpu_error, "api.alert_cpu_load_critical_below_warning");
+    .expect("legacy alert threshold keys remain parse-compatible");
 
-    let range_error = SuiteConfig::parse(
-        r#"
-version = 1
-
-[api]
-alert_disk_available_warning_ratio = 1.0
-alert_disk_available_critical_ratio = 0.1
-"#,
-    )
-    .unwrap_err();
-    assert_eq!(range_error, "api.alert_disk_available_out_of_range");
-
-    let zero_error = SuiteConfig::parse(
-        r#"
-version = 1
-
-[api]
-alert_memory_available_warning_ratio = 0.0
-alert_memory_available_critical_ratio = 0.0
-"#,
-    )
-    .unwrap_err();
-    assert_eq!(zero_error, "api.alert_memory_available_out_of_range");
-
-    let incomplete_error = SuiteConfig::parse(
-        r#"
-version = 1
-
-[api]
-alert_cpu_load_warning = 2.0
-"#,
-    )
-    .unwrap_err();
-    assert_eq!(incomplete_error, "api.alert_cpu_load_pair_incomplete");
+    assert_eq!(
+        config.api.deprecated_resource_alert_threshold_fields(),
+        vec![
+            "api.alert_memory_available_warning_ratio",
+            "api.alert_memory_available_critical_ratio",
+            "api.alert_disk_available_warning_ratio",
+            "api.alert_disk_available_critical_ratio",
+            "api.alert_cpu_load_warning",
+            "api.alert_cpu_load_critical",
+        ]
+    );
+    assert!(!config
+        .validation_summary()
+        .hot_reload_fields
+        .iter()
+        .any(|field| field == "api.alert_*"));
 }

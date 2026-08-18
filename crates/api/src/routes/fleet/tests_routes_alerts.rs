@@ -9,7 +9,9 @@ fn condition_parse_errors_include_operator_actionable_detail() {
     assert_eq!(error.code, "fleet_alert_policy_condition_invalid");
     let message = error.public_message.expect("public condition detail");
     assert!(message.contains("unknown metric cpu.load1"));
-    assert!(message.contains("cpu.load_1"));
+    assert!(message.contains("cpu.utilization_ratio"));
+    assert!(message.contains("cpu.load_saturation (load per core)"));
+    assert!(message.contains("cpu.load_1 (raw load)"));
 }
 
 #[test]

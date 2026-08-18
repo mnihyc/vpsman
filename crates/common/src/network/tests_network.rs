@@ -239,6 +239,31 @@ fn topology_identity_ignores_policy_only_plan_edits() {
 }
 
 #[test]
+fn runtime_evidence_identity_tracks_runtime_policy_and_credential_generation() {
+    let plan_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let mut plan = plan_tunnel(&plan_input(
+        TunnelKind::Wireguard,
+        RuntimeTunnelManager::AgentBuiltin,
+    ))
+    .unwrap();
+    let identity = tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1));
+
+    plan.bandwidth_mbps = 9_999;
+    assert_ne!(
+        tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1)),
+        identity,
+        "runtime policy edits must invalidate old adapter/traffic evidence"
+    );
+
+    let generation_one = tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(1));
+    assert_ne!(
+        tunnel_runtime_evidence_identity_hash(plan_id, &plan, Some(2)),
+        generation_one,
+        "credential rotation must invalidate old runtime evidence"
+    );
+}
+
+#[test]
 fn topology_identity_changes_with_endpoint_underlay_or_primary_family() {
     let plan_id = "00000000-0000-4000-8000-000000000001".parse().unwrap();
     let plan = plan_tunnel(&plan_input(

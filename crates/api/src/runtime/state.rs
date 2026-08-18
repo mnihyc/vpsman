@@ -15,7 +15,6 @@ use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
 use crate::{
     client_ip::TrustedProxyConfig,
     error::ApiError,
-    fleet_alerts::FleetAlertPolicy,
     gateway_client::GatewayDispatchClient,
     model::{AuthContext, WsEvent},
     object_store::BackupObjectStore,
@@ -149,7 +148,6 @@ pub(crate) struct AppState {
     pub(crate) gateway: GatewayDispatchClient,
     pub(crate) backup_object_store: Option<BackupObjectStore>,
     pub(crate) update_release_policy: UpdateReleasePolicy,
-    pub(crate) fleet_alert_policy: FleetAlertPolicy,
     pub(crate) job_output_artifact_min_bytes: usize,
     pub(crate) artifact_max_bytes: usize,
     pub(crate) require_registered_agent_updates: bool,
@@ -441,46 +439,6 @@ impl AppState {
         configured
             .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS)
             .clamp(1, self.max_job_timeout_secs())
-    }
-
-    pub(crate) fn fleet_alert_policy(&self) -> FleetAlertPolicy {
-        let mut policy = self.fleet_alert_policy.clone();
-        if let Some(suite) = self.current_suite_config() {
-            if env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO")
-                && env_absent("VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO")
-            {
-                if let (Some(warning), Some(critical)) = (
-                    suite.api.alert_memory_available_warning_ratio,
-                    suite.api.alert_memory_available_critical_ratio,
-                ) {
-                    policy.memory_available_warning_ratio = warning;
-                    policy.memory_available_critical_ratio = critical;
-                }
-            }
-            if env_absent("VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO")
-                && env_absent("VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO")
-            {
-                if let (Some(warning), Some(critical)) = (
-                    suite.api.alert_disk_available_warning_ratio,
-                    suite.api.alert_disk_available_critical_ratio,
-                ) {
-                    policy.disk_available_warning_ratio = warning;
-                    policy.disk_available_critical_ratio = critical;
-                }
-            }
-            if env_absent("VPSMAN_ALERT_CPU_LOAD_WARNING")
-                && env_absent("VPSMAN_ALERT_CPU_LOAD_CRITICAL")
-            {
-                if let (Some(warning), Some(critical)) = (
-                    suite.api.alert_cpu_load_warning,
-                    suite.api.alert_cpu_load_critical,
-                ) {
-                    policy.cpu_load_warning = warning;
-                    policy.cpu_load_critical = critical;
-                }
-            }
-        }
-        policy
     }
 }
 

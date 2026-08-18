@@ -844,6 +844,7 @@ fn mutating_runtime_config_sync_command() -> JobCommand {
         .push(AgentRuntimeStatusTelemetryPlan {
             plan_id: Some("plan-left-right".to_string()),
             topology_identity_hash: "0".repeat(64),
+            runtime_evidence_identity_hash: "1".repeat(64),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
             builtin_credentials: None,

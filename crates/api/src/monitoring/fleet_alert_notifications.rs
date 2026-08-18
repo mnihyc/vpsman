@@ -15,12 +15,12 @@ use vpsman_common::{
 use vpsman_server_core::{operator_is_active_authorized, prepare_webhook_target};
 
 use crate::{
-    fleet_alerts::{build_agent_alert_scopes, AgentAlertScope},
+    fleet_alerts::{build_agent_alert_scopes, fleet_alert_is_confirmed_active, AgentAlertScope},
     model::{AuthContext, FleetAlertQuery, FleetAlertView},
     model_alert_notifications::{
         FleetAlertNotificationCandidate, FleetAlertNotificationChannelView,
         FleetAlertNotificationDeliveryView, FleetAlertNotificationDispatchRequest,
-        FleetAlertNotificationProcessRequest,
+        FleetAlertNotificationMatchRule, FleetAlertNotificationProcessRequest,
     },
     repository_alert_notifications::notification_status_for_kind,
     state::AppState,
@@ -49,18 +49,22 @@ impl AppState {
             .repo
             .list_enabled_fleet_alert_notification_channels_for_dispatch()
             .await?;
-        let alerts = self
-            .list_fleet_alerts(FleetAlertQuery {
-                limit: request.limit.or(Some(200)),
-                client_id: request.client_id.clone(),
-                severity: request.severity.clone(),
-                category: request.category.clone(),
-                operator_state: request.operator_state.clone(),
-                include_muted: request.include_muted,
-            })
-            .await?;
         let agents = self.repo.list_agents().await?;
         let agent_scopes = build_agent_alert_scopes(&agents);
+        let notification_rules = notification_match_rules(&channels, &agent_scopes);
+        let alerts = self
+            .list_fleet_alerts_for_notification_dispatch(
+                FleetAlertQuery {
+                    limit: request.limit.or(Some(200)),
+                    client_id: request.client_id.clone(),
+                    severity: request.severity.clone(),
+                    category: request.category.clone(),
+                    operator_state: request.operator_state.clone(),
+                    include_muted: request.include_muted,
+                },
+                &notification_rules,
+            )
+            .await?;
         let candidates = notification_candidates(&alerts, &channels, &agent_scopes);
         let preview_hash = notification_dispatch_preview_hash(request, &candidates)?;
         if dry_run {
@@ -250,6 +254,47 @@ impl AppState {
     }
 }
 
+fn notification_match_rules(
+    channels: &[FleetAlertNotificationChannelView],
+    agent_scopes: &HashMap<String, AgentAlertScope>,
+) -> Vec<FleetAlertNotificationMatchRule> {
+    channels
+        .iter()
+        .filter_map(|channel| {
+            let client_ids = match (channel.scope_kind.as_str(), channel.scope_value.as_deref()) {
+                ("global", _) => None,
+                ("client", Some(client_id)) => Some(vec![client_id.to_string()]),
+                ("provider", Some(provider)) => Some(
+                    agent_scopes
+                        .iter()
+                        .filter(|(_, scope)| scope.provider.as_deref() == Some(provider))
+                        .map(|(client_id, _)| client_id.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                ("tag", Some(tag)) => Some(
+                    agent_scopes
+                        .iter()
+                        .filter(|(_, scope)| scope.tags.iter().any(|stored| stored == tag))
+                        .map(|(client_id, _)| client_id.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => return None,
+            };
+            let mut client_ids = client_ids;
+            if let Some(client_ids) = &mut client_ids {
+                client_ids.sort();
+                client_ids.dedup();
+            }
+            Some(FleetAlertNotificationMatchRule {
+                min_severity_rank: severity_rank(&channel.min_severity),
+                categories: channel.categories.clone(),
+                operator_states: channel.operator_states.clone(),
+                client_ids,
+            })
+        })
+        .collect()
+}
+
 fn notification_candidates(
     alerts: &[FleetAlertView],
     channels: &[FleetAlertNotificationChannelView],
@@ -257,7 +302,10 @@ fn notification_candidates(
 ) -> Vec<FleetAlertNotificationCandidate> {
     let now = unix_now() as i64;
     let mut candidates = Vec::new();
-    for alert in alerts {
+    for alert in alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+    {
         let alert_scope = alert_scope(alert, agent_scopes);
         for channel in channels {
             if !channel_matches_alert(channel, alert, alert_scope) {

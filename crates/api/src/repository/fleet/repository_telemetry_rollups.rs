@@ -2596,6 +2596,7 @@ impl Repository {
                     SELECT
                         client_id,
                         observed_at::text AS observed_at,
+                        updated_at::text AS accepted_at,
                         interface,
                         telemetry.kind AS kind,
                         ownership_mode,
@@ -2612,6 +2613,8 @@ impl Repository {
                         traffic_reason,
                         traffic_checked_unix,
                         telemetry_plan_id,
+                        telemetry_topology_identity_hash,
+                        telemetry_runtime_evidence_identity_hash,
                         telemetry_plan_name,
                         telemetry_plan_runtime_manager,
                         telemetry_endpoint_side,
@@ -2716,11 +2719,16 @@ impl Repository {
                         Ok(TelemetryTunnelView {
                             client_id: row.try_get("client_id")?,
                             observed_at: row.try_get("observed_at")?,
+                            accepted_at: row.try_get("accepted_at")?,
                             interface: row.try_get("interface")?,
                             kind: row.try_get("kind")?,
                             ownership_mode: row.try_get("ownership_mode")?,
                             mutation_policy: row.try_get("mutation_policy")?,
                             plan_id: telemetry_plan_id,
+                            topology_identity_hash: row
+                                .try_get("telemetry_topology_identity_hash")?,
+                            runtime_evidence_identity_hash: row
+                                .try_get("telemetry_runtime_evidence_identity_hash")?,
                             plan_name: telemetry_plan_name,
                             plan_runtime_manager: row.try_get("telemetry_plan_runtime_manager")?,
                             endpoint_side: row.try_get("telemetry_endpoint_side")?,

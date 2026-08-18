@@ -159,12 +159,7 @@ const allViews: ScreenshotEntry[] = [
     subpage: "Alerts",
     heading: "Fleet alerts",
     id: "07-fleet-alerts",
-    requiredText: [
-      "Tunnel adapter degraded",
-      "Traffic policy",
-      "Acknowledge",
-      "Open",
-    ],
+    requiredText: ["Tunnel adapter degraded", "Traffic", "Acknowledge", "Open"],
   },
   {
     view: "Fleet",

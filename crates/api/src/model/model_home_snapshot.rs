@@ -23,6 +23,7 @@ pub(crate) struct HomeSnapshotResponse {
     pub(crate) telemetry_rollups: FleetSnapshotSource<Vec<TelemetryRollupView>>,
     pub(crate) telemetry_network_rates: FleetSnapshotSource<Vec<TelemetryNetworkRateView>>,
     pub(crate) fleet_alerts: FleetSnapshotSource<Vec<FleetAlertView>>,
+    pub(crate) fleet_alerts_truncated: bool,
     pub(crate) monitoring_cards: FleetSnapshotSource<Vec<MonitoringCardView>>,
     pub(crate) jobs: FleetSnapshotSource<Vec<JobHistoryView>>,
     pub(crate) file_transfers: FleetSnapshotSource<Vec<FileTransferSessionView>>,

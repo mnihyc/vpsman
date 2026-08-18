@@ -243,6 +243,7 @@ impl Repository {
                     .await
                     .get(&client_id)
                     .cloned();
+                let creating_identity = existing.is_none();
                 if request.replace_existing_key {
                     if existing.as_ref().is_none_or(|key| key.is_empty()) {
                         anyhow::bail!("client_not_found_or_no_key");
@@ -401,6 +402,14 @@ impl Repository {
                     }
                 };
                 sort_agent_tags_by_order(&mut view.tags, &memory_tag_order);
+                if creating_identity {
+                    self.reconcile_memory_agent_alert_transition(
+                        &client_id,
+                        "never",
+                        &unix_now().to_string(),
+                    )
+                    .await?;
+                }
                 if let Some(prior_status) = prior_status.filter(|status| status != "offline") {
                     memory
                         .client_status_history
@@ -502,10 +511,17 @@ impl Repository {
                 .bind(&client_id)
                 .fetch_optional(&mut *tx)
                 .await?;
+                let creating_identity = existing.is_none();
+                let prior_status = existing
+                    .as_ref()
+                    .map(|row| row.try_get::<String, _>("status"))
+                    .transpose()?;
 
                 if let Some(row) = existing.as_ref() {
                     let hidden: bool = row.try_get("hidden")?;
-                    let status: String = row.try_get("status")?;
+                    let status = prior_status
+                        .as_deref()
+                        .context("existing client status missing")?;
                     if hidden || status == "deleted" {
                         anyhow::bail!("agent_identity_deactivated");
                     }
@@ -587,22 +603,6 @@ impl Repository {
                     .bind(request.replace_existing_key)
                     .execute(&mut *tx)
                     .await?;
-                    if request.replace_existing_key && status != "offline" {
-                        crate::repository_ingest::record_client_status_transition_in_tx(
-                            &mut tx,
-                            &client_id,
-                            Some(&status),
-                            "offline",
-                            "client_key_replaced",
-                            json!({
-                                "operator_id": operator.operator.id,
-                                "recovery_with_new_key": true,
-                            }),
-                            "operator_request",
-                            "agent-identity-controller",
-                        )
-                        .await?;
-                    }
                 } else {
                     sqlx::query(
                         r#"
@@ -634,6 +634,33 @@ impl Repository {
                     .bind(&client_id)
                     .bind(tag_id)
                     .execute(&mut *tx)
+                    .await?;
+                }
+                if let Some(prior_status) = replacement_transition_prior_status(
+                    request.replace_existing_key,
+                    prior_status.as_deref(),
+                ) {
+                    crate::repository_ingest::record_client_status_transition_in_tx(
+                        &mut tx,
+                        &client_id,
+                        Some(prior_status),
+                        "offline",
+                        "client_key_replaced",
+                        json!({
+                            "operator_id": operator.operator.id,
+                            "recovery_with_new_key": true,
+                        }),
+                        "operator_request",
+                        "agent-identity-controller",
+                    )
+                    .await?;
+                }
+                if creating_identity {
+                    crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
+                        &mut tx,
+                        &client_id,
+                        "never",
+                    )
                     .await?;
                 }
 
@@ -940,18 +967,18 @@ impl Repository {
                         } else {
                             Vec::new()
                         };
-                    mark_postgres_agent_revoked(
-                        &mut tx,
-                        client_id,
-                        reason.as_deref(),
-                        &prior_status,
-                    )
-                    .await?;
                     let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
                         &mut tx,
                         client_id,
                         "client_key_revoked",
                         "client_key_revoked: target skipped before dispatch",
+                    )
+                    .await?;
+                    mark_postgres_agent_revoked(
+                        &mut tx,
+                        client_id,
+                        reason.as_deref(),
+                        &prior_status,
                     )
                     .await?;
                     sqlx::query(
@@ -1023,8 +1050,6 @@ impl Repository {
                     } else {
                         Vec::new()
                     };
-                mark_postgres_agent_revoked(&mut tx, client_id, reason.as_deref(), &prior_status)
-                    .await?;
                 let skipped_job_ids = skip_unstarted_queued_targets_for_client_in_tx(
                     &mut tx,
                     client_id,
@@ -1032,6 +1057,8 @@ impl Repository {
                     "client_key_revoked: target skipped before dispatch",
                 )
                 .await?;
+                mark_postgres_agent_revoked(&mut tx, client_id, reason.as_deref(), &prior_status)
+                    .await?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (
@@ -1636,6 +1663,16 @@ fn normalized_reason(reason: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(1024).collect())
+}
+
+fn replacement_transition_prior_status(
+    replace_existing_key: bool,
+    prior_status: Option<&str>,
+) -> Option<&str> {
+    replace_existing_key
+        .then_some(prior_status)
+        .flatten()
+        .filter(|status| *status != "offline")
 }
 
 fn decode_public_key_hex(value: &str) -> Result<Vec<u8>> {

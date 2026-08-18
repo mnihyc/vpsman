@@ -1,6 +1,23 @@
 use super::*;
 
 #[test]
+fn replacement_transition_requires_an_existing_non_offline_status() {
+    assert_eq!(replacement_transition_prior_status(true, None), None);
+    assert_eq!(
+        replacement_transition_prior_status(true, Some("offline")),
+        None
+    );
+    assert_eq!(
+        replacement_transition_prior_status(true, Some("never")),
+        Some("never")
+    );
+    assert_eq!(
+        replacement_transition_prior_status(false, Some("online")),
+        None
+    );
+}
+
+#[test]
 fn current_key_revocation_is_found_beyond_the_legacy_report_horizon() {
     let client_id = "edge-current";
     let fingerprint = "a".repeat(64);

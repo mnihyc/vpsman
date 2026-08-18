@@ -1344,7 +1344,8 @@ async fn external_observed_plan_enables_evidence_without_enabling_mutation() {
     let mut input = test_plan_input(RuntimeTunnelManager::ExternalObserved, false);
     input.name = "Operator observed link".to_string();
     let plan = plan_tunnel(&input).unwrap();
-    repo.record_tunnel_plan(&input, &plan, true, &network_test_operator())
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &network_test_operator())
         .await
         .unwrap();
     let state = test_state(repo);
@@ -1356,11 +1357,26 @@ async fn external_observed_plan_enables_evidence_without_enabling_mutation() {
     assert!(runtime.network.runtime_status_telemetry_enabled);
     assert!(!runtime.network.apply_enabled);
     assert_eq!(runtime.network.runtime_status_telemetry_plans.len(), 1);
+    let telemetry_plan = &runtime.network.runtime_status_telemetry_plans[0];
     assert_eq!(
-        runtime.network.runtime_status_telemetry_plans[0]
-            .plan
-            .runtime_control
-            .manager,
+        telemetry_plan.topology_identity_hash,
+        vpsman_common::tunnel_topology_identity_hash(saved.id, &saved.plan),
+        "runtime-status telemetry must preserve the topology identity used by reachability"
+    );
+    assert_eq!(
+        telemetry_plan.runtime_evidence_identity_hash,
+        vpsman_common::tunnel_runtime_evidence_identity_hash(
+            saved.id,
+            &saved.plan,
+            saved
+                .builtin_credentials
+                .as_ref()
+                .map(vpsman_common::TunnelBuiltinCredentials::generation),
+        ),
+        "adapter/traffic evidence uses its distinct full-runtime identity"
+    );
+    assert_eq!(
+        telemetry_plan.plan.runtime_control.manager,
         RuntimeTunnelManager::ExternalObserved
     );
 }
@@ -1776,7 +1792,6 @@ fn test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None),
         backup_object_store: None,
         update_release_policy: crate::state::UpdateReleasePolicy::default(),
-        fleet_alert_policy: crate::fleet_alerts::FleetAlertPolicy::default(),
         job_output_artifact_min_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

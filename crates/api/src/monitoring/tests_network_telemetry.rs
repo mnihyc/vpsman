@@ -75,6 +75,108 @@ async fn declared_tunnel_telemetry_keeps_exact_plan_and_endpoint_identity() {
 }
 
 #[tokio::test]
+async fn reconnecting_tunnel_requires_evidence_accepted_after_the_status_boundary() {
+    let repo = Repository::Memory(MemoryState::default());
+    let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::CustomAdapter).await;
+    let plan = repo.get_tunnel_plan(plan_id).await.unwrap().unwrap();
+    let gateway_session_id = uuid::Uuid::new_v4();
+    let process_incarnation_id = uuid::Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        seed_memory_telemetry_source(
+            memory,
+            "edge-a",
+            "gateway-a",
+            gateway_session_id,
+            process_incarnation_id,
+        )
+        .await;
+        memory
+            .agents
+            .write()
+            .await
+            .iter_mut()
+            .find(|agent| agent.id == "edge-a")
+            .unwrap()
+            .status = "offline".to_string();
+    }
+    let tunnel = RuntimeTunnelStat {
+        interface: plan.plan.interface_name.clone(),
+        kind: "wireguard".to_string(),
+        ownership_mode: "custom_adapter".to_string(),
+        mutation_policy: "managed_desired".to_string(),
+        source: "approved_runtime_status_telemetry".to_string(),
+        plan_id: Some(plan.id.to_string()),
+        topology_identity_hash: Some(vpsman_common::tunnel_topology_identity_hash(
+            plan.id, &plan.plan,
+        )),
+        runtime_evidence_identity_hash: Some(vpsman_common::tunnel_runtime_evidence_identity_hash(
+            plan.id,
+            &plan.plan,
+            plan.builtin_credentials
+                .as_ref()
+                .map(vpsman_common::TunnelBuiltinCredentials::generation),
+        )),
+        plan_name: Some(plan.name.clone()),
+        plan_runtime_manager: Some("custom_adapter".to_string()),
+        endpoint_side: Some("left".to_string()),
+        peer_client_id: Some("edge-b".to_string()),
+        traffic_source: Some("interface_counters".to_string()),
+        traffic_status: Some("degraded".to_string()),
+        adapter_health: Some(RuntimeTunnelAdapterHealthStat {
+            status: "failed".to_string(),
+            checked_unix: 1_800_000_000,
+            configured: true,
+            success: false,
+            reason: Some("test adapter failure".to_string()),
+            ..RuntimeTunnelAdapterHealthStat::default()
+        }),
+        ..RuntimeTunnelStat::default()
+    };
+    let mut event = GatewayTelemetryIngest {
+        gateway_id: "gateway-a".to_string(),
+        gateway_session_id,
+        process_incarnation_id,
+        telemetry_seq: 1,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: "edge-a".to_string(),
+            metrics: AgentMetrics {
+                observed_unix: 1_800_000_000,
+                hostname: "edge-a".to_string(),
+                tunnels: vec![tunnel],
+                ..AgentMetrics::default()
+            },
+        },
+    };
+
+    assert!(repo.record_telemetry(&event).await.unwrap());
+    if let Repository::Memory(memory) = &repo {
+        assert!(!memory
+            .operational_alert_episodes
+            .read()
+            .await
+            .iter()
+            .any(|episode| {
+                episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
+            }));
+    }
+
+    event.telemetry_seq = 2;
+    event.telemetry.metrics.observed_unix += 1;
+    assert!(repo.record_telemetry(&event).await.unwrap());
+    if let Repository::Memory(memory) = &repo {
+        let episodes = memory.operational_alert_episodes.read().await;
+        let episode = episodes
+            .iter()
+            .find(|episode| {
+                episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
+            })
+            .unwrap();
+        assert_eq!(episode.lifecycle_state, "triggered");
+    }
+}
+
+#[tokio::test]
 async fn disabled_tunnel_plan_stops_exposing_stale_telemetry() {
     let repo = Repository::Memory(MemoryState::default());
     let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::ExternalObserved).await;

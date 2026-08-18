@@ -1,5 +1,6 @@
 use super::*;
 use base64::Engine as _;
+use chrono::Utc;
 use serde_json::json;
 use std::collections::BTreeMap;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
@@ -57,6 +58,17 @@ async fn fleet_alerts_derive_actionable_current_status() {
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
         .await
         .unwrap();
+    let tunnel_evidence_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+        saved_tunnel.id,
+        &saved_tunnel.plan,
+        saved_tunnel
+            .builtin_credentials
+            .as_ref()
+            .map(vpsman_common::TunnelBuiltinCredentials::generation),
+    );
+    let tunnel_topology_identity =
+        vpsman_common::tunnel_topology_identity_hash(saved_tunnel.id, &saved_tunnel.plan);
+    let tunnel_accepted_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
     let backup_job = Uuid::new_v4();
     if let Repository::Memory(memory) = &repo {
         memory
@@ -65,12 +77,15 @@ async fn fleet_alerts_derive_actionable_current_status() {
             .await
             .push(TelemetryTunnelView {
                 client_id: "edge-a".to_string(),
-                observed_at: "200".to_string(),
+                observed_at: tunnel_accepted_at.clone(),
+                accepted_at: tunnel_accepted_at.clone(),
                 interface: "gre42".to_string(),
                 kind: "gre".to_string(),
                 ownership_mode: "managed".to_string(),
                 mutation_policy: "managed".to_string(),
                 plan_id: Some(saved_tunnel.id),
+                topology_identity_hash: Some(tunnel_topology_identity),
+                runtime_evidence_identity_hash: Some(tunnel_evidence_identity),
                 plan_name: Some("edge-a-gre42".to_string()),
                 plan_runtime_manager: Some("agent_builtin".to_string()),
                 endpoint_side: Some("left".to_string()),
@@ -168,6 +183,8 @@ async fn fleet_alerts_derive_actionable_current_status() {
         );
     }
 
+    repo.reconcile_operational_alerts().await.unwrap();
+
     let state = alert_test_state(repo);
     let alerts = state
         .list_fleet_alerts(FleetAlertQuery {
@@ -221,6 +238,243 @@ async fn fleet_alerts_derive_actionable_current_status() {
 }
 
 #[tokio::test]
+async fn tunnel_alert_runtime_boundary_rejects_pre_reenable_evidence() {
+    let repo = Repository::Memory(MemoryState::default());
+    let input = alert_test_tunnel_input();
+    crate::tests::seed_never_connected_memory_agent(&repo, "edge-a").await;
+    crate::tests::seed_never_connected_memory_agent(&repo, "edge-b").await;
+    if let Repository::Memory(memory) = &repo {
+        for agent in memory.agents.write().await.iter_mut() {
+            agent.status = "online".to_string();
+        }
+    }
+    crate::tests_network::seed_test_plan_adapter_definitions(&repo, &input).await;
+    let plan = vpsman_common::plan_tunnel(&input).unwrap();
+    let saved = repo
+        .record_tunnel_plan(&input, &plan, true, &test_operator())
+        .await
+        .unwrap();
+    let initial_boundary = if let Repository::Memory(memory) = &repo {
+        memory
+            .operational_alert_tunnel_plan_boundaries
+            .read()
+            .await
+            .get(&saved.id)
+            .cloned()
+            .unwrap()
+    } else {
+        unreachable!()
+    };
+    let accepted_at = (chrono::DateTime::parse_from_rfc3339(&initial_boundary).unwrap()
+        + chrono::Duration::nanoseconds(1))
+    .to_rfc3339();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .telemetry_tunnels
+            .write()
+            .await
+            .push(alert_test_tunnel_telemetry(&saved, &accepted_at));
+    }
+    repo.reconcile_memory_tunnel_alerts_for_clients(&[
+        saved.left_client_id.clone(),
+        saved.right_client_id.clone(),
+    ])
+    .await
+    .unwrap();
+
+    let initial_episode = if let Repository::Memory(memory) = &repo {
+        memory
+            .operational_alert_episodes
+            .read()
+            .await
+            .iter()
+            .find(|episode| {
+                episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
+            })
+            .cloned()
+            .unwrap()
+    } else {
+        unreachable!()
+    };
+    assert_eq!(initial_episode.lifecycle_state, "triggered");
+
+    let assessed = repo
+        .update_tunnel_connection_assessment(
+            saved.id,
+            saved.revision,
+            "disconnected",
+            Some("metadata-only review"),
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(
+            memory
+                .operational_alert_tunnel_plan_boundaries
+                .read()
+                .await
+                .get(&saved.id),
+            Some(&initial_boundary),
+            "revision-only connection assessment must not invalidate runtime evidence"
+        );
+        assert!(memory
+            .operational_alert_episodes
+            .read()
+            .await
+            .iter()
+            .any(|episode| episode.id == initial_episode.id));
+    }
+
+    let disabled = repo
+        .set_tunnel_plan_enabled(saved.id, assessed.revision, false, &test_operator())
+        .await
+        .unwrap();
+    let reenabled = repo
+        .set_tunnel_plan_enabled(saved.id, disabled.revision, true, &test_operator())
+        .await
+        .unwrap();
+    let reenabled_boundary = if let Repository::Memory(memory) = &repo {
+        let boundary = memory
+            .operational_alert_tunnel_plan_boundaries
+            .read()
+            .await
+            .get(&saved.id)
+            .cloned()
+            .unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&boundary).unwrap()
+                > chrono::DateTime::parse_from_rfc3339(&accepted_at).unwrap()
+        );
+        assert!(!memory
+            .operational_alert_episodes
+            .read()
+            .await
+            .iter()
+            .any(|episode| {
+                episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
+            }));
+        boundary
+    } else {
+        unreachable!()
+    };
+
+    let fresh_accepted_at = (chrono::DateTime::parse_from_rfc3339(&reenabled_boundary).unwrap()
+        + chrono::Duration::nanoseconds(1))
+    .to_rfc3339();
+    if let Repository::Memory(memory) = &repo {
+        memory.telemetry_tunnels.write().await[0] =
+            alert_test_tunnel_telemetry(&reenabled, &fresh_accepted_at);
+    }
+    repo.reconcile_memory_tunnel_alerts_for_clients(&[
+        reenabled.left_client_id.clone(),
+        reenabled.right_client_id.clone(),
+    ])
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let episodes = memory.operational_alert_episodes.read().await;
+        let current = episodes
+            .iter()
+            .find(|episode| {
+                episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
+            })
+            .unwrap();
+        assert_eq!(current.lifecycle_state, "triggered");
+        assert_eq!(current.trigger_generation, 2);
+    }
+}
+
+#[tokio::test]
+async fn high_resource_rollup_without_policy_does_not_issue_resource_alerts() {
+    let repo = Repository::Memory(MemoryState::default());
+    crate::tests::seed_never_connected_memory_agent(&repo, "high-resource").await;
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .telemetry_rollups
+            .write()
+            .await
+            .push(alert_test_rollup("high-resource", 100.0, 1, 1));
+    }
+    repo.reconcile_operational_alerts().await.unwrap();
+
+    let state = alert_test_state(repo);
+    let resource_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(100),
+            client_id: Some("high-resource".to_string()),
+            severity: None,
+            category: Some("resource".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert!(resource_alerts.is_empty());
+
+    let operational_alerts = state
+        .list_fleet_alerts(FleetAlertQuery {
+            limit: Some(100),
+            client_id: Some("high-resource".to_string()),
+            severity: None,
+            category: Some("agent_status".to_string()),
+            operator_state: None,
+            include_muted: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(operational_alerts.len(), 1);
+    assert_eq!(operational_alerts[0].category, "agent_status");
+}
+
+#[tokio::test]
+async fn resolved_policy_history_retains_hidden_subject_identity() {
+    let repo = Repository::Memory(MemoryState::default());
+    let alert_id = Uuid::new_v4();
+    if let Repository::Memory(memory) = &repo {
+        memory
+            .hidden_clients
+            .write()
+            .await
+            .insert("retired-vps".to_string());
+        memory.policy_alerts.write().await.push(PolicyAlertRecord {
+            id: alert_id,
+            policy_group_id: Uuid::new_v4(),
+            policy_rule_id: Uuid::new_v4(),
+            client_id: "retired-vps".to_string(),
+            trigger_generation: 1,
+            severity: "warning".to_string(),
+            category: "resource".to_string(),
+            title: "Resolved policy episode".to_string(),
+            detail: "subject was later retired".to_string(),
+            actual_value: Some(2.0),
+            threshold_value: Some(1.0),
+            payload: json!({"retained_identity": true}),
+            lifecycle_state: "resolved".to_string(),
+            last_confirmed_at: Some("2026-01-01T00:00:00Z".to_string()),
+            resolved_at: Some("2026-01-01T00:01:00Z".to_string()),
+            resolution_reason: Some("policy_scope_exited".to_string()),
+            observed_at: "2026-01-01T00:00:00Z".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        });
+    }
+
+    let history = repo
+        .list_policy_alerts(&PolicyAlertQuery {
+            limit: Some(10),
+            client_id: Some("retired-vps".to_string()),
+            severity: None,
+            category: None,
+            policy_group_id: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, alert_id);
+    assert_eq!(history[0].client_id, "retired-vps");
+}
+
+#[tokio::test]
 async fn tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
     for (manager, manager_label, health_status, expected_degraded) in [
         (
@@ -252,19 +506,36 @@ async fn tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
             .record_tunnel_plan(&input, &plan, true, &test_operator())
             .await
             .unwrap();
+        let tunnel_evidence_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+            saved.id,
+            &saved.plan,
+            saved
+                .builtin_credentials
+                .as_ref()
+                .map(vpsman_common::TunnelBuiltinCredentials::generation),
+        );
+        let tunnel_topology_identity =
+            vpsman_common::tunnel_topology_identity_hash(saved.id, &saved.plan);
+        let tunnel_accepted_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
         if let Repository::Memory(memory) = &repo {
+            for agent in memory.agents.write().await.iter_mut() {
+                agent.status = "online".to_string();
+            }
             memory
                 .telemetry_tunnels
                 .write()
                 .await
                 .push(TelemetryTunnelView {
                     client_id: "client-a".to_string(),
-                    observed_at: "200".to_string(),
+                    observed_at: tunnel_accepted_at.clone(),
+                    accepted_at: tunnel_accepted_at,
                     interface: input.interface_name.clone(),
                     kind: "wireguard".to_string(),
                     ownership_mode: manager_label.to_string(),
                     mutation_policy: "managed_desired".to_string(),
                     plan_id: Some(saved.id),
+                    topology_identity_hash: Some(tunnel_topology_identity),
+                    runtime_evidence_identity_hash: Some(tunnel_evidence_identity),
                     plan_name: Some(saved.name.clone()),
                     plan_runtime_manager: Some(manager_label.to_string()),
                     endpoint_side: Some("left".to_string()),
@@ -306,6 +577,8 @@ async fn tunnel_adapter_failures_only_degrade_custom_adapter_plans() {
                     latency_missed_windows: None,
                 });
         }
+
+        repo.reconcile_operational_alerts().await.unwrap();
 
         let alerts = alert_test_state(repo)
             .list_fleet_alerts(FleetAlertQuery {
@@ -1518,6 +1791,388 @@ async fn filter_limit_regression_policy_evaluator_is_unbounded() {
 }
 
 #[tokio::test]
+async fn policy_alert_lifecycle_triggers_persists_unknown_resolves_and_recurs_once() {
+    let repo = Repository::Memory(MemoryState::default());
+    let client_id = "policy-lifecycle-edge";
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: client_id.to_string(),
+            display_name: "Policy lifecycle edge".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        let mut rollup = alert_test_rollup(client_id, 0.1, 900, 1800);
+        rollup.cpu_usage_sample_count = 3;
+        rollup.cpu_usage_avg = Some(0.8);
+        rollup.cpu_usage_max = Some(0.9);
+        memory.telemetry_rollups.write().await.push(rollup);
+    }
+
+    let policy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "explicit-policy-lifecycle".to_string(),
+                enabled: true,
+                selector_expression: "status:online".to_string(),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "CPU utilization".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].lifecycle_state, "triggered");
+        assert_eq!(alerts[0].trigger_generation, 1);
+        assert!(alerts[0].last_confirmed_at.is_some());
+        let events = memory.webhook_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "alert.policy_reached");
+        assert!(events[0]
+            .event_predicates
+            .contains(&"alert.policy_triggered".to_string()));
+        assert_eq!(events[0].payload["alert"]["id"], json!(alerts[0].id));
+        assert_eq!(events[0].payload["alert"]["trigger_generation"], json!(1));
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        assert_eq!(
+            memory.policy_alerts.read().await[0].lifecycle_state,
+            "persisting"
+        );
+        assert_eq!(memory.webhook_events.read().await.len(), 1);
+        let rollup = &mut memory.telemetry_rollups.write().await[0];
+        rollup.cpu_usage_sample_count = 0;
+        rollup.cpu_usage_avg = None;
+        rollup.cpu_usage_max = None;
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    let (unknown_alert_id, unknown_last_confirmed_at) = if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts[0].lifecycle_state, "unknown");
+        assert_eq!(alerts[0].trigger_generation, 1);
+        assert!(alerts[0].resolved_at.is_none());
+        assert_eq!(memory.webhook_events.read().await.len(), 1);
+        let unknown_alert_id = alerts[0].id;
+        let unknown_last_confirmed_at = alerts[0].last_confirmed_at.clone();
+        drop(alerts);
+        let rollup = &mut memory.telemetry_rollups.write().await[0];
+        rollup.cpu_usage_sample_count = 3;
+        rollup.cpu_usage_avg = Some(0.8);
+        rollup.cpu_usage_max = Some(0.9);
+        (unknown_alert_id, unknown_last_confirmed_at)
+    } else {
+        unreachable!()
+    };
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].id, unknown_alert_id);
+        assert_eq!(alerts[0].trigger_generation, 1);
+        assert_eq!(alerts[0].lifecycle_state, "persisting");
+        assert!(unknown_last_confirmed_at.is_some());
+        assert!(alerts[0].last_confirmed_at.is_some());
+        assert!(alerts[0].resolved_at.is_none());
+        assert_eq!(memory.webhook_events.read().await.len(), 1);
+        drop(alerts);
+        let rollup = &mut memory.telemetry_rollups.write().await[0];
+        rollup.cpu_usage_avg = Some(0.4);
+        rollup.cpu_usage_max = Some(0.5);
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts[0].lifecycle_state, "resolved");
+        assert_eq!(
+            alerts[0].resolution_reason.as_deref(),
+            Some("condition_recovered")
+        );
+        assert!(alerts[0].resolved_at.is_some());
+        let events = memory.webhook_events.read().await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].kind, "alert.policy_resolved");
+        assert!(events[1]
+            .event_predicates
+            .contains(&"alert.resolved".to_string()));
+        assert_eq!(events[1].payload["alert"]["id"], json!(alerts[0].id));
+        assert_eq!(events[1].payload["alert"]["trigger_generation"], json!(1));
+        assert_eq!(
+            events[1].payload["event"]["occurred_at"],
+            json!(alerts[0].resolved_at.as_deref())
+        );
+        let rollup = &mut memory.telemetry_rollups.write().await[0];
+        rollup.cpu_usage_avg = Some(0.8);
+        rollup.cpu_usage_max = Some(0.9);
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[1].lifecycle_state, "triggered");
+        assert_eq!(alerts[1].trigger_generation, 2);
+        assert_eq!(memory.webhook_events.read().await.len(), 3);
+        memory.agents.write().await[0].status = "offline".to_string();
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts[1].lifecycle_state, "resolved");
+        assert_eq!(
+            alerts[1].resolution_reason.as_deref(),
+            Some("policy_scope_exited")
+        );
+        assert_eq!(memory.webhook_events.read().await.len(), 4);
+        assert!(memory.policy_rule_states.read().await.iter().all(|state| {
+            state.policy_rule_id != policy.rules[0].id || state.client_id != client_id
+        }));
+        memory.agents.write().await[0].status = "online".to_string();
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
+    repo.upsert_fleet_alert_policy(
+        &CreateFleetAlertPolicyRequest {
+            id: Some(policy.id),
+            name: policy.name.clone(),
+            enabled: false,
+            selector_expression: policy.selector_expression.clone(),
+            rules: policy
+                .rules
+                .iter()
+                .map(|rule| PolicyRuleRequest {
+                    id: Some(rule.id),
+                    name: rule.name.clone(),
+                    enabled: rule.enabled,
+                    traffic_selector: rule.traffic_selector.clone(),
+                    condition_expression: rule.condition_expression.clone(),
+                    window_secs: rule.window_secs,
+                    severity: rule.severity.clone(),
+                })
+                .collect(),
+            notes: policy.notes.clone(),
+            confirmed: true,
+            preview_hash: None,
+        },
+        &test_operator(),
+    )
+    .await
+    .unwrap();
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 3);
+        assert_eq!(alerts[2].lifecycle_state, "resolved");
+        assert_eq!(
+            alerts[2].resolution_reason.as_deref(),
+            Some("policy_disabled")
+        );
+        assert_eq!(memory.webhook_events.read().await.len(), 6);
+        assert!(memory.policy_rule_states.read().await.is_empty());
+    }
+}
+
+#[test]
+fn policy_alert_activity_requires_confirmed_trigger_or_persistence() {
+    let mut record = PolicyAlertRecord {
+        id: Uuid::new_v4(),
+        policy_group_id: Uuid::new_v4(),
+        policy_rule_id: Uuid::new_v4(),
+        client_id: "policy-activity-edge".to_string(),
+        trigger_generation: 1,
+        severity: "warning".to_string(),
+        category: "resource".to_string(),
+        title: "CPU utilization threshold reached".to_string(),
+        detail: "current lifecycle classification".to_string(),
+        actual_value: Some(0.8),
+        threshold_value: Some(0.75),
+        payload: json!({}),
+        lifecycle_state: "triggered".to_string(),
+        last_confirmed_at: Some("100".to_string()),
+        resolved_at: None,
+        resolution_reason: None,
+        observed_at: "100".to_string(),
+        created_at: "100".to_string(),
+    };
+
+    for (lifecycle, expected_active) in [
+        ("triggered", true),
+        ("persisting", true),
+        ("unknown", false),
+        ("resolved", false),
+    ] {
+        record.lifecycle_state = lifecycle.to_string();
+        let alert = crate::repository_alert_policies::policy_alert_to_fleet_alert(&record);
+        assert_eq!(
+            crate::fleet_alerts::fleet_alert_is_confirmed_active(&alert),
+            expected_active,
+            "policy lifecycle: {lifecycle}"
+        );
+    }
+
+    let mut operational = crate::repository_alert_policies::policy_alert_to_fleet_alert(&record);
+    operational.target_kind = "agent".to_string();
+    operational.evidence = json!({});
+    assert!(crate::fleet_alerts::fleet_alert_is_confirmed_active(
+        &operational
+    ));
+}
+
+#[tokio::test]
+async fn unconfirmed_legacy_policy_history_neither_resolves_nor_refires() {
+    let repo = Repository::Memory(MemoryState::default());
+    let client_id = "legacy-policy-lifecycle";
+    let policy = repo
+        .upsert_fleet_alert_policy(
+            &CreateFleetAlertPolicyRequest {
+                id: None,
+                name: "legacy lifecycle compatibility".to_string(),
+                enabled: true,
+                selector_expression: format!("id:{client_id}"),
+                rules: vec![PolicyRuleRequest {
+                    id: None,
+                    name: "CPU utilization".to_string(),
+                    enabled: true,
+                    traffic_selector: None,
+                    condition_expression: "cpu.utilization_ratio >= 0.75".to_string(),
+                    window_secs: 0,
+                    severity: "warning".to_string(),
+                }],
+                notes: None,
+                confirmed: true,
+                preview_hash: None,
+            },
+            &test_operator(),
+        )
+        .await
+        .unwrap();
+    let rule = &policy.rules[0];
+    let legacy_alert_id = Uuid::new_v4();
+    let now = Utc::now().to_rfc3339();
+
+    if let Repository::Memory(memory) = &repo {
+        memory.agents.write().await.push(AgentView {
+            id: client_id.to_string(),
+            display_name: "Legacy lifecycle".to_string(),
+            status: "online".to_string(),
+            tags: Vec::new(),
+            registration_ip: None,
+            last_ip: None,
+            last_seen_at: None,
+            arch: None,
+            internal_build_number: 1,
+            process_incarnation_id: None,
+            stale_since: None,
+            stale_reason: None,
+            capabilities: AgentCapabilitySnapshot::default(),
+        });
+        let mut rollup = alert_test_rollup(client_id, 0.1, 900, 1800);
+        rollup.cpu_usage_sample_count = 3;
+        rollup.cpu_usage_avg = Some(0.4);
+        rollup.cpu_usage_max = Some(0.5);
+        memory.telemetry_rollups.write().await.push(rollup);
+        memory
+            .policy_rule_states
+            .write()
+            .await
+            .push(PolicyRuleStateRecord {
+                policy_rule_id: rule.id,
+                client_id: client_id.to_string(),
+                rule_version: rule.rule_version,
+                condition_true: true,
+                previous_condition_true: false,
+                window_satisfied: true,
+                first_true_at: Some(now.clone()),
+                last_true_at: Some(now.clone()),
+                last_false_at: None,
+                last_evaluated_at: now.clone(),
+                incomplete: false,
+                incomplete_reasons: Vec::new(),
+                last_actual_value: Some(0.8),
+                last_threshold_value: Some(0.75),
+                last_fired_at: Some(now.clone()),
+                trigger_generation: 1,
+                updated_at: now.clone(),
+            });
+        memory.policy_alerts.write().await.push(PolicyAlertRecord {
+            id: legacy_alert_id,
+            policy_group_id: policy.id,
+            policy_rule_id: rule.id,
+            client_id: client_id.to_string(),
+            trigger_generation: 1,
+            severity: "warning".to_string(),
+            category: "resource".to_string(),
+            title: "Legacy alert history".to_string(),
+            detail: "No post-upgrade confirmation exists".to_string(),
+            actual_value: Some(0.8),
+            threshold_value: Some(0.75),
+            payload: json!({}),
+            lifecycle_state: "unknown".to_string(),
+            last_confirmed_at: None,
+            resolved_at: None,
+            resolution_reason: None,
+            observed_at: now.clone(),
+            created_at: now,
+        });
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 0);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].lifecycle_state, "unknown");
+        assert!(alerts[0].last_confirmed_at.is_none());
+        assert!(alerts[0].resolved_at.is_none());
+        assert!(memory.webhook_events.read().await.is_empty());
+        let rollup = &mut memory.telemetry_rollups.write().await[0];
+        rollup.cpu_usage_avg = Some(0.8);
+        rollup.cpu_usage_max = Some(0.9);
+    }
+
+    assert_eq!(repo.evaluate_policy_rules().await.unwrap(), 1);
+    if let Repository::Memory(memory) = &repo {
+        let alerts = memory.policy_alerts.read().await;
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].id, legacy_alert_id);
+        assert_eq!(alerts[0].lifecycle_state, "unknown");
+        assert!(alerts[0].last_confirmed_at.is_none());
+        assert_eq!(alerts[1].trigger_generation, 2);
+        assert_eq!(alerts[1].lifecycle_state, "triggered");
+        let events = memory.webhook_events.read().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, format!("policy-alert:{}", alerts[1].id));
+    }
+}
+
+#[tokio::test]
 async fn policy_evaluator_isolates_malformed_persisted_group_selector() {
     let repo = Repository::Memory(MemoryState::default());
     let healthy = repo
@@ -1815,26 +2470,6 @@ async fn policy_rollups_exceed_public_page_without_truncating_preview_or_evaluat
     assert_eq!(preview.rule_previews[0].false_count, 0);
     assert_eq!(preview.rule_previews[0].incomplete_count, 0);
 
-    let last_client_id = format!("scale-client-{:05}", CLIENT_COUNT - 1);
-    let base_alerts = alert_test_state(repo.clone())
-        .list_fleet_alerts(FleetAlertQuery {
-            limit: Some(100),
-            client_id: Some(last_client_id.clone()),
-            severity: None,
-            category: Some("resource".to_string()),
-            operator_state: None,
-            include_muted: None,
-        })
-        .await
-        .unwrap();
-    assert!(
-        base_alerts.iter().any(|alert| {
-            alert.client_id.as_deref() == Some(last_client_id.as_str())
-                && alert.status == "cpu_load_high"
-        }),
-        "base resource alerts must include clients beyond the public telemetry page"
-    );
-
     assert_eq!(repo.evaluate_policy_rules().await.unwrap(), CLIENT_COUNT);
     if let Repository::Memory(memory) = &repo {
         assert_eq!(
@@ -1904,6 +2539,17 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
         .record_tunnel_plan(&tunnel_input, &tunnel_plan, true, &test_operator())
         .await
         .unwrap();
+    let tunnel_evidence_identity = vpsman_common::tunnel_runtime_evidence_identity_hash(
+        saved_tunnel.id,
+        &saved_tunnel.plan,
+        saved_tunnel
+            .builtin_credentials
+            .as_ref()
+            .map(vpsman_common::TunnelBuiltinCredentials::generation),
+    );
+    let tunnel_topology_identity =
+        vpsman_common::tunnel_topology_identity_hash(saved_tunnel.id, &saved_tunnel.plan);
+    let tunnel_accepted_at = (Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
     let policy_alert_id = Uuid::new_v4();
     let failed_backup_id = Uuid::new_v4();
     let failed_job_id = Uuid::new_v4();
@@ -1924,6 +2570,10 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
             actual_value: Some(2.0),
             threshold_value: Some(1.0),
             payload: json!({"regression": "policy_candidate"}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some("00000".to_string()),
+            resolved_at: None,
+            resolution_reason: None,
             observed_at: "00000".to_string(),
             created_at: "00000".to_string(),
         });
@@ -1944,6 +2594,10 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
                 actual_value: None,
                 threshold_value: None,
                 payload: json!({}),
+                lifecycle_state: "triggered".to_string(),
+                last_confirmed_at: Some(format!("{index:05}")),
+                resolved_at: None,
+                resolution_reason: None,
                 observed_at: format!("{index:05}"),
                 created_at: format!("{index:05}"),
             }));
@@ -2038,12 +2692,15 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
         };
         let healthy_tunnel = TelemetryTunnelView {
             client_id: "edge-a".to_string(),
-            observed_at: "00001".to_string(),
+            observed_at: tunnel_accepted_at.clone(),
+            accepted_at: tunnel_accepted_at,
             interface: "gre42".to_string(),
             kind: "gre".to_string(),
             ownership_mode: "managed".to_string(),
             mutation_policy: "managed".to_string(),
             plan_id: Some(saved_tunnel.id),
+            topology_identity_hash: Some(tunnel_topology_identity),
+            runtime_evidence_identity_hash: Some(tunnel_evidence_identity),
             plan_name: Some(saved_tunnel.name.clone()),
             plan_runtime_manager: None,
             endpoint_side: Some("left".to_string()),
@@ -2082,6 +2739,7 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
             }));
         let mut failed_tunnel = healthy_tunnel;
         failed_tunnel.observed_at = "00000".to_string();
+        failed_tunnel.accepted_at = "99999".to_string();
         failed_tunnel.adapter_health.as_mut().unwrap().status = "failed".to_string();
         failed_tunnel.adapter_health.as_mut().unwrap().success = false;
         failed_tunnel.adapter_health.as_mut().unwrap().exit_code = Some(1);
@@ -2089,6 +2747,8 @@ async fn fleet_alert_candidates_are_not_hidden_by_public_page_caps() {
             Some("adapter status command failed".to_string());
         memory.telemetry_tunnels.write().await.push(failed_tunnel);
     }
+
+    repo.reconcile_operational_alerts().await.unwrap();
 
     assert!(!repo
         .list_policy_alerts(&PolicyAlertQuery {
@@ -2242,6 +2902,7 @@ async fn fleet_alerts_merge_operator_state_and_filter_muted_alerts() {
             capabilities: AgentCapabilitySnapshot::default(),
         });
     }
+    repo.reconcile_operational_alerts().await.unwrap();
     let state = alert_test_state(repo);
     let operator = test_operator();
     let alerts = state
@@ -2403,6 +3064,136 @@ async fn fleet_alert_notification_dispatch_rejects_channel_overflow_explicitly()
         .to_string();
 
     assert!(error.contains("fleet_alert_notification_dispatch_channel_limit_exceeded"));
+}
+
+#[tokio::test]
+async fn fleet_alert_notification_dispatch_keeps_fresh_events_beyond_condition_cohort_cap() {
+    let repo = Repository::Memory(MemoryState::default());
+    let operator = test_operator();
+    repo.upsert_fleet_alert_notification_channel(
+        &CreateFleetAlertNotificationChannelRequest {
+            id: None,
+            name: "global-lifecycle-webhook".to_string(),
+            scope_kind: "global".to_string(),
+            scope_value: None,
+            min_severity: Some("info".to_string()),
+            categories: Some(Vec::new()),
+            operator_states: Some(Vec::new()),
+            delivery_kind: "webhook".to_string(),
+            target: "https://hooks.acme.com/fleet-lifecycle".to_string(),
+            cooldown_secs: Some(60),
+            enabled: Some(true),
+            notes: None,
+            confirmed: true,
+        },
+        &operator,
+    )
+    .await
+    .unwrap();
+
+    let condition_at = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let event_at = Utc::now().to_rfc3339();
+    let event_public_id = "job:event-beyond-condition-cap".to_string();
+    if let Repository::Memory(memory) = &repo {
+        let mut episodes = memory.operational_alert_episodes.write().await;
+        episodes.extend((0..201).map(|index| {
+            let id = Uuid::new_v4();
+            crate::model::OperationalAlertEpisodeRecord {
+                id,
+                public_id: format!("agent_status:condition-{index:03}"),
+                producer_kind: "agent_status".to_string(),
+                natural_key: format!("condition-{index:03}:connectivity"),
+                record_kind: "condition".to_string(),
+                trigger_generation: 1,
+                trigger_severity: "warning".to_string(),
+                trigger_category: "agent_status".to_string(),
+                severity: "warning".to_string(),
+                category: "agent_status".to_string(),
+                target_kind: "agent".to_string(),
+                target_id: format!("condition-{index:03}"),
+                client_id: Some(format!("condition-{index:03}")),
+                title: "Agent is not online".to_string(),
+                detail: "condition cohort filler".to_string(),
+                source_status: "offline".to_string(),
+                evidence: json!({"subject":{"client_id":format!("condition-{index:03}")}}),
+                lifecycle_state: "persisting".to_string(),
+                triggered_at: condition_at.clone(),
+                last_confirmed_at: Some(condition_at.clone()),
+                resolved_at: None,
+                resolution_reason: None,
+                resolution_note: None,
+                resolution_actor_id: None,
+                backfilled: false,
+                created_at: condition_at.clone(),
+                updated_at: condition_at.clone(),
+            }
+        }));
+        let id = Uuid::new_v4();
+        episodes.push(crate::model::OperationalAlertEpisodeRecord {
+            id,
+            public_id: event_public_id.clone(),
+            producer_kind: "job".to_string(),
+            natural_key: id.to_string(),
+            record_kind: "event".to_string(),
+            trigger_generation: 1,
+            trigger_severity: "critical".to_string(),
+            trigger_category: "job".to_string(),
+            severity: "critical".to_string(),
+            category: "job".to_string(),
+            target_kind: "job".to_string(),
+            target_id: id.to_string(),
+            client_id: None,
+            title: "Job requires operator attention".to_string(),
+            detail: "fresh terminal event".to_string(),
+            source_status: "failed".to_string(),
+            evidence: json!({"job_id":id,"retained_identity":true}),
+            lifecycle_state: "triggered".to_string(),
+            triggered_at: event_at.clone(),
+            last_confirmed_at: Some(event_at.clone()),
+            resolved_at: None,
+            resolution_reason: None,
+            resolution_note: None,
+            resolution_actor_id: None,
+            backfilled: false,
+            created_at: event_at.clone(),
+            updated_at: event_at,
+        });
+    }
+
+    let state = alert_test_state(repo);
+    let request = FleetAlertNotificationDispatchRequest {
+        limit: Some(50),
+        client_id: None,
+        severity: None,
+        category: None,
+        operator_state: None,
+        include_muted: Some(true),
+        dry_run: Some(true),
+        preview_hash: None,
+        confirmed: false,
+    };
+    let preview = state
+        .dispatch_fleet_alert_notifications(&request, &operator)
+        .await
+        .unwrap();
+    assert_eq!(preview.len(), 50);
+    assert!(preview.iter().any(|row| row.alert_id == event_public_id));
+    let reviewed_hash = preview[0].review_preview_hash.clone();
+
+    let delivered = state
+        .dispatch_fleet_alert_notifications(
+            &FleetAlertNotificationDispatchRequest {
+                dry_run: Some(false),
+                preview_hash: reviewed_hash,
+                confirmed: true,
+                ..request
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(delivered.len(), 50);
+    assert!(delivered.iter().any(|row| row.alert_id == event_public_id));
 }
 
 #[tokio::test]
@@ -3592,7 +4383,6 @@ fn alert_test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
@@ -3681,6 +4471,68 @@ fn alert_test_tunnel_input() -> vpsman_common::TunnelPlanInput {
         left_mtu: None,
         right_mtu: None,
         ospf: None,
+    }
+}
+
+fn alert_test_tunnel_telemetry(plan: &TunnelPlanView, accepted_at: &str) -> TelemetryTunnelView {
+    TelemetryTunnelView {
+        client_id: plan.left_client_id.clone(),
+        observed_at: accepted_at.to_string(),
+        accepted_at: accepted_at.to_string(),
+        interface: plan.plan.interface_name.clone(),
+        kind: "gre".to_string(),
+        ownership_mode: "custom_adapter".to_string(),
+        mutation_policy: "managed_desired".to_string(),
+        plan_id: Some(plan.id),
+        topology_identity_hash: Some(vpsman_common::tunnel_topology_identity_hash(
+            plan.id, &plan.plan,
+        )),
+        runtime_evidence_identity_hash: Some(vpsman_common::tunnel_runtime_evidence_identity_hash(
+            plan.id,
+            &plan.plan,
+            plan.builtin_credentials
+                .as_ref()
+                .map(vpsman_common::TunnelBuiltinCredentials::generation),
+        )),
+        plan_name: Some(plan.name.clone()),
+        plan_runtime_manager: Some("custom_adapter".to_string()),
+        endpoint_side: Some("left".to_string()),
+        peer_client_id: Some(plan.right_client_id.clone()),
+        source: "telemetry".to_string(),
+        operstate: Some("up".to_string()),
+        mtu: Some(1476),
+        link_type: None,
+        address: Some("10.42.0.0".to_string()),
+        rx_bytes: 100,
+        tx_bytes: 200,
+        traffic_source: Some("interface_counters".to_string()),
+        traffic_status: Some("degraded".to_string()),
+        traffic_reason: Some("test traffic evidence".to_string()),
+        traffic_checked_unix: Some(1),
+        adapter_health: Some(TelemetryTunnelAdapterHealthView {
+            status: "failed".to_string(),
+            checked_unix: 1,
+            configured: true,
+            success: false,
+            exit_code: Some(1),
+            reason: Some("test adapter failure".to_string()),
+            duration_ms: 1,
+            command_sha256_hex: Some("0".repeat(64)),
+            timed_out: false,
+            output_truncated: false,
+            stdout_sha256_hex: None,
+            stderr_sha256_hex: None,
+        }),
+        latency_monitoring_enabled: None,
+        latency_status: None,
+        latency_reason: None,
+        latency_primary_family: None,
+        latency_target: None,
+        latency_checked_unix: None,
+        latency_avg_ms: None,
+        packet_loss_ratio: None,
+        latency_healthy_windows: None,
+        latency_missed_windows: None,
     }
 }
 

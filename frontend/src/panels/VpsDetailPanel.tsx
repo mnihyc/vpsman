@@ -21,10 +21,13 @@ import { handleTabListKeyDown, tabId } from "../components/AccessibleTabs";
 import { CountryBadge } from "../components/CountryFlag";
 import { useHistoryEntryState } from "../historyEntryState";
 import { useProjectedMonitoringMetadata } from "../hooks/useProjectedMonitoringMetadata";
+import { FLEET_DETAIL_LIMIT, formatLowerBoundCount } from "../constants";
 import {
-  formatLowerBoundCount,
-  isActionableFleetAlertState,
-} from "../constants";
+  alertCategoryLabel,
+  alertLifecycleLabel,
+  isActivePolicyAlert,
+  presentFleetAlert,
+} from "../alertPresentation";
 import type { FileTransferSessionRecord } from "../typesFileTransfer";
 import type {
   AgentView,
@@ -108,13 +111,20 @@ type VpsDetailPanelProps = {
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertsEvidenceAvailable: boolean;
   fleetAlertsTruncated: boolean;
+  fleetAlertHistory: FleetAlertRecord[];
+  fleetAlertHistoryEvidenceAvailable: boolean;
+  fleetAlertHistoryTruncated: boolean;
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   recordBounds: VpsDetailRecordBounds;
   loading: boolean;
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
+  currentPolicyAlerts: PolicyAlertRecord[];
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
   onOpenAudit: (auditId?: string) => void;
   onOpenAlertPolicies: (policyId?: string) => void;
   onOpenBackup: (agent: AgentView) => void;
@@ -132,6 +142,7 @@ type VpsDetailPanelProps = {
   onOpenProcesses: (agent: AgentView) => void;
   onOpenTerminal: (agent: AgentView) => void;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsEvidenceAvailable: boolean;
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   runtimeConfigEvidenceState: "available" | "loading" | "unavailable";
   configurationSources: ConfigurationSourceView[];
@@ -167,13 +178,20 @@ export function VpsDetailPanel({
   backups,
   fileTransfers,
   fleetAlerts,
+  fleetAlertsEvidenceAvailable,
   fleetAlertsTruncated,
+  fleetAlertHistory,
+  fleetAlertHistoryEvidenceAvailable,
+  fleetAlertHistoryTruncated,
   fleetAlertPolicies,
   jobs,
   recordBounds,
   loading,
   networkObservations,
   networkTrends,
+  currentPolicyAlerts,
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
   onOpenAudit,
   onOpenAlertPolicies,
   onOpenBackup,
@@ -191,6 +209,7 @@ export function VpsDetailPanel({
   onOpenProcesses,
   onOpenTerminal,
   policyAlerts,
+  policyAlertsEvidenceAvailable,
   runtimeConfigApplyStates,
   runtimeConfigEvidenceState,
   configurationSources,
@@ -205,6 +224,8 @@ export function VpsDetailPanel({
     "Summary",
   );
   const [sourceLoadError, setSourceLoadError] = useState<string | null>(null);
+  const policyAlertHistoryTruncated =
+    policyAlertsEvidenceAvailable && policyAlerts.length >= FLEET_DETAIL_LIMIT;
   const agentId = agent?.id ?? null;
   useEffect(() => {
     if (!agentId) {
@@ -236,10 +257,12 @@ export function VpsDetailPanel({
             backups,
             fileTransfers,
             fleetAlerts,
+            fleetAlertHistory,
             fleetAlertPolicies,
             jobs,
             networkObservations,
             networkTrends,
+            currentPolicyAlerts,
             policyAlerts,
             runtimeConfigApplyStates:
               runtimeConfigEvidenceState === "available"
@@ -260,10 +283,12 @@ export function VpsDetailPanel({
       backups,
       fileTransfers,
       fleetAlerts,
+      fleetAlertHistory,
       fleetAlertPolicies,
       jobs,
       networkObservations,
       networkTrends,
+      currentPolicyAlerts,
       policyAlerts,
       runtimeConfigApplyStates,
       runtimeConfigEvidenceState,
@@ -336,8 +361,8 @@ export function VpsDetailPanel({
     );
   }
 
-  const activeAlertCount = related.alerts.filter((alert) =>
-    isActionableFleetAlertState(alert.operator_state),
+  const activeAlertCount = related.alerts.filter(
+    (alert) => presentFleetAlert(alert).actionable,
   ).length;
   const latestJob = related.relatedJobs[0] ?? null;
   const displayState = agentDisplayState(agent);
@@ -517,13 +542,21 @@ export function VpsDetailPanel({
               icon={<AlertTriangle size={16} />}
               label="Alerts"
               value={
-                fleetAlertsTruncated && activeAlertCount === 0
-                  ? "None in loaded page"
-                  : `${formatLowerBoundCount(activeAlertCount, fleetAlertsTruncated)} active`
+                !fleetAlertsEvidenceAvailable
+                  ? "Unknown"
+                  : fleetAlertsTruncated && related.alerts.length === 0
+                    ? "None in loaded page"
+                    : `${formatLowerBoundCount(related.alerts.length, fleetAlertsTruncated)} current`
               }
-              detail={`${related.alerts.length} loaded records${fleetAlertsTruncated ? "; the fleet alert page is capped" : ""}`}
+              detail={
+                fleetAlertsEvidenceAvailable
+                  ? `${activeAlertCount} actionable${fleetAlertsTruncated ? "; the fleet alert page is capped" : ""}`
+                  : "Current alert evidence is unavailable"
+              }
               tone={
-                activeAlertCount > 0 || fleetAlertsTruncated
+                !fleetAlertsEvidenceAvailable ||
+                activeAlertCount > 0 ||
+                fleetAlertsTruncated
                   ? "warning"
                   : "ready"
               }
@@ -599,6 +632,7 @@ export function VpsDetailPanel({
           {activeTab === "Summary" && (
             <SummaryTab
               agent={agent}
+              fleetAlertsEvidenceAvailable={fleetAlertsEvidenceAvailable}
               latestJob={latestJob}
               loading={loading}
               related={related}
@@ -716,7 +750,13 @@ export function VpsDetailPanel({
           )}
           {activeTab === "Network" && (
             <NetworkTab
+              currentPolicyAlertsEvidenceAvailable={
+                currentPolicyAlertsEvidenceAvailable
+              }
+              currentPolicyAlertsTruncated={currentPolicyAlertsTruncated}
               loading={loading}
+              policyAlertHistoryTruncated={policyAlertHistoryTruncated}
+              policyAlertsEvidenceAvailable={policyAlertsEvidenceAvailable}
               related={related}
               onOpenAlertPolicies={onOpenAlertPolicies}
               onOpenConfig={() => onOpenConfig(agent)}
@@ -727,6 +767,10 @@ export function VpsDetailPanel({
           )}
           {activeTab === "Activity" && (
             <ActivityTab
+              fleetAlertHistoryEvidenceAvailable={
+                fleetAlertHistoryEvidenceAvailable
+              }
+              fleetAlertHistoryTruncated={fleetAlertHistoryTruncated}
               loading={loading}
               related={related}
               recordBounds={recordBounds}
@@ -744,6 +788,7 @@ export function VpsDetailPanel({
 
 function SummaryTab({
   agent,
+  fleetAlertsEvidenceAvailable,
   latestJob,
   loading,
   related,
@@ -753,6 +798,7 @@ function SummaryTab({
   onOpenJob,
 }: {
   agent: AgentView;
+  fleetAlertsEvidenceAvailable: boolean;
   latestJob: JobHistoryRecord | null;
   loading: boolean;
   related: VpsDetailContext;
@@ -836,29 +882,44 @@ function SummaryTab({
           View retained metrics
         </button>
       </DetailBlock>
-      <DetailBlock title="Warnings" icon={<AlertTriangle size={18} />}>
-        {related.alerts.length === 0 ? (
+      <DetailBlock title="Current alerts" icon={<AlertTriangle size={18} />}>
+        {!fleetAlertsEvidenceAvailable ? (
           <DetailState
             loading={loading}
-            title="No alert records"
-            detail="Fleet alerts for this VPS are not present in the current page cache."
+            title="Current alert evidence unavailable"
+            detail="Current lifecycle and operator triage cannot be inferred for this VPS."
+          />
+        ) : related.alerts.length === 0 ? (
+          <DetailState
+            loading={loading}
+            title="No current alert episodes"
+            detail="No current condition or occurrence is present for this VPS in the loaded page."
           />
         ) : (
-          related.alerts.slice(0, 3).map((alert) => (
-            <button
-              className="vpsDetailRecord"
-              key={alert.id}
-              onClick={onOpenFleetAlerts}
-              type="button"
-            >
-              <strong>{alert.title}</strong>
-              <span>
-                {alertSeverityLabel(alert.severity)} ·{" "}
-                {operatorStateLabel(alert.operator_state)} ·{" "}
-                <DetailTime value={alert.observed_at} />
-              </span>
-            </button>
-          ))
+          related.alerts.slice(0, 3).map((alert) => {
+            const presentation = presentFleetAlert(alert);
+            return (
+              <button
+                className="vpsDetailRecord"
+                key={alert.id}
+                onClick={onOpenFleetAlerts}
+                type="button"
+              >
+                <strong>{alert.title}</strong>
+                <span>
+                  {alertSeverityLabel(alert.severity)} ·{" "}
+                  {alertCategoryLabel(alert.category)} ·{" "}
+                  {presentation.recordKindLabel} · {presentation.lifecycleLabel}
+                  {" · "}Operator triage: {presentation.operatorLabel} ·{" "}
+                  {presentation.malformed ? (
+                    "Lifecycle time unavailable"
+                  ) : (
+                    <DetailTime value={alert.lifecycle.triggered_at} />
+                  )}
+                </span>
+              </button>
+            );
+          })
         )}
       </DetailBlock>
       <DetailBlock title="Latest work" icon={<History size={18} />}>
@@ -1311,7 +1372,11 @@ function BackupsTab({
 }
 
 function NetworkTab({
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
   loading,
+  policyAlertHistoryTruncated,
+  policyAlertsEvidenceAvailable,
   related,
   onOpenAlertPolicies,
   onOpenConfig,
@@ -1319,7 +1384,11 @@ function NetworkTab({
   onOpenNetwork,
   onOpenNetworkEvidence,
 }: {
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
   loading: boolean;
+  policyAlertHistoryTruncated: boolean;
+  policyAlertsEvidenceAvailable: boolean;
   related: VpsDetailContext;
   onOpenAlertPolicies: (policyId?: string) => void;
   onOpenConfig: () => void;
@@ -1349,10 +1418,12 @@ function NetworkTab({
     (rule) =>
       rule.key.startsWith("traffic.") || rule.key === "network.rate.interfaces",
   );
-  const trafficPolicyAlerts = related.policyAlerts.filter((alert) =>
-    `${alert.category} ${alert.title} ${alert.detail} ${JSON.stringify(alert.payload)}`
-      .toLowerCase()
-      .includes("traffic"),
+  const trafficPolicyAlerts = mergePolicyAlertsCurrentFirst(
+    related.currentPolicyAlerts,
+    related.policyAlerts,
+  ).filter((alert) => alert.category === "traffic");
+  const currentTrafficPolicyAlerts = related.currentPolicyAlerts.filter(
+    (alert) => alert.category === "traffic",
   );
   const primaryPolicyId = trafficPolicyAlerts[0]?.policy_group_id;
 
@@ -1481,20 +1552,63 @@ function NetworkTab({
       </DetailBlock>
       <DetailBlock title="Matched policies" icon={<AlertTriangle size={18} />}>
         <strong>Recent policy alerts</strong>
+        {!currentPolicyAlertsEvidenceAvailable ? (
+          <span className="vpsDetailRecord static warning">
+            <strong>Current traffic policy state is unavailable</strong>
+            <span>
+              Current evidence is unavailable or incomplete; no stale episode is
+              presented as current.
+            </span>
+          </span>
+        ) : currentPolicyAlertsTruncated ? (
+          <span className="vpsDetailRecord static warning">
+            <strong>Current traffic policy state is partially loaded</strong>
+            <span>
+              {currentTrafficPolicyAlerts.length === 0
+                ? "Unknown in loaded current policy-alert page; more may exist"
+                : `At least ${currentTrafficPolicyAlerts.length} current traffic policy alert${currentTrafficPolicyAlerts.length === 1 ? "" : "s"} in the loaded current page; more may exist.`}
+            </span>
+          </span>
+        ) : null}
         {trafficPolicyAlerts.length === 0 ? (
           <DetailState
             loading={loading}
-            title="No policy alerts"
-            detail="No traffic policy alert is loaded for this VPS."
+            title={
+              !currentPolicyAlertsEvidenceAvailable
+                ? "Current traffic policy state unavailable"
+                : currentPolicyAlertsTruncated
+                  ? "Current traffic policy state unknown"
+                  : "No policy alerts"
+            }
+            detail={
+              !currentPolicyAlertsEvidenceAvailable
+                ? "Current evidence is unavailable or incomplete."
+                : currentPolicyAlertsTruncated &&
+                    currentTrafficPolicyAlerts.length === 0
+                  ? "Unknown in loaded current policy-alert page; more may exist"
+                  : !policyAlertsEvidenceAvailable
+                    ? "Policy alert history is unavailable; retained rows may be stale."
+                    : policyAlertHistoryTruncated
+                      ? "No traffic policy alert appears in the loaded policy alert history; more may exist."
+                      : "No traffic policy alert is loaded for this VPS."
+            }
           />
         ) : (
           trafficPolicyAlerts.slice(0, 4).map((alert) => (
-            <span className="vpsDetailRecord static warning" key={alert.id}>
+            <span
+              className={`vpsDetailRecord static ${
+                isActivePolicyAlert(alert) && alert.severity !== "info"
+                  ? "warning"
+                  : ""
+              }`}
+              key={alert.id}
+            >
               <strong title={alert.policy_group_id}>
                 {trafficPolicyLabel(alert, related.alertPolicies)}
               </strong>
               <span title={alert.policy_rule_id}>
-                {trafficPolicyRuleLabel(alert, related.alertPolicies)} ·{" "}
+                {alertLifecycleLabel(alert.lifecycle_state)} · {alert.severity}{" "}
+                · {trafficPolicyRuleLabel(alert, related.alertPolicies)} ·{" "}
                 {alert.detail}
               </span>
             </span>
@@ -1506,6 +1620,8 @@ function NetworkTab({
 }
 
 function ActivityTab({
+  fleetAlertHistoryEvidenceAvailable,
+  fleetAlertHistoryTruncated,
   loading,
   related,
   recordBounds,
@@ -1514,6 +1630,8 @@ function ActivityTab({
   onOpenJob,
   onOpenJobs,
 }: {
+  fleetAlertHistoryEvidenceAvailable: boolean;
+  fleetAlertHistoryTruncated: boolean;
   loading: boolean;
   related: VpsDetailContext;
   recordBounds: VpsDetailRecordBounds;
@@ -1530,13 +1648,15 @@ function ActivityTab({
             loading={loading}
             title="No correlated activity"
             detail={
-              recordBounds.audits ||
-              recordBounds.jobs ||
-              recordBounds.backups ||
-              recordBounds.fileTransfers ||
-              recordBounds.fleetAlerts
-                ? "No target-scoped record for this VPS appears in the loaded history pages; more activity may exist."
-                : "Loaded activity does not include target-scoped records for this VPS yet."
+              !fleetAlertHistoryEvidenceAvailable
+                ? "Alert episode history is unavailable; other retained activity remains independently sourced."
+                : recordBounds.audits ||
+                    recordBounds.jobs ||
+                    recordBounds.backups ||
+                    recordBounds.fileTransfers ||
+                    fleetAlertHistoryTruncated
+                  ? "No target-scoped record for this VPS appears in the loaded history pages; more activity may exist."
+                  : "Loaded activity does not include target-scoped records for this VPS yet."
             }
           />
         ) : (
@@ -1563,12 +1683,14 @@ function ActivityTab({
         <VpsFact
           label="Alerts"
           value={
-            recordBounds.fleetAlerts && related.alerts.length === 0
-              ? "None in loaded history"
-              : `${formatLowerBoundCount(
-                  related.alerts.length,
-                  recordBounds.fleetAlerts,
-                )}${recordBounds.fleetAlerts ? " loaded" : ""}`
+            !fleetAlertHistoryEvidenceAvailable
+              ? "Unknown"
+              : fleetAlertHistoryTruncated && related.alertHistory.length === 0
+                ? "None in loaded history"
+                : `${formatLowerBoundCount(
+                    related.alertHistory.length,
+                    fleetAlertHistoryTruncated,
+                  )}${fleetAlertHistoryTruncated ? " loaded" : ""}`
           }
         />
         <VpsFact
@@ -1723,10 +1845,12 @@ function buildVpsDetailContext({
   backups,
   fileTransfers,
   fleetAlerts,
+  fleetAlertHistory,
   fleetAlertPolicies,
   jobs,
   networkObservations,
   networkTrends,
+  currentPolicyAlerts,
   policyAlerts,
   runtimeConfigApplyStates,
   configurationSources,
@@ -1742,10 +1866,12 @@ function buildVpsDetailContext({
   backups: BackupRequestRecord[];
   fileTransfers: FileTransferSessionRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertHistory: FleetAlertRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   jobs: JobHistoryRecord[];
   networkObservations: NetworkObservationRecord[];
   networkTrends: NetworkObservationTrendRecord[];
+  currentPolicyAlerts: PolicyAlertRecord[];
   policyAlerts: PolicyAlertRecord[];
   runtimeConfigApplyStates: RuntimeConfigApplyStateRecord[];
   configurationSources: ConfigurationSourceView[];
@@ -1767,9 +1893,21 @@ function buildVpsDetailContext({
       (alert) => alert.client_id === clientId || alert.target_id === clientId,
     )
     .sort(newestFirst((alert) => alert.observed_at));
+  const relatedAlertHistory = fleetAlertHistory
+    .filter(
+      (alert) => alert.client_id === clientId || alert.target_id === clientId,
+    )
+    .sort(
+      newestFirst(
+        (alert) => alert.lifecycle?.triggered_at ?? alert.observed_at,
+      ),
+    );
   const relatedPolicyAlerts = policyAlerts
     .filter((alert) => alert.client_id === clientId)
     .sort(newestFirst((alert) => alert.observed_at));
+  const relatedCurrentPolicyAlerts = currentPolicyAlerts.filter(
+    (alert) => alert.client_id === clientId,
+  );
   const relatedAudits = audits
     .filter((audit) => auditClientIds(audit).includes(clientId))
     .sort(newestFirst((audit) => audit.created_at));
@@ -1838,12 +1976,12 @@ function buildVpsDetailContext({
     title: string;
     when: string;
   }> = [
-    ...relatedAlerts.map((alert) => ({
-      detail: `${alertSeverityLabel(alert.severity)} · ${operatorStateLabel(alert.operator_state)} · ${formatCompactTime(alert.observed_at)}`,
+    ...relatedAlertHistory.map((alert) => ({
+      detail: fleetAlertActivityDetail(alert),
       id: alert.id,
       kind: "alert" as const,
       title: alert.title,
-      when: alert.observed_at,
+      when: alert.lifecycle?.triggered_at ?? alert.observed_at,
     })),
     ...relatedBackups.map((backup) => ({
       detail: `${backupStatusLabel(backup.status)} · ${backup.paths.join(", ") || "no paths"} · ${formatCompactTime(backup.created_at)}`,
@@ -1892,6 +2030,7 @@ function buildVpsDetailContext({
   return {
     activity,
     alerts: relatedAlerts,
+    alertHistory: relatedAlertHistory,
     audits: relatedAudits,
     backupArtifacts: relatedArtifacts,
     backups: relatedBackups,
@@ -1900,6 +2039,7 @@ function buildVpsDetailContext({
     networkObservations: relatedNetworkObservations,
     networkRates,
     networkTrends: relatedNetworkTrends,
+    currentPolicyAlerts: relatedCurrentPolicyAlerts,
     policyAlerts: relatedPolicyAlerts,
     relatedJobs,
     rollup,
@@ -1909,6 +2049,20 @@ function buildVpsDetailContext({
     uptime,
     vpsRules,
   };
+}
+
+function mergePolicyAlertsCurrentFirst(
+  current: PolicyAlertRecord[],
+  history: PolicyAlertRecord[],
+): PolicyAlertRecord[] {
+  const seen = new Set<string>();
+  return [...current, ...history].filter((alert) => {
+    if (seen.has(alert.id)) {
+      return false;
+    }
+    seen.add(alert.id);
+    return true;
+  });
 }
 
 function newestFirst<T>(dateFor: (record: T) => string) {
@@ -2306,15 +2460,16 @@ function alertSeverityLabel(severity: string): string {
   return labels[severity] ?? readableDetailToken(severity);
 }
 
-function operatorStateLabel(state: string): string {
-  const labels: Record<string, string> = {
-    acknowledged: "Acknowledged",
-    cleared: "Cleared",
-    escalated: "Escalated",
-    muted: "Muted",
-    open: "Open",
-  };
-  return labels[state] ?? readableDetailToken(state);
+function fleetAlertActivityDetail(alert: FleetAlertRecord): string {
+  const presentation = presentFleetAlert(alert);
+  const lifecycleTime = presentation.malformed
+    ? "lifecycle time unavailable"
+    : formatCompactTime(alert.lifecycle.triggered_at);
+  const resolution =
+    presentation.lifecycleState === "resolved"
+      ? ` · ${readableDetailToken(alert.lifecycle.resolution_reason ?? "resolution unavailable")}${alert.lifecycle.resolution_note ? `: ${alert.lifecycle.resolution_note}` : ""}`
+      : "";
+  return `${alertSeverityLabel(alert.severity)} · ${presentation.recordKindLabel} · ${presentation.lifecycleLabel} · Operator triage: ${presentation.operatorLabel} · ${lifecycleTime}${resolution}`;
 }
 
 function transferDirectionLabel(direction: string): string {

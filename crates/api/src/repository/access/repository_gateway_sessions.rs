@@ -135,6 +135,12 @@ impl Repository {
                 {
                     return Ok(());
                 }
+                let session_boundary_changed =
+                    !memory.gateway_sessions.read().await.iter().any(|session| {
+                        session.id == event.session_id
+                            && session.client_id == event.client_id
+                            && session.status == "active"
+                    });
                 expire_memory_active_other_sessions(memory, &event.client_id, event.session_id)
                     .await;
                 upsert_memory_gateway_session(memory, event, "active", None).await;
@@ -165,6 +171,12 @@ impl Repository {
                         metadata,
                     )
                     .await?;
+                } else if session_boundary_changed {
+                    self.mark_memory_tunnel_alerts_unknown_for_clients(
+                        std::slice::from_ref(&event.client_id),
+                        &Utc::now().to_rfc3339(),
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -187,19 +199,22 @@ impl Repository {
                     tx.commit().await?;
                     return Ok(());
                 };
-                let existing_session_status: Option<String> = sqlx::query_scalar(
-                    "SELECT status FROM gateway_sessions WHERE id = $1 FOR UPDATE",
+                let existing_session = sqlx::query(
+                    "SELECT client_id, status FROM gateway_sessions WHERE id = $1 FOR UPDATE",
                 )
                 .bind(event.session_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                if existing_session_status
-                    .as_deref()
-                    .is_some_and(|status| status != "active")
+                if existing_session
+                    .as_ref()
+                    .is_some_and(|row| row.get::<String, _>("status") != "active")
                 {
                     tx.commit().await?;
                     return Ok(());
                 }
+                let session_boundary_changed = existing_session
+                    .as_ref()
+                    .is_none_or(|row| row.get::<String, _>("client_id") != event.client_id);
                 sqlx::query(
                     r#"
                     UPDATE gateway_sessions
@@ -266,6 +281,12 @@ impl Repository {
                         gateway_status_metadata(event, "online"),
                         "gateway_ingest",
                         "gateway-session-lifecycle",
+                    )
+                    .await?;
+                } else if session_boundary_changed {
+                    crate::repository_operational_alerts::mark_postgres_tunnel_alerts_unknown_for_clients_in_tx(
+                        &mut tx,
+                        std::slice::from_ref(&event.client_id),
                     )
                     .await?;
                 }

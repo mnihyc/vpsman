@@ -9,11 +9,11 @@ use tracing::warn;
 use uuid::Uuid;
 use vpsman_common::{
     runtime_config_content_hash, runtime_config_reconcile_scope_from_reason,
-    tunnel_topology_identity_hash, validate_agent_config_shape, AgentConfig, AgentNetworkConfig,
-    AgentPingTarget, AgentPortForwardingConfig, AgentRuntimeConfig,
-    AgentRuntimeStatusTelemetryPlan, JobCommand, RuntimeConfigReconcileResource,
-    RuntimeConfigReconcileScope, RuntimeTunnelAdapterCommands, RuntimeTunnelManager,
-    TunnelEndpointSide, TunnelKind,
+    tunnel_runtime_evidence_identity_hash, tunnel_topology_identity_hash,
+    validate_agent_config_shape, AgentConfig, AgentNetworkConfig, AgentPingTarget,
+    AgentPortForwardingConfig, AgentRuntimeConfig, AgentRuntimeStatusTelemetryPlan, JobCommand,
+    RuntimeConfigReconcileResource, RuntimeConfigReconcileScope, RuntimeTunnelAdapterCommands,
+    RuntimeTunnelManager, TunnelEndpointSide, TunnelKind,
 };
 
 use crate::{
@@ -516,6 +516,10 @@ fn apply_enabled_tunnel_plans(
             } else {
                 None
             };
+        let builtin_credential_generation = plan
+            .builtin_credentials
+            .as_ref()
+            .map(vpsman_common::TunnelBuiltinCredentials::generation);
         let builtin_credentials = if plan.plan.runtime_control.manager
             == RuntimeTunnelManager::AgentBuiltin
             && matches!(plan.plan.kind, TunnelKind::Wireguard | TunnelKind::Openvpn)
@@ -537,6 +541,11 @@ fn apply_enabled_tunnel_plans(
             .push(AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some(plan.id.to_string()),
                 topology_identity_hash: tunnel_topology_identity_hash(plan.id, &plan.plan),
+                runtime_evidence_identity_hash: tunnel_runtime_evidence_identity_hash(
+                    plan.id,
+                    &plan.plan,
+                    builtin_credential_generation,
+                ),
                 endpoint_side,
                 plan: plan.plan.clone(),
                 builtin_credentials,

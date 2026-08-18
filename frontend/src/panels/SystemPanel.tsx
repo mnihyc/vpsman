@@ -162,6 +162,15 @@ const pointDensityOptions: Array<{
   { label: "Dense", value: "dense" },
 ];
 
+const deprecatedResourceAlertThresholdPaths = [
+  "api.alert_memory_available_warning_ratio",
+  "api.alert_memory_available_critical_ratio",
+  "api.alert_disk_available_warning_ratio",
+  "api.alert_disk_available_critical_ratio",
+  "api.alert_cpu_load_warning",
+  "api.alert_cpu_load_critical",
+] as const;
+
 type SystemHealthTone = "critical" | "warning" | "ok" | "info" | "neutral";
 
 type SystemAttentionItem = {
@@ -5445,6 +5454,11 @@ function SystemConfigPanel({
     suiteConfigSections[0].id,
   );
   const parsedDraft = useMemo(() => parseTomlDraft(draftToml), [draftToml]);
+  const presentDeprecatedAlertThresholdPaths = parsedDraft.ok
+    ? deprecatedResourceAlertThresholdPaths.filter(
+        (path) => getTomlPath(parsedDraft.table, path.split(".")) !== undefined,
+      )
+    : [];
   const currentConfigDraft = useMemo(
     () => (config ? parseTomlDraft(config.toml) : null),
     [config],
@@ -6042,6 +6056,15 @@ function SystemConfigPanel({
                   advanced TOML editor to repair the document.
                 </div>
               )}
+              {editorMode === "toml" &&
+              presentDeprecatedAlertThresholdPaths.length > 0 ? (
+                <div className="panelWarning systemConfigNotice">
+                  Legacy resource alert threshold settings are ignored:{" "}
+                  {presentDeprecatedAlertThresholdPaths.join(", ")}. Remove
+                  these keys and configure an enabled policy in Observability /
+                  Alerts.
+                </div>
+              ) : null}
               {editorMode === "form" ? (
                 <div className="systemConfigSectionStack">
                   {filteredConfigSections.length === 0 ? (

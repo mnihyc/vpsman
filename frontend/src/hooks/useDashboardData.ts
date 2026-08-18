@@ -97,10 +97,7 @@ export function useDashboardData(activeView: ActiveView) {
   const clearDashboardDataRef = useRef<() => void>(() => undefined);
   const activeViewRef = useRef(activeView);
 
-  if (
-    apiToken &&
-    initialViewForTokenRef.current?.token !== apiToken
-  ) {
+  if (apiToken && initialViewForTokenRef.current?.token !== apiToken) {
     initialViewForTokenRef.current = {
       token: apiToken,
       view: activeView,
@@ -115,10 +112,10 @@ export function useDashboardData(activeView: ActiveView) {
   }
   const isInitialHomeVisit = Boolean(
     apiToken &&
-      initialViewForTokenRef.current?.token === apiToken &&
-      initialViewForTokenRef.current.view === "Home" &&
-      !initialViewForTokenRef.current.left &&
-      activeView === "Home",
+    initialViewForTokenRef.current?.token === apiToken &&
+    initialViewForTokenRef.current.view === "Home" &&
+    !initialViewForTokenRef.current.left &&
+    activeView === "Home",
   );
 
   useEffect(() => {
@@ -403,10 +400,7 @@ export function useDashboardData(activeView: ActiveView) {
           return;
         }
         setHomeMonitoringCards(snapshot.monitoring_cards);
-        access.hydrateHomeOperator(
-          hydrationFences.access,
-          snapshot.operator,
-        );
+        access.hydrateHomeOperator(hydrationFences.access, snapshot.operator);
         fleet.hydrateHomeFleet(hydrationFences.fleet, snapshot);
         jobs.hydrateHomeJobs(
           hydrationFences.jobs,
@@ -711,12 +705,7 @@ export function useDashboardData(activeView: ActiveView) {
       return;
     }
     void system.loadSuiteConfig();
-  }, [
-    access.operator?.role,
-    activeView,
-    apiToken,
-    system.loadSuiteConfig,
-  ]);
+  }, [access.operator?.role, activeView, apiToken, system.loadSuiteConfig]);
 
   useEffect(() => {
     if (!apiToken) {
@@ -1033,7 +1022,20 @@ export function useDashboardData(activeView: ActiveView) {
     deleteAgents: fleet.deleteAgents,
     fleetAlertsEvidenceAvailable: fleet.fleetAlertsEvidenceAvailable,
     fleetAlerts: fleet.fleetAlerts,
+    fleetAlertsTruncated: fleet.fleetAlertsTruncated,
+    fleetAlertHistory: fleet.fleetAlertHistory,
+    fleetAlertHistoryTruncated: fleet.fleetAlertHistoryTruncated,
+    fleetAlertHistoryEvidenceAvailable:
+      fleet.fleetAlertHistoryEvidenceAvailable,
+    fleetAlertEventReviewItems: fleet.fleetAlertEventReviewItems,
+    fleetAlertEventReviewHasMore: fleet.fleetAlertEventReviewHasMore,
+    fleetAlertEventReviewStarted: fleet.fleetAlertEventReviewStarted,
+    fleetAlertEventReviewLoading: fleet.fleetAlertEventReviewLoading,
+    fleetAlertEventReviewError: fleet.fleetAlertEventReviewError,
+    loadOlderFleetAlertEvents: fleet.loadOlderFleetAlertEvents,
+    refreshFleetAlertEvents: fleet.refreshFleetAlertEvents,
     fleetAlertStates: fleet.fleetAlertStates,
+    fleetAlertStatesEvidenceAvailable: fleet.fleetAlertStatesEvidenceAvailable,
     fleetAlertPolicies: fleet.fleetAlertPolicies,
     configPolicyEvidenceAvailable: fleet.configPolicyEvidenceAvailable,
     vpsRuleEvidenceAvailable: fleet.vpsRuleEvidenceAvailable,
@@ -1041,6 +1043,11 @@ export function useDashboardData(activeView: ActiveView) {
     vpsRuleValues: fleet.vpsRuleValues,
     trafficAccounting: fleet.trafficAccounting,
     policyAlerts: fleet.policyAlerts,
+    policyAlertsEvidenceAvailable: fleet.policyAlertsEvidenceAvailable,
+    currentPolicyAlerts: fleet.currentPolicyAlerts,
+    currentPolicyAlertsTruncated: fleet.currentPolicyAlertsTruncated,
+    currentPolicyAlertsEvidenceAvailable:
+      fleet.currentPolicyAlertsEvidenceAvailable,
     fleetAlertNotificationChannels: fleet.fleetAlertNotificationChannels,
     fleetAlertNotifications: fleet.fleetAlertNotifications,
     webhookRules: fleet.webhookRules,
@@ -1081,6 +1088,7 @@ export function useDashboardData(activeView: ActiveView) {
     jobRollouts: jobs.jobRollouts,
     updateJobRollout: jobs.updateJobRollout,
     updateFleetAlertState: fleet.updateFleetAlertState,
+    resolveFleetAlert: fleet.resolveFleetAlert,
     dryRunFleetAlertPolicy: fleet.dryRunFleetAlertPolicy,
     upsertFleetAlertNotificationChannel:
       fleet.upsertFleetAlertNotificationChannel,

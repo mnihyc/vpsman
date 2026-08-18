@@ -355,10 +355,12 @@ Compose deployments keep durable state under their `runtime/` directory:
 - active frontend payload: `runtime/frontend/current`
 - active CLI payload: `runtime/cli/current`
 
-The current canonical database is intentionally fresh-first. Its sole supported
-in-place schema step is the checksum-pinned v0.3.5 `0001`–`0008` baseline to
-`0009`; review [migration compatibility](docs/migration-compatibility.md) before
-updating any deployment.
+The current canonical database is intentionally fresh-first. Supported
+in-place steps are checksum-pinned: the exact v0.4.4 `0001`–`0009` baseline
+may apply `0010` and then `0011`, while the exact v0.3.5 `0001`–`0008`
+baseline may apply `0009`, `0010`, and then `0011`. Review
+[migration compatibility](docs/migration-compatibility.md) before updating any
+deployment.
 
 Update an existing deployment:
 

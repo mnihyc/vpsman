@@ -142,6 +142,10 @@ pub struct RuntimeTunnelStat {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology_identity_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_evidence_identity_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_runtime_manager: Option<String>,

@@ -4,6 +4,10 @@ import { ActionFeedback } from "../../components/ActionFeedback";
 import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../../constants";
 import { handleTabListKeyDown, tabId } from "../../components/AccessibleTabs";
 import {
+  isActivePolicyAlert,
+  presentFleetAlert,
+} from "../../alertPresentation";
+import {
   DeliveryPreviewSection,
   FleetAlertNotificationManager,
   FleetAlertPolicyManager,
@@ -29,10 +33,18 @@ type AlertConfigTab = "policies" | "destinations" | "deliveries";
 type AlertsPanelProps = {
   agents: AgentView[];
   apiError: string | null;
+  currentPolicyAlerts: PolicyAlertRecord[];
+  currentPolicyAlertsEvidenceAvailable: boolean;
+  currentPolicyAlertsTruncated: boolean;
   fleetAlertNotificationChannels: FleetAlertNotificationChannelRecord[];
   fleetAlertNotifications: FleetAlertNotificationDeliveryRecord[];
   fleetAlertPolicies: FleetAlertPolicyRecord[];
   fleetAlerts: FleetAlertRecord[];
+  fleetAlertsEvidenceAvailable: boolean;
+  fleetAlertsTruncated: boolean;
+  fleetAlertHistory: FleetAlertRecord[];
+  fleetAlertHistoryEvidenceAvailable: boolean;
+  fleetAlertHistoryTruncated: boolean;
   onDeleteFleetAlertNotificationChannel: (
     channelId: string,
     reviewedName: string,
@@ -60,15 +72,24 @@ type AlertsPanelProps = {
   ) => Promise<FleetAlertPolicyRecord>;
   policyFocusId: string | null;
   policyAlerts: PolicyAlertRecord[];
+  policyAlertsEvidenceAvailable: boolean;
 };
 
 export function AlertsPanel({
   agents,
   apiError,
+  currentPolicyAlerts,
+  currentPolicyAlertsEvidenceAvailable,
+  currentPolicyAlertsTruncated,
   fleetAlertNotificationChannels,
   fleetAlertNotifications,
   fleetAlertPolicies,
   fleetAlerts,
+  fleetAlertsEvidenceAvailable,
+  fleetAlertsTruncated,
+  fleetAlertHistory,
+  fleetAlertHistoryEvidenceAvailable,
+  fleetAlertHistoryTruncated,
   onDeleteFleetAlertNotificationChannel,
   onDeleteFleetAlertPolicy,
   onDispatchFleetAlertNotifications,
@@ -80,6 +101,7 @@ export function AlertsPanel({
   onUpsertFleetAlertPolicy,
   policyFocusId,
   policyAlerts,
+  policyAlertsEvidenceAvailable,
 }: AlertsPanelProps) {
   const [activeTab, setActiveTab] = useState<AlertConfigTab>("policies");
   const [policyEditorOpen, setPolicyEditorOpen] = useState(false);
@@ -89,10 +111,27 @@ export function AlertsPanel({
   const failedDeliveries = fleetAlertNotifications.filter((delivery) =>
     ["failed", "permanently_failed"].includes(delivery.status),
   ).length;
-  const urgentPolicyAlerts = policyAlerts.filter((alert) =>
+  const currentPresentations = fleetAlerts.map(presentFleetAlert);
+  const activeFleetAlerts = currentPresentations.filter(
+    (presentation) => presentation.active,
+  ).length;
+  const unknownFleetAlerts = currentPresentations.filter(
+    (presentation) => presentation.lifecycleState === "unknown",
+  ).length;
+  const actionableFleetAlerts = currentPresentations.filter(
+    (presentation) => presentation.actionable,
+  ).length;
+  const malformedFleetAlerts = currentPresentations.filter(
+    (presentation) => presentation.malformed,
+  ).length;
+  const activePolicyAlerts = currentPolicyAlertsEvidenceAvailable
+    ? currentPolicyAlerts.filter(isActivePolicyAlert)
+    : [];
+  const urgentPolicyAlerts = activePolicyAlerts.filter((alert) =>
     ["critical", "warning"].includes(alert.severity),
   ).length;
-  const policyAlertsTruncated = policyAlerts.length >= FLEET_DETAIL_LIMIT;
+  const policyAlertHistoryTruncated =
+    policyAlertsEvidenceAvailable && policyAlerts.length >= FLEET_DETAIL_LIMIT;
   const deliveriesTruncated =
     fleetAlertNotifications.length >= FLEET_DETAIL_LIMIT;
 
@@ -117,8 +156,8 @@ export function AlertsPanel({
             <div>
               <h2>Alerts</h2>
               <span>
-                Policy groups, issued policy alerts, and notification channels.
-                Live triage stays in Fleet / Alerts.
+                Enabled policy groups issue threshold alerts. System operational
+                alerts and live triage stay in Fleet / Alerts.
               </span>
             </div>
             <div className="sectionActions" aria-label="Alert action links">
@@ -150,26 +189,58 @@ export function AlertsPanel({
               <MetricTile
                 actionLabel="Open triage"
                 detail={
-                  fleetAlerts.length >= FLEET_DETAIL_LIMIT
-                    ? `At least ${fleetAlerts.length} active alerts; open triage to review the loaded page`
-                    : "Operational alert triage records live in Fleet / Alerts"
+                  !fleetAlertsEvidenceAvailable
+                    ? "Current alert evidence is unavailable; cached rows are not presented as current"
+                    : `${activeFleetAlerts} active · ${unknownFleetAlerts} Unknown · ${actionableFleetAlerts} actionable${malformedFleetAlerts ? ` · ${malformedFleetAlerts} malformed` : ""}${fleetAlertsTruncated ? " in the loaded current page; more may exist" : ""}`
                 }
-                label="Active fleet alerts"
+                label="Current alert episodes"
                 onAction={onOpenFleetAlerts}
-                value={formatBoundedCount(
-                  fleetAlerts.length,
-                  fleetAlerts.length >= FLEET_DETAIL_LIMIT,
-                )}
+                value={
+                  fleetAlertsEvidenceAvailable
+                    ? formatBoundedCount(
+                        fleetAlerts.length,
+                        fleetAlertsTruncated,
+                      )
+                    : "Unknown"
+                }
+              />
+              <MetricTile
+                actionLabel="Open history"
+                detail={
+                  !fleetAlertHistoryEvidenceAvailable
+                    ? "Alert episode history is unavailable; retained cached rows are not treated as fresh evidence"
+                    : fleetAlertHistoryTruncated
+                      ? "Loaded alert episode history is truncated; more episodes may exist"
+                      : "Condition and occurrence episodes across every lifecycle state"
+                }
+                label="Alert episode history"
+                onAction={onOpenFleetAlerts}
+                value={
+                  fleetAlertHistoryEvidenceAvailable
+                    ? formatBoundedCount(
+                        fleetAlertHistory.length,
+                        fleetAlertHistoryTruncated,
+                      )
+                    : "Unknown"
+                }
               />
               <MetricTile
                 actionLabel="Policies"
-                detail={`${urgentPolicyAlerts} warning or critical policy-issued alerts${policyAlertsTruncated ? " in the loaded page" : ""}`}
-                label="Policy alerts"
+                detail={
+                  !currentPolicyAlertsEvidenceAvailable
+                    ? "Current policy alert evidence is unavailable"
+                    : `${currentPolicyAlertsTruncated ? `At least ${urgentPolicyAlerts} active warning or critical alerts in the loaded current page; more may exist` : `${urgentPolicyAlerts} active warning or critical alerts`}; ${policyAlertsEvidenceAvailable ? `${policyAlerts.length} issued record${policyAlerts.length === 1 ? "" : "s"}${policyAlertHistoryTruncated ? " in the loaded history" : ""}` : "policy alert history unavailable"}`
+                }
+                label="Policy alert history"
                 onAction={() => setActiveTab("policies")}
-                value={formatBoundedCount(
-                  policyAlerts.length,
-                  policyAlertsTruncated,
-                )}
+                value={
+                  policyAlertsEvidenceAvailable
+                    ? formatBoundedCount(
+                        policyAlerts.length,
+                        policyAlertHistoryTruncated,
+                      )
+                    : "Unknown"
+                }
               />
               <MetricTile
                 actionLabel="Destinations"
@@ -249,8 +320,29 @@ export function AlertsPanel({
               </div>
               <AlertTriangle size={18} />
             </div>
+            <div
+              aria-label="Policy alert lifecycle"
+              className="consoleInlineNotice policyLifecycleNotice"
+            >
+              <strong>Policy alert lifecycle</strong>
+              <small>
+                The predefined traffic-quota starter is an ordinary disabled
+                policy. Conditions enter Triggered on first qualifying evidence,
+                advance to Persisting on confirmation without another Triggered
+                edge, become Unknown when current evidence is unavailable or
+                incomplete, and become Resolved on recovery or scope change.
+                Unknown neither resolves nor re-arms an episode; a later
+                recurrence starts a new generation. Terminal occurrences are
+                Triggered or Persisting until an operator explicitly resolves
+                the incident; they never become Unknown or resolve
+                automatically. Operator triage is independent: resetting triage
+                to Open does not resolve either lifecycle.
+              </small>
+            </div>
             <FleetAlertPolicyManager
               agents={agents}
+              alertsEvidenceAvailable={policyAlertsEvidenceAvailable}
+              alertsTruncated={policyAlertHistoryTruncated}
               onDelete={onDeleteFleetAlertPolicy}
               onDryRun={onDryRunFleetAlertPolicy}
               onEditorOpenChange={setPolicyEditorOpen}

@@ -501,7 +501,7 @@ const dashboardOverview = {
     series: [
       {
         client_id: "agent-fra-02",
-        critical_threshold: 4,
+        critical_threshold: null,
         current: 1.42,
         drilldown: {
           label: "Open VPS details",
@@ -517,11 +517,11 @@ const dashboardOverview = {
           { bucket_start: "2026-06-05T20:35:00Z", value: 1.42 },
         ],
         threshold_direction: "above",
-        warning_threshold: 2,
+        warning_threshold: null,
       },
       {
         client_id: "agent-sfo-01",
-        critical_threshold: 4,
+        critical_threshold: null,
         current: 0.71,
         drilldown: {
           label: "Open VPS details",
@@ -537,11 +537,11 @@ const dashboardOverview = {
           { bucket_start: "2026-06-05T20:35:00Z", value: 0.71 },
         ],
         threshold_direction: "above",
-        warning_threshold: 2,
+        warning_threshold: null,
       },
       {
         client_id: "agent-nyc-03",
-        critical_threshold: 4,
+        critical_threshold: null,
         current: 0.34,
         drilldown: {
           label: "Open VPS details",
@@ -557,7 +557,7 @@ const dashboardOverview = {
           { bucket_start: "2026-06-05T20:35:00Z", value: 0.34 },
         ],
         threshold_direction: "above",
-        warning_threshold: 2,
+        warning_threshold: null,
       },
     ],
     top_limit: 8,
@@ -961,7 +961,6 @@ const suiteConfigValidation = {
     "worker.require_registered_agent_updates",
     "timeout.worker_schedule_job_max_timeout_secs",
     "timeout.agent_offline_secs",
-    "api.alert_*",
   ],
   restart_required_fields: [
     "api.bind",
@@ -1204,8 +1203,19 @@ const fleetAlerts = [
     detail: "adapter exited",
     evidence: { interface: "tun0" },
     id: "fleet-alert-network-agent-fra-02-tun0",
+    lifecycle: {
+      last_confirmed_at: "2026-05-31T10:02:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "triggered",
+      trigger_generation: 1,
+      triggered_at: "2026-05-31T10:02:00Z",
+    },
     observed_at: "2026-05-31T10:02:00Z",
     operator_state: "open",
+    record_kind: "condition",
     severity: "critical",
     muted_until_unix: null,
     escalation_level: 0,
@@ -1218,13 +1228,54 @@ const fleetAlerts = [
     title: "Tunnel adapter status failed",
   },
   {
+    category: "network",
+    client_id: "agent-fra-02",
+    detail: "Current tunnel traffic evidence is unavailable or incomplete",
+    evidence: { endpoint_id: "fixture-tunnel-endpoint-01" },
+    id: "fleet-alert-network-traffic-unknown",
+    lifecycle: {
+      last_confirmed_at: "2026-05-31T09:57:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "unknown",
+      trigger_generation: 1,
+      triggered_at: "2026-05-31T09:55:00Z",
+    },
+    observed_at: "2026-05-31T10:03:00Z",
+    operator_state: "open",
+    record_kind: "condition",
+    severity: "warning",
+    muted_until_unix: null,
+    escalation_level: 0,
+    state_actor_id: null,
+    state_reason: null,
+    state_updated_at: null,
+    status: "tunnel_traffic_degraded",
+    target_id: "fixture-tunnel-endpoint-01",
+    target_kind: "tunnel",
+    title: "Tunnel traffic evidence unavailable",
+  },
+  {
     category: "agent_status",
     client_id: "agent-nyc-03",
     detail: "backup-nyc-03 currently reports stale",
     evidence: { privilege_mode: "unprivileged" },
     id: "fleet-alert-agent-agent-nyc-03-stale",
+    lifecycle: {
+      last_confirmed_at: "2026-05-31T10:02:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "persisting",
+      trigger_generation: 1,
+      triggered_at: "2026-05-31T09:50:00Z",
+    },
     observed_at: "2026-05-31T10:02:00Z",
     operator_state: "open",
+    record_kind: "condition",
     severity: "warning",
     muted_until_unix: null,
     escalation_level: 0,
@@ -1237,13 +1288,54 @@ const fleetAlerts = [
     title: "Agent is not online",
   },
   {
+    category: "agent_status",
+    client_id: "agent-sfo-01",
+    detail: "Agent access has been revoked",
+    evidence: { condition_identity: "access" },
+    id: "fleet-alert-agent-access-revoked",
+    lifecycle: {
+      last_confirmed_at: "2026-06-02T09:58:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "triggered",
+      trigger_generation: 1,
+      triggered_at: "2026-06-02T09:58:00Z",
+    },
+    observed_at: "2026-06-02T09:58:00Z",
+    operator_state: "acknowledged",
+    record_kind: "condition",
+    severity: "critical",
+    muted_until_unix: null,
+    escalation_level: 0,
+    state_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    state_reason: "access owner reviewing",
+    state_updated_at: "2026-06-02T09:59:00Z",
+    status: "revoked",
+    target_id: "agent-sfo-01",
+    target_kind: "agent",
+    title: "Agent access revoked",
+  },
+  {
     category: "backup",
     client_id: "agent-sfo-01",
     detail: "backup request fixture-backup-01 is execution_failed",
     evidence: { include_config: true, paths: ["/etc"] },
     id: "fleet-alert-backup-agent-sfo-01",
+    lifecycle: {
+      last_confirmed_at: "2026-06-02T10:00:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "persisting",
+      trigger_generation: 1,
+      triggered_at: "2026-06-02T10:00:00Z",
+    },
     observed_at: "2026-06-02T10:00:00Z",
     operator_state: "acknowledged",
+    record_kind: "event",
     severity: "warning",
     muted_until_unix: null,
     escalation_level: 0,
@@ -1260,6 +1352,12 @@ const fleetAlerts = [
     client_id: "agent-sfo-01",
     detail: "traffic.cycle.total >= traffic.quota.total * 0.8",
     evidence: {
+      lifecycle: {
+        last_confirmed_at: "2026-06-23T07:33:00Z",
+        resolution_reason: null,
+        resolved_at: null,
+        state: "persisting",
+      },
       policy: { name: "edge-resource-policy" },
       rule: {
         condition_expression:
@@ -1269,29 +1367,221 @@ const fleetAlerts = [
     },
     escalation_level: 0,
     id: "policy-alert:policy-alert-fixture-01",
+    lifecycle: {
+      last_confirmed_at: "2026-06-23T07:33:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "persisting",
+      trigger_generation: 2,
+      triggered_at: "2026-06-23T07:31:00Z",
+    },
     muted_until_unix: null,
     observed_at: "2026-06-23T07:31:00Z",
     operator_state: "open",
+    record_kind: "condition",
     severity: "warning",
     state_actor_id: null,
     state_reason: null,
     state_updated_at: null,
     status: "policy_reached",
     target_id: "agent-sfo-01:policy-alert-fixture-01",
-    target_kind: "policy_alert",
+    target_kind: "policy_rule",
     title: "Traffic quota threshold reached",
+  },
+  {
+    category: "resource",
+    client_id: "agent-fra-02",
+    detail: "The latest CPU utilization evidence is incomplete",
+    evidence: {
+      lifecycle: {
+        last_confirmed_at: "2026-06-23T07:33:00Z",
+        resolution_reason: null,
+        resolved_at: null,
+        state: "unknown",
+      },
+      policy: { name: "edge-resource-policy" },
+      rule: { condition_expression: "cpu.utilization_ratio >= 0.75" },
+    },
+    escalation_level: 0,
+    id: "policy-alert:policy-alert-fixture-unknown",
+    lifecycle: {
+      last_confirmed_at: "2026-06-23T07:33:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "unknown",
+      trigger_generation: 1,
+      triggered_at: "2026-06-23T07:30:00Z",
+    },
+    muted_until_unix: null,
+    observed_at: "2026-06-23T07:34:00Z",
+    operator_state: "open",
+    record_kind: "condition",
+    severity: "critical",
+    state_actor_id: null,
+    state_reason: null,
+    state_updated_at: null,
+    status: "policy_reached",
+    target_id: "fbfbfbfb-2222-4111-8111-111111111111",
+    target_kind: "policy_rule",
+    title: "CPU utilization evidence unavailable",
+  },
+  {
+    category: "agent_update",
+    client_id: "agent-sfo-01",
+    detail: "Agent update job reached control_timeout",
+    evidence: { command_type: "agent_update" },
+    escalation_level: 0,
+    id: "fleet-alert-agent-update-timeout",
+    lifecycle: {
+      last_confirmed_at: "2026-06-02T09:51:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "triggered",
+      trigger_generation: 1,
+      triggered_at: "2026-06-02T09:51:00Z",
+    },
+    muted_until_unix: null,
+    observed_at: "2026-06-02T09:51:00Z",
+    operator_state: "acknowledged",
+    record_kind: "event",
+    severity: "warning",
+    state_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    state_reason: "update owner reviewing",
+    state_updated_at: "2026-06-02T09:52:00Z",
+    status: "control_timeout",
+    target_id: "fixture-update-job-01",
+    target_kind: "job",
+    title: "Agent update timed out",
+  },
+  {
+    category: "job",
+    client_id: "agent-fra-02",
+    detail: "Terminal job reached partial_success",
+    evidence: { command_type: "shell" },
+    escalation_level: 0,
+    id: "fleet-alert-job-partial-success",
+    lifecycle: {
+      last_confirmed_at: "2026-06-02T09:48:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "persisting",
+      trigger_generation: 1,
+      triggered_at: "2026-06-02T09:47:00Z",
+    },
+    muted_until_unix: 1_900_000_000,
+    observed_at: "2026-06-02T09:48:00Z",
+    operator_state: "muted",
+    record_kind: "event",
+    severity: "info",
+    state_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    state_reason: "maintenance window",
+    state_updated_at: "2026-06-02T09:49:00Z",
+    status: "partial_success",
+    target_id: "fixture-terminal-job-01",
+    target_kind: "job",
+    title: "Terminal job partially succeeded",
+  },
+  {
+    category: "capability_degraded",
+    client_id: "agent-nyc-03",
+    detail: "Target skipped because the required capability is unavailable",
+    evidence: { hint: "unlock privileged mode", reason: "privilege_required" },
+    escalation_level: 0,
+    id: "fleet-alert-capability-skipped",
+    lifecycle: {
+      last_confirmed_at: "2026-06-02T09:45:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: null,
+      resolved_at: null,
+      state: "triggered",
+      trigger_generation: 1,
+      triggered_at: "2026-06-02T09:45:00Z",
+    },
+    muted_until_unix: null,
+    observed_at: "2026-06-02T09:45:00Z",
+    operator_state: "acknowledged",
+    record_kind: "event",
+    severity: "warning",
+    state_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    state_reason: "capability owner reviewing",
+    state_updated_at: "2026-06-02T09:46:00Z",
+    status: "privilege_required",
+    target_id: "fixture-capability-target-01",
+    target_kind: "job_target",
+    title: "Job target skipped",
+  },
+];
+
+const fleetAlertHistory = [
+  ...fleetAlerts,
+  {
+    ...fleetAlerts[0],
+    id: "fleet-alert-network-recovered",
+    lifecycle: {
+      last_confirmed_at: "2026-05-30T09:40:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: "condition_recovered",
+      resolved_at: "2026-05-30T09:45:00Z",
+      state: "resolved",
+      trigger_generation: 1,
+      triggered_at: "2026-05-30T09:35:00Z",
+    },
+    observed_at: "2026-05-30T09:45:00Z",
+    title: "Tunnel adapter recovered",
+  },
+  {
+    ...fleetAlerts[1],
+    id: "fleet-alert-network-traffic-recovered",
+    lifecycle: {
+      last_confirmed_at: "2026-05-29T07:45:00Z",
+      resolution_actor_id: null,
+      resolution_note: null,
+      resolution_reason: "condition_recovered",
+      resolved_at: "2026-05-29T07:50:00Z",
+      state: "resolved",
+      trigger_generation: 1,
+      triggered_at: "2026-05-29T07:40:00Z",
+    },
+    observed_at: "2026-05-29T07:50:00Z",
+    title: "Tunnel traffic recovered",
+  },
+  {
+    ...fleetAlerts[4],
+    id: "fleet-alert-backup-operator-resolved",
+    lifecycle: {
+      last_confirmed_at: "2026-05-29T08:10:00Z",
+      resolution_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+      resolution_note: "Failure reviewed; a replacement backup completed.",
+      resolution_reason: "operator_resolved",
+      resolved_at: "2026-05-29T08:20:00Z",
+      state: "resolved",
+      trigger_generation: 1,
+      triggered_at: "2026-05-29T08:00:00Z",
+    },
+    observed_at: "2026-05-29T08:20:00Z",
+    title: "Backup incident resolved",
   },
 ];
 
 const fleetAlertStates = [
   {
-    action: "acknowledge",
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     alert_id: "fleet-alert-backup-agent-sfo-01",
     created_at: "2026-06-02T10:00:10Z",
-    created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-    expires_at: null,
-    id: "fafafafa-1111-4111-8111-111111111111",
+    escalation_level: 0,
+    muted_until_unix: null,
     reason: "fixture acknowledgement",
+    state: "acknowledged",
     updated_at: "2026-06-02T10:00:10Z",
   },
 ];
@@ -1299,6 +1589,7 @@ const fleetAlertStates = [
 const fleetAlertPolicies = [
   {
     active_critical_count: 0,
+    active_info_count: 0,
     active_warning_count: 1,
     created_at: "2026-06-02T10:00:00Z",
     created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
@@ -1469,6 +1760,8 @@ const policyAlerts = [
     created_at: "2026-06-23T07:31:30Z",
     detail: "traffic.cycle.total reached traffic.quota.total * 0.8",
     id: "policy-alert-fixture-01",
+    last_confirmed_at: "2026-06-23T07:33:00Z",
+    lifecycle_state: "persisting",
     observed_at: "2026-06-23T07:31:00Z",
     payload: {
       alert: { category: "traffic", severity: "warning" },
@@ -1476,6 +1769,31 @@ const policyAlerts = [
     },
     policy_group_id: "fbfbfbfb-1111-4111-8111-111111111111",
     policy_rule_id: "fbfbfbfb-2222-4111-8111-111111111111",
+    resolution_reason: null,
+    resolved_at: null,
+    severity: "warning",
+    threshold_value: 2400000000000,
+    title: "Traffic quota threshold reached",
+    trigger_generation: 2,
+  },
+  {
+    actual_value: 2405000000000,
+    category: "traffic",
+    client_id: "agent-sfo-01",
+    created_at: "2026-05-20T07:31:30Z",
+    detail: "traffic.cycle.total reached traffic.quota.total * 0.8",
+    id: "policy-alert-fixture-resolved-01",
+    last_confirmed_at: "2026-05-20T07:35:00Z",
+    lifecycle_state: "resolved",
+    observed_at: "2026-05-20T07:31:00Z",
+    payload: {
+      alert: { category: "traffic", severity: "warning" },
+      traffic: { cycle_percent: 80.16, reset_day: 14 },
+    },
+    policy_group_id: "fbfbfbfb-1111-4111-8111-111111111111",
+    policy_rule_id: "fbfbfbfb-2222-4111-8111-111111111111",
+    resolution_reason: "condition_recovered",
+    resolved_at: "2026-05-20T07:40:00Z",
     severity: "warning",
     threshold_value: 2400000000000,
     title: "Traffic quota threshold reached",
@@ -1584,9 +1902,113 @@ const webhookRules = [
     target: "https://hooks.example/vpsman/edge-capacity",
     updated_at: "2026-06-02T10:00:00Z",
   },
+  {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    body_template:
+      "{event.kind} {alert.record_kind} {alert.lifecycle_state} generation={alert.trigger_generation}",
+    cooldown_secs: 0,
+    created_at: "2026-06-02T10:03:00Z",
+    enabled: true,
+    expression: "alert.triggered || alert.resolved",
+    id: "fefefefe-2222-4222-8222-222222222222",
+    name: "alert-lifecycle-webhook",
+    notes:
+      "Consumes paired lifecycle edges and merges them by episode generation.",
+    signing_secret_set: true,
+    target: "https://hooks.example/vpsman/alert-lifecycle",
+    updated_at: "2026-06-02T10:03:00Z",
+  },
 ];
 
 const webhookDeliveries = [
+  {
+    actor_id: null,
+    attempt_count: 1,
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:04:00Z",
+    dedupe_key:
+      "alert-lifecycle-webhook:fleet-alert:12121212-3434-4567-8787-121212121212:resolved",
+    delivered_at: "2026-06-02T10:04:01Z",
+    error: null,
+    event_id: "fleet-alert:12121212-3434-4567-8787-121212121212:resolved",
+    event_kind: "alert.resolved",
+    id: "abababab-4444-4444-8444-444444444444",
+    last_attempt_at: "2026-06-02T10:04:01Z",
+    matched_vps: [],
+    message:
+      "alert.resolved occurrence resolved generation=3 (delivered before its trigger fixture)",
+    next_attempt_at: null,
+    payload: {
+      alert: {
+        category: "backup",
+        id: "operational-alert:12121212-3434-4567-8787-121212121212",
+        last_confirmed_at: "2026-06-02T09:59:00Z",
+        lifecycle_state: "resolved",
+        record_kind: "event",
+        resolution_note: "Replacement backup verified.",
+        resolution_reason: "operator_resolved",
+        resolved_at: "2026-06-02T10:00:00Z",
+        severity: "warning",
+        source_status: "execution_failed",
+        trigger_generation: 3,
+        triggered_at: "2026-06-02T09:58:00Z",
+      },
+      event: {
+        id: "fleet-alert:12121212-3434-4567-8787-121212121212:resolved",
+        kind: "alert.resolved",
+        occurred_at: "2026-06-02T10:00:00Z",
+      },
+    },
+    review_preview_hash: null,
+    rule_id: "fefefefe-2222-4222-8222-222222222222",
+    rule_name: "alert-lifecycle-webhook",
+    status: "delivered",
+    target: "https://hooks.example/vpsman/alert-lifecycle",
+  },
+  {
+    actor_id: null,
+    attempt_count: 1,
+    cooldown_until_unix: 0,
+    created_at: "2026-06-02T10:05:00Z",
+    dedupe_key:
+      "alert-lifecycle-webhook:fleet-alert:12121212-3434-4567-8787-121212121212:triggered",
+    delivered_at: "2026-06-02T10:05:01Z",
+    error: null,
+    event_id: "fleet-alert:12121212-3434-4567-8787-121212121212:triggered",
+    event_kind: "alert.triggered",
+    id: "abababab-5555-4555-8555-555555555555",
+    last_attempt_at: "2026-06-02T10:05:01Z",
+    matched_vps: [],
+    message:
+      "alert.triggered occurrence triggered generation=3 (delivered after its resolve fixture)",
+    next_attempt_at: null,
+    payload: {
+      alert: {
+        category: "backup",
+        id: "operational-alert:12121212-3434-4567-8787-121212121212",
+        last_confirmed_at: "2026-06-02T09:58:00Z",
+        lifecycle_state: "triggered",
+        record_kind: "event",
+        resolution_note: null,
+        resolution_reason: null,
+        resolved_at: null,
+        severity: "warning",
+        source_status: "execution_failed",
+        trigger_generation: 3,
+        triggered_at: "2026-06-02T09:58:00Z",
+      },
+      event: {
+        id: "fleet-alert:12121212-3434-4567-8787-121212121212:triggered",
+        kind: "alert.triggered",
+        occurred_at: "2026-06-02T09:58:00Z",
+      },
+    },
+    review_preview_hash: null,
+    rule_id: "fefefefe-2222-4222-8222-222222222222",
+    rule_name: "alert-lifecycle-webhook",
+    status: "delivered",
+    target: "https://hooks.example/vpsman/alert-lifecycle",
+  },
   {
     actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
     attempt_count: 1,
@@ -3554,6 +3976,9 @@ export async function installConsoleApiMock(
   options: {
     agentListOverride?: typeof agents;
     alertEvidenceSaturated?: boolean;
+    alertDomainDuplicateCoverage?: boolean;
+    alertLifecycleMalformed?: boolean;
+    alertScopedGlobalCoverage?: boolean;
     alertStateCoverage?: boolean;
     agentDeleteDelayMs?: number;
     agentDeleteFailedClientIds?: string[];
@@ -3576,6 +4001,11 @@ export async function installConsoleApiMock(
     fileTransferSourceArtifactsOverride?: typeof fileTransferSourceArtifacts;
     fileTransfersOverride?: typeof fileTransfers;
     fleetAlertStateFailure?: boolean;
+    fleetAlertHistorySaturated?: boolean;
+    fleetAlertEventReviewFailure?: boolean;
+    fleetAlertEventReviewRefreshAddsNew?: boolean;
+    fleetAlertEventReviewSaturated?: boolean;
+    fleetAlertSourceFailure?: "current" | "history" | "both";
     fleetAlertNotificationChannelsOverride?: FleetAlertNotificationChannelRecord[];
     fleetSnapshotAfterDeleteDelayMs?: number;
     holdInitialFleetSnapshots?: boolean;
@@ -3614,9 +4044,11 @@ export async function installConsoleApiMock(
     networkSpeedSecondDispatchFailure?: boolean;
     ospfUpdatePlansOverride?: typeof ospfUpdatePlans;
     operatorRoleOverride?: "admin" | "operator" | "viewer";
+    operatorScopesOverride?: string[];
     operatorAuthEventsOverride?: OperatorAuthEventRecord[];
     privilegeVerificationDelayMs?: number;
     privilegeVerificationFailure?: "denied" | "unavailable";
+    policyAlertHistorySaturated?: boolean;
     schedulesOverride?: ScheduleRecord[];
     storedAuthSession?: boolean;
     tagOrderStateOverride?: {
@@ -3641,6 +4073,40 @@ export async function installConsoleApiMock(
     vpsRuleValuesAdditional?: VpsRuleValueRecord[];
   } = {},
 ) {
+  const saturatedFleetAlertEvents = Array.from({ length: 201 }, (_, index) => {
+    const triggeredAt = new Date(
+      Date.parse("2026-06-02T10:00:00Z") - index * 1_000,
+    ).toISOString();
+    return {
+      ...fleetAlerts[8],
+      id: `fleet-alert-event-review-${String(index).padStart(3, "0")}`,
+      lifecycle: {
+        ...fleetAlerts[8].lifecycle,
+        last_confirmed_at: triggeredAt,
+        triggered_at: triggeredAt,
+      },
+      observed_at: triggeredAt,
+      operator_state: index === 0 ? "acknowledged" : "open",
+      state_actor_id:
+        index === 0 ? "99999999-aaaa-4bbb-8ccc-000000000001" : null,
+      state_reason: index === 0 ? "fresh snapshot triage" : null,
+      state_updated_at: index === 0 ? "2026-06-02T10:00:01Z" : null,
+      target_id: `fixture-terminal-job-${String(index).padStart(3, "0")}`,
+      title:
+        index === 200
+          ? "Older incident beyond snapshot cap"
+          : `Paged terminal incident ${String(index).padStart(3, "0")}`,
+    };
+  });
+  const scopedGlobalFleetAlert = {
+    ...fleetAlerts[8],
+    client_id: null,
+    id: "fleet-alert-global-job-incident",
+    operator_state: "open",
+    severity: "warning",
+    target_id: "fixture-global-job-01",
+    title: "Whole-fleet job incident",
+  };
   await page.addInitScript(
     ({
       agentListOverrideFixture,
@@ -3685,6 +4151,13 @@ export async function installConsoleApiMock(
       fleetAlertNotificationChannelsFixture,
       fleetAlertNotificationsFixture,
       fleetAlertPoliciesFixture,
+      fleetAlertHistoryFixture,
+      fleetAlertHistoryTruncatedFixture,
+      fleetAlertEventReviewFailureFixture,
+      fleetAlertEventReviewRefreshAddsNewFixture,
+      fleetAlertEventsFixture,
+      fleetAlertsTruncatedFixture,
+      fleetAlertSourceFailureFixture,
       fleetAlertStateFailureFixture,
       fleetAlertStatesFixture,
       fleetAlertsFixture,
@@ -3692,6 +4165,8 @@ export async function installConsoleApiMock(
       holdInitialFleetSnapshotsFixture,
       holdInitialHomeSnapshotFixture,
       homeSnapshotSourceFailureFixture,
+      currentPolicyAlertsFixture,
+      currentPolicyAlertsTruncatedFixture,
       policyAlertsFixture,
       policyDryRunFixture,
       portForwardRulesFixture,
@@ -3719,6 +4194,7 @@ export async function installConsoleApiMock(
       operatorPreferencesFixture,
       operatorAuthEventsFixture,
       operatorRoleOverrideFixture,
+      operatorScopesOverrideFixture,
       privilegeVerificationDelayMsFixture,
       privilegeVerificationFailureFixture,
       processSupervisorInventoryFixture,
@@ -3901,6 +4377,7 @@ export async function installConsoleApiMock(
       }));
       let telemetryNetworkRateRequestCount = 0;
       let monitoringCardsRequestCount = 0;
+      let fleetAlertEventReviewRequestCount = 0;
       const mutableHostPackageUpdatePlans = hostPackageUpdatePlansFixture.map(
         (plan) => ({
           ...plan,
@@ -4057,6 +4534,8 @@ export async function installConsoleApiMock(
         fleetAlertNotificationProcesses: [] as unknown[],
         fleetAlertNotificationChannels: [] as unknown[],
         fleetAlertPolicies: [] as unknown[],
+        fleetAlertEventReviews: [] as unknown[],
+        fleetAlertResolutions: [] as unknown[],
         fleetAlertStates: [] as unknown[],
         fileBrowserJobs: [] as unknown[],
         fileTransferHandoffs: [] as unknown[],
@@ -4587,10 +5066,14 @@ export async function installConsoleApiMock(
         ...record,
         preferences: currentOperatorPreferences,
       });
-      const currentOperatorRecord =
+      const selectedOperatorRecord =
         operatorRecords.find(
           (record) => record.role === operatorRoleOverrideFixture,
         ) ?? operatorRecords[0];
+      const currentOperatorRecord = {
+        ...selectedOperatorRecord,
+        scopes: operatorScopesOverrideFixture ?? selectedOperatorRecord.scopes,
+      };
       const findOperator = (operatorId: string) =>
         operatorRecords.find((operator) => operator.id === operatorId) ??
         operatorRecords[0];
@@ -5595,7 +6078,10 @@ export async function installConsoleApiMock(
               "jobs",
               "/api/v1/jobs?limit=1000&sort=created_at&dir=desc",
             ),
-            loadHomeSource("file_transfers", "/api/v1/file-transfers?limit=200"),
+            loadHomeSource(
+              "file_transfers",
+              "/api/v1/file-transfers?limit=200",
+            ),
             loadHomeSource(
               "terminal_sessions",
               "/api/v1/terminal-sessions?limit=200",
@@ -5633,6 +6119,7 @@ export async function installConsoleApiMock(
             telemetry_rollups: telemetryRollups,
             telemetry_network_rates: telemetryNetworkRates,
             fleet_alerts: fleetAlerts,
+            fleet_alerts_truncated: fleetAlertsTruncatedFixture,
             monitoring_cards: homeMonitoringCards,
             jobs: homeJobs,
             file_transfers: homeFileTransfers,
@@ -5693,8 +6180,7 @@ export async function installConsoleApiMock(
 
                 return {
                   ...series,
-                  critical_threshold:
-                    requestedResourceMetric === "memory_used" ? 0.8 : 0.1,
+                  critical_threshold: null,
                   current: points.at(-1)?.value ?? transform(series.current),
                   peak: transform(series.peak),
                   points,
@@ -5702,8 +6188,7 @@ export async function installConsoleApiMock(
                     requestedResourceMetric === "memory_used"
                       ? "above"
                       : "below",
-                  warning_threshold:
-                    requestedResourceMetric === "memory_used" ? 0.7 : 0.2,
+                  warning_threshold: null,
                 };
               });
           return jsonResponse({
@@ -5789,7 +6274,7 @@ export async function installConsoleApiMock(
               effective_require_registered_agent_updates: false,
               exists: true,
               hot_reload_note:
-                "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
+                "API dispatcher limits, gateway-control read timeout, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.",
               path: "config/vpsman.toml",
               redacted: suiteConfigRedactedFixture,
               restart_required_note:
@@ -5937,6 +6422,7 @@ export async function installConsoleApiMock(
           if (mode === "full") {
             const [
               fleetAlerts,
+              fleetAlertHistory,
               fleetAlertStates,
               fleetAlertPolicies,
               vpsRuleValues,
@@ -5949,6 +6435,9 @@ export async function installConsoleApiMock(
             ] = await Promise.all([
               loadSnapshotSource(
                 "/api/v1/fleet-alerts?limit=200&include_muted=true",
+              ),
+              loadSnapshotSource(
+                "/api/v1/fleet-alert-history?limit=200&include_muted=true",
               ),
               loadSnapshotSource("/api/v1/fleet-alert-states?limit=200"),
               loadSnapshotSource("/api/v1/fleet-alert-policies?limit=200"),
@@ -5963,11 +6452,20 @@ export async function installConsoleApiMock(
               loadSnapshotSource("/api/v1/webhook-deliveries?limit=200"),
             ]);
             Object.assign(snapshot, {
+              current_policy_alerts: {
+                data: currentPolicyAlertsFixture,
+                error: null,
+              },
+              current_policy_alerts_truncated:
+                currentPolicyAlertsTruncatedFixture,
               fleet_alert_notification_channels: notificationChannels,
               fleet_alert_notifications: notifications,
               fleet_alert_policies: fleetAlertPolicies,
+              fleet_alert_history: fleetAlertHistory,
+              fleet_alert_history_truncated: fleetAlertHistoryTruncatedFixture,
               fleet_alert_states: fleetAlertStates,
               fleet_alerts: fleetAlerts,
+              fleet_alerts_truncated: fleetAlertsTruncatedFixture,
               policy_alerts: policyAlerts,
               traffic_accounting: trafficAccounting,
               vps_rule_values: vpsRuleValues,
@@ -6008,8 +6506,187 @@ export async function installConsoleApiMock(
             warnings: offline + never + revoked + stale + unknown,
           });
         }
+        if (
+          pathname.startsWith("/api/v1/fleet-alerts/") &&
+          pathname.endsWith("/resolve") &&
+          method === "POST"
+        ) {
+          const body = (await readJsonBody(input, init)) as {
+            confirmed?: boolean;
+            reason?: string;
+          };
+          const alertId = decodeURIComponent(
+            pathname.slice("/api/v1/fleet-alerts/".length, -"/resolve".length),
+          );
+          requests.fleetAlertResolutions.push({ alert_id: alertId, ...body });
+          const alertIndex = fleetAlertsFixture.findIndex(
+            (alert) => alert.id === alertId,
+          );
+          const alert = fleetAlertsFixture[alertIndex];
+          if (!alert) {
+            const terminal = fleetAlertHistoryFixture.find(
+              (stored) =>
+                stored.id === alertId &&
+                stored.record_kind === "event" &&
+                stored.lifecycle.state === "resolved",
+            );
+            if (terminal) {
+              return jsonResponse(terminal);
+            }
+          }
+          if (
+            !alert ||
+            alert.record_kind !== "event" ||
+            !["triggered", "persisting"].includes(alert.lifecycle.state)
+          ) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_not_resolvable",
+                message:
+                  "Only a current Triggered or Persisting occurrence can be resolved.",
+              },
+              409,
+            );
+          }
+          const reason = body.reason?.trim() ?? "";
+          if (!body.confirmed || !reason || reason.length > 1024) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_resolution_invalid",
+                message:
+                  "Resolution requires explicit confirmation and a reason of at most 1024 characters.",
+              },
+              400,
+            );
+          }
+          const resolvedAlert = {
+            ...alert,
+            lifecycle: {
+              ...alert.lifecycle,
+              resolution_actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+              resolution_note: reason,
+              resolution_reason: "operator_resolved",
+              resolved_at: "2026-07-01T12:00:00Z",
+              state: "resolved",
+            },
+          };
+          fleetAlertsFixture.splice(alertIndex, 1);
+          const eventReviewIndex = fleetAlertEventsFixture.findIndex(
+            (stored) => stored.id === alertId,
+          );
+          if (eventReviewIndex >= 0) {
+            fleetAlertEventsFixture.splice(eventReviewIndex, 1);
+          }
+          const historyIndex = fleetAlertHistoryFixture.findIndex(
+            (stored) => stored.id === alertId,
+          );
+          if (historyIndex >= 0) {
+            fleetAlertHistoryFixture.splice(historyIndex, 1, resolvedAlert);
+          } else {
+            fleetAlertHistoryFixture.unshift(resolvedAlert);
+          }
+          return jsonResponse(resolvedAlert);
+        }
+        if (pathname === "/api/v1/fleet-alert-events" && method === "GET") {
+          const requestUrl = new URL(url, window.location.href);
+          const cursor = requestUrl.searchParams.get("cursor");
+          requests.fleetAlertEventReviews.push({ cursor });
+          if (fleetAlertEventReviewFailureFixture) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_events_unavailable",
+                message: "Simulated unresolved occurrence review failure.",
+              },
+              503,
+            );
+          }
+          if (
+            fleetAlertEventReviewRefreshAddsNewFixture &&
+            fleetAlertEventReviewRequestCount >= 2 &&
+            cursor === null &&
+            !fleetAlertEventsFixture.some(
+              (alert) => alert.id === "fleet-alert-new-after-review-end",
+            )
+          ) {
+            const externallyResolvedIndex = fleetAlertEventsFixture.findIndex(
+              (alert) => alert.title === "Older incident beyond snapshot cap",
+            );
+            if (externallyResolvedIndex >= 0) {
+              fleetAlertEventsFixture.splice(externallyResolvedIndex, 1);
+            }
+            const newest = fleetAlertEventsFixture[0];
+            fleetAlertEventsFixture.unshift({
+              ...newest,
+              id: "fleet-alert-new-after-review-end",
+              lifecycle: {
+                ...newest.lifecycle,
+                last_confirmed_at: "2026-06-02T10:05:00Z",
+                triggered_at: "2026-06-02T10:05:00Z",
+              },
+              observed_at: "2026-06-02T10:05:00Z",
+              operator_state: "open",
+              state_actor_id: null,
+              state_reason: null,
+              state_updated_at: null,
+              target_id: "fixture-terminal-job-new",
+              title: "New incident after review reached end",
+            });
+          }
+          fleetAlertEventReviewRequestCount += 1;
+          const offset = cursor
+            ? Number(cursor.replace("fixture-event-cursor:", ""))
+            : 0;
+          if (!Number.isInteger(offset) || offset < 0) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_cursor_invalid",
+                message: "Fixture incident cursor is invalid.",
+              },
+              400,
+            );
+          }
+          const limit = Math.min(
+            200,
+            Math.max(1, Number(requestUrl.searchParams.get("limit") ?? 50)),
+          );
+          const items = fleetAlertEventsFixture.slice(offset, offset + limit);
+          const nextOffset = offset + items.length;
+          const hasMore = nextOffset < fleetAlertEventsFixture.length;
+          return jsonResponse({
+            has_more: hasMore,
+            items,
+            next_cursor: hasMore ? `fixture-event-cursor:${nextOffset}` : null,
+          });
+        }
         if (pathname === "/api/v1/fleet-alerts" && method === "GET") {
+          if (
+            fleetAlertSourceFailureFixture === "current" ||
+            fleetAlertSourceFailureFixture === "both"
+          ) {
+            return jsonResponse(
+              {
+                error: "fleet_alerts_unavailable",
+                message: "Simulated current fleet alert source failure.",
+              },
+              503,
+            );
+          }
           return jsonResponse(fleetAlertsFixture);
+        }
+        if (pathname === "/api/v1/fleet-alert-history" && method === "GET") {
+          if (
+            fleetAlertSourceFailureFixture === "history" ||
+            fleetAlertSourceFailureFixture === "both"
+          ) {
+            return jsonResponse(
+              {
+                error: "fleet_alert_history_unavailable",
+                message: "Simulated fleet alert history source failure.",
+              },
+              503,
+            );
+          }
+          return jsonResponse(fleetAlertHistoryFixture);
         }
         if (pathname === "/api/v1/fleet-alert-states" && method === "GET") {
           return jsonResponse(fleetAlertStatesFixture);
@@ -6032,14 +6709,47 @@ export async function installConsoleApiMock(
             muted_for_secs?: number | null;
             reason?: string | null;
           };
+          const alertId = request.alert_id ?? fleetAlertsFixture[0].id;
+          const currentAlert = [
+            ...fleetAlertsFixture,
+            ...fleetAlertEventsFixture,
+          ].find((alert) => alert.id === alertId);
+          const state =
+            request.action === "clear"
+              ? "open"
+              : request.action === "mute"
+                ? "muted"
+                : request.action === "escalate"
+                  ? "escalated"
+                  : "acknowledged";
+          const mutedUntilUnix = state === "muted" ? 1_900_000_000 : null;
+          const escalationLevel =
+            state === "escalated"
+              ? (currentAlert?.escalation_level ?? 0) + 1
+              : state === "open"
+                ? 0
+                : (currentAlert?.escalation_level ?? 0);
+          for (const alert of [
+            ...fleetAlertsFixture,
+            ...fleetAlertEventsFixture,
+          ]) {
+            if (alert.id === alertId) {
+              alert.operator_state = state;
+              alert.muted_until_unix = mutedUntilUnix;
+              alert.escalation_level = escalationLevel;
+              alert.state_actor_id = "99999999-aaaa-4bbb-8ccc-000000000001";
+              alert.state_reason = request.reason ?? null;
+              alert.state_updated_at = "2026-06-02T10:02:00Z";
+            }
+          }
           return jsonResponse({
-            action: request.action ?? "acknowledge",
-            alert_id: request.alert_id ?? fleetAlertsFixture[0].id,
+            actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+            alert_id: alertId,
             created_at: "2026-06-02T10:02:00Z",
-            created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
-            expires_at: request.muted_for_secs ? "2026-06-02T14:02:00Z" : null,
-            id: "edededed-1111-4111-8111-111111111111",
+            escalation_level: escalationLevel,
+            muted_until_unix: mutedUntilUnix,
             reason: request.reason ?? null,
+            state,
             updated_at: "2026-06-02T10:02:00Z",
           });
         }
@@ -6428,6 +7138,7 @@ export async function installConsoleApiMock(
           };
           return jsonResponse({
             active_critical_count: 0,
+            active_info_count: 0,
             active_warning_count: 0,
             created_at: "2026-06-02T10:02:00Z",
             created_by: "99999999-aaaa-4bbb-8ccc-000000000001",
@@ -10694,19 +11405,28 @@ export async function installConsoleApiMock(
               ),
             ]
           : backupArtifacts),
-      backupsFixture: options.recordPagesSaturated
+      backupsFixture: options.alertDomainDuplicateCoverage
         ? [
-            ...backupRequests,
-            ...Array.from(
-              { length: 1_000 - backupRequests.length },
-              (_, index) => ({
-                ...backupRequests[0],
-                client_id: "agent-fra-02",
-                id: `a0000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
-              }),
-            ),
+            {
+              ...backupRequests[0],
+              artifact_id: null,
+              id: "fixture-backup-01",
+              status: "execution_failed",
+            },
           ]
-        : backupRequests,
+        : options.recordPagesSaturated
+          ? [
+              ...backupRequests,
+              ...Array.from(
+                { length: 1_000 - backupRequests.length },
+                (_, index) => ({
+                  ...backupRequests[0],
+                  client_id: "agent-fra-02",
+                  id: `a0000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+                }),
+              ),
+            ]
+          : backupRequests,
       bulkResolveFailureFixture: options.bulkResolveFailure ?? false,
       configurationSourceApplyFailureFixture:
         options.configurationSourceApplyFailure ?? false,
@@ -10747,8 +11467,7 @@ export async function installConsoleApiMock(
         options.fleetSnapshotAfterDeleteDelayMs ?? 0,
       holdInitialFleetSnapshotsFixture:
         options.holdInitialFleetSnapshots ?? false,
-      holdInitialHomeSnapshotFixture:
-        options.holdInitialHomeSnapshot ?? false,
+      holdInitialHomeSnapshotFixture: options.holdInitialHomeSnapshot ?? false,
       homeSnapshotSourceFailureFixture:
         options.homeSnapshotSourceFailure ?? null,
       fleetAlertNotificationsFixture: options.alertEvidenceSaturated
@@ -10758,58 +11477,138 @@ export async function installConsoleApiMock(
           }))
         : fleetAlertNotifications,
       fleetAlertPoliciesFixture: fleetAlertPolicies,
+      fleetAlertHistoryFixture: options.fleetAlertHistorySaturated
+        ? Array.from({ length: 200 }, (_, index) => ({
+            ...fleetAlertHistory[fleetAlertHistory.length - 1],
+            id: `fleet-alert-history-${String(index).padStart(3, "0")}`,
+          }))
+        : fleetAlertHistory,
+      fleetAlertHistoryTruncatedFixture:
+        options.fleetAlertHistorySaturated ?? false,
+      fleetAlertEventReviewFailureFixture:
+        options.fleetAlertEventReviewFailure ?? false,
+      fleetAlertEventReviewRefreshAddsNewFixture:
+        options.fleetAlertEventReviewRefreshAddsNew ?? false,
+      fleetAlertEventsFixture: options.fleetAlertEventReviewSaturated
+        ? saturatedFleetAlertEvents.map((alert, index) =>
+            index === 0
+              ? {
+                  ...alert,
+                  operator_state: "open",
+                  state_actor_id: null,
+                  state_reason: "stale review-feed triage",
+                  state_updated_at: "2026-06-02T09:59:00Z",
+                }
+              : alert,
+          )
+        : [
+            ...fleetAlerts.filter((alert) => alert.record_kind === "event"),
+            ...(options.alertScopedGlobalCoverage
+              ? [scopedGlobalFleetAlert]
+              : []),
+          ],
+      fleetAlertsTruncatedFixture:
+        options.fleetAlertEventReviewFailure ||
+        options.fleetAlertEventReviewSaturated ||
+        options.recordPagesSaturated,
+      fleetAlertSourceFailureFixture: options.fleetAlertSourceFailure ?? null,
       fleetAlertStateFailureFixture: options.fleetAlertStateFailure ?? false,
       fleetAlertStatesFixture: fleetAlertStates,
-      fleetAlertsFixture: options.alertStateCoverage
-        ? [
-            {
-              ...fleetAlerts[3],
-              id: "fleet-alert-state-open",
-              operator_state: "open",
-              severity: "warning",
-              title: "Open daily alert",
-            },
-            {
-              ...fleetAlerts[3],
-              escalation_level: 1,
-              id: "fleet-alert-state-escalated",
-              operator_state: "escalated",
-              severity: "critical",
-              title: "Escalated daily alert",
-            },
-            {
-              ...fleetAlerts[3],
-              id: "fleet-alert-state-muted",
-              muted_until_unix: 1_900_000_000,
-              operator_state: "muted",
-              severity: "critical",
-              title: "Muted daily alert",
-            },
-            {
-              ...fleetAlerts[2],
-              id: "fleet-alert-state-acknowledged",
-              title: "Acknowledged daily alert",
-            },
-          ]
-        : options.recordPagesSaturated
-          ? [
-              ...fleetAlerts,
-              ...Array.from(
-                { length: 200 - fleetAlerts.length },
-                (_, index) => ({
-                  ...fleetAlerts[0],
-                  id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
-                  target_id: `agent-fra-02:filler-${index}`,
-                }),
-              ),
-            ]
-          : fleetAlerts,
+      fleetAlertsFixture: options.fleetAlertEventReviewSaturated
+        ? saturatedFleetAlertEvents.slice(0, 200)
+        : options.alertScopedGlobalCoverage
+          ? [...fleetAlerts, scopedGlobalFleetAlert]
+          : options.alertDomainDuplicateCoverage
+            ? fleetAlerts.filter(
+                (alert) =>
+                  alert.target_id !== "fixture-backup-01" &&
+                  alert.target_id !== "fixture-update-job-01",
+              )
+            : options.alertLifecycleMalformed
+              ? [
+                  {
+                    ...fleetAlerts[7],
+                    id: "fleet-alert-malformed-event-unknown",
+                    lifecycle: {
+                      ...fleetAlerts[7].lifecycle,
+                      state: "unknown",
+                    },
+                    operator_state: "open",
+                    title: "Malformed event lifecycle fixture",
+                  },
+                  {
+                    ...fleetAlerts[5],
+                    id: "fleet-alert-malformed-policy-condition",
+                    lifecycle: {
+                      ...fleetAlerts[5].lifecycle,
+                      last_confirmed_at: "2026-06-01T09:59:00Z",
+                    },
+                    operator_state: "open",
+                    title: "Malformed policy lifecycle fixture",
+                  },
+                ]
+              : options.alertStateCoverage
+                ? [
+                    {
+                      ...fleetAlerts[5],
+                      id: "fleet-alert-state-open",
+                      operator_state: "open",
+                      severity: "warning",
+                      title: "Open daily alert",
+                    },
+                    {
+                      ...fleetAlerts[5],
+                      escalation_level: 1,
+                      id: "fleet-alert-state-escalated",
+                      operator_state: "escalated",
+                      severity: "critical",
+                      title: "Escalated daily alert",
+                    },
+                    {
+                      ...fleetAlerts[5],
+                      id: "fleet-alert-state-muted",
+                      muted_until_unix: 1_900_000_000,
+                      operator_state: "muted",
+                      severity: "critical",
+                      title: "Muted daily alert",
+                    },
+                    {
+                      ...fleetAlerts[4],
+                      id: "fleet-alert-state-acknowledged",
+                      title: "Acknowledged daily alert",
+                    },
+                  ]
+                : options.recordPagesSaturated
+                  ? [
+                      ...fleetAlerts,
+                      ...Array.from(
+                        { length: 200 - fleetAlerts.length },
+                        (_, index) => ({
+                          ...fleetAlerts[0],
+                          id: `fleet-alert-filler-${String(index).padStart(3, "0")}`,
+                          target_id: `agent-fra-02:filler-${index}`,
+                        }),
+                      ),
+                    ]
+                  : fleetAlerts,
       policyAlertsFixture: options.alertEvidenceSaturated
         ? Array.from({ length: 200 }, (_, index) => ({
             ...policyAlerts[0],
             id: `policy-alert-saturated-${String(index).padStart(3, "0")}`,
           }))
-        : policyAlerts,
+        : options.policyAlertHistorySaturated
+          ? Array.from({ length: 200 }, (_, index) => ({
+              ...policyAlerts[1],
+              id: `policy-alert-history-${String(index).padStart(3, "0")}`,
+            }))
+          : policyAlerts,
+      currentPolicyAlertsFixture: options.alertEvidenceSaturated
+        ? Array.from({ length: 200 }, (_, index) => ({
+            ...policyAlerts[0],
+            id: `policy-alert-saturated-${String(index).padStart(3, "0")}`,
+          }))
+        : [policyAlerts[0]],
+      currentPolicyAlertsTruncatedFixture: options.alertEvidenceSaturated,
       policyDryRunFixture,
       portForwardRulesFixture: portForwardRules,
       fileTransferSourceArtifactsFixture:
@@ -10851,7 +11650,20 @@ export async function installConsoleApiMock(
       networkSpeedSecondDispatchFailureFixture:
         options.networkSpeedSecondDispatchFailure ?? false,
       jobOutputsFixture: networkJobOutputs,
-      jobsFixture: networkJobs,
+      jobsFixture: options.alertDomainDuplicateCoverage
+        ? [
+            ...networkJobs,
+            {
+              ...networkJobs[1],
+              command_type: "agent_update",
+              completed_at: "2026-06-02T09:51:00Z",
+              created_at: "2026-06-02T09:40:00Z",
+              id: "fixture-update-job-01",
+              status: "control_timeout",
+              target_count: 1,
+            },
+          ]
+        : networkJobs,
       networkObservationsFixture: networkObservations,
       ospfRecommendationsFixture: ospfRecommendations,
       ospfUpdatePlansFixture:
@@ -10860,6 +11672,7 @@ export async function installConsoleApiMock(
       operatorPreferencesFixture: operatorPreferences,
       operatorAuthEventsFixture: options.operatorAuthEventsOverride ?? null,
       operatorRoleOverrideFixture: options.operatorRoleOverride ?? "admin",
+      operatorScopesOverrideFixture: options.operatorScopesOverride ?? null,
       privilegeVerificationDelayMsFixture:
         options.privilegeVerificationDelayMs ?? 0,
       privilegeVerificationFailureFixture:

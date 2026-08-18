@@ -462,6 +462,24 @@ test("webhook expression autocomplete values are accepted event predicates", () 
   }
 });
 
+test("policy webhook suggestions prefer lifecycle predicates while retaining the reached alias", () => {
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.triggered");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.resolved");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.policy_triggered");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).toContain("alert.policy_resolved");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.policy_reached");
+  expect(WEBHOOK_EXPRESSION_SUGGESTIONS).not.toContain("alert.state:open");
+
+  const parsed = parseSearchExpression("alert.policy_reached");
+  expect(parsed.error).toBeNull();
+  expect(
+    evaluateSearchExpression(parsed.expression, {
+      all: [],
+      events: ["alert.policy_reached"],
+    }),
+  ).toBe(true);
+});
+
 test("shared advertised autocomplete suggestions parse in the frontend parser", () => {
   for (const suggestion of fixture.parseable_suggestions ?? []) {
     expect(isParseableSearchSuggestion(suggestion), suggestion).toBe(true);

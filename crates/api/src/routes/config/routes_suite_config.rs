@@ -77,7 +77,7 @@ pub(crate) async fn get_suite_config(
         redacted: redacted_toml_json(&text)?,
         toml: text,
         validation: config.validation_summary(),
-        hot_reload_note: "API dispatcher limits, gateway-control read timeout, alert thresholds, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.".to_string(),
+        hot_reload_note: "API dispatcher limits, gateway-control read timeout, job-output artifact threshold, update-registration enforcement, gateway runtime timing, and worker tick/schedule/notification/webhook/retention controls are applied by running services after this file changes.".to_string(),
         restart_required_note: "Bind addresses, gateway/API URLs and identities, database URL/migration path/pool sizes, secret refs, object-store clients and local object directories, worker identity/once mode, and connect/write timeout changes require service restart.".to_string(),
     }))
 }

@@ -437,7 +437,6 @@ fn test_state_with_store(repo: Repository, store: BackupObjectStore) -> AppState
         gateway: GatewayDispatchClient::default(),
         backup_object_store: Some(store),
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: usize::MAX,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

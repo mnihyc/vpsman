@@ -3,6 +3,7 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
+use chrono::Utc;
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -768,6 +769,7 @@ impl Repository {
                 request.status = status.as_str().to_string();
                 let view = request.clone();
                 drop(requests);
+                let terminal_at = Utc::now().to_rfc3339();
                 memory
                     .audits
                     .write()
@@ -775,8 +777,12 @@ impl Repository {
                     .push(backup_request_execution_audit(
                         &view,
                         operator,
-                        unix_now().to_string(),
+                        terminal_at.clone(),
                     ));
+                if status == BackupRequestStatus::ExecutionFailed {
+                    self.reconcile_memory_backup_event_source(view.id, &terminal_at)
+                        .await?;
+                }
                 Ok(Some(view))
             }
             Self::Postgres(pool) => {
@@ -833,6 +839,13 @@ impl Repository {
                 .bind(backup_request_execution_metadata(&view, operator))
                 .execute(&mut *tx)
                 .await?;
+                if status == BackupRequestStatus::ExecutionFailed {
+                    crate::repository_operational_alerts::reconcile_postgres_backup_event_source_in_tx(
+                        &mut tx,
+                        view.id,
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 Ok(Some(view))
             }

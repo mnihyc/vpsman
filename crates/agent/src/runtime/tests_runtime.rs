@@ -612,6 +612,7 @@ async fn configured_runtime_reconcile_runs_saved_telemetry_plans() {
             runtime_status_telemetry_plans: vec![vpsman_common::AgentRuntimeStatusTelemetryPlan {
                 plan_id: Some("plan-a".to_string()),
                 topology_identity_hash: "0".repeat(64),
+                runtime_evidence_identity_hash: "1".repeat(64),
                 endpoint_side: vpsman_common::TunnelEndpointSide::Left,
                 plan,
                 builtin_credentials: None,
@@ -1293,6 +1294,7 @@ async fn runtime_config_sync_failure_does_not_return_config_update() {
         vpsman_common::AgentRuntimeStatusTelemetryPlan {
             plan_id: Some("plan-a".to_string()),
             topology_identity_hash: "0".repeat(64),
+            runtime_evidence_identity_hash: "1".repeat(64),
             endpoint_side: vpsman_common::TunnelEndpointSide::Left,
             plan,
             builtin_credentials: None,
@@ -1424,6 +1426,7 @@ fn runtime_sync_test_telemetry_plan(
     vpsman_common::AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("plan-a".to_string()),
         topology_identity_hash: "0".repeat(64),
+        runtime_evidence_identity_hash: "1".repeat(64),
         endpoint_side: vpsman_common::TunnelEndpointSide::Left,
         plan,
         builtin_credentials: None,

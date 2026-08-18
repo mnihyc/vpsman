@@ -3,6 +3,10 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL, Engine as _};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 use vpsman_common::{
     is_fleet_alert_notification_delivery_process_status,
     is_fleet_alert_notification_delivery_status,
@@ -10,7 +14,11 @@ use vpsman_common::{
 
 use crate::{
     error::ApiError,
-    model::{FleetAlertQuery, FleetAlertView},
+    fleet_alerts::apply_alert_states,
+    model::{
+        FleetAlertEventPage, FleetAlertEventQuery, FleetAlertHistoryQuery, FleetAlertQuery,
+        FleetAlertView, ResolveFleetAlertRequest,
+    },
     model_alert_notifications::{
         CreateFleetAlertNotificationChannelRequest, DeleteFleetAlertNotificationChannelRequest,
         FleetAlertNotificationChannelQuery, FleetAlertNotificationChannelView,
@@ -28,6 +36,7 @@ use crate::{
         FleetAlertExportView, FleetAlertStateQuery, FleetAlertStateView,
         UpdateFleetAlertStateRequest,
     },
+    repository_operational_alerts::operational_episode_to_fleet_alert,
     repository_webhook_rules::validate_webhook_rule_target,
     security::{
         operator_has_scope, require_vps_rule_selector_scope, SCOPE_BACKUPS_READ, SCOPE_CONFIG_READ,
@@ -36,8 +45,14 @@ use crate::{
     selector_expression::parse_selector_expression,
     state::AppState,
     unix_now,
-    util::limit_or_default,
+    util::{limit_or_default, parse_timestamp_utc},
 };
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FleetAlertEventCursor {
+    triggered_at: String,
+    episode_id: Uuid,
+}
 
 pub(crate) async fn list_fleet_alerts(
     State(state): State<AppState>,
@@ -57,6 +72,239 @@ pub(crate) async fn list_fleet_alerts(
             "Fleet alerts could not be loaded.",
         ),
     )?))
+}
+
+pub(crate) async fn list_fleet_alert_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<FleetAlertHistoryQuery>,
+) -> Result<Json<Vec<FleetAlertView>>, ApiError> {
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    let fleet_query = FleetAlertQuery {
+        limit: query.limit,
+        client_id: query.client_id,
+        severity: query.severity,
+        category: query.category,
+        operator_state: query.operator_state,
+        include_muted: query.include_muted,
+    };
+    validate_alert_query(&fleet_query)?;
+    if query
+        .start_unix
+        .zip(query.end_unix)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(ApiError::bad_request("fleet_alert_history_window_invalid"));
+    }
+    Ok(Json(
+        state
+            .list_fleet_alert_history_bounded(fleet_query, query.start_unix, query.end_unix)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "fleet_alert_history_unavailable",
+                "Fleet alert history could not be loaded.",
+            ))?
+            .alerts,
+    ))
+}
+
+pub(crate) async fn list_fleet_alert_events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<FleetAlertEventQuery>,
+) -> Result<Json<FleetAlertEventPage>, ApiError> {
+    let operator = state
+        .require_operator_scope(&headers, SCOPE_FLEET_READ)
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ) {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    let fleet_query = FleetAlertQuery {
+        limit: query.limit,
+        client_id: query.client_id,
+        severity: query.severity,
+        category: query.category,
+        operator_state: query.operator_state,
+        include_muted: query.include_muted,
+    };
+    validate_alert_query(&fleet_query)?;
+    let limit = fleet_query.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let cursor = decode_fleet_alert_event_cursor(query.cursor.as_deref())?;
+    let mut episodes = state
+        .repo
+        .list_unresolved_operational_alert_events_page(
+            &fleet_query,
+            cursor,
+            limit.saturating_add(1),
+        )
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alert_events_unavailable",
+            "Fleet alert events could not be loaded.",
+        ))?;
+    let has_more = episodes.len() > limit;
+    if has_more {
+        episodes.truncate(limit);
+    }
+    let next_cursor = if has_more {
+        episodes
+            .last()
+            .map(encode_fleet_alert_event_cursor)
+            .transpose()?
+    } else {
+        None
+    };
+    let mut items = episodes
+        .iter()
+        .map(operational_episode_to_fleet_alert)
+        .collect::<Vec<_>>();
+    let alert_ids = items
+        .iter()
+        .map(|alert| alert.id.clone())
+        .collect::<Vec<_>>();
+    let states = state
+        .repo
+        .list_fleet_alert_states_for_alert_ids(&alert_ids)
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alert_state_unavailable",
+            "Fleet alert triage state could not be loaded.",
+        ))?;
+    apply_alert_states(&mut items, &states);
+    Ok(Json(FleetAlertEventPage {
+        items,
+        next_cursor,
+        has_more,
+    }))
+}
+
+fn decode_fleet_alert_event_cursor(
+    cursor: Option<&str>,
+) -> Result<Option<(DateTime<Utc>, Uuid)>, ApiError> {
+    let Some(cursor) = cursor else {
+        return Ok(None);
+    };
+    let bytes = BASE64_URL
+        .decode(cursor)
+        .map_err(|_| ApiError::bad_request("fleet_alert_event_cursor_invalid"))?;
+    let payload = serde_json::from_slice::<FleetAlertEventCursor>(&bytes)
+        .map_err(|_| ApiError::bad_request("fleet_alert_event_cursor_invalid"))?;
+    let triggered_at = parse_timestamp_utc(&payload.triggered_at)
+        .ok_or_else(|| ApiError::bad_request("fleet_alert_event_cursor_invalid"))?;
+    Ok(Some((triggered_at, payload.episode_id)))
+}
+
+fn encode_fleet_alert_event_cursor(
+    episode: &crate::model::OperationalAlertEpisodeRecord,
+) -> Result<String, ApiError> {
+    let triggered_at = parse_timestamp_utc(&episode.triggered_at)
+        .ok_or_else(|| {
+            ApiError::internal(
+                "fleet_alert_event_cursor_failed",
+                "The Fleet alert cursor could not be generated.",
+                anyhow::anyhow!("operational alert has an invalid triggered_at timestamp"),
+            )
+        })?
+        .to_rfc3339();
+    let payload = serde_json::to_vec(&FleetAlertEventCursor {
+        triggered_at,
+        episode_id: episode.id,
+    })
+    .map_err(|error| {
+        ApiError::internal(
+            "fleet_alert_event_cursor_failed",
+            "The Fleet alert cursor could not be generated.",
+            error.into(),
+        )
+    })?;
+    Ok(BASE64_URL.encode(payload))
+}
+
+pub(crate) async fn resolve_fleet_alert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(alert_id): Path<String>,
+    Json(request): Json<ResolveFleetAlertRequest>,
+) -> Result<Json<FleetAlertView>, ApiError> {
+    let operator = state
+        .require_operator_role_and_scope(&headers, "operator", SCOPE_INTEGRATIONS_WRITE)
+        .await?;
+    if !operator_has_scope(&operator.operator.scopes, SCOPE_FLEET_READ)
+        || !operator_has_scope(&operator.operator.scopes, SCOPE_BACKUPS_READ)
+    {
+        return Err(ApiError::forbidden("operator_scope_insufficient"));
+    }
+    if !request.confirmed {
+        return Err(ApiError::bad_request(
+            "fleet_alert_resolution_confirmation_required",
+        ));
+    }
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.len() > 1024 {
+        return Err(ApiError::bad_request(
+            "fleet_alert_resolution_reason_invalid",
+        ));
+    }
+    if let Some(policy_alert_id) = alert_id
+        .strip_prefix("policy-alert:")
+        .and_then(|value| Uuid::parse_str(value).ok())
+    {
+        if state
+            .repo
+            .policy_alert_exists(policy_alert_id)
+            .await
+            .map_err(ApiError::internal_mapper(
+                "fleet_alert_resolution_failed",
+                "The Fleet alert could not be resolved.",
+            ))?
+        {
+            return Err(ApiError::conflict(
+                "fleet_alert_condition_not_operator_resolvable",
+            ));
+        }
+    }
+    let episode = state
+        .repo
+        .resolve_operational_alert_event(&alert_id, reason, &operator)
+        .await
+        .map_err(fleet_alert_resolution_error)?;
+    let mut alert = operational_episode_to_fleet_alert(&episode);
+    let states = state
+        .repo
+        .list_fleet_alert_states_for_alert_ids(&[alert.id.clone()])
+        .await
+        .map_err(ApiError::internal_mapper(
+            "fleet_alert_state_unavailable",
+            "Fleet alert triage state could not be loaded.",
+        ))?;
+    apply_alert_states(std::slice::from_mut(&mut alert), &states);
+    Ok(Json(alert))
+}
+
+fn fleet_alert_resolution_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("fleet_alert_not_found") {
+        return ApiError::not_found("fleet_alert_not_found");
+    }
+    if message.contains("fleet_alert_condition_not_operator_resolvable") {
+        return ApiError::conflict("fleet_alert_condition_not_operator_resolvable");
+    }
+    if message.contains("fleet_alert_already_resolved") {
+        return ApiError::conflict("fleet_alert_already_resolved");
+    }
+    if message.contains("fleet_alert_resolution_reason_invalid") {
+        return ApiError::bad_request("fleet_alert_resolution_reason_invalid");
+    }
+    ApiError::internal(
+        "fleet_alert_resolution_failed",
+        "The Fleet alert could not be resolved.",
+        error,
+    )
 }
 
 pub(crate) async fn export_fleet_alerts(
@@ -972,7 +1220,7 @@ fn fleet_alert_policy_error(error: anyhow::Error) -> ApiError {
         return ApiError::bad_request_with_message(
             "fleet_alert_policy_condition_invalid",
             format!(
-                "{reason}. Supported metrics include cpu.load_1, cpu.load_saturation, memory.available_ratio, disk.available_ratio, and traffic quota/cycle values"
+                "{reason}. Supported metrics include cpu.utilization_ratio (busy-time ratio), cpu.load_saturation (load per core), cpu.load_1 (raw load), memory.available_ratio, disk.available_ratio, and traffic quota/cycle values"
             ),
         );
     }

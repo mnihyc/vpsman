@@ -16,7 +16,6 @@ fn test_state() -> AppState {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32_768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
@@ -78,6 +77,8 @@ async fn live_snapshot_contains_only_the_live_sources() {
         "vps_rule_values",
         "traffic_accounting",
         "policy_alerts",
+        "current_policy_alerts",
+        "current_policy_alerts_truncated",
         "fleet_alert_notification_channels",
         "fleet_alert_notifications",
         "webhook_rules",
@@ -128,6 +129,7 @@ async fn full_snapshot_contains_all_current_fleet_detail_sources() {
         "vps_rule_values",
         "traffic_accounting",
         "policy_alerts",
+        "current_policy_alerts",
         "fleet_alert_notification_channels",
         "fleet_alert_notifications",
         "webhook_rules",
@@ -142,6 +144,53 @@ async fn full_snapshot_contains_all_current_fleet_detail_sources() {
             "failed full source {source}"
         );
     }
+    assert_eq!(value["current_policy_alerts_truncated"], false);
+}
+
+#[tokio::test]
+async fn full_snapshot_splits_and_bounds_current_policy_alerts_from_history() {
+    let state = test_state();
+    let Repository::Memory(memory) = &state.repo else {
+        unreachable!();
+    };
+    let template = snapshot_policy_alert("triggered", false, "2026-01-01T00:00:00Z");
+    let mut alerts = (0..=FLEET_DETAIL_LIMIT)
+        .map(|index| {
+            let mut alert = template.clone();
+            alert.id = uuid::Uuid::new_v4();
+            alert.client_id = format!("current-{index}");
+            alert.trigger_generation = index + 1;
+            alert
+        })
+        .collect::<Vec<_>>();
+    let resolved = snapshot_policy_alert("resolved", true, "2027-01-01T00:00:00Z");
+    let resolved_id = resolved.id;
+    alerts.push(resolved);
+    *memory.policy_alerts.write().await = alerts;
+    let headers = crate::test_auth_headers(&state).await;
+
+    let Json(snapshot) = fleet_snapshot(
+        State(state),
+        headers,
+        Query(FleetSnapshotQuery {
+            mode: Some("full".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    let value = serde_json::to_value(snapshot).unwrap();
+    let history = value["policy_alerts"]["data"].as_array().unwrap();
+    let current = value["current_policy_alerts"]["data"].as_array().unwrap();
+
+    assert_eq!(history.len(), FLEET_DETAIL_LIMIT as usize);
+    assert!(history
+        .iter()
+        .any(|alert| alert["id"] == resolved_id.to_string()));
+    assert_eq!(current.len(), FLEET_DETAIL_LIMIT as usize);
+    assert!(current
+        .iter()
+        .all(|alert| alert["lifecycle_state"] == "triggered"));
+    assert_eq!(value["current_policy_alerts_truncated"], true);
 }
 
 #[tokio::test]
@@ -181,6 +230,7 @@ async fn full_snapshot_keeps_scope_failures_local_to_each_source() {
         "fleet_alert_policies",
         "traffic_accounting",
         "policy_alerts",
+        "current_policy_alerts",
     ] {
         assert!(
             !value[source]["data"].is_null(),
@@ -188,6 +238,7 @@ async fn full_snapshot_keeps_scope_failures_local_to_each_source() {
         );
         assert!(value[source]["error"].is_null());
     }
+    assert_eq!(value["current_policy_alerts_truncated"], false);
     for source in [
         "fleet_alerts",
         "vps_rule_values",
@@ -198,6 +249,33 @@ async fn full_snapshot_keeps_scope_failures_local_to_each_source() {
     ] {
         assert!(value[source]["data"].is_null(), "forbidden source {source}");
         assert_eq!(value[source]["error"], "operator_scope_insufficient");
+    }
+}
+
+fn snapshot_policy_alert(
+    lifecycle_state: &str,
+    resolved: bool,
+    observed_at: &str,
+) -> crate::model_alert_policies::PolicyAlertRecord {
+    crate::model_alert_policies::PolicyAlertRecord {
+        id: uuid::Uuid::new_v4(),
+        policy_group_id: uuid::Uuid::new_v4(),
+        policy_rule_id: uuid::Uuid::new_v4(),
+        client_id: "snapshot-client".to_string(),
+        trigger_generation: 1,
+        severity: "warning".to_string(),
+        category: "traffic".to_string(),
+        title: "Snapshot policy alert".to_string(),
+        detail: "snapshot policy alert detail".to_string(),
+        actual_value: Some(90.0),
+        threshold_value: Some(80.0),
+        payload: serde_json::json!({}),
+        lifecycle_state: lifecycle_state.to_string(),
+        last_confirmed_at: Some(observed_at.to_string()),
+        resolved_at: resolved.then(|| observed_at.to_string()),
+        resolution_reason: resolved.then(|| "condition_recovered".to_string()),
+        observed_at: observed_at.to_string(),
+        created_at: observed_at.to_string(),
     }
 }
 

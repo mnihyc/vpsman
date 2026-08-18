@@ -45,7 +45,7 @@ use crate::repository_runtime_config::{
 use crate::runtime_config::redact_runtime_tunnel_credentials;
 use crate::util::{
     compare_timestamps_desc, limit_or_default, offset_or_default, output_stream_name,
-    search_pattern, sort_descending, timestamp_in_optional_bounds,
+    search_pattern, sort_descending,
 };
 use crate::{unix_now, TargetDispatchOutcome};
 
@@ -56,42 +56,12 @@ pub(crate) struct PrecompletedJobTarget {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CapabilityDegradedJobTargetCandidate {
-    pub(crate) job: JobHistoryView,
-    pub(crate) target: JobTargetView,
-    pub(crate) reason: String,
-    pub(crate) hint: String,
-}
-
-#[derive(Clone, Debug)]
 struct PendingRuntimeConfigApply {
     client_id: String,
     version: u64,
     content_hash: String,
     config: AgentRuntimeConfig,
     reason: String,
-}
-
-fn fleet_alert_job_status_is_actionable(status: &str) -> bool {
-    matches!(
-        status,
-        JOB_STATUS_PARTIAL_SUCCESS
-            | JOB_STATUS_CANCELED
-            | "rejected"
-            | "failed"
-            | "agent_timeout"
-            | "control_timeout"
-    )
-}
-
-fn fleet_alert_job_category(command_type: &str) -> &'static str {
-    if command_type.contains("backup") || command_type.contains("restore") {
-        "backup"
-    } else if command_type.contains("agent_update") {
-        "agent_update"
-    } else {
-        "job"
-    }
 }
 
 fn capability_degraded_metadata(
@@ -869,6 +839,11 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     .execute(&mut **tx)
     .await?;
     finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, target.job_id).await?;
+    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+        tx,
+        target.job_id,
+    )
+    .await?;
     Ok(true)
 }
 
@@ -2288,307 +2263,6 @@ impl Repository {
         }
     }
 
-    pub(crate) async fn list_failed_job_alert_candidates(
-        &self,
-        category: Option<&str>,
-        severity: Option<&str>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        limit: i64,
-    ) -> Result<Vec<JobHistoryView>> {
-        let limit = limit.clamp(1, 200);
-        match self {
-            Self::Memory(memory) => {
-                let mut jobs = memory
-                    .jobs
-                    .read()
-                    .await
-                    .iter()
-                    .filter(|job| {
-                        fleet_alert_job_status_is_actionable(&job.status)
-                            && category.is_none_or(|category| {
-                                fleet_alert_job_category(&job.command_type) == category
-                            })
-                            && severity.is_none_or(|severity| {
-                                if job.status == JOB_STATUS_PARTIAL_SUCCESS {
-                                    severity == "warning"
-                                } else {
-                                    severity == "critical"
-                                }
-                            })
-                            && timestamp_in_optional_bounds(
-                                job.completed_at.as_deref().unwrap_or(&job.created_at),
-                                start_unix,
-                                end_unix,
-                            )
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                jobs.sort_by(|left, right| {
-                    (left.status == JOB_STATUS_PARTIAL_SUCCESS)
-                        .cmp(&(right.status == JOB_STATUS_PARTIAL_SUCCESS))
-                        .then_with(|| {
-                            compare_timestamps_desc(
-                                left.completed_at.as_deref().unwrap_or(&left.created_at),
-                                right.completed_at.as_deref().unwrap_or(&right.created_at),
-                            )
-                        })
-                        .then_with(|| right.id.cmp(&left.id))
-                });
-                jobs.truncate(limit as usize);
-                Ok(jobs)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        id,
-                        actor_id,
-                        command_type,
-                        source_schedule_id,
-                        privileged,
-                        status,
-                        target_count,
-                        payload_hash,
-                        max_timeout_secs,
-                        created_at::text AS created_at,
-                        completed_at::text AS completed_at
-                    FROM jobs
-                    WHERE status IN (
-                        'failed',
-                        'agent_timeout',
-                        'control_timeout',
-                        'partial_success',
-                        'rejected',
-                        'canceled'
-                    )
-                      AND (
-                        $1::TEXT IS NULL
-                        OR CASE
-                            WHEN command_type LIKE '%backup%'
-                              OR command_type LIKE '%restore%' THEN 'backup'
-                            WHEN command_type LIKE '%agent_update%' THEN 'agent_update'
-                            ELSE 'job'
-                        END = $1
-                      )
-                      AND (
-                        $2::TEXT IS NULL
-                        OR CASE
-                            WHEN status = 'partial_success' THEN 'warning'
-                            ELSE 'critical'
-                        END = $2
-                      )
-                      AND (
-                        $3::DOUBLE PRECISION IS NULL
-                        OR COALESCE(completed_at, created_at)
-                            >= to_timestamp($3::DOUBLE PRECISION)
-                      )
-                      AND (
-                        $4::DOUBLE PRECISION IS NULL
-                        OR COALESCE(completed_at, created_at)
-                            <= to_timestamp($4::DOUBLE PRECISION)
-                      )
-                    ORDER BY
-                        CASE WHEN status = 'partial_success' THEN 1 ELSE 0 END ASC,
-                        COALESCE(completed_at, created_at) DESC,
-                        id DESC
-                    LIMIT $5
-                    "#,
-                )
-                .bind(category)
-                .bind(severity)
-                .bind(start_unix.map(|value| value as f64))
-                .bind(end_unix.map(|value| value as f64))
-                .bind(limit)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        Ok(JobHistoryView {
-                            id: row.try_get("id")?,
-                            actor_id: row.try_get("actor_id")?,
-                            command_type: row.try_get("command_type")?,
-                            source_schedule_id: row.try_get("source_schedule_id")?,
-                            privileged: row.try_get("privileged")?,
-                            status: row.try_get("status")?,
-                            target_count: row.try_get("target_count")?,
-                            payload_hash: row.try_get("payload_hash")?,
-                            max_timeout_secs: row.try_get::<i64, _>("max_timeout_secs")?.max(1)
-                                as u64,
-                            created_at: row.try_get("created_at")?,
-                            completed_at: row.try_get("completed_at")?,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
-    pub(crate) async fn list_capability_degraded_job_target_candidates(
-        &self,
-        client_id: Option<&str>,
-        allowed_client_ids: Option<&HashSet<String>>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-        limit: i64,
-    ) -> Result<Vec<CapabilityDegradedJobTargetCandidate>> {
-        let limit = limit.clamp(1, 200) as usize;
-        match self {
-            Self::Memory(memory) => {
-                let all_jobs = memory.jobs.read().await;
-                let all_jobs_by_id = all_jobs
-                    .iter()
-                    .map(|job| (job.id, job))
-                    .collect::<HashMap<_, _>>();
-                let metadata = memory.capability_degraded_job_targets.read().await;
-                let mut candidates = memory
-                    .job_targets
-                    .read()
-                    .await
-                    .iter()
-                    .filter_map(|target| {
-                        let job = all_jobs_by_id.get(&target.job_id)?;
-                        let (reason, hint) =
-                            metadata.get(&(target.job_id, target.client_id.clone()))?;
-                        let matches = target.status == TARGET_STATUS_SKIPPED
-                            && client_id.is_none_or(|client_id| target.client_id == client_id)
-                            && allowed_client_ids
-                                .is_none_or(|client_ids| client_ids.contains(&target.client_id))
-                            && timestamp_in_optional_bounds(
-                                target
-                                    .completed_at
-                                    .as_deref()
-                                    .or(target.started_at.as_deref())
-                                    .unwrap_or(job.created_at.as_str()),
-                                start_unix,
-                                end_unix,
-                            );
-                        matches.then(|| CapabilityDegradedJobTargetCandidate {
-                            job: (*job).clone(),
-                            target: target.clone(),
-                            reason: reason.clone(),
-                            hint: hint.clone(),
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                candidates.sort_by(|left, right| {
-                    let left_observed = left
-                        .target
-                        .completed_at
-                        .as_deref()
-                        .or(left.target.started_at.as_deref())
-                        .unwrap_or(left.job.created_at.as_str());
-                    let right_observed = right
-                        .target
-                        .completed_at
-                        .as_deref()
-                        .or(right.target.started_at.as_deref())
-                        .unwrap_or(right.job.created_at.as_str());
-                    compare_timestamps_desc(left_observed, right_observed)
-                        .then_with(|| right.job.id.cmp(&left.job.id))
-                        .then_with(|| left.target.client_id.cmp(&right.target.client_id))
-                });
-                candidates.truncate(limit);
-                Ok(candidates)
-            }
-            Self::Postgres(pool) => {
-                let rows = sqlx::query(
-                    r#"
-                    SELECT
-                        job.id AS job_id,
-                        job.actor_id AS job_actor_id,
-                        job.command_type AS job_command_type,
-                        job.source_schedule_id AS job_source_schedule_id,
-                        job.privileged AS job_privileged,
-                        job.status AS job_status,
-                        job.target_count AS job_target_count,
-                        job.payload_hash AS job_payload_hash,
-                        job.max_timeout_secs AS job_max_timeout_secs,
-                        job.created_at::text AS job_created_at,
-                        job.completed_at::text AS job_completed_at,
-                        target.client_id AS target_client_id,
-                        target.status AS target_status,
-                        target.message AS target_message,
-                        target.exit_code AS target_exit_code,
-                        target.started_at::text AS target_started_at,
-                        target.deadline_at::text AS target_deadline_at,
-                        target.completed_at::text AS target_completed_at,
-                        target.process_incarnation_id AS target_process_incarnation_id,
-                        target.capability_degraded_reason,
-                        target.capability_degraded_hint
-                    FROM jobs job
-                    JOIN job_targets target ON target.job_id = job.id
-                    WHERE target.status = 'skipped'
-                      AND target.capability_degraded_reason IS NOT NULL
-                      AND target.capability_degraded_hint IS NOT NULL
-                      AND ($1::TEXT IS NULL OR target.client_id = $1)
-                      AND ($2::TEXT[] IS NULL OR target.client_id = ANY($2))
-                      AND (
-                        $3::DOUBLE PRECISION IS NULL
-                        OR COALESCE(target.completed_at, target.started_at)
-                            >= to_timestamp($3::DOUBLE PRECISION)
-                      )
-                      AND (
-                        $4::DOUBLE PRECISION IS NULL
-                        OR COALESCE(target.completed_at, target.started_at)
-                            <= to_timestamp($4::DOUBLE PRECISION)
-                      )
-                    ORDER BY
-                        COALESCE(target.completed_at, target.started_at) DESC,
-                        job.id DESC,
-                        target.client_id ASC
-                    LIMIT $5
-                    "#,
-                )
-                .bind(client_id)
-                .bind(
-                    allowed_client_ids
-                        .map(|client_ids| client_ids.iter().cloned().collect::<Vec<_>>()),
-                )
-                .bind(start_unix.map(|value| value as f64))
-                .bind(end_unix.map(|value| value as f64))
-                .bind(limit as i64)
-                .fetch_all(pool)
-                .await?;
-                rows.into_iter()
-                    .map(|row| {
-                        let job = JobHistoryView {
-                            id: row.try_get("job_id")?,
-                            actor_id: row.try_get("job_actor_id")?,
-                            command_type: row.try_get("job_command_type")?,
-                            source_schedule_id: row.try_get("job_source_schedule_id")?,
-                            privileged: row.try_get("job_privileged")?,
-                            status: row.try_get("job_status")?,
-                            target_count: row.try_get("job_target_count")?,
-                            payload_hash: row.try_get("job_payload_hash")?,
-                            max_timeout_secs: row.try_get::<i64, _>("job_max_timeout_secs")?.max(1)
-                                as u64,
-                            created_at: row.try_get("job_created_at")?,
-                            completed_at: row.try_get("job_completed_at")?,
-                        };
-                        let target = JobTargetView {
-                            job_id: job.id,
-                            client_id: row.try_get("target_client_id")?,
-                            status: row.try_get("target_status")?,
-                            message: row.try_get("target_message")?,
-                            exit_code: row.try_get("target_exit_code")?,
-                            started_at: row.try_get("target_started_at")?,
-                            deadline_at: row.try_get("target_deadline_at")?,
-                            completed_at: row.try_get("target_completed_at")?,
-                            process_incarnation_id: row.try_get("target_process_incarnation_id")?,
-                        };
-                        Ok(CapabilityDegradedJobTargetCandidate {
-                            job,
-                            target,
-                            reason: row.try_get("capability_degraded_reason")?,
-                            hint: row.try_get("capability_degraded_hint")?,
-                        })
-                    })
-                    .collect()
-            }
-        }
-    }
-
     pub(crate) async fn query_jobs(&self, query: &ListQuery) -> Result<Vec<JobHistoryView>> {
         let limit = limit_or_default(query.limit);
         let offset = offset_or_default(query.offset);
@@ -3127,8 +2801,15 @@ impl Repository {
                 .bind(metadata)
                 .execute(&mut *tx)
                 .await?;
+                crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                    &mut tx, job_id,
+                )
+                .await?;
                 tx.commit().await?;
             }
+        }
+        if matches!(self, Self::Memory(_)) {
+            self.reconcile_memory_job_event_sources(job_id).await?;
         }
         self.record_job_created_webhook_event(JobCreatedWebhookEvent {
             job_id,
@@ -3743,6 +3424,10 @@ impl Repository {
                 finished_status =
                     finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
                         .await?;
+                crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                    &mut tx, job_id,
+                )
+                .await?;
                 tx.commit().await?;
             }
         }
@@ -3759,6 +3444,7 @@ impl Repository {
         })
         .await?;
         if matches!(self, Self::Memory(_)) {
+            self.reconcile_memory_job_event_sources(job_id).await?;
             for target in precompleted_targets {
                 self.record_runtime_config_apply_terminal_for_target_status(
                     job_id,
@@ -3967,10 +3653,10 @@ impl Repository {
                     }) {
                         job.status = JOB_STATUS_RUNNING.to_string();
                     }
-                    for job_id in invalid_job_ids {
+                    for job_id in &invalid_job_ids {
                         let job_targets = target_snapshot
                             .iter()
-                            .filter(|target| target.job_id == job_id)
+                            .filter(|target| target.job_id == *job_id)
                             .cloned()
                             .collect::<Vec<_>>();
                         if job_targets.is_empty()
@@ -3982,7 +3668,7 @@ impl Repository {
                         }
                         if let Some(job) = jobs
                             .iter_mut()
-                            .find(|job| job.id == job_id && job.completed_at.is_none())
+                            .find(|job| job.id == *job_id && job.completed_at.is_none())
                         {
                             job.status =
                                 aggregate_job_status_from_targets(&job_targets).to_string();
@@ -4056,6 +3742,9 @@ impl Repository {
                             "terminalized dispatch target with invalid stored job operation"
                         );
                     }
+                }
+                for job_id in invalid_job_ids {
+                    self.reconcile_memory_job_event_sources(job_id).await?;
                 }
                 Ok(claimed)
             }
@@ -5052,6 +4741,10 @@ impl Repository {
                 .await?;
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
                 finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id).await?;
+                crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                    &mut tx, job_id,
+                )
+                .await?;
                 tx.commit().await?;
             }
         }
@@ -5562,6 +5255,18 @@ impl Repository {
                         status: status.to_string(),
                     });
                 }
+                let mut changed_job_ids = expired
+                    .iter()
+                    .map(|target| target.job_id)
+                    .collect::<Vec<_>>();
+                changed_job_ids.sort();
+                changed_job_ids.dedup();
+                for job_id in changed_job_ids {
+                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                        &mut tx, job_id,
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
                 let control_deadline_extra_secs =
                     control_deadline_extra_secs.min(i32::MAX as u64) as i32;
@@ -5863,6 +5568,10 @@ impl Repository {
                 }))
                 .execute(&mut *tx)
                 .await?;
+                crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                    &mut tx, job_id,
+                )
+                .await?;
                 tx.commit().await?;
                 Ok(JobCancelPlan {
                     cancel_targets,
@@ -5939,6 +5648,10 @@ impl Repository {
                         .await?;
                     finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
                         .await?;
+                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                        &mut tx, job_id,
+                    )
+                    .await?;
                 }
                 tx.commit().await?;
             }
@@ -6282,6 +5995,11 @@ impl Repository {
                 let finished = row.is_some();
                 if finished {
                     enqueue_job_terminal_event_in_tx(&mut tx, job_id, status).await?;
+                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                        &mut tx,
+                        job_id,
+                    )
+                    .await?;
                 }
                 tx.commit().await?;
                 finished
@@ -6529,6 +6247,9 @@ impl Repository {
         job_id: Uuid,
         status: &str,
     ) -> Result<()> {
+        if matches!(self, Self::Memory(_)) {
+            self.reconcile_memory_job_event_sources(job_id).await?;
+        }
         self.record_job_status_webhook_event(job_id, status).await?;
         self.record_schedule_job_outcome(job_id, status).await?;
         Ok(())

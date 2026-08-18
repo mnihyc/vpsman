@@ -415,11 +415,9 @@ async fn dashboard_overview_aggregates_memory_state() {
         view.resource_curve.latest_sample_at.as_deref(),
         Some(now.as_str())
     );
-    assert!(view
-        .resource_curve
-        .series
-        .iter()
-        .any(|series| series.client_id == "edge-b" && series.critical_threshold.is_some()));
+    assert!(view.resource_curve.series.iter().all(|series| {
+        series.warning_threshold.is_none() && series.critical_threshold.is_none()
+    }));
     assert_eq!(view.network.top_clients.len(), 2);
     assert!(view.network.rx_bps < 1_000.0);
     assert!(view.network.tx_bps < 1_000.0);
@@ -629,6 +627,10 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
             actual_value: Some(2.0),
             threshold_value: Some(1.0),
             payload: json!({}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some(current.clone()),
+            resolved_at: None,
+            resolution_reason: None,
             observed_at: current.clone(),
             created_at: current.clone(),
         },
@@ -645,8 +647,32 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
             actual_value: Some(2.0),
             threshold_value: Some(1.0),
             payload: json!({}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some(future.clone()),
+            resolved_at: None,
+            resolution_reason: None,
             observed_at: future.clone(),
             created_at: future.clone(),
+        },
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id: Uuid::new_v4(),
+            client_id: selected_client.to_string(),
+            trigger_generation: 1,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Unknown selected alert".to_string(),
+            detail: "must remain visible as evidence but never count active".to_string(),
+            actual_value: None,
+            threshold_value: Some(1.0),
+            payload: json!({}),
+            lifecycle_state: "unknown".to_string(),
+            last_confirmed_at: Some(current.clone()),
+            resolved_at: None,
+            resolution_reason: None,
+            observed_at: current.clone(),
+            created_at: current.clone(),
         },
     ]);
     memory
@@ -666,6 +692,10 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
             actual_value: Some(2.0),
             threshold_value: Some(1.0),
             payload: json!({}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some(now.saturating_sub(1).to_string()),
+            resolved_at: None,
+            resolution_reason: None,
             observed_at: now.saturating_sub(1).to_string(),
             created_at: now.saturating_sub(1).to_string(),
         }));
@@ -740,6 +770,7 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
             scope_kind: Some("client".to_string()),
             scope_value: Some(selected_client.to_string()),
             window: Some("1d".to_string()),
+            group_by: Some("date".to_string()),
             ..dashboard_query_default()
         }),
     )
@@ -762,6 +793,19 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
         .recent_alerts
         .iter()
         .any(|alert| alert.title == "Future selected alert"));
+    assert!(!view
+        .operations
+        .recent_alerts
+        .iter()
+        .any(|alert| alert.title == "Unknown selected alert"));
+    assert_eq!(
+        view.label_clusters
+            .iter()
+            .map(|cluster| cluster.warnings)
+            .sum::<usize>(),
+        view.operations.active_alerts,
+        "date clusters must not classify Unknown policy evidence as an open alert"
+    );
 }
 
 #[tokio::test]
@@ -816,6 +860,69 @@ async fn dashboard_date_groups_do_not_rebucket_active_jobs_created_before_the_ra
             process_incarnation_id: None,
         });
     }
+    let policy_group_id = Uuid::new_v4();
+    memory.policy_alerts.write().await.extend([
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            trigger_generation: 1,
+            severity: "warning".to_string(),
+            category: "resource".to_string(),
+            title: "Old active policy episode".to_string(),
+            detail: "current activity predates the selected history window".to_string(),
+            actual_value: Some(0.8),
+            threshold_value: Some(0.75),
+            payload: json!({}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some(old.to_string()),
+            resolved_at: None,
+            resolution_reason: None,
+            observed_at: old.to_string(),
+            created_at: old.to_string(),
+        },
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            trigger_generation: 1,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Old unknown policy episode".to_string(),
+            detail: "unknown evidence is current but never active".to_string(),
+            actual_value: None,
+            threshold_value: Some(0.9),
+            payload: json!({}),
+            lifecycle_state: "unknown".to_string(),
+            last_confirmed_at: Some(old.to_string()),
+            resolved_at: None,
+            resolution_reason: None,
+            observed_at: old.to_string(),
+            created_at: old.to_string(),
+        },
+        PolicyAlertRecord {
+            id: Uuid::new_v4(),
+            policy_group_id,
+            policy_rule_id: Uuid::new_v4(),
+            client_id: "edge-a".to_string(),
+            trigger_generation: 1,
+            severity: "critical".to_string(),
+            category: "resource".to_string(),
+            title: "Future policy episode".to_string(),
+            detail: "future evidence must remain excluded".to_string(),
+            actual_value: Some(0.95),
+            threshold_value: Some(0.9),
+            payload: json!({}),
+            lifecycle_state: "triggered".to_string(),
+            last_confirmed_at: Some(now.saturating_add(60).to_string()),
+            resolved_at: None,
+            resolution_reason: None,
+            observed_at: now.saturating_add(60).to_string(),
+            created_at: now.saturating_add(60).to_string(),
+        },
+    ]);
 
     let state = dashboard_test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
@@ -837,12 +944,35 @@ async fn dashboard_date_groups_do_not_rebucket_active_jobs_created_before_the_ra
         "current workload summary remains independent of creation time"
     );
     assert_eq!(
+        view.operations.active_alerts, 1,
+        "current Triggered policy episodes remain active outside the history window; Unknown and future evidence do not"
+    );
+    assert!(view
+        .operations
+        .recent_alerts
+        .iter()
+        .any(|alert| alert.title == "Old active policy episode"));
+    assert!(!view.operations.recent_alerts.iter().any(|alert| {
+        matches!(
+            alert.title.as_str(),
+            "Old unknown policy episode" | "Future policy episode"
+        )
+    }));
+    assert_eq!(
         view.label_clusters
             .iter()
             .map(|cluster| cluster.running_jobs)
             .sum::<usize>(),
         1,
         "date groups include only jobs actually created inside the selected range"
+    );
+    assert_eq!(
+        view.label_clusters
+            .iter()
+            .map(|cluster| cluster.warnings)
+            .sum::<usize>(),
+        0,
+        "current episodes predating the range must not be rebucketed into its timeline"
     );
     assert!(view.label_clusters.iter().all(|cluster| {
         crate::util::parse_timestamp_unix(&cluster.label)
@@ -1156,7 +1286,6 @@ fn dashboard_test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::default(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

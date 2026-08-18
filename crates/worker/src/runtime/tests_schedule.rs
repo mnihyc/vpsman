@@ -461,7 +461,7 @@ async fn postgres_webhook_rule_failures_do_not_poison_event_batch() {
     .fetch_one(&db.pool)
     .await
     .unwrap();
-    assert_eq!(open_failure_alerts, 3);
+    assert_eq!(open_failure_alerts, 0);
     let permanent_failure_audits: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_logs WHERE action = 'webhook.rule_delivery_permanently_failed'",
     )
@@ -887,6 +887,105 @@ async fn postgres_scheduled_capability_skip_persists_alert_metadata() {
     let output = job_status_output(&db.pool, job_id, "edge-unprivileged").await;
     assert_eq!(output["type"], "capability_degraded");
     assert_eq!(output["command_type"], "agent_update_check");
+
+    let episode = sqlx::query(
+        r#"
+        SELECT id, lifecycle_state, trigger_generation, producer_kind,
+               category, client_id, source_status
+        FROM operational_alert_episodes
+        WHERE producer_kind = 'capability_degraded'
+          AND natural_key = $1
+        "#,
+    )
+    .bind(format!("{job_id}:edge-unprivileged"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let episode_id: Uuid = episode.try_get("id").unwrap();
+    assert_eq!(
+        episode.try_get::<String, _>("lifecycle_state").unwrap(),
+        "triggered"
+    );
+    assert_eq!(episode.try_get::<i64, _>("trigger_generation").unwrap(), 1);
+    assert_eq!(
+        episode.try_get::<String, _>("category").unwrap(),
+        "capability_degraded"
+    );
+    assert_eq!(
+        episode.try_get::<Option<String>, _>("client_id").unwrap(),
+        Some("edge-unprivileged".to_string())
+    );
+    assert_eq!(
+        episode.try_get::<String, _>("source_status").unwrap(),
+        "target_agent_lacks_agent_update_capability"
+    );
+
+    let edge = sqlx::query(
+        r#"
+        SELECT payload, event_predicates, subject_client_ids
+        FROM webhook_events
+        WHERE kind = 'alert.triggered' AND event_id = $1
+        "#,
+    )
+    .bind(format!("fleet-alert:{episode_id}:triggered"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let payload = edge
+        .try_get::<SqlJson<serde_json::Value>, _>("payload")
+        .unwrap()
+        .0;
+    assert_eq!(payload["alert"]["producer_kind"], "capability_degraded");
+    assert_eq!(payload["alert"]["lifecycle_state"], "triggered");
+    assert_eq!(payload["alert"]["trigger_generation"], 1);
+    assert_eq!(payload["alert"]["client_id"], "edge-unprivileged");
+    assert_eq!(
+        payload["alert"]["source_status"],
+        "target_agent_lacks_agent_update_capability"
+    );
+    assert_eq!(
+        edge.try_get::<Vec<String>, _>("event_predicates").unwrap(),
+        vec![
+            "alert.category:capability_degraded",
+            "alert.open",
+            "alert.severity:warning",
+            "alert.triggered",
+        ]
+    );
+    assert_eq!(
+        edge.try_get::<Vec<String>, _>("subject_client_ids")
+            .unwrap(),
+        vec!["edge-unprivileged"]
+    );
+
+    let mut retry = db.pool.begin().await.unwrap();
+    reconcile_scheduled_job_event_sources_in_tx(&mut retry, job_id)
+        .await
+        .unwrap();
+    retry.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM operational_alert_episodes
+            WHERE producer_kind = 'capability_degraded' AND natural_key = $1
+            "#,
+        )
+        .bind(format!("{job_id}:edge-unprivileged"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_events WHERE event_id = $1",)
+            .bind(format!("fleet-alert:{episode_id}:triggered"))
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1,
+        "schedule retries must not recreate the capability episode or trigger edge"
+    );
     db.cleanup().await;
 }
 

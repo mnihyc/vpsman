@@ -158,6 +158,30 @@ fn event_objects_support_decimal_comparisons_and_policy_alert_predicates() {
 }
 
 #[test]
+fn alert_lifecycle_edge_predicates_are_explicit() {
+    let generic_triggered = ExpressionContext::default()
+        .with_event_predicate("alert.triggered")
+        .with_event_predicate("alert.open");
+    assert!(matches("alert.triggered && alert.open", &generic_triggered));
+    assert!(!matches("alert.resolved", &generic_triggered));
+
+    let policy_triggered = ExpressionContext::default()
+        .with_event_predicate("alert.policy_triggered")
+        .with_event_predicate("alert.policy_reached");
+    assert!(matches("alert.policy_triggered", &policy_triggered));
+    assert!(matches("alert.policy_reached", &policy_triggered));
+
+    let resolved = ExpressionContext::default()
+        .with_event_predicate("alert.policy_resolved")
+        .with_event_predicate("alert.resolved");
+    assert!(matches(
+        "alert.policy_resolved && alert.resolved",
+        &resolved
+    ));
+    assert!(!matches("alert.policy_triggered", &resolved));
+}
+
+#[test]
 fn quoted_list_values_preserve_commas() {
     let context = ExpressionContext::for_vps(VpsMetadata::new(
         "id",

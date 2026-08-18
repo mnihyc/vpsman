@@ -631,7 +631,7 @@ jq -e '
 alert_policy_json="$(vpsctl_json alert-policy upsert \
   --name docker-edge-resource-alerts \
   --selector 'tag:role:edge' \
-  --rule 'cpu.load_1 >= 0.5' \
+  --rule 'cpu.utilization_ratio >= 0.75' \
   --severity warning \
   --notes docker-fault-fuzz-live-review \
   --confirmed)"

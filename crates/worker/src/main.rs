@@ -50,6 +50,8 @@ mod build_info;
 mod history_retention;
 #[path = "retention/network_observation_retention.rs"]
 mod network_observation_retention;
+#[path = "runtime/operational_alerts.rs"]
+mod operational_alerts;
 #[cfg(test)]
 #[path = "runtime/test_support.rs"]
 mod test_support;
@@ -69,6 +71,9 @@ use backup_policy_retention::{
     BackupPolicyRetentionPruneRun,
 };
 use history_retention::{process_telemetry_history_retention, TelemetryHistoryRetentionRun};
+use operational_alerts::{
+    reconcile_agent_status_transition_in_tx, reconcile_scheduled_job_event_sources_in_tx,
+};
 use webhook_rules::{
     ensure_event_partitions, insert_webhook_event_in_tx, process_webhook_rules,
     WebhookRuleWorkerConfig, WebhookRuleWorkerRun,
@@ -1104,6 +1109,7 @@ async fn detect_offline_agents(pool: &PgPool, offline_timeout_secs: i64) -> Resu
             "vps.status.offline".to_string(),
             "vps.status.become_offline".to_string(),
         ];
+        reconcile_agent_status_transition_in_tx(&mut tx, &client_id, "offline").await?;
         insert_webhook_event_in_tx(
             &mut tx,
             "vps.status_changed",
@@ -2382,6 +2388,7 @@ async fn materialize_due_schedule(
 
     record_schedule_capability_skip_outputs(tx, job_id, &operation, &capability_skips).await?;
     record_schedule_target_skip_outputs(tx, job_id, &operation, &schedule_target_skips).await?;
+    reconcile_scheduled_job_event_sources_in_tx(tx, job_id).await?;
 
     sqlx::query(
         r#"
@@ -3437,6 +3444,9 @@ fn truncate_schedule_error(error: &str) -> String {
     error.chars().take(1024).collect()
 }
 
+#[cfg(test)]
+#[path = "runtime/tests_operational_alerts.rs"]
+mod operational_alert_tests;
 #[cfg(test)]
 #[path = "runtime/tests_schedule.rs"]
 mod schedule_tests;

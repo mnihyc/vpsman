@@ -346,12 +346,151 @@ fn host_fact_parsing_does_not_invent_cpu_or_virtualization_labels() {
 }
 
 #[test]
-fn malformed_mount_inventory_fails_instead_of_disappearing() {
+fn malformed_mount_row_does_not_discard_available_storage() {
     let root = std::env::temp_dir().join(format!("vpsman-mounts-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("mounts"), "incomplete-row\n").unwrap();
-    let error = disk_stats(&root).unwrap_err();
-    assert!(error.to_string().contains("row 1 is incomplete"));
+    let storage = root.join("storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(
+        root.join("mounts"),
+        format!(
+            "incomplete-row\n/dev/root {} ext4 rw 0 0\n",
+            storage.display()
+        ),
+    )
+    .unwrap();
+
+    let collection = disk_stats(&root).unwrap();
+    assert_eq!(collection.disks.len(), 1);
+    assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
+    assert_eq!(collection.failure_count, 1);
+    assert!(collection
+        .first_error
+        .as_deref()
+        .is_some_and(|error| error.contains("row 1 is incomplete")));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn container_namespace_and_overlay_mounts_are_not_storage() {
+    let root = std::env::temp_dir().join(format!("vpsman-nsfs-{}", uuid::Uuid::new_v4()));
+    let storage = root.join("storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(
+        root.join("mounts"),
+        format!(
+            "nsfs /run/docker/netns/808d0d1218c8 nsfs rw 0 0\n\
+             fuse-overlayfs /var/lib/docker/fuse-overlayfs/layer fuse-overlayfs rw 0 0\n\
+             /dev/fuse /var/lib/docker/fuse-overlayfs/other fuse.fuse-overlayfs rw 0 0\n\
+             /dev/root {} ext4 rw 0 0\n",
+            storage.display()
+        ),
+    )
+    .unwrap();
+
+    let collection = disk_stats(&root).unwrap();
+    assert_eq!(collection.disks.len(), 1);
+    assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
+    assert_eq!(collection.failure_count, 0);
+    assert_eq!(collection.first_error, None);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn inaccessible_storage_mount_does_not_discard_available_storage() {
+    let root = std::env::temp_dir().join(format!("vpsman-partial-disks-{}", uuid::Uuid::new_v4()));
+    let storage = root.join("storage");
+    let missing = root.join("missing");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(
+        root.join("mounts"),
+        format!(
+            "/dev/root {} ext4 rw 0 0\n/dev/root {} ext4 rw 0 0\n",
+            missing.display(),
+            storage.display()
+        ),
+    )
+    .unwrap();
+
+    let collection = disk_stats(&root).unwrap();
+    assert_eq!(collection.disks.len(), 1);
+    assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
+    assert_eq!(collection.failure_count, 1);
+    assert!(collection
+        .first_error
+        .as_deref()
+        .is_some_and(|error| error.contains(missing.to_string_lossy().as_ref())));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn unprivileged_permission_denied_mounts_do_not_raise_warning_state() {
+    let permission_error = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::EACCES))
+        .context("failed to inspect telemetry mount /restricted");
+    assert!(error_is_permission_denied(&permission_error));
+    let missing_error = anyhow::Error::new(std::io::Error::from_raw_os_error(libc::ENOENT))
+        .context("failed to inspect telemetry mount /vanished");
+    assert!(!error_is_permission_denied(&missing_error));
+
+    let mut collection = DiskCollection::default();
+    collection.record_failure(format!("{permission_error:#}"), true);
+    assert_eq!(collection.warning_summary(1_000), None);
+    let root_warning = collection.warning_summary(0).unwrap();
+    assert_eq!(root_warning.0, 1);
+    assert!(root_warning.1.contains("/restricted"));
+
+    collection.record_failure(format!("{missing_error:#}"), false);
+    let unprivileged_warning = collection.warning_summary(1_000).unwrap();
+    assert_eq!(unprivileged_warning.0, 1);
+    assert!(unprivileged_warning.1.contains("/vanished"));
+}
+
+#[test]
+fn unavailable_disk_inventory_keeps_other_linux_telemetry_available() {
+    let root =
+        std::env::temp_dir().join(format!("vpsman-partial-telemetry-{}", uuid::Uuid::new_v4()));
+    let proc_root = root.join("proc");
+    let hostname_path = root.join("hostname");
+    std::fs::create_dir_all(proc_root.join("net")).unwrap();
+    std::fs::write(&hostname_path, "partial-host\n").unwrap();
+    std::fs::write(proc_root.join("uptime"), "123.50 50.00\n").unwrap();
+    std::fs::write(proc_root.join("loadavg"), "0.25 0.50 0.75 1/10 1\n").unwrap();
+    std::fs::write(
+        proc_root.join("meminfo"),
+        "MemTotal: 4096 kB\nMemAvailable: 1024 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n",
+    )
+    .unwrap();
+    std::fs::write(
+        proc_root.join("net/dev"),
+        "Inter-| Receive | Transmit\n\
+         face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\
+         eth0: 10 1 0 0 0 0 0 0 20 2 0 0 0 0 0 0\n",
+    )
+    .unwrap();
+
+    let mut config = AgentConfig::default();
+    config.telemetry.proc_root = proc_root.to_string_lossy().into_owned();
+    config.telemetry.hostname_file = Some(hostname_path.to_string_lossy().into_owned());
+    let mut runtime_state = TelemetryRuntimeState::default();
+
+    let metrics = collect_linux_metrics(&config, &mut runtime_state).unwrap();
+    assert_eq!(metrics.hostname, "partial-host");
+    assert_eq!(metrics.uptime_secs, 123);
+    assert_eq!(metrics.cpu.load.one, 0.25);
+    assert_eq!(metrics.memory.total_bytes, 4096 * 1024);
+    assert_eq!(metrics.networks.len(), 1);
+    assert!(metrics.disks.is_empty());
+    assert!(runtime_state.disk_collection_failed);
+
+    let storage = root.join("storage");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(
+        proc_root.join("mounts"),
+        format!("/dev/root {} ext4 rw 0 0\n", storage.display()),
+    )
+    .unwrap();
+    let recovered = collect_linux_metrics(&config, &mut runtime_state).unwrap();
+    assert_eq!(recovered.disks.len(), 1);
+    assert!(!runtime_state.disk_collection_failed);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -456,6 +595,39 @@ fn runtime_status_and_latency_checks_keep_independent_cadences() {
 }
 
 #[test]
+fn runtime_status_merge_retains_both_plan_evidence_identities() {
+    let mut metrics = AgentMetrics {
+        tunnels: vec![RuntimeTunnelStat {
+            interface: "guard0".to_string(),
+            source: "interface_inventory".to_string(),
+            ..RuntimeTunnelStat::default()
+        }],
+        ..AgentMetrics::default()
+    };
+    merge_runtime_status_tunnel(
+        &mut metrics,
+        RuntimeTunnelStat {
+            interface: "guard0".to_string(),
+            source: "runtime_status".to_string(),
+            plan_id: Some("00000000-0000-4000-8000-000000000001".to_string()),
+            topology_identity_hash: Some("a".repeat(64)),
+            runtime_evidence_identity_hash: Some("b".repeat(64)),
+            ..RuntimeTunnelStat::default()
+        },
+    );
+
+    assert_eq!(metrics.tunnels.len(), 1);
+    assert_eq!(
+        metrics.tunnels[0].topology_identity_hash.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    assert_eq!(
+        metrics.tunnels[0].runtime_evidence_identity_hash.as_deref(),
+        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+    );
+}
+
+#[test]
 fn removed_runtime_plan_cannot_reuse_cached_state_when_readded() {
     let key = "plan:topology:left";
     let mut state = TelemetryRuntimeState::default();
@@ -514,6 +686,7 @@ fn runtime_status_cache_key_is_scoped_to_topology_and_endpoint() {
     let base = AgentRuntimeStatusTelemetryPlan {
         plan_id: Some("00000000-0000-4000-8000-000000000001".to_string()),
         topology_identity_hash: "a".repeat(64),
+        runtime_evidence_identity_hash: "c".repeat(64),
         endpoint_side: TunnelEndpointSide::Left,
         plan,
         builtin_credentials: None,
@@ -522,12 +695,18 @@ fn runtime_status_cache_key_is_scoped_to_topology_and_endpoint() {
     };
     let mut changed_topology = base.clone();
     changed_topology.topology_identity_hash = "b".repeat(64);
+    let mut changed_runtime = base.clone();
+    changed_runtime.runtime_evidence_identity_hash = "d".repeat(64);
     let mut other_side = base.clone();
     other_side.endpoint_side = TunnelEndpointSide::Right;
 
     assert_ne!(
         runtime_status_telemetry_key(&base),
         runtime_status_telemetry_key(&changed_topology)
+    );
+    assert_ne!(
+        runtime_status_telemetry_key(&base),
+        runtime_status_telemetry_key(&changed_runtime)
     );
     assert_ne!(
         runtime_status_telemetry_key(&base),

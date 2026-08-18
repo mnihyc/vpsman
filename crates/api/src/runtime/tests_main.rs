@@ -10,6 +10,29 @@ use vpsman_server_core::{
     TARGET_STATUS_FAILED, TARGET_STATUS_SKIPPED,
 };
 
+#[test]
+fn legacy_resource_alert_cli_flags_remain_parse_only() {
+    let args = Args::try_parse_from([
+        "vpsman-api",
+        "--alert-memory-available-warning-ratio",
+        "0.2",
+        "--alert-disk-available-critical-ratio",
+        "0.1",
+        "--alert-cpu-load-warning",
+        "2",
+    ])
+    .expect("legacy resource alert flags remain parse-compatible");
+
+    assert_eq!(
+        args.deprecated_resource_alert_threshold_fields(),
+        vec![
+            "--alert-memory-available-warning-ratio",
+            "--alert-disk-available-critical-ratio",
+            "--alert-cpu-load-warning",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn fleet_summary_accounts_for_every_visible_connection_state() {
     let repo = Repository::Memory(MemoryState::default());
@@ -1146,6 +1169,10 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         actual_value: Some(0.9),
         threshold_value: Some(0.8),
         payload: serde_json::json!({"source": "lifecycle-regression"}),
+        lifecycle_state: "unknown".to_string(),
+        last_confirmed_at: None,
+        resolved_at: None,
+        resolution_reason: None,
         observed_at: "1700000000".to_string(),
         created_at: "1700000000".to_string(),
     });
@@ -3548,7 +3575,6 @@ pub(crate) fn test_app_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

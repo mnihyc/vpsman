@@ -275,6 +275,7 @@ pub(crate) struct PolicyGroupRecord {
     pub(crate) matched_vps_count: i64,
     pub(crate) rule_count: i64,
     pub(crate) enabled_rule_count: i64,
+    pub(crate) active_info_count: i64,
     pub(crate) active_warning_count: i64,
     pub(crate) active_critical_count: i64,
     pub(crate) incomplete_vps_count: i64,
@@ -321,6 +322,10 @@ pub(crate) struct PolicyAlertRecord {
     pub(crate) actual_value: Option<f64>,
     pub(crate) threshold_value: Option<f64>,
     pub(crate) payload: Value,
+    pub(crate) lifecycle_state: String,
+    pub(crate) last_confirmed_at: Option<String>,
+    pub(crate) resolved_at: Option<String>,
+    pub(crate) resolution_reason: Option<String>,
     pub(crate) observed_at: String,
     pub(crate) created_at: String,
 }

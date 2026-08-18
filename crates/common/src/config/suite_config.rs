@@ -27,12 +27,20 @@ pub struct SuiteApiConfig {
     pub require_registered_agent_updates: Option<bool>,
     pub job_output_artifact_min_bytes: Option<usize>,
     pub artifact_max_bytes: Option<usize>,
-    pub alert_memory_available_warning_ratio: Option<f64>,
-    pub alert_memory_available_critical_ratio: Option<f64>,
-    pub alert_disk_available_warning_ratio: Option<f64>,
-    pub alert_disk_available_critical_ratio: Option<f64>,
-    pub alert_cpu_load_warning: Option<f64>,
-    pub alert_cpu_load_critical: Option<f64>,
+    // Parse-only compatibility for configurations shipped before resource
+    // thresholds moved into explicit alert policies. These values are ignored.
+    #[serde(rename = "alert_memory_available_warning_ratio")]
+    pub deprecated_alert_memory_available_warning_ratio: Option<f64>,
+    #[serde(rename = "alert_memory_available_critical_ratio")]
+    pub deprecated_alert_memory_available_critical_ratio: Option<f64>,
+    #[serde(rename = "alert_disk_available_warning_ratio")]
+    pub deprecated_alert_disk_available_warning_ratio: Option<f64>,
+    #[serde(rename = "alert_disk_available_critical_ratio")]
+    pub deprecated_alert_disk_available_critical_ratio: Option<f64>,
+    #[serde(rename = "alert_cpu_load_warning")]
+    pub deprecated_alert_cpu_load_warning: Option<f64>,
+    #[serde(rename = "alert_cpu_load_critical")]
+    pub deprecated_alert_cpu_load_critical: Option<f64>,
     pub trusted_proxy_cidrs: Option<Vec<String>>,
     pub operator_auth_username_failed_attempt_limit: Option<i64>,
     pub operator_auth_ip_failed_attempt_limit: Option<i64>,
@@ -329,21 +337,6 @@ impl SuiteConfig {
             self.api.trusted_proxy_cidrs.as_deref(),
             "api.trusted_proxy_cidrs",
         )?;
-        validate_optional_ratio_thresholds(
-            self.api.alert_memory_available_warning_ratio,
-            self.api.alert_memory_available_critical_ratio,
-            "api.alert_memory_available",
-        )?;
-        validate_optional_ratio_thresholds(
-            self.api.alert_disk_available_warning_ratio,
-            self.api.alert_disk_available_critical_ratio,
-            "api.alert_disk_available",
-        )?;
-        validate_optional_cpu_thresholds(
-            self.api.alert_cpu_load_warning,
-            self.api.alert_cpu_load_critical,
-            "api.alert_cpu_load",
-        )?;
         validate_optional_tunnel_allocation_pool(
             self.network.tunnel_ipv4_allocation_pool_cidr.as_deref(),
             TunnelAllocationPoolFamily::Ipv4,
@@ -414,10 +407,46 @@ impl SuiteConfig {
                 "worker.require_registered_agent_updates".to_string(),
                 "timeout.worker_schedule_job_max_timeout_secs".to_string(),
                 "timeout.agent_offline_secs".to_string(),
-                "api.alert_*".to_string(),
                 "network.tunnel_*_allocation_pool_cidr".to_string(),
             ],
         }
+    }
+}
+
+impl SuiteApiConfig {
+    pub fn deprecated_resource_alert_threshold_fields(&self) -> Vec<&'static str> {
+        [
+            (
+                "api.alert_memory_available_warning_ratio",
+                self.deprecated_alert_memory_available_warning_ratio
+                    .is_some(),
+            ),
+            (
+                "api.alert_memory_available_critical_ratio",
+                self.deprecated_alert_memory_available_critical_ratio
+                    .is_some(),
+            ),
+            (
+                "api.alert_disk_available_warning_ratio",
+                self.deprecated_alert_disk_available_warning_ratio.is_some(),
+            ),
+            (
+                "api.alert_disk_available_critical_ratio",
+                self.deprecated_alert_disk_available_critical_ratio
+                    .is_some(),
+            ),
+            (
+                "api.alert_cpu_load_warning",
+                self.deprecated_alert_cpu_load_warning.is_some(),
+            ),
+            (
+                "api.alert_cpu_load_critical",
+                self.deprecated_alert_cpu_load_critical.is_some(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(field, present)| present.then_some(field))
+        .collect()
     }
 }
 
@@ -549,48 +578,6 @@ fn validate_optional_ip_nets(values: Option<&[String]>, name: &str) -> Result<()
         let value = value.trim();
         if value.is_empty() || value.parse::<ipnet::IpNet>().is_err() {
             return Err(format!("{name}_invalid"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_optional_ratio_thresholds(
-    warning: Option<f64>,
-    critical: Option<f64>,
-    name: &str,
-) -> Result<(), String> {
-    if warning.is_some() != critical.is_some() {
-        return Err(format!("{name}_pair_incomplete"));
-    }
-    for value in [warning, critical].into_iter().flatten() {
-        if !value.is_finite() || value <= 0.0 || value >= 1.0 {
-            return Err(format!("{name}_out_of_range"));
-        }
-    }
-    if let (Some(warning), Some(critical)) = (warning, critical) {
-        if critical > warning {
-            return Err(format!("{name}_critical_above_warning"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_optional_cpu_thresholds(
-    warning: Option<f64>,
-    critical: Option<f64>,
-    name: &str,
-) -> Result<(), String> {
-    if warning.is_some() != critical.is_some() {
-        return Err(format!("{name}_pair_incomplete"));
-    }
-    for value in [warning, critical].into_iter().flatten() {
-        if !value.is_finite() || value <= 0.0 {
-            return Err(format!("{name}_out_of_range"));
-        }
-    }
-    if let (Some(warning), Some(critical)) = (warning, critical) {
-        if critical < warning {
-            return Err(format!("{name}_critical_below_warning"));
         }
     }
     Ok(())

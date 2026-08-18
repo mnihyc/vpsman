@@ -133,20 +133,14 @@ IDs or network-address fields, internal configuration, actions, jobs, terminals,
 files, backups, audit data, or operator identity. Operator-entered public labels
 appear as entered.
 
-## Tune Fleet Alert Policy
+## Configure Fleet Alert Policies
 
-Resource alerts use a startup policy instead of hardcoded thresholds. Set these
-on the API process when the default operating tolerance is too noisy or too
-late for your fleet:
-
-```sh
-export VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO=0.20
-export VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO=0.10
-export VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO=0.20
-export VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO=0.10
-export VPSMAN_ALERT_CPU_LOAD_WARNING=2.0
-export VPSMAN_ALERT_CPU_LOAD_CRITICAL=4.0
-```
+Resource threshold alerts are issued only by enabled policy groups in
+Observability > Alerts. Starter resource policies are disabled by default, so
+review their selectors and conditions before enabling them. Legacy
+`VPSMAN_ALERT_*` environment variables and `api.alert_*` Suite TOML keys are
+accepted only to keep existing deployments parseable; they are ignored and
+produce a startup or Advanced TOML warning instead of silently creating alerts.
 
 Inspect filtered alerts from CLI or VTY:
 
@@ -155,9 +149,9 @@ cargo run -p vpsctl -- fleet-alerts --severity critical
 cargo run -p vpsctl -- fleet-alerts --client-id edge-01 --limit 20
 ```
 
-The evidence field includes the threshold that fired. Use this to adjust the
-policy deliberately instead of suppressing useful warnings. In the panel, active
-VPS alerts are shown in a dense Fleet alerts table with search, pagination,
+Policy-issued alert evidence includes the rule and threshold that fired. Use
+this to adjust the policy deliberately instead of suppressing useful warnings.
+In the panel, fleet alert records are shown in a dense table with search, pagination,
 selection, expandable evidence, and bulk acknowledge, mute, escalate, or clear
 actions for daily fleet triage.
 
@@ -234,14 +228,50 @@ cargo run -p vpsctl -- alert-policies list --selector 'tag:edge'
 In the UI, Fleet > Instances keeps traffic columns hidden by default; enable
 them through Fields when you need operational status in the main table. Expand a
 VPS and open Traffic & Rules for counters, current cycle usage, incomplete
-reasons, matched policies, and recent issued alerts. Use Config > Rules for bulk
+reasons, current policy lifecycle, and recent policy alert history. Use Config > Rules for bulk
 dry-run, preview-hash confirmation, and explicit unset actions. Use
 Observability > Alerts for policy-group editing, selector dry-runs, notification
 channels, and rule previews.
-Issued policy alerts appear in Fleet > Alerts and are delivered by the existing
-notification/webhook channels as `alert.policy_reached` events. Delivery
-payloads use `alert`, `policy`, `policy_rule`, and `traffic` for source event
-data, `matched_vps` for matched VPSs, and `rule` for the webhook rule.
+Unresolved policy alerts appear in Fleet > Alerts. New episodes emit the
+`alert.policy_triggered` predicate, and recovery emits
+`alert.policy_resolved` plus generic `alert.resolved`. The trigger event kind
+remains `alert.policy_reached` for compatibility, and
+`alert.policy_reached` remains a compatibility predicate alias; use the
+lifecycle predicates for new webhook rules. Persisting and Unknown evaluations
+do not emit lifecycle webhooks. Delivery payloads use `alert`, `policy`,
+`policy_rule`, and `traffic` for source event data, `matched_vps` for matched
+VPSs, and `rule` for the webhook rule. Observability > Alerts retains the full
+policy alert history, including resolved rows.
+
+Lifecycle edges bypass webhook-rule cooldown because the policy generation
+already suppresses repeated true evaluations. Delivery remains retryable, so
+consumers should deduplicate by `event.id` and use the alert ID, trigger
+generation, lifecycle state, and timestamps rather than assuming HTTP arrival
+order.
+
+The predefined traffic-quota starter is an ordinary disabled policy. Once an
+operator enables it, a rule that remains true through its configured window
+enters **Triggered** and issues one alert for that continuous true episode.
+Repeated valid true evaluations move it to **Persisting**, update its last
+confirmation time, and reuse the same trigger generation. A valid false
+evaluation is explicit recovery: it marks that generation **Resolved** with a
+resolution time and reason. Missing, stale, or otherwise incomplete evidence is
+**Unknown**; it neither resolves the episode nor re-arms the rule. A later
+false-to-true recurrence starts a new generation and can issue a new alert after
+the window is satisfied.
+
+Resolution reasons are explicit and stable: `condition_recovered`,
+`policy_scope_exited`, `policy_scope_changed`, `policy_disabled`,
+`policy_changed`, and `policy_deleted`. Automation should branch on those
+values; missing evidence is Unknown, never an implicit recovery.
+
+Fleet > Alerts contains unresolved policy alerts alongside system operational
+alerts. Resolved policy alerts leave that live queue but remain in
+Observability > Alerts under **Recent policy alert history**, where Triggered,
+Persisting, Unknown, and Resolved states include their available confirmation
+or resolution evidence. **Active States** and traffic warning summaries count
+only Triggered and Persisting rows. Older issued rows whose lifecycle cannot be
+reconstructed appear as Unknown history and are not treated as active.
 
 Route alert notifications through scoped channel presets:
 

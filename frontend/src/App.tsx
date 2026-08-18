@@ -21,7 +21,12 @@ import { SessionEvidencePanel } from "./panels/audit/SessionEvidencePanel";
 import { JobArtifactsPanel } from "./panels/jobs/JobArtifactsPanel";
 import { PanelDisplayProvider } from "./panelDisplay";
 import { ApiResponseError, apiPost } from "./api";
-import type { ActiveView, AgentView, FleetSummary } from "./types";
+import type {
+  ActiveView,
+  AgentView,
+  FleetSummary,
+  OperatorView,
+} from "./types";
 import {
   buildPrivilegeAssertion,
   canonicalDbPrivilegeIntent,
@@ -33,7 +38,6 @@ import {
 import {
   defaultSubpages,
   FLEET_DETAIL_LIMIT,
-  isActionableFleetAlertState,
   navItems,
   normalizeSubpage,
   viewLabel,
@@ -56,6 +60,7 @@ import type {
 } from "./jobDispatchPreset";
 import { pushHistoryEntry, replaceHistoryEntry } from "./historyEntryState";
 import { retryableLazy } from "./lazyImport";
+import { presentFleetAlert } from "./alertPresentation";
 import { presentAudit, type AuditEvidenceReference } from "./auditPresentation";
 import {
   createVpsRuleSearchContextValue,
@@ -1185,6 +1190,9 @@ export function App() {
   const hasFleetScope =
     fleetViews.fleetQuery.trim().length > 0 ||
     fleetViews.activeSavedViewId !== null;
+  const canManageAlertLifecycle = operatorCanManageAlertLifecycle(
+    dashboard.operator,
+  );
   const runtimeConfigEvidenceState = dashboard.runtimeConfigApplyLoading
     ? "loading"
     : dashboard.runtimeConfigApplyEvidenceAvailable
@@ -1218,7 +1226,7 @@ export function App() {
     backupArtifacts: dashboard.backupArtifactsTruncated,
     backups: dashboard.backupsTruncated,
     fileTransfers: dashboard.fileTransfersTruncated,
-    fleetAlerts: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+    fleetAlerts: dashboard.fleetAlertsTruncated,
     jobs: dashboard.jobsTruncated,
     schedules: dashboard.schedulesTruncated,
   };
@@ -1231,10 +1239,9 @@ export function App() {
     const scopedClientIds = new Set(visibleAgents.map((agent) => agent.id));
     const activeAlerts = dashboard.fleetAlerts.filter(
       (alert) =>
-        isActionableFleetAlertState(alert.operator_state) &&
+        presentFleetAlert(alert).actionable &&
         (!hasFleetScope ||
-          alert.client_id === null ||
-          scopedClientIds.has(alert.client_id)),
+          (alert.client_id !== null && scopedClientIds.has(alert.client_id))),
     );
     const critical = activeAlerts.filter(
       (alert) => alert.severity === "critical",
@@ -1247,10 +1254,15 @@ export function App() {
       critical,
       info,
       total: activeAlerts.length,
-      truncated: dashboard.fleetAlerts.length >= FLEET_DETAIL_LIMIT,
+      truncated: dashboard.fleetAlertsTruncated,
       warning,
     };
-  }, [dashboard.fleetAlerts, hasFleetScope, visibleAgents]);
+  }, [
+    dashboard.fleetAlerts,
+    dashboard.fleetAlertsTruncated,
+    hasFleetScope,
+    visibleAgents,
+  ]);
   const homeScopedRecords = useMemo(() => {
     if (!hasFleetScope) {
       return {
@@ -1274,7 +1286,7 @@ export function App() {
       ),
       fleetAlerts: dashboard.fleetAlerts.filter(
         (alert) =>
-          alert.client_id === null || scopedClientIds.has(alert.client_id),
+          alert.client_id !== null && scopedClientIds.has(alert.client_id),
       ),
       schedules: dashboard.schedules.filter((schedule) =>
         schedule.target_client_ids.some((clientId) =>
@@ -1882,7 +1894,13 @@ export function App() {
         fleetAlertStates={dashboard.fleetAlertStates}
         fleetPageResetKey={fleetViews.fleetQuery}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
+        currentPolicyAlerts={dashboard.currentPolicyAlerts}
+        currentPolicyAlertsEvidenceAvailable={
+          dashboard.currentPolicyAlertsEvidenceAvailable
+        }
+        currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyAlerts={dashboard.policyAlerts}
+        policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
         trafficAccounting={dashboard.trafficAccounting}
         vpsRuleValues={dashboard.vpsRuleValues}
         fleetAlertNotificationChannels={
@@ -1992,7 +2010,13 @@ export function App() {
         backups={dashboard.backups}
         fileTransfers={dashboard.fileTransfers}
         fleetAlerts={dashboard.fleetAlerts}
-        fleetAlertsTruncated={recordPageBounds.fleetAlerts}
+        fleetAlertsEvidenceAvailable={dashboard.fleetAlertsEvidenceAvailable}
+        fleetAlertsTruncated={dashboard.fleetAlertsTruncated}
+        fleetAlertHistory={dashboard.fleetAlertHistory}
+        fleetAlertHistoryEvidenceAvailable={
+          dashboard.fleetAlertHistoryEvidenceAvailable
+        }
+        fleetAlertHistoryTruncated={dashboard.fleetAlertHistoryTruncated}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         jobs={dashboard.jobs}
         recordBounds={recordPageBounds}
@@ -2036,7 +2060,13 @@ export function App() {
         onOpenNetworkEvidence={releaseRoutes.openNetworkEvidence}
         onOpenProcesses={releaseRoutes.openProcess}
         onOpenTerminal={releaseRoutes.openTerminal}
+        currentPolicyAlerts={dashboard.currentPolicyAlerts}
+        currentPolicyAlertsEvidenceAvailable={
+          dashboard.currentPolicyAlertsEvidenceAvailable
+        }
+        currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyAlerts={dashboard.policyAlerts}
+        policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
         runtimeConfigApplyStates={dashboard.runtimeConfigApplyStates}
         runtimeConfigEvidenceState={runtimeConfigEvidenceState}
         configurationSources={dashboard.configurationSources}
@@ -2156,6 +2186,13 @@ export function App() {
         fleetAlertNotifications={dashboard.fleetAlertNotifications}
         fleetAlertPolicies={dashboard.fleetAlertPolicies}
         fleetAlerts={dashboard.fleetAlerts}
+        fleetAlertsEvidenceAvailable={dashboard.fleetAlertsEvidenceAvailable}
+        fleetAlertsTruncated={dashboard.fleetAlertsTruncated}
+        fleetAlertHistory={dashboard.fleetAlertHistory}
+        fleetAlertHistoryEvidenceAvailable={
+          dashboard.fleetAlertHistoryEvidenceAvailable
+        }
+        fleetAlertHistoryTruncated={dashboard.fleetAlertHistoryTruncated}
         onDeleteFleetAlertNotificationChannel={
           dashboard.deleteFleetAlertNotificationChannel
         }
@@ -2178,8 +2215,14 @@ export function App() {
           dashboard.upsertFleetAlertNotificationChannel
         }
         onUpsertFleetAlertPolicy={dashboard.upsertFleetAlertPolicy}
+        currentPolicyAlerts={dashboard.currentPolicyAlerts}
+        currentPolicyAlertsEvidenceAvailable={
+          dashboard.currentPolicyAlertsEvidenceAvailable
+        }
+        currentPolicyAlertsTruncated={dashboard.currentPolicyAlertsTruncated}
         policyFocusId={policyFocusId}
         policyAlerts={dashboard.policyAlerts}
+        policyAlertsEvidenceAvailable={dashboard.policyAlertsEvidenceAvailable}
       />
     );
   }
@@ -2869,6 +2912,9 @@ export function App() {
             }
             fileTransfers={dashboard.fileTransfers}
             fleetAlerts={dashboard.fleetAlerts}
+            fleetAlertsEvidenceAvailable={
+              dashboard.fleetAlertsEvidenceAvailable
+            }
             jobs={dashboard.jobs}
             recordBounds={recordPageBounds}
             runningJobCount={Math.max(
@@ -2896,10 +2942,25 @@ export function App() {
             agents={visibleAgents}
             apiError={dashboard.apiError}
             alerts={dashboard.fleetAlerts}
+            alertsEvidenceAvailable={dashboard.fleetAlertsEvidenceAvailable}
+            alertsTruncated={dashboard.fleetAlertsTruncated}
+            canManageAlertLifecycle={canManageAlertLifecycle}
+            eventReviewError={dashboard.fleetAlertEventReviewError}
+            eventReviewHasMore={dashboard.fleetAlertEventReviewHasMore}
+            eventReviewItems={dashboard.fleetAlertEventReviewItems}
+            eventReviewLoading={dashboard.fleetAlertEventReviewLoading}
+            eventReviewStarted={dashboard.fleetAlertEventReviewStarted}
+            history={dashboard.fleetAlertHistory}
+            historyEvidenceAvailable={
+              dashboard.fleetAlertHistoryEvidenceAvailable
+            }
+            historyTruncated={dashboard.fleetAlertHistoryTruncated}
+            onLoadOlderEvents={dashboard.loadOlderFleetAlertEvents}
+            onRefreshEvents={dashboard.refreshFleetAlertEvents}
             onOpenAlertPolicies={() => selectView("Observability", "alerts")}
             onOpenVpsDetail={releaseRoutes.openVpsDetail}
+            onResolve={dashboard.resolveFleetAlert}
             onUpdate={dashboard.updateFleetAlertState}
-            stateCount={dashboard.fleetAlertStates.length}
           />
         );
       }
@@ -3317,6 +3378,21 @@ function auditReleaseSubpage(subpage: string) {
 
 function isActiveJobStatus(status: string) {
   return ["queued", "dispatching", "running"].includes(status);
+}
+
+function operatorCanManageAlertLifecycle(
+  operator: OperatorView | null,
+): boolean {
+  const scopes = new Set(operator?.scopes ?? []);
+  const hasAllScopes = scopes.has("*");
+  return Boolean(
+    operator &&
+    (operator.role === "operator" || operator.role === "admin") &&
+    (hasAllScopes ||
+      (scopes.has("fleet:read") &&
+        scopes.has("backups:read") &&
+        scopes.has("integrations:write"))),
+  );
 }
 
 function displaySummaryForAgents(

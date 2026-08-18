@@ -116,6 +116,7 @@ pub(crate) async fn home_snapshot(
         telemetry_rollups: fleet.telemetry_rollups,
         telemetry_network_rates: fleet.telemetry_network_rates,
         fleet_alerts: fleet.fleet_alerts,
+        fleet_alerts_truncated: fleet.fleet_alerts_truncated,
         monitoring_cards,
         jobs,
         file_transfers,

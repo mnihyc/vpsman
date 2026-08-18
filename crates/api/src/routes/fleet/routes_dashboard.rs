@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::{
     error::ApiError,
-    fleet_alerts::{FleetAlertPolicy, FleetAlertSelector},
+    fleet_alerts::{fleet_alert_is_confirmed_active, FleetAlertSelector},
     model::{
         AgentView, BackupRequestStatus, BackupRequestView, DashboardAgentSummaryView,
         DashboardAlertSummaryView, DashboardAvailableFiltersView, DashboardDrilldownView,
@@ -142,7 +142,6 @@ struct ResourceClientSeries {
     peak: Option<f64>,
     latest_sample_at: String,
     risk_score: f64,
-    policy: FleetAlertPolicy,
 }
 
 struct DashboardGroupingContext<'a> {
@@ -205,23 +204,6 @@ impl DashboardResourceMetric {
                 .then_some(rollup.memory_used_ratio_max.clamp(0.0, 1.0)),
             Self::DiskFree => (rollup.disk_total_bytes_max > 0)
                 .then_some((1.0 - rollup.disk_used_ratio_max).clamp(0.0, 1.0)),
-        }
-    }
-
-    fn thresholds(self, policy: &FleetAlertPolicy) -> (Option<f64>, Option<f64>) {
-        match self {
-            Self::CpuLoad => (
-                Some(policy.cpu_load_warning),
-                Some(policy.cpu_load_critical),
-            ),
-            Self::MemoryUsed => (
-                Some(1.0 - policy.memory_available_warning_ratio),
-                Some(1.0 - policy.memory_available_critical_ratio),
-            ),
-            Self::DiskFree => (
-                Some(policy.disk_available_warning_ratio),
-                Some(policy.disk_available_critical_ratio),
-            ),
         }
     }
 }
@@ -391,13 +373,11 @@ async fn build_dashboard_overview(
                 severity: None,
                 category: None,
                 operator_state: None,
-                include_muted: Some(false),
+                include_muted: Some(true),
             },
             Some(FleetAlertSelector {
                 allowed_client_ids: &scoped_client_ids,
-                start_unix: range.start_unix,
                 end_unix: range.end_unix,
-                snapshot_unix,
                 include_global: scope.kind == DashboardScopeKind::All,
             }),
         )
@@ -476,6 +456,10 @@ async fn build_dashboard_overview(
     let latest_rates = coherent_latest_rates(latest_rates_by_client_interface(&network_rates));
     let latest_rates_by_client = network_by_client(latest_rates.values());
     let alert_counts_by_client = alert_counts_by_client(&alerts);
+    let active_alert_count = alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+        .count();
     let stale_agents = scoped_agents
         .iter()
         .filter(|agent| is_degraded_agent_status(&agent.status))
@@ -503,7 +487,6 @@ async fn build_dashboard_overview(
         effective_range,
     );
     let resources = build_resources(latest_rollups.values());
-    let base_alert_policy = state.fleet_alert_policy();
     let resource_curve = build_resource_curve(ResourceCurveInput {
         metric: resource_metric,
         rollups: &rollups,
@@ -511,7 +494,6 @@ async fn build_dashboard_overview(
         range: &effective_range,
         chart_step_secs,
         preferences,
-        base_policy: &base_alert_policy,
     })?;
     let network = build_network(
         &network_rates,
@@ -562,7 +544,7 @@ async fn build_dashboard_overview(
                 .filter(|agent| agent.status == "revoked")
                 .count(),
             stale: stale_agents,
-            warnings: stale_agents.max(alerts.len()),
+            warnings: stale_agents.max(active_alert_count),
             warnings_truncated: alerts_truncated,
             running_jobs: running_jobs.len(),
             running_jobs_truncated,
@@ -985,7 +967,7 @@ fn effective_dashboard_range(
         .chain(
             alerts
                 .iter()
-                .filter_map(|alert| parse_timestamp_unix(&alert.observed_at)),
+                .filter_map(|alert| parse_timestamp_unix(&alert.lifecycle.triggered_at)),
         )
         .chain(
             backups
@@ -1055,13 +1037,17 @@ fn build_operations(
         })
         .collect();
 
+    let active_alerts = alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+        .collect::<Vec<_>>();
     DashboardOperationsView {
-        active_alerts: alerts.len(),
-        critical_alerts: alerts
+        active_alerts: active_alerts.len(),
+        critical_alerts: active_alerts
             .iter()
             .filter(|alert| alert.severity == "critical")
             .count(),
-        warning_alerts: alerts
+        warning_alerts: active_alerts
             .iter()
             .filter(|alert| alert.severity == "warning")
             .count(),
@@ -1140,7 +1126,6 @@ struct ResourceCurveInput<'a> {
     range: &'a DashboardRange,
     chart_step_secs: u64,
     preferences: &'a OperatorPreferences,
-    base_policy: &'a FleetAlertPolicy,
 }
 
 fn build_resource_curve(
@@ -1153,7 +1138,6 @@ fn build_resource_curve(
         range,
         chart_step_secs,
         preferences,
-        base_policy,
     } = input;
     let exclusions = &preferences.dashboard_curve_exclusions;
     let excluded_clients = agents
@@ -1249,7 +1233,6 @@ fn build_resource_curve(
             peak,
             latest_sample_at,
             risk_score,
-            policy: base_policy.clone(),
         });
     }
 
@@ -1271,15 +1254,14 @@ fn build_resource_curve(
         .into_iter()
         .take(top_limit)
         .map(|candidate| {
-            let (warning_threshold, critical_threshold) = metric.thresholds(&candidate.policy);
             let client_id = candidate.agent.id.clone();
             DashboardResourceSeriesView {
                 client_id: client_id.clone(),
                 label: candidate.agent.display_name,
                 current: candidate.current,
                 peak: candidate.peak,
-                warning_threshold,
-                critical_threshold,
+                warning_threshold: None,
+                critical_threshold: None,
                 threshold_direction: metric.threshold_direction().to_string(),
                 points: candidate.points,
                 drilldown: client_drilldown(&client_id),
@@ -1665,11 +1647,14 @@ fn build_date_groups(
             group.tx_bps += rate.tx_bps_avg.max(0.0);
         }
     }
-    for alert in alerts {
-        if !timestamp_in_range(&alert.observed_at, range) {
+    for alert in alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+    {
+        if !timestamp_in_range(&alert.lifecycle.triggered_at, range) {
             continue;
         }
-        if let Some(timestamp) = parse_timestamp_unix(&alert.observed_at) {
+        if let Some(timestamp) = parse_timestamp_unix(&alert.lifecycle.triggered_at) {
             let group = date_group_entry(&mut groups, bucket_start(timestamp), counts_truncated);
             group.warnings += 1;
         }
@@ -1809,7 +1794,11 @@ fn recent_alerts(
     alerts: &[FleetAlertView],
     agents_by_id: &HashMap<String, AgentView>,
 ) -> Vec<DashboardAlertSummaryView> {
-    let mut alerts = alerts.to_vec();
+    let mut alerts = alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+        .cloned()
+        .collect::<Vec<_>>();
     alerts.sort_by(|left, right| {
         timestamp_sort_key(&right.observed_at)
             .cmp(&timestamp_sort_key(&left.observed_at))
@@ -1823,8 +1812,8 @@ fn recent_alerts(
                 .client_id
                 .as_ref()
                 .and_then(|client_id| agents_by_id.get(client_id))
-                .map(|agent| format!("Open {}", agent.display_name))
-                .unwrap_or_else(|| "Open alert target".to_string());
+                .map(|agent| format!("Review active alert for {}", agent.display_name))
+                .unwrap_or_else(|| "Review active alert".to_string());
             DashboardAlertSummaryView {
                 id: alert.id,
                 severity: alert.severity,
@@ -1923,7 +1912,10 @@ fn network_by_client<'a>(
 
 fn alert_counts_by_client(alerts: &[FleetAlertView]) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
-    for alert in alerts {
+    for alert in alerts
+        .iter()
+        .filter(|alert| fleet_alert_is_confirmed_active(alert))
+    {
         if let Some(client_id) = &alert.client_id {
             *counts.entry(client_id.clone()).or_insert(0) += 1;
         }

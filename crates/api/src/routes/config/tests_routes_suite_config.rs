@@ -65,8 +65,7 @@ fn changed_paths_ignore_equivalent_integer_and_float_toml_numbers() {
 version = 1
 
 [api]
-alert_cpu_load_warning = 2.0
-alert_cpu_load_critical = 4.0
+artifact_max_bytes = 2.0
 "#,
     )
     .unwrap();
@@ -75,8 +74,7 @@ alert_cpu_load_critical = 4.0
 version = 1
 
 [api]
-alert_cpu_load_warning = 2
-alert_cpu_load_critical = 4
+artifact_max_bytes = 2
 "#,
     )
     .unwrap();
@@ -87,14 +85,13 @@ alert_cpu_load_critical = 4
 version = 1
 
 [api]
-alert_cpu_load_warning = 3
-alert_cpu_load_critical = 4
+artifact_max_bytes = 3
 "#,
     )
     .unwrap();
     assert_eq!(
         changed_json_paths(&old, &changed),
-        vec!["api.alert_cpu_load_warning".to_string()]
+        vec!["api.artifact_max_bytes".to_string()]
     );
 }
 

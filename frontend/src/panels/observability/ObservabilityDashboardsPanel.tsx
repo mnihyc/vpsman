@@ -99,7 +99,7 @@ const dashboardPresets: DashboardPreset[] = [
     id: "resource_capacity",
     label: "Resource capacity",
     source: "Dashboard resource curve API",
-    widgets: ["resource chart", "top VPS table", "threshold status cards"],
+    widgets: ["resource summary cards", "resource chart", "top VPS table"],
   },
   {
     description:
@@ -629,7 +629,7 @@ function FleetOperationsDashboard({
         aria-label="Recent alert widget table"
       >
         <WidgetHeader
-          title="Recent alerts"
+          title="Recent active alerts"
           detail={countPhrase(recentAlerts.length, "retained row")}
         />
         {recentAlerts.slice(0, 8).map((alert) => (
@@ -663,7 +663,7 @@ function FleetOperationsDashboard({
           </div>
         ))}
         {!recentAlerts.length ? (
-          <WidgetEmpty label="No retained alerts" />
+          <WidgetEmpty label="No retained active alerts" />
         ) : null}
       </div>
       <div
@@ -789,9 +789,6 @@ function ResourceDashboard({
             key={series.client_id}
             title={`${series.label || series.client_id || "Unnamed VPS"}: current ${formatResourceValue(preferences.resourceMetric, series.current)}; peak ${formatResourceValue(preferences.resourceMetric, series.peak)}`}
           >
-            <ConsoleStatusBadge tone={thresholdTone(series)}>
-              {thresholdLabel(series)}
-            </ConsoleStatusBadge>
             <strong
               title={`VPS: ${series.label || series.client_id || "Unnamed VPS"}`}
             >
@@ -1506,44 +1503,6 @@ function formatResourceValue(
   if (metric === "memory_used" || metric === "disk_free")
     return `${Math.round(value * 100)}%`;
   return value.toFixed(2);
-}
-
-function thresholdTone(
-  series: DashboardResourceSeriesRecord,
-): "critical" | "warning" | "ok" | "neutral" {
-  const value = series.current;
-  if (value === null) return "neutral";
-  if (
-    series.critical_threshold !== null &&
-    thresholdReached(
-      value,
-      series.critical_threshold,
-      series.threshold_direction,
-    )
-  )
-    return "critical";
-  if (
-    series.warning_threshold !== null &&
-    thresholdReached(
-      value,
-      series.warning_threshold,
-      series.threshold_direction,
-    )
-  )
-    return "warning";
-  return "ok";
-}
-
-function thresholdReached(value: number, threshold: number, direction: string) {
-  return direction === "below" ? value <= threshold : value >= threshold;
-}
-
-function thresholdLabel(series: DashboardResourceSeriesRecord): string {
-  const tone = thresholdTone(series);
-  if (tone === "critical") return "critical";
-  if (tone === "warning") return "warning";
-  if (tone === "neutral") return "missing";
-  return "ok";
 }
 
 function scopeLabel(preferences: DashboardPreferences): string {

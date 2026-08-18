@@ -632,7 +632,7 @@ jq -e '.alert_id == "'"$alert_state_target_id"'" and .state == "open"' <<<"$aler
 alert_policy_json="$(vpsctl_auth alert-policy upsert \
   --name edge-resource-alerts \
   --selector 'tag:edge' \
-  --rule 'cpu.load_1 >= 1.5' \
+  --rule 'cpu.utilization_ratio >= 0.75' \
   --severity warning \
   --notes live-smoke \
   --confirmed)"
@@ -641,7 +641,7 @@ jq -e '
   .selector_expression == "tag:edge" and
   .enabled == true and
   (.rules | length) == 1 and
-  .rules[0].condition_expression == "cpu.load_1 >= 1.5"
+  .rules[0].condition_expression == "cpu.utilization_ratio >= 0.75"
 ' <<<"$alert_policy_json" >/dev/null
 alert_policies_json="$(vpsctl_auth alert-policies list --selector 'tag:edge' --enabled true --limit 20)"
 jq -e 'length == 1 and .[0].name == "edge-resource-alerts"' <<<"$alert_policies_json" >/dev/null
@@ -656,7 +656,7 @@ fi
 scoped_alert_policy_write_response="$(curl -sS -w '\n%{http_code}' \
   -H "Authorization: Bearer $scoped_access_token" \
   -H "Content-Type: application/json" \
-  -d '{"name":"denied-alert-policy","enabled":true,"selector_expression":"tag:edge","rules":[{"name":"cpu","enabled":true,"traffic_selector":null,"condition_expression":"cpu.load_1 >= 1.0","window_secs":0,"severity":"warning"}],"confirmed":true}' \
+  -d '{"name":"denied-alert-policy","enabled":true,"selector_expression":"tag:edge","rules":[{"name":"cpu","enabled":true,"traffic_selector":null,"condition_expression":"cpu.utilization_ratio >= 0.75","window_secs":0,"severity":"warning"}],"confirmed":true}' \
   "$api_url/api/v1/fleet-alert-policies")"
 scoped_alert_policy_write_status="${scoped_alert_policy_write_response##*$'\n'}"
 scoped_alert_policy_write_body="${scoped_alert_policy_write_response%$'\n'*}"

@@ -437,6 +437,7 @@ impl Repository {
             "missing" | "failed" => ("failed", "failed", true),
             _ => anyhow::bail!("terminal_session_state_invalid:{session_state}"),
         };
+        let terminal_transitioned;
         match self {
             Self::Memory(memory) => {
                 let now = now_rfc3339();
@@ -446,8 +447,15 @@ impl Repository {
                         .iter_mut()
                         .find(|job| job.id == job_id && job.command_type == "terminal_open")
                         .context("terminal_open_job_not_found")?;
+                    terminal_transitioned = terminal && job.completed_at.is_none();
                     job.status = job_status.to_string();
-                    job.completed_at = terminal.then(|| now.clone());
+                    if terminal {
+                        if job.completed_at.is_none() {
+                            job.completed_at = Some(now.clone());
+                        }
+                    } else {
+                        job.completed_at = None;
+                    }
                 }
                 {
                     let mut targets = memory.job_targets.write().await;
@@ -456,7 +464,13 @@ impl Repository {
                         .find(|target| target.job_id == job_id && target.client_id == client_id)
                         .context("terminal_open_target_not_found")?;
                     target.status = target_status.to_string();
-                    target.completed_at = terminal.then(|| now.clone());
+                    if terminal {
+                        if target.completed_at.is_none() {
+                            target.completed_at = Some(now.clone());
+                        }
+                    } else {
+                        target.completed_at = None;
+                    }
                     if !terminal {
                         target.exit_code = None;
                         target.deadline_at = None;
@@ -465,6 +479,18 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let was_nonterminal: Option<bool> = sqlx::query_scalar(
+                    r#"
+                    SELECT completed_at IS NULL
+                    FROM jobs
+                    WHERE id = $1 AND command_type = 'terminal_open'
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(job_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let was_nonterminal = was_nonterminal.context("terminal_open_job_not_found")?;
                 let job_result = sqlx::query(
                     r#"
                     UPDATE jobs
@@ -482,6 +508,7 @@ impl Repository {
                     job_result.rows_affected() == 1,
                     "terminal_open_job_not_found"
                 );
+                terminal_transitioned = terminal && was_nonterminal;
                 let target_result = sqlx::query(
                     r#"
                     UPDATE job_targets
@@ -503,8 +530,18 @@ impl Repository {
                     target_result.rows_affected() == 1,
                     "terminal_open_target_not_found"
                 );
+                if terminal_transitioned {
+                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+                        &mut tx,
+                        job_id,
+                    )
+                    .await?;
+                }
                 tx.commit().await?;
             }
+        }
+        if terminal_transitioned && matches!(self, Self::Memory(_)) {
+            self.reconcile_memory_job_event_sources(job_id).await?;
         }
         Ok(())
     }

@@ -55,6 +55,12 @@ pub(crate) struct FleetSnapshotResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alerts: Option<FleetSnapshotSource<Vec<FleetAlertView>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fleet_alerts_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fleet_alert_history: Option<FleetSnapshotSource<Vec<FleetAlertView>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) fleet_alert_history_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alert_states: Option<FleetSnapshotSource<Vec<FleetAlertStateView>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alert_policies: Option<FleetSnapshotSource<Vec<PolicyGroupRecord>>>,
@@ -64,6 +70,10 @@ pub(crate) struct FleetSnapshotResponse {
     pub(crate) traffic_accounting: Option<FleetSnapshotSource<Vec<TrafficAccountingRecord>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) policy_alerts: Option<FleetSnapshotSource<Vec<PolicyAlertRecord>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_policy_alerts: Option<FleetSnapshotSource<Vec<PolicyAlertRecord>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_policy_alerts_truncated: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) fleet_alert_notification_channels:
         Option<FleetSnapshotSource<Vec<FleetAlertNotificationChannelView>>>,

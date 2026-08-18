@@ -21,6 +21,18 @@ pub(crate) struct FleetAlertNotificationChannelView {
     pub(crate) updated_at: String,
 }
 
+/// A normalized notification-channel predicate pushed into each alert owner
+/// before its source cap. `client_ids = None` represents a global channel;
+/// provider/tag scopes are resolved from the current visible fleet and remain
+/// fail-closed when their subjects disappear.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct FleetAlertNotificationMatchRule {
+    pub(crate) min_severity_rank: u8,
+    pub(crate) categories: Vec<String>,
+    pub(crate) operator_states: Vec<String>,
+    pub(crate) client_ids: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct FleetAlertNotificationChannelQuery {
     pub(crate) limit: Option<i64>,

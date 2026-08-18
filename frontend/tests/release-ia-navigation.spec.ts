@@ -603,7 +603,7 @@ test("home applies fleet scope to target-bound records and labels fleet-wide evi
 
   const posture = page.getByLabel("Home posture strip");
   const alertMetric = posture.locator(".homePostureMetric").filter({
-    hasText: "Open alerts",
+    hasText: "Actionable alerts",
   });
   await expect(alertMetric.locator("strong")).toHaveText("1");
   await expect(alertMetric.locator("small")).toHaveText(
@@ -642,7 +642,7 @@ test(
     const posture = page.getByLabel("Home posture strip");
     const alertMetric = posture
       .locator(".homePostureMetric")
-      .filter({ hasText: "Open alerts" });
+      .filter({ hasText: "Actionable alerts" });
     await expect(alertMetric.locator("strong")).toHaveText("2");
     await expect(alertMetric).toContainText("1 critical, 1 warning, 0 info");
     await expect(
@@ -691,11 +691,13 @@ test(
     await expect(
       posture
         .locator(".homePostureMetric")
-        .filter({ hasText: "Open alerts" })
+        .filter({ hasText: "Actionable alerts" })
         .locator("strong"),
     ).toHaveText("3");
     await expect(
-      posture.locator(".homePostureMetric").filter({ hasText: "Open alerts" }),
+      posture
+        .locator(".homePostureMetric")
+        .filter({ hasText: "Actionable alerts" }),
     ).not.toContainText("in loaded page");
     await expect(
       posture
@@ -780,7 +782,7 @@ test(
     const posture = page.getByLabel("Home posture strip");
     const alertMetric = posture
       .locator(".homePostureMetric")
-      .filter({ hasText: "Open alerts" });
+      .filter({ hasText: "Actionable alerts" });
     const backupMetric = posture
       .locator(".homePostureMetric")
       .filter({ hasText: "Backups" });
@@ -845,7 +847,8 @@ test(
       .getByLabel("VPS resource facts")
       .locator(".vpsResourceFact")
       .filter({ hasText: "Alerts" });
-    await expect(alertFact.locator("strong")).toHaveText("≥1 active");
+    await expect(alertFact.locator("strong")).toHaveText("≥4 current");
+    await expect(alertFact).toContainText("1 actionable");
     await expect(alertFact).toContainText("fleet alert page is capped");
 
     await openConsoleSubpage(page, "Fleet", "Monitor");
@@ -878,10 +881,12 @@ test(
     await gotoConsoleHome(page);
     await openConsoleSubpage(page, "Fleet", "Alerts");
 
-    const grid = page.getByLabel("Fleet alerts data grid");
-    await grid.getByLabel("Fleet alerts page size").selectOption("10");
-    await grid.getByLabel("Fleet alerts next page").click();
-    await grid.getByLabel("Fleet alerts next page").click();
+    const grid = page.getByLabel("Current alert episodes data grid");
+    await grid
+      .getByLabel("Current alert episodes page size")
+      .selectOption("10");
+    await grid.getByLabel("Current alert episodes next page").click();
+    await grid.getByLabel("Current alert episodes next page").click();
     await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
 
     await page.evaluate(async () => {
@@ -947,19 +952,19 @@ test(
     await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
     await expect(grid).toContainText("Refreshed page-three alert");
 
-    const search = grid.getByLabel("Fleet alerts search");
+    const search = grid.getByLabel("Current alert episodes search");
     await search.fill("Refreshed page-three alert");
     await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 1");
     await search.fill("");
     await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 20");
 
-    await grid.getByLabel("Fleet alerts next page").click();
+    await grid.getByLabel("Current alert episodes next page").click();
     await expect(grid.locator(".gridPageLabel")).toHaveText("2 / 20");
     await grid.getByRole("button", { name: "Severity", exact: true }).click();
     await expect(grid.locator(".gridPageLabel")).toHaveText("1 / 20");
 
-    await grid.getByLabel("Fleet alerts next page").click();
-    await grid.getByLabel("Fleet alerts next page").click();
+    await grid.getByLabel("Current alert episodes next page").click();
+    await grid.getByLabel("Current alert episodes next page").click();
     await expect(grid.locator(".gridPageLabel")).toHaveText("3 / 20");
     await page.evaluate(() => {
       const trackedWindow = window as typeof window & {
@@ -996,10 +1001,13 @@ test(
     const summary = page.getByLabel("Alert routing summary");
     const policyMetric = summary
       .locator(".metricCard")
-      .filter({ hasText: "Policy alerts" });
+      .filter({ hasText: "Policy alert history" });
     await expect(policyMetric.locator("strong")).toHaveText("200+");
     await expect(policyMetric).toContainText(
-      "200 warning or critical policy-issued alerts in the loaded page",
+      "At least 200 active warning or critical alerts in the loaded current page; more may exist",
+    );
+    await expect(policyMetric).toContainText(
+      "200 issued records in the loaded history",
     );
 
     const deliveryMetric = summary
@@ -1955,10 +1963,8 @@ test("home exposes quick actions, availability, running work, failures, attentio
   const failurePanel = homePanel(page, "Recent issues");
   await expect(failurePanel).toBeVisible();
   await expect(
-    failurePanel.getByRole("button", {
-      name: /Tunnel adapter status failed/,
-    }),
-  ).toBeVisible();
+    failurePanel.getByRole("button", { name: /Tunnel adapter status failed/ }),
+  ).toHaveCount(0);
   await expect(
     failurePanel.getByRole("button", { name: /Transfer .* aborted/ }),
   ).toBeVisible();
@@ -1973,7 +1979,7 @@ test("home exposes quick actions, availability, running work, failures, attentio
     }),
   ).toBeVisible();
   await expect(
-    attentionPanel.getByRole("button", { name: /backup-nyc-03 needs review/ }),
+    attentionPanel.getByRole("button", { name: /Agent is not online/ }),
   ).toBeVisible();
   await expect(
     attentionPanel.getByRole("button", {
@@ -2064,10 +2070,10 @@ test("home attention queue links to release evidence pages", async ({
 
   await gotoConsoleHome(page);
   await homeAttentionPanel(page)
-    .getByRole("button", { name: /backup-nyc-03 needs review/ })
+    .getByRole("button", { name: /Agent is not online/ })
     .click();
   await expect(
-    page.getByRole("heading", { name: "Instance detail" }),
+    page.getByRole("heading", { level: 1, name: "Fleet alerts" }),
   ).toBeVisible();
 
   await gotoConsoleHome(page);
@@ -4301,7 +4307,7 @@ test("fleet instance detail is the canonical VPS route from release workflows", 
 
   await openConsoleSubpage(page, "Fleet", "Alerts");
   const alertRow = page
-    .getByLabel("Fleet alerts data grid")
+    .getByLabel("Current alert episodes data grid")
     .locator(".gridBody [role=row]", { hasText: "core-fra-02" })
     .first();
   await alertRow.click({ button: "right" });
@@ -5321,20 +5327,20 @@ test("observability alerts and webhooks are explicit separate pages", async ({
     "Tunnel adapter degraded",
   );
   await expect(page.getByLabel("Fleet alerts", { exact: true })).toContainText(
-    "Traffic policy",
+    "Traffic",
   );
   const criticalAlertRow = page
-    .getByLabel("Fleet alerts data grid")
+    .getByLabel("Current alert episodes data grid")
     .getByRole("row")
     .filter({ hasText: "Tunnel adapter status failed" })
     .first();
   await criticalAlertRow.getByRole("checkbox").check();
   await page
-    .getByLabel("Fleet alerts data grid")
+    .getByLabel("Current alert episodes data grid")
     .getByRole("button", { name: "Actions", exact: true })
     .click();
   await expect(
-    page.getByRole("menuitem", { name: "Acknowledge open" }),
+    page.getByRole("menuitem", { name: "Acknowledge Open triage" }),
   ).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Open VPS" })).toBeVisible();
   await page.keyboard.press("Escape");
@@ -5355,20 +5361,23 @@ test("observability alerts and webhooks are explicit separate pages", async ({
   ).toHaveCount(0);
   await activate(
     page.getByLabel(
-      "Expand Fleet alerts row fleet-alert-network-agent-fra-02-tun0",
+      "Expand Current alert episodes row fleet-alert-network-agent-fra-02-tun0",
     ),
   );
   const alertDetail = page.locator(".fleetAlertDetail").first();
-  await expect(alertDetail).toContainText("Alert status");
+  await expect(alertDetail).toContainText("Source status");
   await expect(alertDetail).toContainText("Network");
   await expect(alertDetail.getByRole("button")).toHaveCount(0);
-  await activate(page.getByLabel("Close Fleet alerts row details"));
+  await activate(page.getByLabel("Close Current alert episodes row details"));
   await page
-    .getByLabel("Fleet alerts data grid")
+    .getByLabel("Current alert episodes data grid")
     .getByRole("button", { name: "Actions", exact: true })
     .click();
   await activate(
-    page.getByRole("menuitem", { name: "Acknowledge open", exact: true }),
+    page.getByRole("menuitem", {
+      name: "Acknowledge Open triage",
+      exact: true,
+    }),
   );
   const triageConfirmation = page.getByLabel("Confirm fleet alert triage");
   await expect(triageConfirmation).toBeVisible();
@@ -5403,7 +5412,7 @@ test("observability alerts and webhooks are explicit separate pages", async ({
 
   await openConsoleSubpage(page, "Fleet", "Alerts");
   const refreshedCriticalAlertRow = page
-    .getByLabel("Fleet alerts data grid")
+    .getByLabel("Current alert episodes data grid")
     .getByRole("row")
     .filter({ hasText: "Tunnel adapter status failed" })
     .first();
@@ -5415,8 +5424,9 @@ test("observability alerts and webhooks are explicit separate pages", async ({
 
   await expect(page.getByText("vpsman / Observability / Alerts")).toBeVisible();
   const alertSummary = page.getByLabel("Alert routing summary");
-  await expect(alertSummary).toContainText("Active fleet alerts");
-  await expect(alertSummary).toContainText("Policy alerts");
+  await expect(alertSummary).toContainText("Current alert episodes");
+  await expect(alertSummary).toContainText("Alert episode history");
+  await expect(alertSummary).toContainText("Policy alert history");
   await expect(alertSummary).toContainText("Destinations");
   await expect(alertSummary).toContainText("Delivery history");
   await expect(

@@ -1490,10 +1490,6 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
                 artifact_min_bytes: 4096,
                 artifact_max_bytes: 96 * 1024 * 1024,
                 require_registered_agent_updates: true,
-                memory_warning: 0.30,
-                memory_critical: 0.20,
-                cpu_warning: 3.0,
-                cpu_critical: 5.0,
             }),
         )
         .unwrap();
@@ -1511,11 +1507,6 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(state.job_output_artifact_min_bytes(), 4096);
         assert_eq!(state.artifact_max_bytes(), 96 * 1024 * 1024);
         assert!(state.require_registered_agent_updates());
-        let policy = state.fleet_alert_policy();
-        assert_eq!(policy.memory_available_warning_ratio, 0.30);
-        assert_eq!(policy.memory_available_critical_ratio, 0.20);
-        assert_eq!(policy.cpu_load_warning, 3.0);
-        assert_eq!(policy.cpu_load_critical, 5.0);
         state.refresh_gateway_dispatch_timeouts();
         assert_eq!(state.gateway.test_timeouts().read.as_secs(), 13);
 
@@ -1531,10 +1522,6 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
                 artifact_min_bytes: 8192,
                 artifact_max_bytes: 160 * 1024 * 1024,
                 require_registered_agent_updates: false,
-                memory_warning: 0.40,
-                memory_critical: 0.15,
-                cpu_warning: 4.0,
-                cpu_critical: 6.0,
             }),
         )
         .unwrap();
@@ -1550,20 +1537,8 @@ fn app_state_reloads_suite_config_hot_fields_from_file() {
         assert_eq!(state.job_output_artifact_min_bytes(), 8192);
         assert_eq!(state.artifact_max_bytes(), 160 * 1024 * 1024);
         assert!(!state.require_registered_agent_updates());
-        let policy = state.fleet_alert_policy();
-        assert_eq!(policy.memory_available_warning_ratio, 0.40);
-        assert_eq!(policy.memory_available_critical_ratio, 0.15);
-        assert_eq!(policy.cpu_load_warning, 4.0);
-        assert_eq!(policy.cpu_load_critical, 6.0);
         state.refresh_gateway_dispatch_timeouts();
         assert_eq!(state.gateway.test_timeouts().read.as_secs(), 29);
-
-        std::fs::write(&path, "version = 1\n").unwrap();
-        let policy = state.fleet_alert_policy();
-        assert_eq!(policy.memory_available_warning_ratio, 0.20);
-        assert_eq!(policy.memory_available_critical_ratio, 0.10);
-        assert_eq!(policy.cpu_load_warning, 2.0);
-        assert_eq!(policy.cpu_load_critical, 4.0);
 
         let _ = std::fs::remove_file(path);
     });
@@ -1731,7 +1706,6 @@ fn test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::new(Some("http://127.0.0.1:1".to_string()), None),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,
@@ -1756,12 +1730,6 @@ const API_HOT_RELOAD_ENV: &[&str] = &[
     "VPSMAN_JOB_OUTPUT_ARTIFACT_MIN_BYTES",
     "VPSMAN_ARTIFACT_MAX_BYTES",
     "VPSMAN_REQUIRE_REGISTERED_AGENT_UPDATES",
-    "VPSMAN_ALERT_MEMORY_AVAILABLE_WARNING_RATIO",
-    "VPSMAN_ALERT_MEMORY_AVAILABLE_CRITICAL_RATIO",
-    "VPSMAN_ALERT_DISK_AVAILABLE_WARNING_RATIO",
-    "VPSMAN_ALERT_DISK_AVAILABLE_CRITICAL_RATIO",
-    "VPSMAN_ALERT_CPU_LOAD_WARNING",
-    "VPSMAN_ALERT_CPU_LOAD_CRITICAL",
 ];
 
 static SUITE_CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1800,10 +1768,6 @@ struct SuiteRuntimeToml {
     artifact_min_bytes: usize,
     artifact_max_bytes: usize,
     require_registered_agent_updates: bool,
-    memory_warning: f64,
-    memory_critical: f64,
-    cpu_warning: f64,
-    cpu_critical: f64,
 }
 
 fn suite_runtime_toml(input: SuiteRuntimeToml) -> String {
@@ -1817,10 +1781,6 @@ fn suite_runtime_toml(input: SuiteRuntimeToml) -> String {
         artifact_min_bytes,
         artifact_max_bytes,
         require_registered_agent_updates,
-        memory_warning,
-        memory_critical,
-        cpu_warning,
-        cpu_critical,
     } = input;
     format!(
         r#"version = 1
@@ -1839,12 +1799,6 @@ control_deadline_grace_secs = {control_deadline_grace_secs}
 job_output_artifact_min_bytes = {artifact_min_bytes}
 artifact_max_bytes = {artifact_max_bytes}
 require_registered_agent_updates = {require_registered_agent_updates}
-alert_memory_available_warning_ratio = {memory_warning}
-alert_memory_available_critical_ratio = {memory_critical}
-alert_disk_available_warning_ratio = {memory_warning}
-alert_disk_available_critical_ratio = {memory_critical}
-alert_cpu_load_warning = {cpu_warning}
-alert_cpu_load_critical = {cpu_critical}
 "#
     )
 }

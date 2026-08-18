@@ -2302,7 +2302,6 @@ fn test_state(repo: Repository) -> AppState {
         gateway: GatewayDispatchClient::test_privilege_auto_approve(),
         backup_object_store: None,
         update_release_policy: Default::default(),
-        fleet_alert_policy: Default::default(),
         job_output_artifact_min_bytes: 32768,
         artifact_max_bytes: crate::state::DEFAULT_ARTIFACT_MAX_BYTES,
         require_registered_agent_updates: false,

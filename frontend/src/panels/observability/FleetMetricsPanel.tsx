@@ -685,6 +685,7 @@ function WarningDefinitionStrip({
 }: {
   overview: DashboardOverviewRecord | null;
 }) {
+  const overviewAvailable = overview !== null;
   const activeAlerts = overview?.operations.active_alerts ?? 0;
   const alertsTruncated = overview?.operations.alerts_truncated ?? false;
   const criticalAlerts = overview?.operations.critical_alerts ?? 0;
@@ -705,26 +706,36 @@ function WarningDefinitionStrip({
     (overview?.summary.revoked ?? 0);
   const definitions = [
     {
-      detail: `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`,
+      detail: overviewAvailable
+        ? `${criticalAlerts} critical, ${warningAlerts} warning, ${infoAlerts} info${alertsTruncated ? " in loaded page" : ""}`
+        : "Fleet operations evidence unavailable",
       label: "Active alerts",
-      value: formatLowerBoundCount(activeAlerts, alertsTruncated),
+      value: overviewAvailable
+        ? formatLowerBoundCount(activeAlerts, alertsTruncated)
+        : "No data",
     },
     {
-      detail:
-        "unique VPSs named by the recent alert and degraded-agent rows shown",
+      detail: overviewAvailable
+        ? "unique VPSs named by the recent alert and degraded-agent rows shown"
+        : "Fleet operations evidence unavailable",
       label: "VPS in shown evidence",
-      value: String(affectedVpsCount),
+      value: overviewAvailable ? String(affectedVpsCount) : "No data",
     },
     {
-      detail: `group rows shown can overlap across provider, country, tag, and all-fleet buckets${groupedAlertsTruncated ? "; alert counts use the loaded operations page" : ""}`,
+      detail: overviewAvailable
+        ? `group rows shown can overlap across provider, country, tag, and all-fleet buckets${groupedAlertsTruncated ? "; alert counts use the loaded operations page" : ""}`
+        : "Fleet group evidence unavailable",
       label: "Alerts in shown groups",
-      value: formatLowerBoundCount(groupedAlerts, groupedAlertsTruncated),
+      value: overviewAvailable
+        ? formatLowerBoundCount(groupedAlerts, groupedAlertsTruncated)
+        : "No data",
     },
     {
-      detail:
-        "offline, stale, and access-revoked VPSs in the retained overview scope",
+      detail: overviewAvailable
+        ? "offline, stale, and access-revoked VPSs in the retained overview scope"
+        : "Fleet summary evidence unavailable",
       label: "Unavailable VPS",
-      value: String(unavailableVps),
+      value: overviewAvailable ? String(unavailableVps) : "No data",
     },
   ];
 

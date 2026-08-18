@@ -5,21 +5,28 @@ import {
   Bell,
   Check,
   CircleCheck,
+  History,
   Server,
   VolumeX,
 } from "lucide-react";
 import { ActionFeedback } from "../components/ActionFeedback";
 import { ConfirmationPrompt } from "../components/ConfirmationPrompt";
-import { FLEET_DETAIL_LIMIT, formatBoundedCount } from "../constants";
+import { formatBoundedCount } from "../constants";
 import {
   ConsoleDataGrid,
   type ConsoleDataGridColumn,
 } from "../components/ConsoleDataGrid";
 import { ConsoleStatusBadge } from "../components/ConsoleLayout";
 import { usePanelDisplaySettings } from "../panelDisplay";
+import {
+  alertCategoryLabel,
+  presentFleetAlert,
+  readableAlertToken,
+} from "../alertPresentation";
 import type {
   AgentView,
   FleetAlertRecord,
+  FleetAlertResolveRequest,
   FleetAlertStateRecord,
   FleetAlertStateRequest,
 } from "../types";
@@ -29,9 +36,25 @@ type FleetAlertsPanelProps = {
   agents: AgentView[];
   apiError: string | null;
   alerts: FleetAlertRecord[];
-  stateCount: number;
+  alertsEvidenceAvailable: boolean;
+  alertsTruncated: boolean;
+  canManageAlertLifecycle: boolean;
+  eventReviewError: string | null;
+  eventReviewHasMore: boolean;
+  eventReviewItems: FleetAlertRecord[];
+  eventReviewLoading: boolean;
+  eventReviewStarted: boolean;
+  history: FleetAlertRecord[];
+  historyEvidenceAvailable: boolean;
+  historyTruncated: boolean;
   onOpenAlertPolicies: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
+  onLoadOlderEvents: () => Promise<void>;
+  onRefreshEvents: () => Promise<void>;
+  onResolve: (
+    alertId: string,
+    request: FleetAlertResolveRequest,
+  ) => Promise<FleetAlertRecord>;
   onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
 };
 
@@ -39,11 +62,38 @@ export function FleetAlertsPanel({
   agents,
   apiError,
   alerts,
-  stateCount,
+  alertsEvidenceAvailable,
+  alertsTruncated,
+  canManageAlertLifecycle,
+  eventReviewError,
+  eventReviewHasMore,
+  eventReviewItems,
+  eventReviewLoading,
+  eventReviewStarted,
+  history,
+  historyEvidenceAvailable,
+  historyTruncated,
   onOpenAlertPolicies,
   onOpenVpsDetail,
+  onLoadOlderEvents,
+  onRefreshEvents,
+  onResolve,
   onUpdate,
 }: FleetAlertsPanelProps) {
+  const currentAlerts = useMemo(
+    // Manual review rows can outlive a snapshot refresh. Put authoritative
+    // snapshot rows last so fresh lifecycle/triage state wins duplicate IDs.
+    () => dedupeFleetAlertsById([...eventReviewItems, ...alerts]),
+    [alerts, eventReviewItems],
+  );
+  const currentTriagedCount = currentAlerts.filter((alert) => {
+    const presentation = presentFleetAlert(alert);
+    return (
+      presentation.current &&
+      presentation.operatorState !== null &&
+      presentation.operatorState !== "open"
+    );
+  }).length;
   return (
     <section className="workspace singleColumn">
       <div className="fleetPanel">
@@ -51,48 +101,94 @@ export function FleetAlertsPanel({
           <div>
             <h2>Fleet alerts</h2>
             <span>
-              {alerts.length >= FLEET_DETAIL_LIMIT
-                ? `${alerts.length}+ active fleet alerts; first ${alerts.length} shown`
-                : `${alerts.length} active fleet alerts`}
+              {!alertsEvidenceAvailable
+                ? eventReviewStarted
+                  ? `Current alert snapshot is unavailable; ${currentAlerts.length} incident review row${currentAlerts.length === 1 ? " is" : "s are"} loaded separately.`
+                  : "Current alert evidence is unavailable."
+                : `${formatBoundedCount(currentAlerts.length, alertsTruncated)} current alert episode${currentAlerts.length === 1 ? "" : "s"}${alertsTruncated ? " in the loaded evidence" : ""}`}
             </span>
           </div>
           <div className="sectionActions">
             <span className="sectionContext">
-              {formatBoundedCount(stateCount, stateCount >= FLEET_DETAIL_LIMIT)} triaged states
+              {alertsEvidenceAvailable
+                ? `${formatBoundedCount(currentTriagedCount, alertsTruncated)} current triaged episode${currentTriagedCount === 1 ? "" : "s"}`
+                : "Current triage evidence unavailable"}
             </span>
             <button
               className="secondaryAction compactAction"
               onClick={onOpenAlertPolicies}
-              title="Open alert policy configuration for fleet alert triage."
+              title={
+                canManageAlertLifecycle
+                  ? "Open threshold policy configuration. Operational alerts are system-generated."
+                  : "View threshold policies. Alert lifecycle changes require Operator or Admin role with fleet:read, backups:read, and integrations:write."
+              }
               type="button"
             >
               <Bell size={14} />
-              <span>Open alert policies</span>
+              <span>
+                {canManageAlertLifecycle
+                  ? "Open alert policies"
+                  : "View alert policies"}
+              </span>
             </button>
           </div>
         </div>
-        <ConsoleFreshnessBanner error={apiError} />
+        <ConsoleFreshnessBanner
+          currentAvailable={alertsEvidenceAvailable}
+          error={apiError}
+          historyAvailable={historyEvidenceAvailable}
+        />
         <FleetAlertList
           agents={agents}
-          alerts={alerts}
+          alerts={currentAlerts}
+          alertsEvidenceAvailable={alertsEvidenceAvailable}
+          alertsTruncated={alertsTruncated}
+          canManageAlertLifecycle={canManageAlertLifecycle}
+          eventReviewAdditionalCount={Math.max(
+            0,
+            currentAlerts.length - alerts.length,
+          )}
+          eventReviewError={eventReviewError}
+          eventReviewHasMore={eventReviewHasMore}
+          eventReviewLoading={eventReviewLoading}
+          eventReviewStarted={eventReviewStarted}
+          history={history}
+          historyEvidenceAvailable={historyEvidenceAvailable}
+          historyTruncated={historyTruncated}
           onOpenAlertPolicies={onOpenAlertPolicies}
           onOpenVpsDetail={onOpenVpsDetail}
+          onLoadOlderEvents={onLoadOlderEvents}
+          onRefreshEvents={onRefreshEvents}
+          onResolve={onResolve}
           onUpdate={onUpdate}
-          stateCount={stateCount}
         />
       </div>
     </section>
   );
 }
 
-function ConsoleFreshnessBanner({ error }: { error: string | null }) {
-  if (!error) {
+function ConsoleFreshnessBanner({
+  currentAvailable,
+  error,
+  historyAvailable,
+}: {
+  currentAvailable: boolean;
+  error: string | null;
+  historyAvailable: boolean;
+}) {
+  if (!error && currentAvailable && historyAvailable) {
     return null;
   }
   return (
     <div className="consoleFreshnessBanner">
       <span>
-        Last refresh failed; any previously loaded data remains visible: {error}
+        {!currentAvailable
+          ? "Current alert evidence is unavailable; no stale episode is presented as current. "
+          : ""}
+        {!historyAvailable
+          ? "Alert history is unavailable; any retained history is stale. "
+          : ""}
+        {error ? `Refresh detail: ${error}` : ""}
       </span>
     </div>
   );
@@ -101,16 +197,45 @@ function ConsoleFreshnessBanner({ error }: { error: string | null }) {
 function FleetAlertList({
   agents,
   alerts,
-  stateCount,
+  alertsEvidenceAvailable,
+  alertsTruncated,
+  canManageAlertLifecycle,
+  eventReviewAdditionalCount,
+  eventReviewError,
+  eventReviewHasMore,
+  eventReviewLoading,
+  eventReviewStarted,
+  history,
+  historyEvidenceAvailable,
+  historyTruncated,
   onOpenAlertPolicies,
   onOpenVpsDetail,
+  onLoadOlderEvents,
+  onRefreshEvents,
+  onResolve,
   onUpdate,
 }: {
   agents: AgentView[];
   alerts: FleetAlertRecord[];
-  stateCount: number;
+  alertsEvidenceAvailable: boolean;
+  alertsTruncated: boolean;
+  canManageAlertLifecycle: boolean;
+  eventReviewAdditionalCount: number;
+  eventReviewError: string | null;
+  eventReviewHasMore: boolean;
+  eventReviewLoading: boolean;
+  eventReviewStarted: boolean;
+  history: FleetAlertRecord[];
+  historyEvidenceAvailable: boolean;
+  historyTruncated: boolean;
   onOpenAlertPolicies: () => void;
   onOpenVpsDetail: (agent: AgentView) => void;
+  onLoadOlderEvents: () => Promise<void>;
+  onRefreshEvents: () => Promise<void>;
+  onResolve: (
+    alertId: string,
+    request: FleetAlertResolveRequest,
+  ) => Promise<FleetAlertRecord>;
   onUpdate: (request: FleetAlertStateRequest) => Promise<FleetAlertStateRecord>;
 }) {
   const { vpsNameDisplayMode } = usePanelDisplaySettings();
@@ -121,18 +246,45 @@ function FleetAlertList({
     requests: FleetAlertStateRequest[];
     rows: FleetAlertRecord[];
   } | null>(null);
+  const [resolveSnapshot, setResolveSnapshot] =
+    useState<FleetAlertRecord | null>(null);
+  const [resolveReason, setResolveReason] = useState("");
+  const [resolvePending, setResolvePending] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [resolveSuccess, setResolveSuccess] = useState<string | null>(null);
   const agentById = useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent])),
     [agents],
   );
   const nameById = useMemo(
-    () => new Map(agents.map((agent) => [agent.id, formatVpsName(agent, vpsNameDisplayMode)])),
+    () =>
+      new Map(
+        agents.map((agent) => [
+          agent.id,
+          formatVpsName(agent, vpsNameDisplayMode),
+        ]),
+      ),
     [agents, vpsNameDisplayMode],
   );
-  const criticalCount = alerts.filter((alert) => alert.severity === "critical").length;
-  const warningCount = alerts.filter((alert) => alert.severity === "warning").length;
-  const infoCount = alerts.length - criticalCount - warningCount;
-  const alertsCapped = alerts.length >= FLEET_DETAIL_LIMIT;
+  const activeAlerts = alerts.filter(
+    (alert) => presentFleetAlert(alert).active,
+  );
+  const criticalCount = activeAlerts.filter(
+    (alert) => alert.severity === "critical",
+  ).length;
+  const warningCount = activeAlerts.filter(
+    (alert) => alert.severity === "warning",
+  ).length;
+  const infoCount = activeAlerts.length - criticalCount - warningCount;
+  const unknownCount = alerts.filter(
+    (alert) => presentFleetAlert(alert).lifecycleState === "unknown",
+  ).length;
+  const malformedCount = alerts.filter(
+    (alert) => presentFleetAlert(alert).malformed,
+  ).length;
+  const actionableCount = alerts.filter(
+    (alert) => presentFleetAlert(alert).actionable,
+  ).length;
 
   const alertColumns = useMemo<ConsoleDataGridColumn<FleetAlertRecord>[]>(
     () => [
@@ -155,14 +307,23 @@ function FleetAlertList({
         size: 390,
         minSize: 240,
         sortValue: (alert) => alert.title,
-        searchValue: (alert) => `${alert.title} ${alert.detail} ${alert.category}`,
-        cell: (alert) => (
-          <span className="historyPrimary fleetAlertSummary">
-            <strong>{alert.title}</strong>
-            <small>{alert.detail}</small>
-            <small>{alertCategoryLabel(alert)} · {alertStatusLabel(alert.status)}</small>
-          </span>
-        ),
+        searchValue: (alert) => {
+          const presentation = presentFleetAlert(alert);
+          return `${alert.title} ${alert.detail} ${alertCategoryLabel(alert.category)} ${presentation.recordKindLabel} ${presentation.lifecycleLabel} ${presentation.operatorLabel} ${alertSourceStatusLabel(alert)}`;
+        },
+        cell: (alert) => {
+          const presentation = presentFleetAlert(alert);
+          return (
+            <span className="historyPrimary fleetAlertSummary">
+              <strong>{alert.title}</strong>
+              <small>{alert.detail}</small>
+              <small>
+                {alertCategoryLabel(alert.category)} ·{" "}
+                {presentation.recordKindLabel} · {alertSourceStatusLabel(alert)}
+              </small>
+            </span>
+          );
+        },
       },
       {
         id: "target",
@@ -179,7 +340,7 @@ function FleetAlertList({
           }`,
         cell: (alert) => {
           const label = alert.client_id
-            ? (nameById.get(alert.client_id) ?? "Unnamed VPS")
+            ? (nameById.get(alert.client_id) ?? alert.client_id)
             : alertTargetLabel(alert);
           return (
             <span
@@ -197,19 +358,19 @@ function FleetAlertList({
         header: "State",
         size: 190,
         minSize: 160,
-        sortValue: alertOperatorState,
-        searchValue: (alert) =>
-          `${alertOperatorState(alert)} ${alert.status} ${alert.state_reason ?? ""}`,
+        sortValue: (alert) => presentFleetAlert(alert).lifecycleLabel,
+        searchValue: (alert) => {
+          const presentation = presentFleetAlert(alert);
+          return `${presentation.lifecycleLabel} ${presentation.operatorLabel} ${alert.state_reason ?? ""}`;
+        },
         cell: (alert) => {
-          const operatorState = alertOperatorState(alert);
+          const presentation = presentFleetAlert(alert);
           return (
             <span className="fleetAlertStateStack">
-              <ConsoleStatusBadge
-                tone={operatorState === "open" ? "warning" : "info"}
-              >
-                {operatorStateLabel(operatorState)}
+              <ConsoleStatusBadge tone={presentation.lifecycleTone}>
+                {presentation.lifecycleLabel}
               </ConsoleStatusBadge>
-              <small>{alertStatusLabel(alert.status)}</small>
+              <small>Operator triage: {presentation.operatorLabel}</small>
               {alert.state_reason && <small>{alert.state_reason}</small>}
             </span>
           );
@@ -217,15 +378,46 @@ function FleetAlertList({
       },
       {
         id: "observed",
-        header: "Age",
+        header: "Triggered",
         size: 140,
         minSize: 110,
-        sortValue: (alert) => alert.observed_at,
-        cell: (alert) => (
-          <time dateTime={alert.observed_at} title={formatFullTime(alert.observed_at)}>
-            {formatCompactTime(alert.observed_at)}
-          </time>
-        ),
+        sortValue: (alert) =>
+          presentFleetAlert(alert).malformed
+            ? ""
+            : alert.lifecycle.triggered_at,
+        cell: (alert) => {
+          const presentation = presentFleetAlert(alert);
+          return presentation.malformed ? (
+            "Lifecycle unavailable"
+          ) : (
+            <time
+              dateTime={alert.lifecycle.triggered_at}
+              title={formatFullTime(alert.lifecycle.triggered_at)}
+            >
+              {formatCompactTime(alert.lifecycle.triggered_at)}
+            </time>
+          );
+        },
+      },
+      {
+        id: "resolution",
+        header: "Resolution",
+        size: 230,
+        minSize: 170,
+        sortValue: (alert) => alert.lifecycle?.resolved_at ?? "",
+        searchValue: (alert) =>
+          `${alert.lifecycle?.resolution_reason ?? ""} ${alert.lifecycle?.resolution_note ?? ""} ${alert.lifecycle?.resolution_actor_id ?? ""}`,
+        cell: (alert) =>
+          presentFleetAlert(alert).lifecycleState === "resolved" ? (
+            <span className="historyPrimary">
+              <strong>
+                {formatLifecycleTime(alert.lifecycle.resolved_at)}
+              </strong>
+              <small>{alertResolutionLabel(alert)}</small>
+            </span>
+          ) : (
+            "—"
+          ),
       },
     ],
     [nameById],
@@ -239,20 +431,45 @@ function FleetAlertList({
       const currentAlerts = new Map(alerts.map((alert) => [alert.id, alert]));
       const reviewIsCurrent = current.rows.every((reviewedAlert) => {
         const latestAlert = currentAlerts.get(reviewedAlert.id);
+        const reviewed = presentFleetAlert(reviewedAlert);
+        const latest = latestAlert ? presentFleetAlert(latestAlert) : null;
         return (
           latestAlert != null &&
-          alertOperatorState(latestAlert) === alertOperatorState(reviewedAlert)
+          !reviewed.malformed &&
+          latest != null &&
+          !latest.malformed &&
+          latest.operatorState === reviewed.operatorState &&
+          latest.lifecycleState === reviewed.lifecycleState &&
+          latestAlert.lifecycle.trigger_generation ===
+            reviewedAlert.lifecycle.trigger_generation
         );
       });
       return reviewIsCurrent ? current : null;
     });
   }, [alerts]);
 
+  useEffect(() => {
+    if (!resolveSnapshot) {
+      return;
+    }
+    const latest = alerts.find((alert) => alert.id === resolveSnapshot.id);
+    if (
+      !latest ||
+      !presentFleetAlert(latest).resolvableIncident ||
+      latest.lifecycle.trigger_generation !==
+        resolveSnapshot.lifecycle.trigger_generation
+    ) {
+      setResolveSnapshot(null);
+      setResolveReason("");
+      setResolveError(null);
+    }
+  }, [alerts, resolveSnapshot]);
+
   function reviewAlertUpdate(
     rows: FleetAlertRecord[],
     action: FleetAlertStateRequest["action"],
   ) {
-    if (rows.length === 0 || pending) {
+    if (!canManageAlertLifecycle || rows.length === 0 || pending) {
       return;
     }
     setActionError(null);
@@ -270,7 +487,7 @@ function FleetAlertList({
               ? "panel acknowledgement"
               : action === "escalate"
                 ? "panel escalation"
-                : "panel clear",
+                : "panel triage reset to open",
         confirmed: true,
       })),
     });
@@ -278,10 +495,12 @@ function FleetAlertList({
 
   async function updateReviewedAlerts() {
     const snapshot = reviewSnapshot;
-    if (!snapshot || pending) {
+    if (!canManageAlertLifecycle || !snapshot || pending) {
       return;
     }
-    setPending(`${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`);
+    setPending(
+      `${snapshot.action}:${snapshot.rows.map((alert) => alert.id).join(",")}`,
+    );
     let updatedCount = 0;
     try {
       for (const request of snapshot.requests) {
@@ -305,10 +524,72 @@ function FleetAlertList({
     }
   }
 
+  function reviewIncidentResolution(rows: FleetAlertRecord[]) {
+    const [alert] = rows;
+    if (
+      rows.length !== 1 ||
+      !alert ||
+      !presentFleetAlert(alert).resolvableIncident ||
+      !canManageAlertLifecycle ||
+      pending ||
+      resolvePending
+    ) {
+      return;
+    }
+    setResolveSnapshot(alert);
+    setResolveReason("");
+    setResolveError(null);
+    setResolveSuccess(null);
+  }
+
+  async function resolveReviewedIncident() {
+    const snapshot = resolveSnapshot;
+    const reason = resolveReason.trim();
+    if (
+      !canManageAlertLifecycle ||
+      !snapshot ||
+      !reason ||
+      pending ||
+      resolvePending
+    ) {
+      return;
+    }
+    setResolvePending(true);
+    setResolveError(null);
+    try {
+      await onResolve(snapshot.id, { confirmed: true, reason });
+      setResolveSuccess(
+        `Resolved occurrence ${snapshot.title}, generation ${snapshot.lifecycle.trigger_generation}. Operator triage was not changed.`,
+      );
+      setResolveSnapshot(null);
+      setResolveReason("");
+    } catch (error) {
+      setResolveError(
+        error instanceof Error
+          ? error.message
+          : "The incident could not be resolved without diagnostic detail.",
+      );
+    } finally {
+      setResolvePending(false);
+    }
+  }
+
   const openRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alertOperatorState(alert) === "open");
+    rows.filter((alert) => {
+      const presentation = presentFleetAlert(alert);
+      return presentation.current && presentation.operatorState === "open";
+    });
   const triagedRows = (rows: FleetAlertRecord[]) =>
-    rows.filter((alert) => alertOperatorState(alert) !== "open");
+    rows.filter((alert) => {
+      const presentation = presentFleetAlert(alert);
+      return (
+        presentation.current &&
+        presentation.operatorState !== null &&
+        presentation.operatorState !== "open"
+      );
+    });
+  const resolvableRows = (rows: FleetAlertRecord[]) =>
+    rows.filter((alert) => presentFleetAlert(alert).resolvableIncident);
 
   return (
     <div className="fleetAlertList" aria-label="Fleet alerts">
@@ -318,100 +599,241 @@ function FleetAlertList({
           <strong>Fleet alerts</strong>
         </span>
         <small>
-          {alerts.length === 0
-            ? "clear"
-            : `${alertsCapped ? "Loaded page: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info / ${formatBoundedCount(stateCount, stateCount >= FLEET_DETAIL_LIMIT)} triaged`}
+          {!alertsEvidenceAvailable
+            ? eventReviewStarted
+              ? `Unified current evidence unavailable · ${alerts.length} manually reviewed occurrence${alerts.length === 1 ? "" : "s"}`
+              : "Current alert evidence unavailable"
+            : alerts.length === 0 && !alertsTruncated
+              ? "No current alert episodes"
+              : `${alertsTruncated ? "Loaded page: " : ""}${criticalCount} critical / ${warningCount} warning / ${infoCount} info active · ${actionableCount} actionable${unknownCount ? ` · ${unknownCount} Unknown` : ""}${malformedCount ? ` · ${malformedCount} malformed` : ""} · ${formatBoundedCount(triagedRows(alerts).length, alertsTruncated)} current triaged`}
         </small>
       </div>
+      {!canManageAlertLifecycle ? (
+        <div
+          aria-label="Fleet alert read-only boundary"
+          className="consoleInlineNotice"
+        >
+          <strong>Read-only alert review</strong>
+          <small>
+            Operator or Admin role with fleet:read, backups:read, and
+            integrations:write is required to acknowledge, mute, escalate, reset
+            triage, or resolve an occurrence. Lifecycle and operator triage
+            remain visible.
+          </small>
+        </div>
+      ) : null}
+      {alertsTruncated ||
+      !alertsEvidenceAvailable ||
+      eventReviewStarted ||
+      eventReviewError ? (
+        <div
+          aria-label="Older current incident review"
+          className="consoleInlineNotice"
+        >
+          <span>
+            <strong>Unresolved occurrence review</strong>
+            <small>
+              {eventReviewLoading
+                ? "Loading the next bounded incident-review page."
+                : eventReviewError
+                  ? `Older incident review is unavailable: ${eventReviewError} Loaded current rows are unchanged.`
+                  : !eventReviewStarted
+                    ? alertsEvidenceAvailable
+                      ? "The unified current snapshot is capped. Load the dedicated occurrence feed to reach older unresolved incidents."
+                      : "The unified current snapshot is unavailable. The dedicated occurrence feed can still be reviewed explicitly."
+                    : eventReviewHasMore
+                      ? `${eventReviewAdditionalCount} additional current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded; older incidents remain.`
+                      : `${eventReviewAdditionalCount} additional current occurrence${eventReviewAdditionalCount === 1 ? "" : "s"} loaded. The occurrence feed has reached its explicit end${alertsTruncated ? "; the condition snapshot may still be capped" : ""}.`}
+            </small>
+          </span>
+          <button
+            className="secondaryAction compactAction"
+            disabled={eventReviewLoading}
+            onClick={() =>
+              void (eventReviewStarted && !eventReviewHasMore
+                ? onRefreshEvents()
+                : onLoadOlderEvents())
+            }
+            type="button"
+          >
+            <History size={14} />
+            <span>
+              {eventReviewLoading
+                ? "Loading incidents"
+                : eventReviewStarted && !eventReviewHasMore
+                  ? eventReviewError
+                    ? "Retry incident refresh"
+                    : "Refresh unresolved occurrences"
+                  : eventReviewError
+                    ? "Retry older current incidents"
+                    : "Load older current incidents"}
+            </span>
+          </button>
+        </div>
+      ) : null}
       <ActionFeedback
         className="localActionFeedback"
         message={reviewSnapshot ? null : actionError}
         tone="danger"
       />
+      <ActionFeedback
+        className="localActionFeedback"
+        message={resolveSuccess}
+        tone="success"
+      />
       <ConsoleDataGrid
         actions={[
           {
-            label: "Acknowledge open",
+            label: "Acknowledge Open triage",
             description: (rows) =>
-              `Acknowledge ${openRows(rows).length} selected open fleet alerts.`,
+              `Acknowledge ${openRows(rows).length} selected alerts whose operator triage is Open.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
+            hidden: () => !canManageAlertLifecycle,
             icon: <Check size={14} />,
-            onSelect: (rows) => reviewAlertUpdate(openRows(rows), "acknowledge"),
+            onSelect: (rows) =>
+              reviewAlertUpdate(openRows(rows), "acknowledge"),
           },
           {
-            label: "Mute open 4h",
+            label: "Mute Open triage 4h",
             description: (rows) =>
-              `Mute ${openRows(rows).length} selected open fleet alerts for four hours.`,
+              `Mute ${openRows(rows).length} selected alerts whose operator triage is Open for four hours.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
+            hidden: () => !canManageAlertLifecycle,
             icon: <VolumeX size={14} />,
             onSelect: (rows) => reviewAlertUpdate(openRows(rows), "mute"),
           },
           {
-            label: "Escalate open",
+            label: "Escalate Open triage",
             description: (rows) =>
-              `Escalate ${openRows(rows).length} selected open fleet alerts.`,
+              `Escalate ${openRows(rows).length} selected alerts whose operator triage is Open.`,
             disabled: (rows) => pending != null || openRows(rows).length === 0,
+            hidden: () => !canManageAlertLifecycle,
             icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => reviewAlertUpdate(openRows(rows), "escalate"),
           },
           {
-            label: "Clear triaged",
+            label: "Reset triage to Open",
             description: (rows) =>
-              `Clear ${triagedRows(rows).length} selected triaged fleet alerts.`,
-            disabled: (rows) => pending != null || triagedRows(rows).length === 0,
+              `Reset operator triage to Open for ${triagedRows(rows).length} selected fleet alerts. This does not resolve their lifecycle.`,
+            disabled: (rows) =>
+              pending != null || triagedRows(rows).length === 0,
+            hidden: () => !canManageAlertLifecycle,
             icon: <CircleCheck size={14} />,
             onSelect: (rows) => reviewAlertUpdate(triagedRows(rows), "clear"),
+          },
+          {
+            label: "Resolve incident",
+            description: (rows) =>
+              rows.length === 1 && resolvableRows(rows).length === 1
+                ? "Resolve this occurrence lifecycle with a required operator reason."
+                : "Select exactly one unresolved occurrence to resolve.",
+            disabled: (rows) =>
+              pending != null ||
+              resolvePending ||
+              rows.length !== 1 ||
+              resolvableRows(rows).length !== 1,
+            hidden: () => !canManageAlertLifecycle,
+            icon: <AlertTriangle size={14} />,
+            onSelect: reviewIncidentResolution,
           },
         ]}
         columns={alertColumns}
         defaultPageSize={10}
-        empty="No active fleet alerts."
+        empty={
+          !alertsEvidenceAvailable
+            ? "Current alert evidence is unavailable."
+            : alertsTruncated
+              ? "No current episodes appear in the loaded page; more may exist."
+              : "No current alert episodes."
+        }
         expandOnRowClick
         getRowId={(alert) => alert.id}
         itemLabel="alerts"
-        renderExpandedRow={(alert) => (
-          <div className="consoleGridDetails fleetAlertDetail">
-            <div className="consoleInlineDetailGrid">
-              <span>Operator state</span>
-              <strong>{operatorStateLabel(alertOperatorState(alert))}</strong>
-              <span>Alert status</span>
-              <strong>{alertStatusLabel(alert.status)}</strong>
-              <span>Category</span>
-              <strong>{alertCategoryLabel(alert)}</strong>
-              <span>Target</span>
-              <strong>{alert.target_kind}:{alert.target_id}</strong>
-              <span>Observed</span>
-              <strong>{formatFullTime(alert.observed_at)}</strong>
-              {alert.muted_until_unix && (
-                <>
-                  <span>Muted until</span>
-                  <strong>{formatUnixTime(alert.muted_until_unix)}</strong>
-                </>
+        renderExpandedRow={(alert) => {
+          const presentation = presentFleetAlert(alert);
+          return (
+            <div className="consoleGridDetails fleetAlertDetail">
+              <div className="consoleInlineDetailGrid">
+                <span>Operator state</span>
+                <strong>{presentation.operatorLabel}</strong>
+                <span>Lifecycle</span>
+                <strong>{presentation.lifecycleLabel}</strong>
+                <span>Record kind</span>
+                <strong>{presentation.recordKindLabel}</strong>
+                <span>Generation</span>
+                <strong>
+                  {presentation.malformed
+                    ? "Lifecycle unavailable"
+                    : alert.lifecycle.trigger_generation}
+                </strong>
+                <span>Source status</span>
+                <strong>{alertSourceStatusLabel(alert)}</strong>
+                <span>Category</span>
+                <strong>{alertCategoryLabel(alert.category)}</strong>
+                <span>Target</span>
+                <strong>
+                  {alert.target_kind}:{alert.target_id}
+                </strong>
+                <span>Observed</span>
+                <strong>{formatFullTime(alert.observed_at)}</strong>
+                <span>Triggered</span>
+                <strong>
+                  {presentation.malformed
+                    ? "Lifecycle unavailable"
+                    : formatLifecycleTime(alert.lifecycle.triggered_at)}
+                </strong>
+                <span>Last confirmed</span>
+                <strong>
+                  {presentation.malformed
+                    ? "Lifecycle unavailable"
+                    : formatLifecycleTime(alert.lifecycle.last_confirmed_at)}
+                </strong>
+                <span>Resolved</span>
+                <strong>
+                  {presentation.malformed
+                    ? "Lifecycle unavailable"
+                    : formatLifecycleTime(alert.lifecycle.resolved_at)}
+                </strong>
+                <span>Resolution</span>
+                <strong>{alertResolutionLabel(alert)}</strong>
+                <span>Resolution actor</span>
+                <strong>{alertResolutionActorLabel(alert)}</strong>
+                {alert.muted_until_unix && (
+                  <>
+                    <span>Muted until</span>
+                    <strong>{formatUnixTime(alert.muted_until_unix)}</strong>
+                  </>
+                )}
+                <span>Escalation</span>
+                <strong>{alert.escalation_level ?? 0}</strong>
+              </div>
+              {policyNameFromAlert(alert) && (
+                <span className="fleetAlertPolicyHint">
+                  Policy: <strong>{policyNameFromAlert(alert)}</strong>
+                </span>
               )}
-              <span>Escalation</span>
-              <strong>{alert.escalation_level ?? 0}</strong>
+              {!policyNameFromAlert(alert) && (
+                <span className="fleetAlertPolicyHint">
+                  Source: <strong>System operational detection</strong>
+                </span>
+              )}
+              <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
             </div>
-            {policyNameFromAlert(alert) && (
-              <span className="fleetAlertPolicyHint">
-                Policy: <strong>{policyNameFromAlert(alert)}</strong>
-              </span>
-            )}
-            <pre>{JSON.stringify(alert.evidence, null, 2)}</pre>
-          </div>
-        )}
+          );
+        }}
         rowActions={[
           {
-            label: "Acknowledge open",
+            label: "Acknowledge Open triage",
             description: (rows) =>
               actionTargetDescription(
                 "Acknowledge",
                 "fleet alert",
                 rows[0]?.title,
-                "Marks the open alert as acknowledged.",
+                "Marks the operator triage as Acknowledged.",
               ),
-            disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
-            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
+            disabled: (rows) => pending != null || openRows(rows).length !== 1,
+            hidden: (rows) =>
+              !canManageAlertLifecycle || openRows(rows).length !== 1,
             icon: <Check size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "acknowledge"),
           },
@@ -423,7 +845,8 @@ function FleetAlertList({
                 "VPS detail for alert",
                 rows[0]?.title,
               ),
-            disabled: (rows) => !rows[0]?.client_id || !agentById.has(rows[0].client_id),
+            disabled: (rows) =>
+              !rows[0]?.client_id || !agentById.has(rows[0].client_id),
             icon: <Server size={14} />,
             onSelect: (rows) => {
               const clientId = rows[0]?.client_id;
@@ -434,48 +857,68 @@ function FleetAlertList({
             },
           },
           {
-            label: "Clear triaged",
+            label: "Reset triage to Open",
             description: (rows) =>
               actionTargetDescription(
-                "Clear",
+                "Reset triage to Open for",
                 "fleet alert",
                 rows[0]?.title,
-                "Clears a triaged alert.",
+                "This removes operator triage only; it does not resolve the lifecycle.",
               ),
             disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) === "open",
-            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) === "open",
+              pending != null || triagedRows(rows).length !== 1,
+            hidden: (rows) =>
+              !canManageAlertLifecycle || triagedRows(rows).length !== 1,
             icon: <CircleCheck size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "clear"),
           },
           {
-            label: "Mute open 4h",
+            label: "Resolve incident",
+            description: (rows) =>
+              actionTargetDescription(
+                "Resolve",
+                "occurrence",
+                rows[0]?.title,
+                "Closes the event lifecycle with a required operator reason; triage is unchanged.",
+              ),
+            disabled: (rows) =>
+              pending != null ||
+              resolvePending ||
+              rows.length !== 1 ||
+              resolvableRows(rows).length !== 1,
+            hidden: (rows) =>
+              !canManageAlertLifecycle || resolvableRows(rows).length !== 1,
+            icon: <AlertTriangle size={14} />,
+            onSelect: reviewIncidentResolution,
+          },
+          {
+            label: "Mute Open triage 4h",
             description: (rows) =>
               actionTargetDescription(
                 "Mute",
                 "fleet alert",
                 rows[0]?.title,
-                "Suppresses the open alert for four hours.",
+                "Mutes the Open operator triage for four hours.",
               ),
-            disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
-            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
+            disabled: (rows) => pending != null || openRows(rows).length !== 1,
+            hidden: (rows) =>
+              !canManageAlertLifecycle || openRows(rows).length !== 1,
             icon: <VolumeX size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "mute"),
             separatorBefore: true,
           },
           {
-            label: "Escalate open",
+            label: "Escalate Open triage",
             description: (rows) =>
               actionTargetDescription(
                 "Escalate",
                 "fleet alert",
                 rows[0]?.title,
-                "Raises the open alert escalation level.",
+                "Raises the Open operator-triage escalation level.",
               ),
-            disabled: (rows) =>
-              pending != null || !rows[0] || alertOperatorState(rows[0]) !== "open",
-            hidden: (rows) => !rows[0] || alertOperatorState(rows[0]) !== "open",
+            disabled: (rows) => pending != null || openRows(rows).length !== 1,
+            hidden: (rows) =>
+              !canManageAlertLifecycle || openRows(rows).length !== 1,
             icon: <ArrowUpCircle size={14} />,
             onSelect: (rows) => reviewAlertUpdate(rows, "escalate"),
           },
@@ -494,20 +937,44 @@ function FleetAlertList({
         renderSelectionPanel={(rows) => {
           const selectedOpen = openRows(rows).length;
           const selectedTriaged = triagedRows(rows).length;
+          const selectedResolvable = resolvableRows(rows).length;
           return (
             <span>
-              {rows.length} selected · {selectedOpen} open · {selectedTriaged} triaged
+              {rows.length} selected · {selectedOpen} current with Open triage ·{" "}
+              {selectedTriaged} current triaged · {selectedResolvable}{" "}
+              resolvable occurrence{selectedResolvable === 1 ? "" : "s"}
             </span>
           );
         }}
         rows={alerts}
+        rowsTruncated={alertsTruncated || eventReviewHasMore}
         searchPlaceholder="Search alerts"
+        selectable={canManageAlertLifecycle}
         storageKey="vpsman.grid.fleet.alerts.v1"
-        title="Fleet alerts"
+        title="Current alert episodes"
+      />
+      <ConsoleDataGrid
+        columns={alertColumns}
+        defaultPageSize={10}
+        empty={
+          !historyEvidenceAvailable
+            ? "Alert episode history is unavailable."
+            : historyTruncated
+              ? "No alert episodes appear in the loaded history; more may exist."
+              : "No retained alert episode history."
+        }
+        getRowId={(alert) => alert.id}
+        itemLabel="episodes"
+        rows={history}
+        rowsTruncated={historyTruncated}
+        searchPlaceholder="Search alert episode history"
+        selectable={false}
+        storageKey="vpsman.grid.fleet.alert-history.v1"
+        title="Alert episode history"
       />
       <ConfirmationPrompt
         confirmLabel={fleetAlertActionLabel(reviewSnapshot?.action)}
-        detail="Applies the reviewed operator state update to the selected fleet alerts."
+        detail="Applies only the reviewed operator triage update. It does not change the alert lifecycle."
         items={[
           {
             label: "Action",
@@ -535,6 +1002,48 @@ function FleetAlertList({
         title="Confirm fleet alert triage"
         tone={reviewSnapshot?.action === "clear" ? "normal" : "danger"}
       />
+      <ConfirmationPrompt
+        confirmDisabled={!resolveReason.trim()}
+        confirmLabel="Resolve incident"
+        detail="Closes this occurrence lifecycle and emits its resolved edge. Operator triage remains separate and unchanged."
+        error={resolveError ?? undefined}
+        items={[
+          {
+            label: "Occurrence",
+            value: resolveSnapshot?.title ?? "No occurrence selected",
+            title: resolveSnapshot?.id,
+          },
+          {
+            label: "Generation",
+            value:
+              resolveSnapshot?.lifecycle.trigger_generation ??
+              "Lifecycle unavailable",
+          },
+        ]}
+        onCancel={() => {
+          setResolveSnapshot(null);
+          setResolveReason("");
+          setResolveError(null);
+        }}
+        onConfirm={() => void resolveReviewedIncident()}
+        open={resolveSnapshot !== null}
+        pending={resolvePending}
+        title="Confirm incident resolution"
+        tone="warning"
+      >
+        <label className="confirmationReasonField">
+          <span>Resolution reason</span>
+          <textarea
+            aria-label="Incident resolution reason"
+            autoFocus
+            maxLength={1024}
+            onChange={(event) => setResolveReason(event.target.value)}
+            placeholder="Describe why this occurrence is being closed"
+            required
+            value={resolveReason}
+          />
+        </label>
+      </ConfirmationPrompt>
     </div>
   );
 }
@@ -543,7 +1052,9 @@ function formatUnixTime(value: number): string {
   return formatCompactTime(new Date(value * 1000).toISOString());
 }
 
-function fleetAlertActionLabel(action: FleetAlertStateRequest["action"] | undefined): string {
+function fleetAlertActionLabel(
+  action: FleetAlertStateRequest["action"] | undefined,
+): string {
   switch (action) {
     case "acknowledge":
       return "Acknowledge";
@@ -552,7 +1063,7 @@ function fleetAlertActionLabel(action: FleetAlertStateRequest["action"] | undefi
     case "escalate":
       return "Escalate";
     case "clear":
-      return "Clear";
+      return "Reset triage to Open";
     default:
       return "Confirm";
   }
@@ -569,32 +1080,25 @@ function alertTone(severity: string): "critical" | "warning" | "info" {
 }
 
 function alertTargetLabel(alert: FleetAlertRecord) {
-  return alert.target_kind === "client" ? "Unknown VPS" : alert.target_id;
+  return alert.target_id.trim() || "Target unavailable";
 }
 
-function alertOperatorState(alert: FleetAlertRecord): string {
-  return alert.operator_state?.trim() || "open";
-}
-
-function operatorStateLabel(state: string): string {
-  switch (state) {
-    case "open":
-      return "Open";
-    case "acknowledged":
-      return "Acknowledged";
-    case "muted":
-      return "Muted";
-    case "escalated":
-      return "Escalated";
-    case "cleared":
-      return "Cleared";
-    default:
-      return readableAlertToken(state);
+function dedupeFleetAlertsById(alerts: FleetAlertRecord[]): FleetAlertRecord[] {
+  const byId = new Map<string, FleetAlertRecord>();
+  for (const alert of alerts) {
+    byId.set(alert.id, alert);
   }
+  return Array.from(byId.values());
 }
 
-function alertStatusLabel(status: string): string {
-  switch (status) {
+function alertSourceStatusLabel(alert: FleetAlertRecord): string {
+  if (
+    alert.record_kind === "condition" &&
+    alert.target_kind === "policy_rule"
+  ) {
+    return "Policy condition evidence";
+  }
+  switch (alert.status) {
     case "tunnel_adapter_degraded":
       return "Tunnel adapter degraded";
     case "stale":
@@ -602,20 +1106,7 @@ function alertStatusLabel(status: string): string {
     case "policy_reached":
       return "Policy threshold reached";
     default:
-      return readableAlertToken(status);
-  }
-}
-
-function alertCategoryLabel(alert: FleetAlertRecord): string {
-  switch (alert.category) {
-    case "network":
-      return "Network";
-    case "agent_status":
-      return "Agent status";
-    case "traffic":
-      return "Traffic policy";
-    default:
-      return readableAlertToken(alert.category);
+      return readableAlertToken(alert.status);
   }
 }
 
@@ -631,10 +1122,42 @@ function alertTargetScopeLabel(alert: FleetAlertRecord): string {
     case "configuration_source":
       return "Configuration source";
     case "policy_alert":
+    case "policy_rule":
       return "Policy alert";
     default:
       return readableAlertToken(alert.target_kind);
   }
+}
+
+function formatLifecycleTime(value: string | null | undefined): string {
+  return value && Number.isFinite(Date.parse(value))
+    ? formatFullTime(value)
+    : "Not recorded";
+}
+
+function alertResolutionLabel(alert: FleetAlertRecord): string {
+  const presentation = presentFleetAlert(alert);
+  if (presentation.lifecycleState !== "resolved") {
+    return presentation.malformed ? "Lifecycle unavailable" : "Not resolved";
+  }
+  const reason = alert.lifecycle.resolution_reason
+    ? readableAlertToken(alert.lifecycle.resolution_reason)
+    : "Reason unavailable";
+  const note = alert.lifecycle.resolution_note?.trim();
+  const actor = alert.lifecycle.resolution_actor_id;
+  const provenance = actor ? `Actor ${actor}` : "Automatic resolution";
+  return `${note ? `${reason} · ${note}` : reason} · ${provenance}`;
+}
+
+function alertResolutionActorLabel(alert: FleetAlertRecord): string {
+  const presentation = presentFleetAlert(alert);
+  if (presentation.malformed) {
+    return "Lifecycle unavailable";
+  }
+  if (presentation.lifecycleState !== "resolved") {
+    return "Not resolved";
+  }
+  return alert.lifecycle.resolution_actor_id ?? "Automatic";
 }
 
 function policyNameFromAlert(alert: FleetAlertRecord): string | null {
@@ -648,15 +1171,6 @@ function policyNameFromAlert(alert: FleetAlertRecord): string | null {
   }
   const name = (policy as { name?: unknown }).name;
   return typeof name === "string" && name.trim() ? name : null;
-}
-
-function readableAlertToken(value: string): string {
-  const label = value
-    .split(/[_:\-.]+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-  return label || "Unknown";
 }
 
 function actionTargetDescription(
@@ -684,7 +1198,8 @@ function selectedRecordSummary<T>(
   const ids = selectedRows.map(getId).join(", ");
   return (
     <span title={ids}>
-      {selectedRows.length} {selectedRows.length === 1 ? singularLabel : pluralLabel}: {names}
+      {selectedRows.length}{" "}
+      {selectedRows.length === 1 ? singularLabel : pluralLabel}: {names}
     </span>
   );
 }
