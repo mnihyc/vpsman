@@ -189,7 +189,12 @@ async fn postgres_alert_expression_canonicalization_is_atomic_audited_and_idempo
     assert!(!canonical_rule.0.contains("alert.policy_"));
     assert!(!canonical_rule.0.contains("window_secs"));
     assert!(!canonical_rule.1.contains("alert.policy_"));
-    assert!(!canonical_rule.1.contains("condition_expression"));
+    assert!(!canonical_rule
+        .1
+        .contains("policy_rule.condition_expression"));
+    assert!(canonical_rule
+        .1
+        .contains("policy_rule.trigger_condition_expression"));
 
     let audit = sqlx::query(
         r#"
@@ -5717,6 +5722,15 @@ async fn postgres_combined_telemetry_evidence_is_atomic_exact_and_repairs_only_r
         })
         .collect::<Vec<_>>();
     assert_eq!(reported_times, vec![9_000, 9_000, 8_000]);
+    let accepted_times = evidence_rows
+        .iter()
+        .map(|row| {
+            row.try_get::<SqlJson<Value>, _>("payload").unwrap().0["telemetry"]
+                ["accepted_observed_unix"]
+                .as_u64()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
     let evidence_observed = evidence_rows
         .iter()
         .map(|row| {
@@ -5724,8 +5738,14 @@ async fn postgres_combined_telemetry_evidence_is_atomic_exact_and_repairs_only_r
                 .unwrap()
         })
         .collect::<Vec<_>>();
-    assert_eq!(evidence_observed[0], evidence_observed[1]);
-    assert!(evidence_observed[2] < evidence_observed[1]);
+    assert_eq!(
+        evidence_observed
+            .iter()
+            .map(|observed_at| observed_at.timestamp() as u64)
+            .collect::<Vec<_>>(),
+        accepted_times
+    );
+    assert!(accepted_times.iter().all(|accepted| *accepted > 9_000));
     let first_payload = evidence_rows[0]
         .try_get::<SqlJson<Value>, _>("payload")
         .unwrap()
@@ -5772,7 +5792,7 @@ async fn postgres_combined_telemetry_evidence_is_atomic_exact_and_repairs_only_r
             ),
             (
                 evidence_rows[2].try_get("evidence_seq").unwrap(),
-                "stale".to_string()
+                "not_matched".to_string()
             ),
         ]
     );
@@ -8145,6 +8165,27 @@ async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded()
     .execute(&db.pool)
     .await
     .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO alert_policy_evidence (
+            id, source_kind, source_event_id, fact_kind, natural_key,
+            confirmation_bucket_key, subject_client_id, target_kind, target_id,
+            source_status, completeness, subject_snapshot, payload, observed_at,
+            state_started_at, schedule_lineage
+        )
+        SELECT
+            md5('policy-rollup-evidence-' || id)::uuid,
+            'telemetry.combined', 'policy-rollup-evidence-' || id, 'metric', id,
+            id, id, 'client', id, 'complete', 'complete', '{}'::jsonb,
+            '{"cpu":{"load_1":2.0}}'::jsonb, clock_timestamp(),
+            clock_timestamp(), ARRAY[]::uuid[]
+        FROM visible_clients
+        WHERE id LIKE 'policy-rollup-scale-%'
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
     let client_ids = (1..=CLIENT_COUNT)
         .map(|value| format!("policy-rollup-scale-{value}"))
         .collect::<Vec<_>>();
@@ -9151,6 +9192,10 @@ async fn filter_limit_regression_postgres_rules_and_policies() {
     };
     let target_client_id = "zzz-filter-target";
     insert_client(&db.pool, target_client_id, None).await;
+    sqlx::query("UPDATE policy_groups SET enabled = FALSE")
+        .execute(&db.pool)
+        .await
+        .unwrap();
     sqlx::query(
         r#"
         INSERT INTO clients (

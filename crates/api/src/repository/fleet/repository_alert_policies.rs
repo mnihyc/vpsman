@@ -53,9 +53,6 @@ use crate::{
     },
 };
 
-#[cfg(test)]
-use crate::model::FleetAlertView;
-
 const MAX_POLICY_NAME_BYTES: usize = 128;
 const MAX_POLICY_NOTES_BYTES: usize = 1024;
 const MAX_RULE_NAME_BYTES: usize = 128;
@@ -3031,30 +3028,6 @@ impl Repository {
             Some(limit.clamp(1, MAX_POLICY_ALERT_CANDIDATE_ROWS)),
             true,
             PolicyAlertSelectionMode::CurrentFleet,
-            allowed_client_ids,
-            start_unix,
-            end_unix,
-            None,
-            None,
-            None,
-        )
-        .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn list_policy_alert_notification_candidates(
-        &self,
-        query: &PolicyAlertQuery,
-        limit: usize,
-        allowed_client_ids: Option<&HashSet<String>>,
-        start_unix: Option<u64>,
-        end_unix: Option<u64>,
-    ) -> Result<Vec<PolicyAlertRecord>> {
-        self.list_policy_alerts_matching(
-            query,
-            Some(limit.clamp(1, 200)),
-            true,
-            PolicyAlertSelectionMode::ConfirmedActive,
             allowed_client_ids,
             start_unix,
             end_unix,
@@ -8485,53 +8458,6 @@ fn vps_rules_audit(
             "component": "vps-rules-controller",
         }),
         created_at,
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn policy_alert_to_fleet_alert(alert: &PolicyAlertRecord) -> FleetAlertView {
-    let mut evidence = alert.payload.clone();
-    if let Some(object) = evidence.as_object_mut() {
-        object.insert(
-            "lifecycle".to_string(),
-            json!({
-                "state": alert.lifecycle_state,
-                "last_confirmed_at": alert.last_confirmed_at,
-                "resolved_at": alert.resolved_at,
-                "resolution_reason": alert.resolution_reason,
-            }),
-        );
-    }
-    FleetAlertView {
-        id: format!("policy-alert:{}", alert.id),
-        record_kind: "condition".to_string(),
-        lifecycle: crate::model::FleetAlertLifecycleView {
-            state: alert.lifecycle_state.clone(),
-            trigger_generation: alert.trigger_generation,
-            triggered_at: alert.created_at.clone(),
-            last_confirmed_at: alert.last_confirmed_at.clone(),
-            resolved_at: alert.resolved_at.clone(),
-            resolution_reason: alert.resolution_reason.clone(),
-            resolution_note: None,
-            resolution_actor_id: None,
-        },
-        severity: alert.severity.clone(),
-        category: alert.category.clone(),
-        target_kind: "policy_rule".to_string(),
-        target_id: alert.policy_rule_id.to_string(),
-        client_id: Some(alert.client_id.clone()),
-        title: alert.title.clone(),
-        detail: alert.detail.clone(),
-        status: "open".to_string(),
-        evidence,
-        observed_at: alert.observed_at.clone(),
-        operator_state: "open".to_string(),
-        muted_until_unix: None,
-        escalation_level: 0,
-        state_revision: 0,
-        state_reason: None,
-        state_actor_id: None,
-        state_updated_at: None,
     }
 }
 

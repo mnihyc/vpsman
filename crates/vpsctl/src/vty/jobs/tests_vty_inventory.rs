@@ -164,7 +164,7 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-create --behavior=process_inventory --name=host-proc --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}",
+            "config-preset-create --behavior=process_inventory --name=host-proc --definition-json='{\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}'",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetCreate {
@@ -190,7 +190,7 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-preview --preset-id=11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}",
+            "config-preset-preview --preset-id=11111111-1111-4111-8111-111111111111 --definition-json='{\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}'",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetPreview {
@@ -202,7 +202,7 @@ fn parses_inventory_commands() {
     );
     assert_eq!(
         parse_vty_inventory_command(
-            "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json={\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"} --preview-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirmed",
+            "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --clear-description --definition-json='{\"source\":\"linux_procfs\",\"proc_root\":\"/host/proc\"}' --preview-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --confirmed",
         )
         .unwrap(),
         VtyInventoryCommand::ConfigPresetUpdate {
@@ -462,7 +462,7 @@ fn rejects_invalid_inventory_commands() {
     )
     .is_err());
     assert!(parse_vty_inventory_command(
-        "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --definition-json={\"source\":\"interface_counters\"} --confirmed"
+        "config-preset-update --preset-id 11111111-1111-4111-8111-111111111111 --definition-json='{\"source\":\"interface_counters\"}' --confirmed"
     )
     .is_err());
     assert!(parse_vty_inventory_command(

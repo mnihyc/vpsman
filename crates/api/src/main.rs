@@ -345,8 +345,6 @@ use model_alert_notifications::*;
 #[cfg(test)]
 use model_alert_policies::*;
 #[cfg(test)]
-use model_alert_states::*;
-#[cfg(test)]
 use repository::MemoryState;
 #[cfg(test)]
 use repository_ingest::upsert_memory_agent;

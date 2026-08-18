@@ -75,7 +75,7 @@ async fn declared_tunnel_telemetry_keeps_exact_plan_and_endpoint_identity() {
 }
 
 #[tokio::test]
-async fn reconnecting_tunnel_requires_evidence_accepted_after_the_status_boundary() {
+async fn reconnecting_tunnel_telemetry_does_not_revive_memory_alert_lifecycle() {
     let repo = Repository::Memory(MemoryState::default());
     let plan_id = seed_declared_plan(&repo, RuntimeTunnelManager::CustomAdapter).await;
     let plan = repo.get_tunnel_plan(plan_id).await.unwrap().unwrap();
@@ -165,14 +165,14 @@ async fn reconnecting_tunnel_requires_evidence_accepted_after_the_status_boundar
     event.telemetry.metrics.observed_unix += 1;
     assert!(repo.record_telemetry(&event).await.unwrap());
     if let Repository::Memory(memory) = &repo {
-        let episodes = memory.operational_alert_episodes.read().await;
-        let episode = episodes
+        assert!(!memory
+            .operational_alert_episodes
+            .read()
+            .await
             .iter()
-            .find(|episode| {
+            .any(|episode| {
                 episode.producer_kind == "tunnel_adapter" && episode.lifecycle_state != "resolved"
-            })
-            .unwrap();
-        assert_eq!(episode.lifecycle_state, "triggered");
+            }));
     }
 }
 

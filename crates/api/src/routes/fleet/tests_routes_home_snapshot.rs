@@ -166,8 +166,9 @@ async fn home_snapshot_keeps_scope_failures_local_to_each_source() {
         );
         assert!(value[source]["error"].is_null());
     }
+    assert!(value["fleet_alerts"]["data"].is_null());
+    assert_eq!(value["fleet_alerts"]["error"], "forbidden");
     for source in [
-        "fleet_alerts",
         "file_transfers",
         "terminal_sessions",
         "backups",

@@ -592,6 +592,7 @@ async fn dispatch_alert_event_receipt(
             receipt_id,
             receipt_revision,
             "schedule.event_actor_revoked",
+            "rejected",
             "actor_authority_revoked",
             rendered_operation_hash.as_deref(),
         )
@@ -675,6 +676,7 @@ async fn dispatch_alert_event_receipt(
                         receipt_id,
                         receipt_revision,
                         "schedule.event_dependency_failed",
+                        "failed",
                         "trigger_dependency_failed",
                         rendered_operation_hash.as_deref(),
                     )
@@ -800,6 +802,7 @@ async fn dispatch_alert_event_receipt(
     .bind(format!("schedule:{schedule_id}"))
     .bind(&rendered_operation_hash)
     .bind(json!({
+        "result": "succeeded",
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "receipt_id": receipt_id,
@@ -923,6 +926,7 @@ async fn audit_terminal_receipt_in_tx(
     receipt_id: Uuid,
     definition_revision: i64,
     action: &str,
+    result: &str,
     reason: &str,
     command_hash: Option<&str>,
 ) -> Result<()> {
@@ -938,6 +942,7 @@ async fn audit_terminal_receipt_in_tx(
     .bind(format!("schedule:{schedule_id}"))
     .bind(command_hash)
     .bind(json!({
+        "result": result,
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "receipt_id": receipt_id,
@@ -972,6 +977,7 @@ async fn terminal_config_receipt_failure_in_tx(
         receipt_id,
         definition_revision,
         "schedule.event_config_failed",
+        "failed",
         reason,
         command_hash,
     )
@@ -1022,6 +1028,7 @@ async fn record_event_receipt_failure(pool: &PgPool, receipt_id: Uuid, error: &s
     .bind(format!("schedule:{schedule_id}"))
     .bind(receipt.try_get::<Option<String>, _>("rendered_operation_hash")?)
     .bind(json!({
+        "result": "failed",
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "receipt_id": receipt_id,
@@ -1137,6 +1144,7 @@ async fn disable_revoked_event_schedule_in_tx(
     .bind(schedule.actor_id)
     .bind(format!("schedule:{}", schedule.id))
     .bind(json!({
+        "result": "rejected",
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "schedule_id": schedule.id,
@@ -1176,6 +1184,7 @@ async fn disable_invalid_event_schedule_in_tx(
     .bind(schedule.actor_id)
     .bind(format!("schedule:{}", schedule.id))
     .bind(json!({
+        "result": "failed",
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "schedule_id": schedule.id,
@@ -1211,6 +1220,7 @@ async fn audit_receipt_created_in_tx(
     .bind(format!("schedule:{}", schedule.id))
     .bind(rendered_operation_hash)
     .bind(json!({
+        "result": status,
         "origin_kind": "worker",
         "component": EVENT_SCHEDULE_COMPONENT,
         "receipt_id": receipt_id,
@@ -1354,7 +1364,7 @@ mod tests {
         let template = vec![
             "/usr/bin/printf".to_string(),
             "%s\\n".to_string(),
-            "{alert.title} on {alert.client_id}".to_string(),
+            "{alert.title} on {alert.target_id}".to_string(),
             "{schedule.definition_revision}".to_string(),
         ];
         let (operation, hash) =
@@ -1376,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn alert_event_argv_rejects_dynamic_programs_and_non_scalars() {
+    fn alert_event_argv_rejects_dynamic_programs_and_non_scalars_without_shell_inference() {
         assert!(render_alert_event_job_command(
             Some(&["{alert.title}".to_string()]),
             &event_context()
@@ -1387,15 +1397,25 @@ mod tests {
             &event_context()
         )
         .is_err());
-        assert!(render_alert_event_job_command(
-            Some(&[
+        let shell_template = [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo {alert.title}".to_string(),
+        ];
+        let (operation, _) =
+            render_alert_event_job_command(Some(&shell_template), &event_context()).unwrap();
+        let JobCommand::Shell { argv, pty } = operation else {
+            panic!("expected shell operation");
+        };
+        assert!(!pty);
+        assert_eq!(
+            argv,
+            vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "echo {alert.title}".to_string(),
-            ]),
-            &event_context()
-        )
-        .is_err());
+                "echo Traffic threshold".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1424,6 +1444,7 @@ mod tests {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
         };
+        mark_alert_lifecycle_ready(&db.pool).await;
         let episode_id = insert_resolved_test_episode(&db.pool).await;
         let actor_id = insert_event_schedule_actor(&db.pool).await;
         let schedule_id = insert_event_schedule(
@@ -1482,6 +1503,25 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(dependency_count, 1);
+        let canonical_audit_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM audit_logs
+            WHERE target = $1
+              AND (
+                  (action = 'schedule.event_receipt_created'
+                   AND metadata ->> 'result' = 'pending')
+                  OR
+                  (action = 'schedule.event_dispatched'
+                   AND metadata ->> 'result' = 'succeeded')
+              )
+            "#,
+        )
+        .bind(format!("schedule:{schedule_id}"))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(canonical_audit_count, 4);
         db.cleanup().await;
     }
 
@@ -1643,6 +1683,7 @@ mod tests {
             WHERE action = 'schedule.event_dependency_failed'
               AND metadata ->> 'receipt_id' = $1
               AND metadata ->> 'reason' = 'trigger_dependency_failed'
+              AND metadata ->> 'result' = 'failed'
             "#,
         )
         .bind(dependent_resolve.to_string())
@@ -1760,6 +1801,19 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(job_count, 0);
+        let revocation_audit_result: String = sqlx::query_scalar(
+            r#"
+            SELECT metadata ->> 'result'
+            FROM audit_logs
+            WHERE action = 'schedule.event_actor_revoked'
+              AND metadata ->> 'receipt_id' = $1
+            "#,
+        )
+        .bind(receipt_id.to_string())
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(revocation_audit_result, "rejected");
         db.cleanup().await;
     }
 
@@ -1993,6 +2047,7 @@ mod tests {
         let Some(db) = PgWorkerTestDb::maybe_new().await else {
             return;
         };
+        mark_alert_lifecycle_ready(&db.pool).await;
         let episode_id = insert_resolved_test_episode(&db.pool).await;
         let actor_id = insert_event_schedule_actor(&db.pool).await;
         let mut waiting_schedule_ids = Vec::new();
@@ -2095,7 +2150,7 @@ mod tests {
             "alert.triggered",
             Some(vec![
                 "/bin/echo".to_string(),
-                "{alert.client_id}".to_string(),
+                "{alert.resolution_reason}".to_string(),
             ]),
             &[],
             1,
@@ -2183,6 +2238,31 @@ mod tests {
         .await
         .unwrap();
         actor_id
+    }
+
+    async fn mark_alert_lifecycle_ready(pool: &PgPool) {
+        sqlx::query(
+            r#"
+            UPDATE alert_expression_migration_meta
+            SET completed_at = clock_timestamp(),
+                rewritten_rule_count = 0,
+                rewritten_template_count = 0
+            WHERE singleton
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            r#"
+            UPDATE alert_policy_lifecycle_meta
+            SET startup_reconciled_at = clock_timestamp()
+            WHERE singleton
+            "#,
+        )
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn insert_event_schedule(

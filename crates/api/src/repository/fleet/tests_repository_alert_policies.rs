@@ -26,7 +26,7 @@ use super::{
     resolve_network_rate_interface_selection, resolve_policy_alert, traffic_accounting_for_client,
     traffic_accounting_for_client_with_selector_override, traffic_cycle_starts_for_clients,
     validate_billing_rule_group, NetworkRateSelectorReference, NetworkRateSelectorSpec,
-    PolicyAlertQuery, PolicyEvaluation, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
+    PolicyEvaluation, PolicyGroupRecord, PolicyRuleRecord, PolicyRuleRequest,
     PolicyRuleStateRecord, TelemetryRollupView, TrafficAccountingQuery, TrafficCounterRollupRecord,
     TrafficCounterSampleRecord, TrafficCounterStreamUsage, TrafficHistoryStream,
     TrafficStreamRequest, VpsRuleValueRecord, NO_RESET_TRAFFIC_START_UNIX,
@@ -1461,69 +1461,6 @@ async fn policy_summary_counts_only_confirmed_triggered_or_persisting_episodes()
     memory.policy_alerts.write().await[0] = alert;
     let summary = summarize(repo, group, agent).await;
     assert_eq!(summary.active_warning_count, 1);
-}
-
-#[tokio::test]
-async fn notification_candidate_limit_is_applied_after_confirmed_active_selection() {
-    let memory = MemoryState::default();
-    let repo = Repository::Memory(memory.clone());
-    let group = policy_group("status:online");
-    let agent = policy_agent(Vec::new());
-    let now = Utc.timestamp_opt(2_000_000_000, 0).single().unwrap();
-    let state = policy_state(1, true, &now.to_rfc3339());
-    let active = policy_alert_for_evaluation(
-        &group,
-        &group.rules[0],
-        &agent,
-        &state,
-        &true_policy_evaluation(),
-        &now.to_rfc3339(),
-    );
-    let active_id = active.id;
-    memory.agents.write().await.push(agent);
-    let mut alerts = vec![active];
-    let unknown_template = alerts[0].clone();
-    alerts.extend((1..=201).map(|index| {
-        let mut unknown = unknown_template.clone();
-        unknown.id = uuid::Uuid::new_v4();
-        unknown.trigger_generation = i64::from(index) + 1;
-        unknown.severity = "critical".to_string();
-        unknown.lifecycle_state = "unknown".to_string();
-        unknown.observed_at = (now + chrono::Duration::seconds(i64::from(index))).to_rfc3339();
-        unknown.created_at = unknown.observed_at.clone();
-        unknown
-    }));
-    *memory.policy_alerts.write().await = alerts;
-    let query = PolicyAlertQuery {
-        limit: None,
-        client_id: None,
-        severity: None,
-        category: None,
-        policy_group_id: None,
-    };
-
-    let current_fleet = repo
-        .list_policy_alert_candidates(&query, 201, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(current_fleet.len(), 201);
-    assert_eq!(current_fleet[0].id, active_id);
-    assert_eq!(current_fleet[0].lifecycle_state, "triggered");
-    assert_eq!(
-        current_fleet
-            .iter()
-            .filter(|alert| alert.lifecycle_state == "unknown")
-            .count(),
-        200
-    );
-
-    let notification = repo
-        .list_policy_alert_notification_candidates(&query, 200, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(notification.len(), 1);
-    assert_eq!(notification[0].id, active_id);
-    assert_eq!(notification[0].lifecycle_state, "triggered");
 }
 
 #[tokio::test]

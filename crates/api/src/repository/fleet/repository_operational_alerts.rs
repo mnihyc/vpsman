@@ -3465,7 +3465,7 @@ mod tests {
         assert_eq!(result.edges.len(), 1);
         assert_eq!(
             result.edges[0].0.event_id,
-            format!("{}:triggered", current.id)
+            format!("fleet-alert:{}:triggered", current.id)
         );
     }
 

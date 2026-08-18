@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 import { presentFleetAlert } from "../src/alertPresentation";
-import type { FleetAlertRecord } from "../src/types";
+import {
+  applyFleetAlertStates,
+  mergeFleetAlertStates,
+} from "../src/hooks/useFleetData";
+import type { FleetAlertRecord, FleetAlertStateRecord } from "../src/types";
 
 const baseAlert: FleetAlertRecord = {
   category: "resource",
@@ -42,6 +46,52 @@ function withLifecycle(
     lifecycle: { ...baseAlert.lifecycle, ...lifecycle },
   };
 }
+
+function alertWithState(state: FleetAlertStateRecord): FleetAlertRecord {
+  return {
+    ...baseAlert,
+    escalation_level: state.escalation_level,
+    muted_until_unix: state.muted_until_unix,
+    operator_state: state.state,
+    state_actor_id: state.actor_id,
+    state_reason: state.reason,
+    state_revision: state.revision,
+    state_updated_at: state.updated_at,
+  };
+}
+
+test("delayed bulk state responses cannot downgrade newer alert revisions", () => {
+  const delayed: FleetAlertStateRecord = {
+    actor_id: "99999999-aaaa-4bbb-8ccc-000000000001",
+    alert_id: baseAlert.id,
+    created_at: "2026-08-18T10:01:00Z",
+    escalation_level: 0,
+    muted_until_unix: null,
+    reason: "delayed acknowledgement",
+    revision: 11,
+    state: "acknowledged",
+    updated_at: "2026-08-18T10:01:00Z",
+  };
+  const newer: FleetAlertStateRecord = {
+    ...delayed,
+    escalation_level: 2,
+    reason: "newer escalation",
+    revision: 12,
+    state: "escalated",
+    updated_at: "2026-08-18T10:02:00Z",
+  };
+  const newerAlert = alertWithState(newer);
+
+  expect(mergeFleetAlertStates([newer], [delayed])).toEqual([newer]);
+  expect(applyFleetAlertStates([newerAlert], [delayed])).toEqual([
+    newerAlert,
+  ]);
+
+  expect(mergeFleetAlertStates([delayed], [newer])).toEqual([newer]);
+  expect(applyFleetAlertStates([alertWithState(delayed)], [newer])).toEqual([
+    newerAlert,
+  ]);
+});
 
 test("presents lifecycle and operator triage as independent state machines", () => {
   expect(presentFleetAlert(baseAlert)).toMatchObject({

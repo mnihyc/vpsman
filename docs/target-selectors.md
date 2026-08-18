@@ -724,8 +724,8 @@ compact authoring form for the same array: unquoted whitespace separates
 elements; single or double quotes group one element and are removed; and `''`
 or `""` creates an empty element. Outside quotes, a backslash quotes the next
 character and a backslash-newline continues the same element. Inside double
-quotes, backslash removes its special meaning only before `$`, backtick, `"`,
-or `\`; before any other character the backslash is preserved. Single-quoted
+quotes, backslash is removed only before `$`, backtick, `"`, `\`, or a newline;
+before any other character the backslash is preserved. Single-quoted
 text is literal until its closing quote. An unmatched quote or trailing
 backslash is rejected. There is no variable, glob, command, or shell expansion,
 and the parsed card shows the exact JSON array before review. For example,

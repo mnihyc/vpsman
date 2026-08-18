@@ -801,34 +801,19 @@ async fn backup_source_reuse_is_exact_and_failure_preserves_schedule_cycle_ances
         Some(second.id)
     );
 
-    repo.mark_open_backup_request_execution_terminal(
-        job_a,
-        "client-a",
-        BackupRequestStatus::ExecutionFailed,
-        Some(&operator),
-    )
-    .await
-    .unwrap();
-    let Repository::Memory(memory) = &repo else {
-        unreachable!();
-    };
-    let episodes = memory.operational_alert_episodes.read().await;
-    let failure = episodes
-        .iter()
-        .find(|episode| episode.natural_key == first.id.to_string())
-        .unwrap();
-    assert_eq!(
-        failure.evidence["causation_id"],
-        serde_json::json!(causation_a)
-    );
-    assert_eq!(
-        failure.evidence["schedule_lineage"],
-        serde_json::json!([schedule_a])
-    );
-    assert!(failure.evidence["schedule_lineage"]
-        .as_array()
+    let failure = repo
+        .mark_open_backup_request_execution_terminal(
+            job_a,
+            "client-a",
+            BackupRequestStatus::ExecutionFailed,
+            Some(&operator),
+        )
+        .await
         .unwrap()
-        .contains(&serde_json::json!(schedule_a)));
+        .unwrap();
+    assert_eq!(failure.causation_id, Some(causation_a));
+    assert_eq!(failure.schedule_lineage, vec![schedule_a]);
+    assert!(failure.schedule_lineage.contains(&schedule_a));
 }
 
 #[tokio::test]

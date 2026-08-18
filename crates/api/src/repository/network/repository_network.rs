@@ -690,7 +690,7 @@ impl Repository {
         operator: &AuthContext,
     ) -> Result<TunnelPlanView> {
         let previous = self
-            .get_tunnel_plan_record(plan_id)
+            .get_tunnel_plan_identity(plan_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))?;
         let mut affected_client_ids = HashSet::from([

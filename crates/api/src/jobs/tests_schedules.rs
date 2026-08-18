@@ -579,7 +579,7 @@ async fn schedule_target_update_persists_an_empty_resolution() {
 }
 
 #[tokio::test]
-async fn concurrent_schedule_edit_cannot_overwrite_retargeted_clients() {
+async fn concurrent_schedule_edit_and_retarget_linearize_without_overwrite() {
     let repo = Repository::Memory(MemoryState::default());
     let operator = schedule_test_operator();
     seed_never_connected_agent(&repo, "client-a").await;
@@ -623,17 +623,25 @@ async fn concurrent_schedule_edit_cannot_overwrite_retargeted_clients() {
             &operator,
         ),
     );
-    assert!(retarget_result.is_ok());
-    if let Err(error) = edit_result {
-        assert!(error.to_string().contains("schedule_snapshot_stale"));
+    let stored = repo.schedule_by_id(schedule.id).await.unwrap();
+    match (edit_result, retarget_result) {
+        (Ok(edited), Err(error)) => {
+            assert!(error.to_string().contains("schedule_snapshot_stale"));
+            assert_eq!(stored.name, "concurrent-snapshot-edited");
+            assert_eq!(stored.target_client_ids, schedule.target_client_ids);
+            assert_eq!(stored.definition_revision, edited.definition_revision);
+        }
+        (Err(error), Ok(retargeted)) => {
+            assert!(error.to_string().contains("schedule_snapshot_stale"));
+            assert_eq!(stored.name, schedule.name);
+            assert_eq!(stored.target_client_ids, vec!["client-b".to_string()]);
+            assert_eq!(stored.definition_revision, retargeted.definition_revision);
+        }
+        (Ok(_), Ok(_)) => panic!("concurrent updates committed from the same snapshot"),
+        (Err(edit_error), Err(retarget_error)) => panic!(
+            "both concurrent updates failed: edit={edit_error:#}; retarget={retarget_error:#}"
+        ),
     }
-    assert_eq!(
-        repo.schedule_by_id(schedule.id)
-            .await
-            .unwrap()
-            .target_client_ids,
-        vec!["client-b".to_string()]
-    );
 }
 
 #[tokio::test]

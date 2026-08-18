@@ -1579,13 +1579,11 @@ function dedupeFleetAlertsById(alerts: FleetAlertRecord[]): FleetAlertRecord[] {
   return Array.from(byId.values());
 }
 
-function applyFleetAlertStates(
+export function applyFleetAlertStates(
   alerts: FleetAlertRecord[],
   states: FleetAlertStateRecord[],
 ): FleetAlertRecord[] {
-  const stateByAlertId = new Map(
-    states.map((state) => [state.alert_id, state]),
-  );
+  const stateByAlertId = latestFleetAlertStateById(states);
   return alerts.map((alert) =>
     applyFleetAlertState(alert, stateByAlertId.get(alert.id)),
   );
@@ -1595,33 +1593,50 @@ function applyFleetAlertState(
   alert: FleetAlertRecord,
   state: FleetAlertStateRecord | undefined,
 ): FleetAlertRecord {
-  return state
-    ? {
-        ...alert,
-        escalation_level: state.escalation_level,
-        muted_until_unix: state.muted_until_unix,
-        operator_state: state.state,
-        state_actor_id: state.actor_id,
-        state_reason: state.reason,
-        state_revision: state.revision,
-        state_updated_at: state.updated_at,
-      }
-    : alert;
+  if (!state || state.revision < (alert.state_revision ?? 0)) {
+    return alert;
+  }
+  return {
+    ...alert,
+    escalation_level: state.escalation_level,
+    muted_until_unix: state.muted_until_unix,
+    operator_state: state.state,
+    state_actor_id: state.actor_id,
+    state_reason: state.reason,
+    state_revision: state.revision,
+    state_updated_at: state.updated_at,
+  };
 }
 
-function mergeFleetAlertStates(
+export function mergeFleetAlertStates(
   current: FleetAlertStateRecord[],
   changed: FleetAlertStateRecord[],
 ): FleetAlertStateRecord[] {
-  const changedIds = new Set(changed.map((state) => state.alert_id));
-  return [
-    ...changed,
-    ...current.filter((state) => !changedIds.has(state.alert_id)),
-  ].sort(
+  const statesByAlertId = latestFleetAlertStateById(current);
+  for (const state of changed) {
+    const existing = statesByAlertId.get(state.alert_id);
+    if (!existing || state.revision > existing.revision) {
+      statesByAlertId.set(state.alert_id, state);
+    }
+  }
+  return Array.from(statesByAlertId.values()).sort(
     (left, right) =>
       right.updated_at.localeCompare(left.updated_at) ||
       left.alert_id.localeCompare(right.alert_id),
   );
+}
+
+function latestFleetAlertStateById(
+  states: FleetAlertStateRecord[],
+): Map<string, FleetAlertStateRecord> {
+  const latest = new Map<string, FleetAlertStateRecord>();
+  for (const state of states) {
+    const existing = latest.get(state.alert_id);
+    if (!existing || state.revision > existing.revision) {
+      latest.set(state.alert_id, state);
+    }
+  }
+  return latest;
 }
 
 function snapshotSourceErrorSummary(

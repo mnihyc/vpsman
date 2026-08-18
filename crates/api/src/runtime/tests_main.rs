@@ -979,7 +979,6 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
     let repo = Repository::Memory(MemoryState::default());
     let deleted_client_id = "deleted-observability";
     let visible_peer_id = "visible-observability-peer";
-    let policy_alert_id = Uuid::new_v4();
     let direct_observation_id = Uuid::new_v4();
     let peer_observation_id = Uuid::new_v4();
 
@@ -1159,26 +1158,6 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         observation(direct_observation_id, deleted_client_id, visible_peer_id),
         observation(peer_observation_id, visible_peer_id, deleted_client_id),
     ]);
-    memory.policy_alerts.write().await.push(PolicyAlertRecord {
-        id: policy_alert_id,
-        policy_group_id: Uuid::new_v4(),
-        policy_rule_id: Uuid::new_v4(),
-        client_id: deleted_client_id.to_string(),
-        trigger_generation: 1,
-        severity: "warning".to_string(),
-        category: "resource".to_string(),
-        title: "Historical resource alert".to_string(),
-        detail: "retained after VPS deletion".to_string(),
-        actual_value: Some(0.9),
-        threshold_value: Some(0.8),
-        payload: serde_json::json!({"source": "lifecycle-regression"}),
-        lifecycle_state: "unknown".to_string(),
-        last_confirmed_at: None,
-        resolved_at: None,
-        resolution_reason: None,
-        observed_at: "1700000000".to_string(),
-        created_at: "1700000000".to_string(),
-    });
     let process_job_id = Uuid::new_v4();
     memory.jobs.write().await.push(JobHistoryView {
         id: process_job_id,
@@ -1232,19 +1211,6 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         2
     );
     assert_eq!(
-        repo.list_policy_alerts(&PolicyAlertQuery {
-            limit: Some(10),
-            client_id: Some(deleted_client_id.to_string()),
-            severity: None,
-            category: None,
-            policy_group_id: None,
-        })
-        .await
-        .unwrap()
-        .len(),
-        1
-    );
-    assert_eq!(
         repo.list_process_supervisor_inventory(10)
             .await
             .unwrap()
@@ -1273,17 +1239,6 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         .is_empty());
     assert!(repo
         .list_network_observations(10, true)
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(repo
-        .list_policy_alerts(&PolicyAlertQuery {
-            limit: Some(10),
-            client_id: Some(deleted_client_id.to_string()),
-            severity: None,
-            category: None,
-            policy_group_id: None,
-        })
         .await
         .unwrap()
         .is_empty());
@@ -1325,12 +1280,6 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
         historical_observation_ids,
         std::collections::HashSet::from([direct_observation_id, peer_observation_id])
     );
-    assert!(memory
-        .policy_alerts
-        .read()
-        .await
-        .iter()
-        .any(|alert| alert.id == policy_alert_id));
     assert!(memory
         .job_outputs
         .read()

@@ -7,8 +7,6 @@ use axum::{
 use serde_json::json;
 use vpsman_common::{AgentCapabilitySnapshot, AgentPrivilegeMode};
 
-use crate::model_alert_policies::PolicyAlertRecord;
-
 #[tokio::test]
 async fn dashboard_overview_rejects_invalid_window() {
     let state = dashboard_test_state(Repository::Memory(MemoryState::default()));
@@ -437,11 +435,7 @@ async fn dashboard_overview_aggregates_memory_state() {
         .iter()
         .any(|client| client.client_id == "edge-b"
             && client.points.iter().any(|point| point.tx_bytes == 9_000)));
-    assert!(view
-        .operations
-        .recent_alerts
-        .iter()
-        .any(|alert| alert.client_label.as_deref() == Some("Edge B")));
+    assert!(view.operations.recent_alerts.is_empty());
     assert!(view
         .label_clusters
         .iter()
@@ -615,95 +609,6 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
     agents.push(make_agent(selected_client.to_string(), "stale"));
     memory.agents.write().await.extend(agents);
 
-    let policy_group_id = Uuid::new_v4();
-    let policy_rule_id = Uuid::new_v4();
-    memory.policy_alerts.write().await.extend([
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id,
-            client_id: selected_client.to_string(),
-            trigger_generation: 1,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Current selected alert".to_string(),
-            detail: "must remain visible after scope filtering".to_string(),
-            actual_value: Some(2.0),
-            threshold_value: Some(1.0),
-            payload: json!({}),
-            lifecycle_state: "triggered".to_string(),
-            last_confirmed_at: Some(current.clone()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: current.clone(),
-            created_at: current.clone(),
-        },
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id,
-            client_id: selected_client.to_string(),
-            trigger_generation: 2,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Future selected alert".to_string(),
-            detail: "must not appear before its observation time".to_string(),
-            actual_value: Some(2.0),
-            threshold_value: Some(1.0),
-            payload: json!({}),
-            lifecycle_state: "triggered".to_string(),
-            last_confirmed_at: Some(future.clone()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: future.clone(),
-            created_at: future.clone(),
-        },
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id: Uuid::new_v4(),
-            client_id: selected_client.to_string(),
-            trigger_generation: 1,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Unknown selected alert".to_string(),
-            detail: "must remain visible as evidence but never count active".to_string(),
-            actual_value: None,
-            threshold_value: Some(1.0),
-            payload: json!({}),
-            lifecycle_state: "unknown".to_string(),
-            last_confirmed_at: Some(current.clone()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: current.clone(),
-            created_at: current.clone(),
-        },
-    ]);
-    memory
-        .policy_alerts
-        .write()
-        .await
-        .extend((0..201).map(|index| PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id: Uuid::new_v4(),
-            client_id: format!("noise-{index:03}"),
-            trigger_generation: 1,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Unrelated alert".to_string(),
-            detail: "must not consume the scoped alert cap".to_string(),
-            actual_value: Some(2.0),
-            threshold_value: Some(1.0),
-            payload: json!({}),
-            lifecycle_state: "triggered".to_string(),
-            last_confirmed_at: Some(now.saturating_sub(1).to_string()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: now.saturating_sub(1).to_string(),
-            created_at: now.saturating_sub(1).to_string(),
-        }));
-
     let selected_running_job_id = Uuid::new_v4();
     let mut jobs = vec![make_job(
         selected_running_job_id,
@@ -786,29 +691,14 @@ async fn dashboard_filters_scope_status_and_time_before_bounded_results() {
     assert_eq!(view.operations.running_jobs, 1);
     assert_eq!(view.operations.backup_pending, 1);
     assert_eq!(view.operations.backup_failed, 1);
-    assert_eq!(view.operations.active_alerts, 3);
-    assert!(view
-        .operations
-        .recent_alerts
-        .iter()
-        .any(|alert| alert.title == "Current selected alert"));
-    assert!(!view
-        .operations
-        .recent_alerts
-        .iter()
-        .any(|alert| alert.title == "Future selected alert"));
-    assert!(!view
-        .operations
-        .recent_alerts
-        .iter()
-        .any(|alert| alert.title == "Unknown selected alert"));
+    assert_eq!(view.operations.active_alerts, 0);
+    assert!(view.operations.recent_alerts.is_empty());
     assert_eq!(
         view.label_clusters
             .iter()
             .map(|cluster| cluster.warnings)
             .sum::<usize>(),
-        view.operations.active_alerts,
-        "date clusters must not classify Unknown policy evidence as an open alert"
+        0
     );
 }
 
@@ -866,70 +756,6 @@ async fn dashboard_date_groups_do_not_rebucket_active_jobs_created_before_the_ra
             process_incarnation_id: None,
         });
     }
-    let policy_group_id = Uuid::new_v4();
-    memory.policy_alerts.write().await.extend([
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id: Uuid::new_v4(),
-            client_id: "edge-a".to_string(),
-            trigger_generation: 1,
-            severity: "warning".to_string(),
-            category: "resource".to_string(),
-            title: "Old active policy episode".to_string(),
-            detail: "current activity predates the selected history window".to_string(),
-            actual_value: Some(0.8),
-            threshold_value: Some(0.75),
-            payload: json!({}),
-            lifecycle_state: "triggered".to_string(),
-            last_confirmed_at: Some(old.to_string()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: old.to_string(),
-            created_at: old.to_string(),
-        },
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id: Uuid::new_v4(),
-            client_id: "edge-a".to_string(),
-            trigger_generation: 1,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Old unknown policy episode".to_string(),
-            detail: "unknown evidence is current but never active".to_string(),
-            actual_value: None,
-            threshold_value: Some(0.9),
-            payload: json!({}),
-            lifecycle_state: "unknown".to_string(),
-            last_confirmed_at: Some(old.to_string()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: old.to_string(),
-            created_at: old.to_string(),
-        },
-        PolicyAlertRecord {
-            id: Uuid::new_v4(),
-            policy_group_id,
-            policy_rule_id: Uuid::new_v4(),
-            client_id: "edge-a".to_string(),
-            trigger_generation: 1,
-            severity: "critical".to_string(),
-            category: "resource".to_string(),
-            title: "Future policy episode".to_string(),
-            detail: "future evidence must remain excluded".to_string(),
-            actual_value: Some(0.95),
-            threshold_value: Some(0.9),
-            payload: json!({}),
-            lifecycle_state: "triggered".to_string(),
-            last_confirmed_at: Some(now.saturating_add(60).to_string()),
-            resolved_at: None,
-            resolution_reason: None,
-            observed_at: now.saturating_add(60).to_string(),
-            created_at: now.saturating_add(60).to_string(),
-        },
-    ]);
-
     let state = dashboard_test_state(repo);
     let headers = crate::test_auth_headers(&state).await;
     let Json(view) = routes_dashboard::dashboard_overview(
@@ -950,35 +776,12 @@ async fn dashboard_date_groups_do_not_rebucket_active_jobs_created_before_the_ra
         "current workload summary remains independent of creation time"
     );
     assert_eq!(
-        view.operations.active_alerts, 1,
-        "current Triggered policy episodes remain active outside the history window; Unknown and future evidence do not"
-    );
-    assert!(view
-        .operations
-        .recent_alerts
-        .iter()
-        .any(|alert| alert.title == "Old active policy episode"));
-    assert!(!view.operations.recent_alerts.iter().any(|alert| {
-        matches!(
-            alert.title.as_str(),
-            "Old unknown policy episode" | "Future policy episode"
-        )
-    }));
-    assert_eq!(
         view.label_clusters
             .iter()
             .map(|cluster| cluster.running_jobs)
             .sum::<usize>(),
         1,
         "date groups include only jobs actually created inside the selected range"
-    );
-    assert_eq!(
-        view.label_clusters
-            .iter()
-            .map(|cluster| cluster.warnings)
-            .sum::<usize>(),
-        0,
-        "current episodes predating the range must not be rebucketed into its timeline"
     );
     assert!(view.label_clusters.iter().all(|cluster| {
         crate::util::parse_timestamp_unix(&cluster.label)
