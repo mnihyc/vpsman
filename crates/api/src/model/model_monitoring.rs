@@ -494,6 +494,7 @@ pub(crate) struct PublicResourceMetricView {
     pub(crate) swap_available_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) swap_used_ratio_avg: Option<f64>,
+    pub(crate) disk_sample_count: i32,
     pub(crate) disk_total_bytes: i64,
     pub(crate) disk_available_bytes: i64,
     pub(crate) disk_used_ratio_avg: f64,

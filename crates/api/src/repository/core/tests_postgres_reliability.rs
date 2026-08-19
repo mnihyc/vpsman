@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fs, path::Path, str::FromStr, time::Duration};
+use std::{collections::BTreeMap, fs, path::Path, str::FromStr, sync::Arc, time::Duration};
 
 use axum::{
     body::{to_bytes, Body},
@@ -11,7 +11,7 @@ use sqlx::{
     types::Json as SqlJson,
     PgPool, Row,
 };
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, Barrier};
 use tower::ServiceExt;
 use uuid::Uuid;
 use vpsman_common::{
@@ -23,8 +23,9 @@ use vpsman_common::{
     NetworkTrafficImportSource, OspfControlMode, OspfCostPolicy, OutputStream, PingTargetResult,
     PortForwardProtocol, PortForwardRuntimeSnapshot, PortForwardRuntimeStatus,
     RuntimeTunnelControl, RuntimeTunnelManager, RuntimeTunnelStat, TelemetryEnvelope,
-    TunnelAddressFamily, TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig,
-    TunnelPlanInput, TunnelReachabilityObservation, TunnelReachabilitySource,
+    TerminalControlAck, TerminalControlAction, TerminalStreamOutput, TunnelAddressFamily,
+    TunnelAddressPair, TunnelEndpointSide, TunnelKind, TunnelOspfConfig, TunnelPlanInput,
+    TunnelReachabilityObservation, TunnelReachabilitySource,
 };
 
 #[tokio::test]
@@ -1638,9 +1639,9 @@ use crate::{
     model::{
         AuthContext, BackupRequestStatus, BootstrapOperatorRequest, BulkTagMutationAction,
         BulkTagMutationRequest, ConfigurationOverrideAction, CreateBackupPolicyRequest,
-        CreateBackupRequest, CreateConfigurationPresetRequest, CreateScheduleRequest,
-        JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest, NewServerArtifact,
-        PingTargetRecord, PreviewConfigurationPresetRequest,
+        CreateBackupRequest, CreateConfigurationPresetRequest, CreateOperatorRequest,
+        CreateScheduleRequest, JobOutputView, JobRolloutPolicy, ListQuery, LoginRequest,
+        NewServerArtifact, PingTargetRecord, PreviewConfigurationPresetRequest,
         PreviewConfigurationSourceOverrideRequest, RuntimeConfigOverrideCandidate,
         RuntimeConfigOverrideReplacement, SchedulePrivilegeMutationRequest, ScheduleTriggerKind,
         UpdateTagOrderRequest, UpsertAgentIdentityRequest,
@@ -1661,7 +1662,8 @@ use crate::{
     model_history::UpsertHistoryRetentionPolicyRequest,
     model_history::{HistoryDomain, HistoryRetentionPrunePlan},
     model_port_forwarding::{
-        CreatePortForwardRuleRequest, UpdatePortForwardRuleRequest, UpdateTargetHostname,
+        CreatePortForwardRuleRequest, PortForwardBulkAction, PortForwardBulkItem,
+        UpdatePortForwardRuleRequest, UpdateTargetHostname,
     },
     model_terminal::TerminalSessionView,
     model_webhook_rules::{CreateWebhookRuleRequest, WebhookRuleDeliveryCandidate},
@@ -1671,6 +1673,10 @@ use crate::{
     },
     repository_backups::BackupRequestSourceLink,
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
+    repository_jobs::{
+        enqueue_target_terminal_event_in_tx,
+        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event,
+    },
     repository_network_observations::NetworkObservationFilter,
     repository_network_traffic_import::load_postgres_import_boundary_samples,
     repository_terminal_sessions::upsert_postgres_terminal_session,
@@ -2569,6 +2575,102 @@ async fn postgres_rollout_reconciler_isolates_missing_current_batch_assignment()
     .await
     .unwrap();
     assert_eq!(healthy, ("running".to_string(), 1, None));
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_rollout_mutation_responses_are_the_locked_writer_state() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    for client_id in ["rollout-response-a", "rollout-response-b"] {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    let job_id = Uuid::new_v4();
+    let mut request = crate::tests::operation_job_request(
+        JobCommand::AgentUpdateCheck {
+            version_url: None,
+            activate: false,
+            restart_agent: false,
+        },
+        &["rollout-response-a", "rollout-response-b"],
+    );
+    request.rollout = Some(JobRolloutPolicy {
+        canary_client_ids: vec!["rollout-response-a".to_string()],
+        batch_size: 1,
+        max_failures: 0,
+        pause_after_canary: false,
+        batch_delay_secs: 0,
+    });
+    db.repo
+        .record_dispatching_job(
+            job_id,
+            &request,
+            "rollout-response-command-hash",
+            "rollout-response-fingerprint",
+            &operator,
+            &request.target_client_ids,
+        )
+        .await
+        .unwrap();
+
+    let paused = db
+        .repo
+        .pause_job_rollout(job_id, &operator, Some("response pause"))
+        .await
+        .unwrap();
+    let persisted_paused = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, pause_reason, updated_at::text FROM job_rollouts WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(paused.status, persisted_paused.0);
+    assert_eq!(paused.pause_reason, persisted_paused.1);
+    assert_eq!(paused.updated_at, persisted_paused.2);
+
+    let resumed = db
+        .repo
+        .resume_job_rollout(job_id, &operator, Some("response resume"))
+        .await
+        .unwrap();
+    let persisted_resumed = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, pause_reason, updated_at::text FROM job_rollouts WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(resumed.status, persisted_resumed.0);
+    assert_eq!(resumed.pause_reason, persisted_resumed.1);
+    assert_eq!(resumed.updated_at, persisted_resumed.2);
+
+    for iteration in 0..8 {
+        db.repo
+            .resume_job_rollout(job_id, &operator, Some("race reset"))
+            .await
+            .unwrap();
+        let pause_reason = format!("race pause {iteration}");
+        let (paused, resumed) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                db.repo
+                    .pause_job_rollout(job_id, &operator, Some(&pause_reason)),
+                db.repo
+                    .resume_job_rollout(job_id, &operator, Some("race resume")),
+            )
+        })
+        .await
+        .expect("opposite rollout mutations should not deadlock");
+        let paused = paused.unwrap();
+        let resumed = resumed.unwrap();
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.pause_reason.as_deref(), Some(pause_reason.as_str()));
+        assert_eq!(resumed.status, "running");
+        assert!(resumed.pause_reason.is_none());
+    }
 
     db.cleanup().await;
 }
@@ -5134,6 +5236,10 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
                     total_bytes: 200,
                     available_bytes: 50,
                 }],
+                disk_collection_available: Some(true),
+                disk_semantics: Some(
+                    vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string(),
+                ),
                 networks: vec![NetworkStat {
                     interface: "eth0".to_string(),
                     rx_bytes: 100,
@@ -5371,14 +5477,21 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
                 / nullif(sum(swap_sample_count), 0)::double precision
                 AS swap_used_ratio_avg,
             max(swap_used_ratio_max) AS swap_used_ratio_max,
-            max(disk_total_bytes_max) AS disk_total_bytes_max,
+            sum(disk_sample_count)::integer AS disk_sample_count,
+            max(disk_total_bytes_max)
+                FILTER (WHERE disk_sample_count > 0) AS disk_total_bytes_max,
             round(
-                sum(disk_available_bytes_sum) / sum(sample_count)::numeric
+                sum(disk_available_bytes_sum)
+                    FILTER (WHERE disk_sample_count > 0)
+                    / sum(disk_sample_count)::numeric
             )::bigint AS disk_available_bytes_avg,
-            min(disk_available_bytes_min) AS disk_available_bytes_min,
+            min(disk_available_bytes_min)
+                FILTER (WHERE disk_sample_count > 0) AS disk_available_bytes_min,
             sum(disk_used_ratio_sum)
-                / sum(sample_count)::double precision AS disk_used_ratio_avg,
-            max(disk_used_ratio_max) AS disk_used_ratio_max
+                FILTER (WHERE disk_sample_count > 0)
+                / sum(disk_sample_count)::double precision AS disk_used_ratio_avg,
+            max(disk_used_ratio_max)
+                FILTER (WHERE disk_sample_count > 0) AS disk_used_ratio_max
         FROM telemetry_rollups
         WHERE client_id = $1
         "#,
@@ -5428,6 +5541,7 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
             .abs()
             < f64::EPSILON
     );
+    assert_eq!(resource_rollup.get::<i32, _>("disk_sample_count"), 4);
     assert_eq!(resource_rollup.get::<i64, _>("disk_total_bytes_max"), 400);
     assert_eq!(
         resource_rollup.get::<i64, _>("disk_available_bytes_avg"),
@@ -5469,6 +5583,194 @@ async fn postgres_telemetry_ingest_is_sequence_bound_and_idempotent() {
     .await
     .unwrap();
     assert_eq!(webhook_event_count, 4);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_disk_presence_excludes_failed_zero_and_unversioned_samples_from_utilization() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "disk-presence-client";
+    let gateway_id = "disk-presence-gateway";
+    let process_incarnation_id = Uuid::new_v4();
+    let gateway_session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(process_incarnation_id)).await;
+    start_test_gateway_session(&db.repo, gateway_id, client_id, gateway_session_id).await;
+
+    let bucket_start = crate::unix_now() / 60 * 60;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            disk_sample_count, disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_sum, disk_available_bytes_min,
+            disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        ) VALUES (
+            $1, to_timestamp($2::double precision), 60, 1,
+            0, 0, 0, 1, 1, 1, 1, 0, 0, 0,
+            0, 1000, 999, 999, 999, 0.99, 0.99, 0.99,
+            0, 0, to_timestamp($2::double precision)
+        )
+        "#,
+    )
+    .bind(client_id)
+    .bind(bucket_start as f64)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let canonical = vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1;
+    let conflict_metrics = AgentMetrics {
+        observed_unix: bucket_start + 1,
+        hostname: client_id.to_string(),
+        disks: vec![DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 100,
+            available_bytes: 25,
+        }],
+        disk_collection_available: Some(true),
+        disk_semantics: Some(canonical.to_string()),
+        ..AgentMetrics::default()
+    };
+    let mut tx = db.pool.begin().await.unwrap();
+    crate::repository_ingest::upsert_postgres_telemetry_rollup(
+        &mut tx,
+        client_id,
+        &conflict_metrics,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (i32, i32, i64, i64, i64, f64, f64)>(
+            r#"
+            SELECT sample_count, disk_sample_count, disk_total_bytes_max,
+                   disk_available_bytes_sum::bigint, disk_available_bytes_min,
+                   disk_used_ratio_avg, disk_used_ratio_max
+            FROM telemetry_rollups
+            WHERE client_id = $1
+              AND bucket_secs = 60
+              AND bucket_start = to_timestamp($2::double precision)
+            "#,
+        )
+        .bind(client_id)
+        .bind(bucket_start as f64)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (2, 1, 100, 25, 25, 0.75, 0.75)
+    );
+
+    let mut event = GatewayTelemetryIngest {
+        gateway_id: gateway_id.to_string(),
+        gateway_session_id,
+        process_incarnation_id,
+        telemetry_seq: 1,
+        remote_ip: None,
+        telemetry: TelemetryEnvelope {
+            client_id: client_id.to_string(),
+            metrics: AgentMetrics {
+                observed_unix: 1,
+                ..conflict_metrics
+            },
+        },
+    };
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+
+    event.telemetry_seq = 2;
+    event.telemetry.metrics.disks.clear();
+    event.telemetry.metrics.disk_collection_available = Some(false);
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+
+    event.telemetry_seq = 3;
+    event.telemetry.metrics.disk_collection_available = Some(true);
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+
+    event.telemetry_seq = 4;
+    event.telemetry.metrics.disks.push(DiskStat {
+        mountpoint: "/legacy".to_string(),
+        total_bytes: 1_000,
+        available_bytes: 0,
+    });
+    event.telemetry.metrics.disk_collection_available = None;
+    event.telemetry.metrics.disk_semantics = None;
+    assert!(db.repo.record_telemetry(&event).await.unwrap());
+
+    let rollup: (i64, i64, i64, i64, f64) = sqlx::query_as(
+        r#"
+        SELECT
+            sum(sample_count)::bigint,
+            sum(disk_sample_count)::bigint,
+            max(disk_total_bytes_max)
+                FILTER (WHERE disk_sample_count > 0)::bigint,
+            round(sum(disk_available_bytes_sum)
+                / nullif(sum(disk_sample_count), 0)::numeric)::bigint,
+            sum(disk_used_ratio_sum)
+                / nullif(sum(disk_sample_count), 0)::double precision
+        FROM telemetry_rollups
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rollup, (6, 2, 100, 25, 0.75));
+
+    let raw_presence: (i64, i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            count(*)::bigint,
+            count(disk_total_bytes)::bigint,
+            count(*) FILTER (WHERE disk_total_bytes > 0)::bigint
+        FROM telemetry_samples
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(raw_presence, (4, 2, 1));
+
+    let bounds: (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            extract(epoch FROM min(observed_at))::bigint,
+            extract(epoch FROM max(observed_at))::bigint
+        FROM telemetry_samples
+        WHERE client_id = $1
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let raw = db
+        .repo
+        .list_dashboard_raw_telemetry_rollups(
+            10,
+            bounds.0.max(0) as u64,
+            bounds.1.max(0) as u64,
+            60,
+            &[client_id.to_string()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(raw.iter().map(|row| row.sample_count).sum::<i32>(), 4);
+    assert_eq!(raw.iter().map(|row| row.disk_sample_count).sum::<i32>(), 1);
+    assert!(raw
+        .iter()
+        .filter(|row| row.disk_sample_count > 0)
+        .all(|row| row.disk_used_ratio_avg == 0.75));
 
     db.cleanup().await;
 }
@@ -6741,12 +7043,13 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
                 disk_total_bytes_max, disk_available_bytes_avg,
                 disk_available_bytes_sum, disk_available_bytes_min,
                 disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-                network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+                network_rx_bytes_max, network_tx_bytes_max,
+                disk_sample_count, latest_observed_at
             )
             VALUES (
                 $1, to_timestamp($2::double precision), 60, 1,
                 $3, $3, $3, 1000, 500, 500, 500, 0.5, 0.5, 0.5,
-                2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0,
+                2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0, 1,
                 to_timestamp($2::double precision)
             )
             "#,
@@ -6854,19 +7157,20 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            network_rx_bytes_max, network_tx_bytes_max,
+            disk_sample_count, latest_observed_at
         )
         VALUES
             (
                 'selected-telemetry', to_timestamp($1::double precision), 60, 1,
                 1.0, 1.0, 1.2, 1000, 900, 900, 900, 0.1, 0.1, 0.1,
-                2000, 1900, 1900, 1900, 0.05, 0.05, 0.05, 0, 0,
+                2000, 1900, 1900, 1900, 0.05, 0.05, 0.05, 0, 0, 1,
                 to_timestamp($1::double precision)
             ),
             (
                 'selected-telemetry', to_timestamp($2::double precision), 60, 3,
                 3.0, 9.0, 3.4, 1000, 500, 1500, 500, 0.5, 1.5, 0.5,
-                2000, 1100, 3300, 1100, 0.45, 1.35, 0.45, 0, 0,
+                2000, 1100, 3300, 1100, 0.45, 1.35, 0.45, 0, 0, 3,
                 to_timestamp($2::double precision)
             )
         "#,
@@ -6917,25 +7221,26 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            network_rx_bytes_max, network_tx_bytes_max,
+            disk_sample_count, latest_observed_at
         )
         VALUES
             (
                 'multi-day-telemetry', to_timestamp(0), 60, 1,
                 1.0, 1.0, 1.0, 1000, 900, 900, 900, 0.1, 0.1, 0.1,
-                2000, 1900, 1900, 1900, 0.05, 0.05, 0.05, 0, 0,
+                2000, 1900, 1900, 1900, 0.05, 0.05, 0.05, 0, 0, 1,
                 to_timestamp(0)
             ),
             (
                 'multi-day-telemetry', to_timestamp(172800), 60, 1,
                 2.0, 2.0, 2.0, 1000, 800, 800, 800, 0.2, 0.2, 0.2,
-                2000, 1800, 1800, 1800, 0.1, 0.1, 0.1, 0, 0,
+                2000, 1800, 1800, 1800, 0.1, 0.1, 0.1, 0, 0, 1,
                 to_timestamp(172800)
             ),
             (
                 'multi-day-telemetry', to_timestamp(345600), 60, 1,
                 3.0, 3.0, 3.0, 1000, 700, 700, 700, 0.3, 0.3, 0.3,
-                2000, 1700, 1700, 1700, 0.15, 0.15, 0.15, 0, 0,
+                2000, 1700, 1700, 1700, 0.15, 0.15, 0.15, 0, 0, 1,
                 to_timestamp(345600)
             )
         "#,
@@ -7353,14 +7658,15 @@ async fn postgres_telemetry_queries_preserve_scope_baseline_and_multi_day_endpoi
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            network_rx_bytes_max, network_tx_bytes_max,
+            disk_sample_count, latest_observed_at
         ) VALUES (
             'adaptive-telemetry', to_timestamp($1::double precision), 300, 5,
             5, 1.25, 0.25, 0.25, 2,
             0.5, 2.5, 0.5, 0.4, 2.0, 0.4, 0.3, 1.5, 0.3,
             1000, 500, 2500, 500, 0.5, 2.5, 0.5,
             1, 1000, 400, 400, 400, 0.6, 0.6, 0.6,
-            2000, 1000, 5000, 1000, 0.5, 2.5, 0.5, 0, 0,
+            2000, 1000, 5000, 1000, 0.5, 2.5, 0.5, 0, 0, 5,
             to_timestamp(($1::bigint + 299)::double precision)
         )
         "#,
@@ -7608,17 +7914,18 @@ async fn postgres_retained_queries_preserve_authority_baselines_and_reset_gaps()
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            network_rx_bytes_max, network_tx_bytes_max,
+            disk_sample_count, latest_observed_at
         ) VALUES
             ($1, to_timestamp(($2::bigint + 60)::double precision), 60, 1,
                 1, 0.9, 0.9, 0.9, 2, 9, 9, 9, 9, 9, 9, 9, 9, 9,
                 1000, 100, 100, 100, 0.9, 0.9, 0.9,
-                2000, 200, 200, 200, 0.9, 0.9, 0.9, 0, 0,
+                2000, 200, 200, 200, 0.9, 0.9, 0.9, 0, 0, 1,
                 to_timestamp(($2::bigint + 60)::double precision)),
             ($1, to_timestamp($2::double precision), 300, 5,
                 5, 1, 0.2, 0.3, 2, 2, 10, 3, 2, 10, 3, 2, 10, 3,
                 1000, 800, 4000, 700, 0.2, 1.0, 0.3,
-                2000, 1600, 8000, 1400, 0.2, 1.0, 0.3, 0, 0,
+                2000, 1600, 8000, 1400, 0.2, 1.0, 0.3, 0, 0, 5,
                 to_timestamp(($2::bigint + 240)::double precision))
         "#,
     )
@@ -8152,12 +8459,13 @@ async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded()
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
-            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+            network_rx_bytes_max, network_tx_bytes_max,
+            disk_sample_count, latest_observed_at
         )
         SELECT
             id, date_trunc('minute', now()), 60, 1,
             2.0, 2.0, 2.0, 1000, 500, 500, 500, 0.5, 0.5, 0.5,
-            2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0, now()
+            2000, 1500, 1500, 1500, 0.25, 0.25, 0.25, 0, 0, 1, now()
         FROM visible_clients
         WHERE id LIKE 'policy-rollup-scale-%'
         "#,
@@ -8226,6 +8534,97 @@ async fn postgres_policy_rollup_lookup_is_selected_and_not_public_page_bounded()
 }
 
 #[tokio::test]
+async fn postgres_fleet_alert_policy_regression_idless_retry_preserves_rule_identity_and_arm() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+    let request = || CreateFleetAlertPolicyRequest {
+        id: None,
+        name: "concurrent-name-policy".to_string(),
+        enabled: true,
+        selector_expression: "*".to_string(),
+        rules: vec![postgres_metric_policy_rule_request(
+            None,
+            "cpu threshold",
+            "warning",
+        )],
+        notes: None,
+        confirmed: true,
+        preview_hash: None,
+    };
+    let initial_request = request();
+    let initial = db
+        .repo
+        .upsert_fleet_alert_policy(&initial_request, &operator)
+        .await
+        .unwrap();
+    let persisted_initial = db
+        .repo
+        .get_fleet_alert_policy(initial.id, true)
+        .await
+        .unwrap();
+    assert_eq!(initial.created_at, persisted_initial.created_at);
+    assert_eq!(initial.updated_at, persisted_initial.updated_at);
+    assert_eq!(
+        initial.rules[0].created_at,
+        persisted_initial.rules[0].created_at
+    );
+    assert_eq!(
+        initial.rules[0].updated_at,
+        persisted_initial.rules[0].updated_at
+    );
+    assert_eq!(
+        initial.rules[0].armed_at,
+        persisted_initial.rules[0].armed_at
+    );
+    let initial_armed_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT armed_at FROM policy_rules WHERE id = $1")
+            .bind(initial.rules[0].id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let retry_request = request();
+    let retry = db
+        .repo
+        .upsert_fleet_alert_policy(&retry_request, &operator)
+        .await
+        .unwrap();
+    let persisted_retry = db
+        .repo
+        .get_fleet_alert_policy(retry.id, true)
+        .await
+        .unwrap();
+    assert_eq!(retry.created_at, persisted_retry.created_at);
+    assert_eq!(retry.updated_at, persisted_retry.updated_at);
+    assert_eq!(
+        retry.rules[0].created_at,
+        persisted_retry.rules[0].created_at
+    );
+    assert_eq!(
+        retry.rules[0].updated_at,
+        persisted_retry.rules[0].updated_at
+    );
+    assert_eq!(retry.rules[0].armed_at, persisted_retry.rules[0].armed_at);
+    let retry_armed_at: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT armed_at FROM policy_rules WHERE id = $1")
+            .bind(retry.rules[0].id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(retry.id, initial.id);
+    assert_eq!(retry.rules[0].id, initial.rules[0].id);
+    assert_eq!(retry.rules[0].rule_version, initial.rules[0].rule_version);
+    assert_eq!(
+        retry.rules[0].armed_after_evidence_seq,
+        initial.rules[0].armed_after_evidence_seq
+    );
+    assert_eq!(retry_armed_at, initial_armed_at);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_fleet_alert_policy_regression_concurrent_name_upserts_share_identity() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -8245,14 +8644,18 @@ async fn postgres_fleet_alert_policy_regression_concurrent_name_upserts_share_id
         confirmed: true,
         preview_hash: None,
     };
+
     let first_request = request();
     let second_request = request();
-
-    let (first, second) = tokio::join!(
-        db.repo.upsert_fleet_alert_policy(&first_request, &operator),
-        db.repo
-            .upsert_fleet_alert_policy(&second_request, &operator),
-    );
+    let (first, second) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(
+            db.repo.upsert_fleet_alert_policy(&first_request, &operator),
+            db.repo
+                .upsert_fleet_alert_policy(&second_request, &operator),
+        )
+    })
+    .await
+    .expect("concurrent policy upserts should not deadlock");
     let first = first.unwrap();
     let second = second.unwrap();
     assert_eq!(second.id, first.id);
@@ -8260,6 +8663,14 @@ async fn postgres_fleet_alert_policy_regression_concurrent_name_upserts_share_id
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_groups WHERE name = $1")
             .bind("concurrent-name-policy")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM policy_rules WHERE group_id = $1")
+            .bind(first.id)
             .fetch_one(&db.pool)
             .await
             .unwrap(),
@@ -8820,6 +9231,331 @@ async fn postgres_single_connection_serializes_stale_self_referential_rule_confi
     );
     drop(single_repo);
     single_pool.close().await;
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_inventory_mutation_responses_are_the_locked_writer_state() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "inventory-response-client";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let aliased = db
+        .repo
+        .update_agent_alias(client_id, "Inventory response alias", &operator)
+        .await
+        .unwrap();
+    let persisted_alias: String =
+        sqlx::query_scalar("SELECT display_name FROM clients WHERE id = $1")
+            .bind(client_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(aliased.display_name, persisted_alias);
+
+    for iteration in 0..8 {
+        let left_name = format!("Inventory alias {iteration} left");
+        let right_name = format!("Inventory alias {iteration} right");
+        let (left, right) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                db.repo.update_agent_alias(client_id, &left_name, &operator),
+                db.repo
+                    .update_agent_alias(client_id, &right_name, &operator),
+            )
+        })
+        .await
+        .expect("opposite alias writers should not deadlock");
+        assert_eq!(left.unwrap().display_name, left_name);
+        assert_eq!(right.unwrap().display_name, right_name);
+    }
+
+    let created = db
+        .repo
+        .create_tag_name("inventory-response-tag".to_string())
+        .await
+        .unwrap();
+    let persisted_order: i64 = sqlx::query_scalar("SELECT display_order FROM tags WHERE name = $1")
+        .bind(&created.name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(created.display_order, persisted_order);
+    assert!(created.clients.is_empty());
+
+    let assigned = db
+        .repo
+        .assign_agent_tag(client_id, &created.name)
+        .await
+        .unwrap();
+    assert_eq!(assigned.clients.len(), 1);
+    assert_eq!(assigned.clients[0].id, client_id);
+    assert!(assigned.clients[0]
+        .tags
+        .iter()
+        .any(|tag| tag == &created.name));
+
+    for iteration in 0..8 {
+        let tag = format!("inventory-response-race-{iteration}");
+        db.repo.create_tag_name(tag.clone()).await.unwrap();
+        let remove_request = BulkTagMutationRequest {
+            action: BulkTagMutationAction::Remove,
+            tag: tag.clone(),
+            selector_expression: format!("id:{client_id}"),
+            target_client_ids: vec![client_id.to_string()],
+            confirmed: true,
+            preview_hash: None,
+            privilege_assertion: None,
+        };
+        let (assigned, removed) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(
+                db.repo.assign_agent_tag(client_id, &tag),
+                db.repo.bulk_mutate_tags(&remove_request, false),
+            )
+        })
+        .await
+        .expect("opposite tag writers should not deadlock");
+        let assigned = assigned.unwrap();
+        removed.unwrap();
+        assert!(assigned.clients.iter().any(|client| client.id == client_id));
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tag_order_response_hydrates_the_locked_writer_state() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "tag-order-response-client";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    for tag in ["response:first", "response:second"] {
+        db.repo.create_tag_name(tag.to_string()).await.unwrap();
+        db.repo.assign_agent_tag(client_id, tag).await.unwrap();
+    }
+
+    let state = db
+        .repo
+        .update_tag_order(
+            &UpdateTagOrderRequest {
+                ordered_tags: vec!["response:second".to_string(), "response:first".to_string()],
+                namespace_natural_sort_enabled: false,
+            },
+            operator.operator.id,
+        )
+        .await
+        .unwrap();
+    let persisted = sqlx::query(
+        "SELECT name, display_order FROM tags ORDER BY display_order, created_at, name",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            row.try_get::<String, _>("name").unwrap(),
+            row.try_get::<i64, _>("display_order").unwrap(),
+        )
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        state
+            .tags
+            .iter()
+            .map(|tag| (tag.name.clone(), tag.display_order))
+            .collect::<Vec<_>>(),
+        persisted
+    );
+    assert_eq!(state.tags.len(), 2);
+    for tag in &state.tags {
+        assert_eq!(tag.clients.len(), 1);
+        assert_eq!(tag.clients[0].id, client_id);
+        assert_eq!(
+            tag.clients[0].tags,
+            vec!["response:second".to_string(), "response:first".to_string()]
+        );
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_tag_mutation_and_webhook_evidence_commit_atomically_and_retry_idempotently() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "tag-webhook-atomic-client";
+    let bulk_tag = "atomic:bulk";
+    let assigned_tag = "atomic:assigned";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_test_tag_webhook_event()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            IF NEW.kind = 'vps.tag_changed' THEN
+                RAISE EXCEPTION 'reject_tag_webhook_event';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_test_tag_webhook_event
+        BEFORE INSERT ON webhook_events
+        FOR EACH ROW EXECUTE FUNCTION reject_test_tag_webhook_event()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let bulk_add = BulkTagMutationRequest {
+        action: BulkTagMutationAction::Add,
+        tag: bulk_tag.to_string(),
+        selector_expression: format!("id:{client_id}"),
+        target_client_ids: vec![client_id.to_string()],
+        confirmed: true,
+        preview_hash: None,
+        privilege_assertion: None,
+    };
+    let rejected = db
+        .repo
+        .bulk_mutate_tags(&bulk_add, false)
+        .await
+        .unwrap_err();
+    assert!(rejected.to_string().contains("reject_tag_webhook_event"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tags WHERE name = $1")
+            .bind(bulk_tag)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM webhook_events WHERE kind = 'vps.tag_changed'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    sqlx::query("DROP TRIGGER reject_test_tag_webhook_event ON webhook_events")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let added = db.repo.bulk_mutate_tags(&bulk_add, false).await.unwrap();
+    assert_eq!(added.changed_count, 1);
+    let retried = db.repo.bulk_mutate_tags(&bulk_add, false).await.unwrap();
+    assert_eq!(retried.changed_count, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT count(*)
+            FROM webhook_events
+            WHERE kind = 'vps.tag_changed'
+              AND payload #>> '{event,tag}' = $1
+              AND payload #>> '{event,action}' = 'add'
+            "#,
+        )
+        .bind(bulk_tag)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    let removed = db
+        .repo
+        .bulk_mutate_tags(
+            &BulkTagMutationRequest {
+                action: BulkTagMutationAction::Remove,
+                tag: bulk_tag.to_string(),
+                selector_expression: format!("id:{client_id}"),
+                target_client_ids: vec![client_id.to_string()],
+                confirmed: true,
+                preview_hash: None,
+                privilege_assertion: None,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(removed.changed_count, 1);
+    let assigned = db
+        .repo
+        .assign_agent_tag_mutation(client_id, assigned_tag, true, false)
+        .await
+        .unwrap();
+    assert_eq!(assigned.changed_count, 1);
+    let assigned_retry = db
+        .repo
+        .assign_agent_tag_mutation(client_id, assigned_tag, true, false)
+        .await
+        .unwrap();
+    assert_eq!(assigned_retry.changed_count, 0);
+    let deleted = db.repo.delete_tag(assigned_tag, true, false).await.unwrap();
+    assert_eq!(deleted.changed_count, 1);
+    let delete_retry = db.repo.delete_tag(assigned_tag, true, false).await.unwrap();
+    assert_eq!(delete_retry.changed_count, 0);
+
+    let event_counts = sqlx::query(
+        r#"
+        SELECT
+            payload #>> '{event,tag}' AS tag,
+            payload #>> '{event,action}' AS action,
+            count(*) AS event_count
+        FROM webhook_events
+        WHERE kind = 'vps.tag_changed'
+        GROUP BY payload #>> '{event,tag}', payload #>> '{event,action}'
+        "#,
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            (
+                row.try_get::<String, _>("tag").unwrap(),
+                row.try_get::<String, _>("action").unwrap(),
+            ),
+            row.try_get::<i64, _>("event_count").unwrap(),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        event_counts.get(&(bulk_tag.to_string(), "add".to_string())),
+        Some(&1)
+    );
+    assert_eq!(
+        event_counts.get(&(bulk_tag.to_string(), "remove".to_string())),
+        Some(&1)
+    );
+    assert_eq!(
+        event_counts.get(&(assigned_tag.to_string(), "assign".to_string())),
+        Some(&1)
+    );
+    assert_eq!(
+        event_counts.get(&(assigned_tag.to_string(), "delete".to_string())),
+        Some(&1)
+    );
+    assert_eq!(event_counts.values().sum::<i64>(), 4);
+
     db.cleanup().await;
 }
 
@@ -11370,7 +12106,7 @@ async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0013 must backfill exact traffic usage");
+        .expect("0010 through 0014 must backfill exact traffic usage");
     assert_hourly_traffic_ledger_matches_raw(&db.pool, client_id).await;
     assert_eq!(
         sqlx::query_as::<_, (i64, i64)>(
@@ -11397,6 +12133,71 @@ async fn postgres_exact_v044_upgrade_backfills_hourly_traffic_coverage() {
             .await,
         vec![(client_id.to_string(), 60, 80, 10, 20, 1)]
     );
+
+    db.cleanup().await;
+    fs::remove_dir_all(&baseline_dir).unwrap();
+}
+
+#[tokio::test]
+async fn postgres_exact_v044_upgrade_keeps_legacy_disk_numerics_inert() {
+    let Some((db, baseline_dir)) = exact_v044_migration_test_db().await else {
+        return;
+    };
+    let client_id = "legacy-disk-presence-upgrade";
+    insert_client(&db.pool, client_id, None).await;
+    sqlx::query(
+        r#"
+        INSERT INTO telemetry_rollups (
+            client_id, bucket_start, bucket_secs, sample_count,
+            cpu_load_1_avg, cpu_load_1_sum, cpu_load_1_max,
+            memory_total_bytes_max, memory_available_bytes_avg,
+            memory_available_bytes_sum, memory_available_bytes_min,
+            memory_used_ratio_avg, memory_used_ratio_sum, memory_used_ratio_max,
+            disk_total_bytes_max, disk_available_bytes_avg,
+            disk_available_bytes_sum, disk_available_bytes_min,
+            disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
+            network_rx_bytes_max, network_tx_bytes_max, latest_observed_at
+        ) VALUES (
+            $1, '2026-01-01 00:00:00+00', 60, 2,
+            0, 0, 0, 1, 1, 2, 1, 0, 0, 0,
+            999, 111, 222, 100, 0.88, 1.76, 0.9,
+            0, 0, '2026-01-01 00:00:30+00'
+        )
+        "#,
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO telemetry_resource_latest SELECT source.* FROM telemetry_rollups source WHERE client_id = $1",
+    )
+    .bind(client_id)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    sqlx::migrate::Migrator::new(workspace_migrations_dir().as_path())
+        .await
+        .unwrap()
+        .run(&db.pool)
+        .await
+        .expect("0010 through 0014 must preserve legacy disk numerics as inert evidence");
+
+    for table in ["telemetry_rollups", "telemetry_resource_latest"] {
+        let query = format!(
+            "SELECT disk_sample_count, disk_total_bytes_max, disk_available_bytes_sum::text, disk_used_ratio_sum FROM {table} WHERE client_id = $1"
+        );
+        let row: (i32, i64, String, f64) = sqlx::query_as(&query)
+            .bind(client_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, 0);
+        assert_eq!(row.1, 999);
+        assert_eq!(row.2, "222");
+        assert_eq!(row.3, 1.76);
+    }
 
     db.cleanup().await;
     fs::remove_dir_all(&baseline_dir).unwrap();
@@ -12098,13 +12899,13 @@ async fn postgres_exact_v044_operational_lifecycle_backfill_is_quiet_and_idempot
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0013 must apply to exact v0.4.4");
+        .expect("0010 through 0014 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM fleet_alert_states WHERE revision = 1",)
@@ -13236,13 +14037,13 @@ async fn postgres_exact_v044_resource_policy_upgrade_preserves_operator_intent()
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0013 must apply after exact v0.4.4 migration checksums");
+        .expect("0010 through 0014 must apply after exact v0.4.4 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         sqlx::query_scalar::<_, Value>(
@@ -13455,13 +14256,13 @@ async fn postgres_exact_v044_policy_upgrade_resets_only_saturation_state_and_kee
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0010 through 0013 must apply to exact v0.4.4");
+        .expect("0010 through 0014 must apply to exact v0.4.4");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        13
+        14
     );
 
     let affected_after = sqlx::query_as::<_, (i32, String, String, String, String, Option<Value>)>(
@@ -13883,13 +14684,13 @@ async fn postgres_exact_v035_baseline_applies_supported_migrations_in_place() {
         .unwrap()
         .run(&db.pool)
         .await
-        .expect("0009 through 0013 must apply after exact v0.3.5 migration checksums");
+        .expect("0009 through 0014 must apply after exact v0.3.5 migration checksums");
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM _sqlx_migrations WHERE success")
             .fetch_one(&db.pool)
             .await
             .unwrap(),
-        13
+        14
     );
     assert_eq!(
         sqlx::query_as::<_, (bool, bool, bool, bool, bool, bool)>(
@@ -15172,6 +15973,266 @@ async fn postgres_tunnel_underlay_and_operator_assessment_round_trip_without_con
 }
 
 #[tokio::test]
+async fn postgres_ping_target_detail_omits_hidden_client_assignments() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "hidden-ping-detail-edge";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    let target_id = Uuid::new_v4();
+    let created_unix = crate::unix_now();
+
+    db.repo
+        .upsert_ping_target(
+            PingTargetRecord {
+                id: target_id,
+                name: "Hidden assignment projection".to_string(),
+                host: "1.1.1.1".to_string(),
+                probe_kind: "icmp".to_string(),
+                port: None,
+                enabled: true,
+                selector_expression: format!("id:{client_id}"),
+                generation: 1,
+                created_by: Some(operator.operator.id),
+                created_at: created_unix.to_string(),
+                updated_at: created_unix.to_string(),
+            },
+            &[client_id.to_string()],
+            None,
+            &operator,
+            "ping_target.created",
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE clients SET status = 'deleted', hidden_at = now() WHERE id = $1")
+        .bind(client_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let retained_assignment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ping_target_assignments WHERE target_id = $1 AND client_id = $2",
+    )
+    .bind(target_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained_assignment_count, 1);
+
+    let detail = db
+        .repo
+        .get_ping_target_detail(target_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(detail.assignments.is_empty());
+    assert!(detail.target.target_client_ids.is_empty());
+    assert_eq!(detail.target.assigned_count, 0);
+    assert_eq!(detail.target.primary_count, 0);
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_snapshots() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "mutation-snapshot-edge";
+    insert_client(&db.pool, client_id, None).await;
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let target_id = Uuid::new_v4();
+    let created_unix = crate::unix_now();
+    let target = db
+        .repo
+        .upsert_ping_target(
+            PingTargetRecord {
+                id: target_id,
+                name: "Mutation snapshot Ping".to_string(),
+                host: "1.1.1.1".to_string(),
+                probe_kind: "icmp".to_string(),
+                port: None,
+                enabled: true,
+                selector_expression: format!("id:{client_id}"),
+                generation: 1,
+                created_by: Some(operator.operator.id),
+                created_at: created_unix.to_string(),
+                updated_at: created_unix.to_string(),
+            },
+            &[client_id.to_string()],
+            None,
+            &operator,
+            "ping_target.created",
+        )
+        .await
+        .unwrap();
+    let persisted_target: (i64, String) =
+        sqlx::query_as("SELECT generation, updated_at::text FROM ping_targets WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    let persisted_assignment: (bool, String) = sqlx::query_as(
+        "SELECT is_primary, assigned_at::text FROM ping_target_assignments WHERE target_id = $1 AND client_id = $2",
+    )
+    .bind(target_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(target.target.generation, persisted_target.0);
+    assert_eq!(target.target.updated_at, persisted_target.1);
+    assert_eq!(target.target.target_client_ids, vec![client_id]);
+    assert_eq!(target.assignments.len(), 1);
+    assert_eq!(target.assignments[0].assigned_at, persisted_assignment.1);
+
+    let primary = db
+        .repo
+        .make_primary_ping_target(target_id, &[client_id.to_string()], &operator)
+        .await
+        .unwrap();
+    assert_eq!(primary.target.primary_count, 1);
+    assert!(primary.assignments[0].is_primary);
+
+    let share_id = Uuid::new_v4();
+    let share = crate::model_monitoring::MonitoringShareRecord {
+        id: share_id,
+        name: "Mutation snapshot share".to_string(),
+        token_secret: "a".repeat(64),
+        selector_expression: format!("id:{client_id}"),
+        targets: vec![crate::model_monitoring::MonitoringShareTargetRecord {
+            client_id: client_id.to_string(),
+            public_client_key: "b".repeat(64),
+        }],
+        visibility: crate::model_monitoring::MonitoringShareVisibilityView {
+            identity_context: false,
+            billing: false,
+            system_information: false,
+            resources: true,
+            network: true,
+            traffic: true,
+            ping: true,
+            detail_history: true,
+        },
+        expires_at: created_unix.saturating_add(3_600).to_string(),
+        revoked_at: None,
+        revoked_by: None,
+        created_by: Some(operator.operator.id),
+        created_at: created_unix.to_string(),
+        updated_at: created_unix.to_string(),
+    };
+    db.repo
+        .create_monitoring_share(share, &operator)
+        .await
+        .unwrap();
+    let extended = db
+        .repo
+        .extend_monitoring_shares(&[share_id], 60, &operator)
+        .await
+        .unwrap();
+    let persisted_extended: (String, String) = sqlx::query_as(
+        "SELECT expires_at::text, updated_at::text FROM monitoring_share_links WHERE id = $1",
+    )
+    .bind(share_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(extended.len(), 1);
+    assert_eq!(extended[0].status, "active");
+    assert_eq!(extended[0].expires_at, persisted_extended.0);
+    assert_eq!(extended[0].updated_at, persisted_extended.1);
+
+    let revoked = db
+        .repo
+        .revoke_monitoring_shares(&[share_id], &operator)
+        .await
+        .unwrap();
+    let persisted_revoked: (Option<String>, String) = sqlx::query_as(
+        "SELECT revoked_at::text, updated_at::text FROM monitoring_share_links WHERE id = $1",
+    )
+    .bind(share_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].status, "revoked");
+    assert_eq!(revoked[0].revoked_at, persisted_revoked.0);
+    assert_eq!(revoked[0].updated_at, persisted_revoked.1);
+
+    let create_rule = |name: &str, listen: &str, target: &str| CreatePortForwardRuleRequest {
+        client_id: client_id.to_string(),
+        name: name.to_string(),
+        protocol: PortForwardProtocol::Tcp,
+        target_ip: "192.0.2.40".parse().unwrap(),
+        target_hostname: None,
+        mappings: pair_port_expressions(listen, target).unwrap(),
+        masquerade: true,
+        enabled: true,
+        confirmed: true,
+    };
+    let first_rule = db
+        .repo
+        .create_port_forward_rule(&create_rule("snapshot-first", "18080", "8080"), &operator)
+        .await
+        .unwrap();
+    let second_rule = db
+        .repo
+        .create_port_forward_rule(&create_rule("snapshot-second", "18081", "8081"), &operator)
+        .await
+        .unwrap();
+    let disabled = db
+        .repo
+        .bulk_mutate_port_forward_rules(
+            PortForwardBulkAction::Disable,
+            &[
+                PortForwardBulkItem {
+                    id: first_rule.id,
+                    expected_revision: first_rule.revision,
+                },
+                PortForwardBulkItem {
+                    id: second_rule.id,
+                    expected_revision: second_rule.revision,
+                },
+            ],
+            None,
+            &operator,
+        )
+        .await
+        .unwrap();
+    let persisted_rules = sqlx::query(
+        "SELECT id, enabled, revision, updated_at::text AS updated_at FROM port_forward_rules WHERE id = ANY($1::uuid[])",
+    )
+    .bind(vec![first_rule.id, second_rule.id])
+    .fetch_all(&db.pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|row| {
+        (
+            row.try_get::<Uuid, _>("id").unwrap(),
+            (
+                row.try_get::<bool, _>("enabled").unwrap(),
+                row.try_get::<i64, _>("revision").unwrap(),
+                row.try_get::<String, _>("updated_at").unwrap(),
+            ),
+        )
+    })
+    .collect::<BTreeMap<_, _>>();
+    assert_eq!(disabled.len(), 2);
+    for rule in disabled {
+        let (enabled, revision, updated_at) = persisted_rules.get(&rule.id).unwrap();
+        assert_eq!(rule.enabled, *enabled);
+        assert_eq!(rule.revision, *revision);
+        assert_eq!(&rule.updated_at, updated_at);
+        assert_eq!(rule.runtime_status, "pending");
+    }
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_port_forward_hostname_context_round_trips_with_literal_target() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -16143,6 +17204,377 @@ async fn postgres_bootstrap_rolls_back_when_success_evidence_cannot_be_recorded(
             .unwrap(),
         1
     );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_refresh_rotation_rolls_back_when_replacement_insert_fails() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "refresh-atomicity-admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_test_operator_session_insert()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+            RAISE EXCEPTION 'forced operator session insertion failure';
+        END;
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_test_operator_session_insert
+        BEFORE INSERT ON operator_sessions
+        FOR EACH ROW
+        EXECUTE FUNCTION reject_test_operator_session_insert()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let error = db
+        .repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("forced operator session insertion failure"));
+    let rolled_back = sqlx::query_as::<_, (bool, i64)>(
+        r#"
+        SELECT
+            COALESCE((
+                SELECT revoked_at IS NULL
+                FROM operator_sessions
+                WHERE id = $1
+            ), FALSE),
+            (SELECT count(*) FROM operator_sessions)
+        "#,
+    )
+    .bind(auth.session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rolled_back, (true, 1));
+
+    sqlx::query("DROP TRIGGER reject_test_operator_session_insert ON operator_sessions")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_test_operator_session_insert()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let replacement = db
+        .repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .expect("the rolled-back refresh token should remain retryable");
+    assert_ne!(replacement.session_id, auth.session_id);
+    let rotated = sqlx::query_as::<_, (bool, bool, i64)>(
+        r#"
+        SELECT
+            COALESCE((
+                SELECT revoked_at IS NOT NULL
+                FROM operator_sessions
+                WHERE id = $1
+            ), FALSE),
+            COALESCE((
+                SELECT revoked_at IS NULL
+                FROM operator_sessions
+                WHERE id = $2
+            ), FALSE),
+            (SELECT count(*) FROM operator_sessions)
+        "#,
+    )
+    .bind(auth.session_id)
+    .bind(replacement.session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(rotated, (true, true, 2));
+    assert_eq!(
+        db.repo
+            .authenticate_access_token(&replacement.access_token)
+            .await
+            .unwrap()
+            .map(|context| context.operator.id),
+        Some(auth.operator.id)
+    );
+    assert!(db
+        .repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .is_none());
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_refresh_rotation_precedes_operator_session_revocation_mutations() {
+    async fn wait_for_ungranted_lock(pool: &PgPool, locktype: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    r#"
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_locks locks
+                        JOIN pg_stat_activity activity ON activity.pid = locks.pid
+                        WHERE activity.datname = current_database()
+                          AND locks.locktype = $1
+                          AND NOT locks.granted
+                    )
+                    "#,
+                )
+                .bind(locktype)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for an ungranted {locktype} lock"));
+    }
+
+    #[derive(Clone, Copy)]
+    enum RevokingMutation {
+        PasswordReset,
+        TotpClear,
+        Disable,
+    }
+
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "refresh-order-admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Some(auth.session_id),
+    };
+    let target = db
+        .repo
+        .create_operator(
+            &CreateOperatorRequest {
+                username: "refresh-order-target".to_string(),
+                password: "target-password-123".to_string(),
+                role: "viewer".to_string(),
+                scopes: Vec::new(),
+                session_refresh_ttl_secs: None,
+                confirmed: true,
+                admin_risk_acknowledged: false,
+                privilege_assertion: None,
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
+
+    let gate_key = ((Uuid::new_v4().as_u128() & i64::MAX as u128) as i64).max(1);
+    let gate_function = format!(
+        r#"
+        CREATE FUNCTION gate_test_refresh_session_revoke()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF OLD.revoked_at IS NULL AND NEW.revoked_at IS NOT NULL THEN
+                PERFORM pg_advisory_xact_lock({gate_key});
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    );
+    sqlx::query(&gate_function).execute(&db.pool).await.unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER gate_test_refresh_session_revoke
+        BEFORE UPDATE ON operator_sessions
+        FOR EACH ROW EXECUTE FUNCTION gate_test_refresh_session_revoke()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    for mutation in [
+        RevokingMutation::PasswordReset,
+        RevokingMutation::TotpClear,
+        RevokingMutation::Disable,
+    ] {
+        let original = db.repo.issue_session(target.clone()).await.unwrap();
+        let mut gate = db.pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(gate_key)
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+
+        let refresh_repo = db.repo.clone();
+        let refresh_token = original.refresh_token.clone();
+        let refresh_task =
+            tokio::spawn(
+                async move { refresh_repo.refresh_operator_session(&refresh_token).await },
+            );
+        wait_for_ungranted_lock(&db.pool, "advisory").await;
+
+        let mutation_repo = db.repo.clone();
+        let mutation_actor = actor.clone();
+        let target_id = target.id;
+        let mutation_task = match mutation {
+            RevokingMutation::PasswordReset => tokio::spawn(async move {
+                mutation_repo
+                    .reset_operator_password(
+                        target_id,
+                        "replacement-target-password-123",
+                        &mutation_actor,
+                    )
+                    .await
+                    .map(|operator| operator.is_some())
+            }),
+            RevokingMutation::TotpClear => tokio::spawn(async move {
+                mutation_repo
+                    .clear_operator_totp(target_id, &mutation_actor)
+                    .await
+                    .map(|operator| operator.is_some())
+            }),
+            RevokingMutation::Disable => tokio::spawn(async move {
+                mutation_repo
+                    .set_operator_status(target_id, "disabled", &mutation_actor)
+                    .await
+                    .map(|operator| operator.is_some())
+            }),
+        };
+        wait_for_ungranted_lock(&db.pool, "transactionid").await;
+        gate.commit().await.unwrap();
+
+        let replacement = tokio::time::timeout(Duration::from_secs(10), refresh_task)
+            .await
+            .expect("refresh rotation should complete after the gate opens")
+            .expect("refresh task should not panic")
+            .unwrap()
+            .expect("refresh should win the forced ordering");
+        assert!(tokio::time::timeout(Duration::from_secs(10), mutation_task)
+            .await
+            .expect("operator mutation should complete after refresh")
+            .expect("operator mutation task should not panic")
+            .unwrap());
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT revoked_at IS NOT NULL FROM operator_sessions WHERE id = $1",
+            )
+            .bind(replacement.session_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            "the later operator mutation must revoke the refresh replacement"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM operator_sessions WHERE operator_id = $1 AND revoked_at IS NULL",
+            )
+            .bind(target.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+            0
+        );
+    }
+
+    sqlx::query("DROP TRIGGER gate_test_refresh_session_revoke ON operator_sessions")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION gate_test_refresh_session_revoke()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_session_revoke_response_is_the_persisted_transaction_snapshot() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let auth = db
+        .repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "session-revoke-admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    let target = db.repo.issue_session(auth.operator.clone()).await.unwrap();
+    let actor = AuthContext {
+        operator: auth.operator.clone(),
+        session_id: Some(auth.session_id),
+    };
+
+    let revoked = db
+        .repo
+        .revoke_operator_session(target.session_id, &actor)
+        .await
+        .unwrap()
+        .expect("target session should exist");
+    let persisted =
+        sqlx::query_as::<_, (Uuid, String, String, String, String, String, Option<String>)>(
+            r#"
+        SELECT
+            s.operator_id,
+            o.username,
+            o.role,
+            s.created_at::text,
+            s.expires_at::text,
+            s.refresh_expires_at::text,
+            s.revoked_at::text
+        FROM operator_sessions s
+        JOIN operators o ON o.id = s.operator_id
+        WHERE s.id = $1
+        "#,
+        )
+        .bind(target.session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(revoked.id, target.session_id);
+    assert_eq!(revoked.operator_id, persisted.0);
+    assert_eq!(revoked.operator_username, persisted.1);
+    assert_eq!(revoked.operator_role, persisted.2);
+    assert!(!revoked.current);
+    assert_eq!(revoked.created_at, persisted.3);
+    assert_eq!(revoked.expires_at, persisted.4);
+    assert_eq!(revoked.refresh_expires_at, persisted.5);
+    assert!(revoked.revoked);
+    assert_eq!(revoked.revoked_at, persisted.6);
 
     db.cleanup().await;
 }
@@ -17372,6 +18804,150 @@ async fn postgres_dispatch_claim_binds_incarnation_and_keeps_deadline_immutable(
 }
 
 #[tokio::test]
+async fn postgres_dispatch_claim_does_not_lock_the_joined_client_row() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-claim-client-lock";
+    let incarnation = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(incarnation)).await;
+    insert_job_target(&db.pool, job_id, client_id, "queued", false, None).await;
+
+    let mut client_lock = db.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM clients WHERE id = $1 FOR UPDATE")
+        .bind(client_id)
+        .fetch_one(&mut *client_lock)
+        .await
+        .unwrap();
+
+    let claimed = tokio::time::timeout(
+        Duration::from_secs(2),
+        db.repo.claim_due_job_targets(10, 30, 0),
+    )
+    .await
+    .expect("claim must not wait for the read-only joined client row")
+    .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, job_id);
+    assert_eq!(claimed[0].process_incarnation_id, incarnation);
+
+    client_lock.rollback().await.unwrap();
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_same_job_target_finishers_do_not_fk_lock_upgrade_deadlock() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let job_id = Uuid::new_v4();
+    let clients = ["pg-finish-left", "pg-finish-right"];
+    for client_id in clients {
+        insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO jobs (
+            id, command_type, status, target_count, payload_hash, operation,
+            request_fingerprint, max_timeout_secs
+        )
+        VALUES ($1, 'shell', 'running', 2, $2, $3, $4, 30)
+        "#,
+    )
+    .bind(job_id)
+    .bind(payload_hash(format!("payload-{job_id}").as_bytes()))
+    .bind(sqlx::types::Json(JobCommand::Shell {
+        argv: vec!["true".to_string()],
+        pty: false,
+    }))
+    .bind(format!("fingerprint-{job_id}"))
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    for client_id in clients {
+        sqlx::query(
+            r#"
+            INSERT INTO job_targets (
+                job_id, client_id, status, started_at, process_incarnation_id,
+                dispatch_lease_until, deadline_at
+            )
+            VALUES ($1, $2, 'running', now(), $3, now() + interval '30 seconds',
+                    now() + interval '5 minutes')
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(Uuid::new_v4())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let barrier = Arc::new(Barrier::new(2));
+    let finish = |client_id: &'static str| {
+        let pool = db.pool.clone();
+        let barrier = barrier.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query(
+                r#"
+                UPDATE job_targets
+                SET status = 'completed', completed_at = now(), exit_code = 0
+                WHERE job_id = $1 AND client_id = $2 AND completed_at IS NULL
+                "#,
+            )
+            .bind(job_id)
+            .bind(client_id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            let outcome = crate::TargetDispatchOutcome {
+                status: TARGET_STATUS_COMPLETED.to_string(),
+                exit_code: Some(0),
+                command_version: Some(1),
+                accepted: true,
+                message: "completed".to_string(),
+                received_at: None,
+                outputs: Vec::new(),
+            };
+            enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome)
+                .await
+                .unwrap();
+            barrier.wait().await;
+            finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(finish(clients[0]), finish(clients[1]))
+    })
+    .await
+    .expect("same-job target finishers must serialize without FK lock-upgrade deadlock");
+
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
+    let target_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job_terminal_events WHERE job_id = $1 AND event_kind = 'target_terminalized'",
+    )
+    .bind(job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let job_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM job_terminal_events WHERE job_id = $1 AND event_kind = 'job_terminalized'",
+    )
+    .bind(job_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(target_events, 2);
+    assert_eq!(job_events, 1);
+    db.cleanup().await;
+}
+
+#[tokio::test]
 async fn postgres_batch_output_conflict_poison_prevents_later_final_insert() {
     let Some(db) = PgReliabilityTestDb::maybe_new().await else {
         return;
@@ -17734,6 +19310,138 @@ async fn postgres_changed_incarnation_matching_update_heartbeat_completes_activa
     let output = latest_status_output_json(&db.pool, job_id, client_id).await;
     assert_eq!(output["code"], "agent_update_restart_heartbeat_verified");
     assert_eq!(output["activation_job_id"], job_id.to_string());
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_agent_hello_heartbeat_audit_is_atomic_and_exactly_replayable() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-client-heartbeat-audit-atomic";
+    let process_incarnation_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(process_incarnation_id)).await;
+    let event = hello_event(
+        client_id,
+        process_incarnation_id,
+        Some(AgentUpdateHeartbeat {
+            activation_job_id: Uuid::new_v4(),
+            sha256_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_string(),
+            marker_unix: 100,
+            observed_unix: 101,
+        }),
+    );
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_agent_update_heartbeat_audit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.action = 'agent_update.heartbeat_observed' THEN
+                RAISE EXCEPTION 'forced heartbeat audit failure';
+            END IF;
+            RETURN NEW;
+        END;
+        $$
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_agent_update_heartbeat_audit
+        BEFORE INSERT ON audit_logs
+        FOR EACH ROW EXECUTE FUNCTION reject_agent_update_heartbeat_audit()
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert!(db.repo.upsert_agent_hello(&event).await.is_err());
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, i64, i64)>(
+            r#"
+            SELECT
+                client.agent_version,
+                (SELECT count(*) FROM gateway_sessions
+                    WHERE client_id = client.id),
+                (SELECT count(*) FROM audit_logs
+                    WHERE action = 'agent_update.heartbeat_observed'
+                      AND target = 'client:' || client.id)
+            FROM clients client
+            WHERE client.id = $1
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (None, 0, 0)
+    );
+
+    sqlx::query("DROP TRIGGER reject_agent_update_heartbeat_audit ON audit_logs")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_agent_update_heartbeat_audit()")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    assert!(db.repo.upsert_agent_hello(&event).await.unwrap());
+    assert!(db.repo.upsert_agent_hello(&event).await.unwrap());
+    assert_eq!(
+        sqlx::query_as::<_, (Option<String>, i64, i64)>(
+            r#"
+            SELECT
+                client.agent_version,
+                (SELECT count(*) FROM gateway_sessions
+                    WHERE client_id = client.id),
+                (SELECT count(*) FROM audit_logs
+                    WHERE action = 'agent_update.heartbeat_observed'
+                      AND target = 'client:' || client.id)
+            FROM clients client
+            WHERE client.id = $1
+            "#,
+        )
+        .bind(client_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (Some("pg-test-agent".to_string()), 1, 1)
+    );
+
+    let heartbeat_audit_id: Uuid = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM audit_logs
+        WHERE action = 'agent_update.heartbeat_observed'
+          AND target = $1
+        "#,
+    )
+    .bind(format!("client:{client_id}"))
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE audit_logs SET command_hash = 'forced-collision' WHERE id = $1")
+        .bind(heartbeat_audit_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let collision = db.repo.upsert_agent_hello(&event).await.unwrap_err();
+    assert!(collision
+        .to_string()
+        .contains("agent_update_heartbeat_identity_conflict"));
+    sqlx::query("UPDATE audit_logs SET command_hash = NULL WHERE id = $1")
+        .bind(heartbeat_audit_id)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    assert!(db.repo.upsert_agent_hello(&event).await.unwrap());
+
     db.cleanup().await;
 }
 
@@ -18130,6 +19838,130 @@ async fn postgres_vnstat_finalization_phase_requires_contiguous_output_to_defer_
     .await
     .unwrap();
     assert!(retry_is_cooled);
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_gap_repair_finalizes_stored_done_output_in_the_chunk_transaction() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-gap-finalization";
+    let job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_job_target_with_operation(
+        &db.pool,
+        job_id,
+        client_id,
+        JobCommand::Shell {
+            argv: vec!["/bin/true".to_string()],
+            pty: false,
+        },
+        "shell",
+        None,
+        "running",
+        true,
+        Some(Uuid::new_v4()),
+        300,
+        false,
+    )
+    .await;
+    let persist = JobOutputPersistConfig {
+        object_store: None,
+        artifact_min_bytes: usize::MAX,
+    };
+    let final_output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"completed"}"#.to_vec(),
+        exit_code: Some(0),
+        done: true,
+    };
+    assert_eq!(
+        db.repo
+            .record_active_job_output_chunk_checked_with_config(
+                job_id,
+                client_id,
+                1,
+                &final_output,
+                Some("2026-08-19T00:00:01Z".to_string()),
+                persist,
+            )
+            .await
+            .unwrap(),
+        JobOutputWriteResult::Inserted
+    );
+    assert_eq!(target_status(&db.pool, job_id, client_id).await, "running");
+
+    let prefix = CommandOutput {
+        job_id,
+        stream: OutputStream::Stdout,
+        data: b"ready\n".to_vec(),
+        exit_code: None,
+        done: false,
+    };
+    let repaired = db
+        .repo
+        .record_active_job_output_chunk_and_finalize_if_ready_with_config(
+            job_id,
+            client_id,
+            0,
+            &prefix,
+            Some("2026-08-19T00:00:00Z".to_string()),
+            persist,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repaired.write_result, JobOutputWriteResult::Inserted);
+    assert_eq!(repaired.contiguous_final.unwrap().seq, 1);
+    assert!(repaired.terminal_reconciliation_ready);
+    assert_eq!(
+        target_status(&db.pool, job_id, client_id).await,
+        TARGET_STATUS_COMPLETED
+    );
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
+    let (audit_count, event_count): (i64, i64) = sqlx::query_as(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'job.target_result'
+               AND metadata->>'job_id' = $1
+               AND metadata->>'output_seq' = '1'),
+            (SELECT COUNT(*) FROM job_terminal_events
+             WHERE job_id = $2 AND client_id = $3 AND event_kind = 'target_terminalized')
+        "#,
+    )
+    .bind(job_id.to_string())
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!((audit_count, event_count), (1, 1));
+
+    let late = CommandOutput {
+        job_id,
+        stream: OutputStream::Stdout,
+        data: b"late\n".to_vec(),
+        exit_code: None,
+        done: false,
+    };
+    let error = db
+        .repo
+        .record_active_job_output_chunk_and_finalize_if_ready_with_config(
+            job_id, client_id, 2, &late, None, persist,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("job_target_not_active"));
+    let output_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM job_outputs WHERE job_id = $1 AND client_id = $2")
+            .bind(job_id)
+            .bind(client_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(output_count, 2);
     db.cleanup().await;
 }
 
@@ -18937,6 +20769,1159 @@ async fn postgres_agent_source_disappearance_closes_policy_episode_and_resets_ga
         .await
         .unwrap(),
         1
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_idless_exact_retries_reuse_generator_webhook_and_channel_identity() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let operator = postgres_network_operator(&db.repo).await;
+
+    let generator_request = |description: &str| UpsertRuntimeConfigPatchGeneratorRequest {
+        id: None,
+        name: "PG retry-safe generator".to_string(),
+        category: "update".to_string(),
+        domain: "agent_update".to_string(),
+        description: description.to_string(),
+        field_schema: json!({}),
+        raw_generator_body: "[update]\nunmanaged_enabled = false\n".to_string(),
+        docs_metadata: json!({"patch_only": true}),
+        confirmed: true,
+    };
+    let generator = db
+        .repo
+        .upsert_runtime_config_patch_generator(&generator_request("retry fixture"), &operator)
+        .await
+        .unwrap();
+    let generator_retry = db
+        .repo
+        .upsert_runtime_config_patch_generator(&generator_request("retry fixture"), &operator)
+        .await
+        .unwrap();
+    assert_eq!(generator_retry.id, generator.id);
+    assert_eq!(generator_retry.created_at, generator.created_at);
+    assert_eq!(generator_retry.updated_at, generator.updated_at);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runtime_config_patch_generators WHERE name = $1"
+        )
+        .bind(&generator.name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = $1 AND target = $2"
+        )
+        .bind("runtime_config_patch_generator.saved")
+        .bind(format!("runtime_config_patch_generator:{}", generator.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let changed_generator = db
+        .repo
+        .upsert_runtime_config_patch_generator(&generator_request("changed material"), &operator)
+        .await
+        .unwrap();
+    assert_ne!(changed_generator.id, generator.id);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM runtime_config_patch_generators WHERE name = $1"
+        )
+        .bind(&generator.name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'runtime_config_patch_generator.saved' AND target = ANY($1::text[])"
+        )
+        .bind(vec![
+            format!("runtime_config_patch_generator:{}", generator.id),
+            format!("runtime_config_patch_generator:{}", changed_generator.id),
+        ])
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        2
+    );
+
+    let webhook_request = |target: &str| CreateWebhookRuleRequest {
+        id: None,
+        name: "PG retry-safe webhook".to_string(),
+        enabled: true,
+        expression: "interval.1min".to_string(),
+        target: target.to_string(),
+        body_template: String::new(),
+        signing_secret: Some("retry-secret".to_string()),
+        clear_signing_secret: false,
+        cooldown_secs: Some(60),
+        notes: Some("retry fixture".to_string()),
+        confirmed: true,
+    };
+    let webhook = db
+        .repo
+        .upsert_webhook_rule(
+            &webhook_request("https://www.cloudflare.com/vpsman-retry"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let webhook_retry = db
+        .repo
+        .upsert_webhook_rule(
+            &webhook_request("https://www.cloudflare.com/vpsman-retry"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(webhook_retry.id, webhook.id);
+    assert_eq!(webhook_retry.created_at, webhook.created_at);
+    assert_eq!(webhook_retry.updated_at, webhook.updated_at);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_rules WHERE name = $1")
+            .bind(&webhook.name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = $1 AND target = $2"
+        )
+        .bind("webhook.rule_upserted")
+        .bind(format!("webhook_rule:{}", webhook.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.repo
+            .upsert_webhook_rule(
+                &webhook_request("https://www.cloudflare.com/vpsman-changed"),
+                &operator,
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+        "webhook_rule_name_conflict"
+    );
+
+    let channel_request = |target: &str| CreateFleetAlertNotificationChannelRequest {
+        id: None,
+        name: "PG retry-safe notification channel".to_string(),
+        scope_kind: "global".to_string(),
+        scope_value: None,
+        min_severity: Some("warning".to_string()),
+        categories: Some(vec!["agent_status".to_string()]),
+        operator_states: Some(vec!["open".to_string()]),
+        delivery_kind: "webhook".to_string(),
+        target: target.to_string(),
+        cooldown_secs: Some(60),
+        enabled: Some(true),
+        notes: Some("retry fixture".to_string()),
+        confirmed: true,
+    };
+    let channel = db
+        .repo
+        .upsert_fleet_alert_notification_channel(
+            &channel_request("https://www.cloudflare.com/vpsman-channel-retry"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let channel_retry = db
+        .repo
+        .upsert_fleet_alert_notification_channel(
+            &channel_request("https://www.cloudflare.com/vpsman-channel-retry"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    assert_eq!(channel_retry.id, channel.id);
+    assert_eq!(channel_retry.created_at, channel.created_at);
+    assert_eq!(channel_retry.updated_at, channel.updated_at);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fleet_alert_notification_channels WHERE name = $1"
+        )
+        .bind(&channel.name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = $1 AND target = $2"
+        )
+        .bind("fleet.alert_notification_channel_upserted")
+        .bind(format!("fleet_alert_notification_channel:{}", channel.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.repo
+            .upsert_fleet_alert_notification_channel(
+                &channel_request("https://www.cloudflare.com/vpsman-channel-changed"),
+                &operator,
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+        "fleet_alert_notification_channel_name_conflict"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM webhook_rules WHERE name = $1")
+            .bind(&webhook.name)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM fleet_alert_notification_channels WHERE name = $1"
+        )
+        .bind(&channel.name)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'webhook.rule_upserted' AND target = $1"
+        )
+        .bind(format!("webhook_rule:{}", webhook.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE action = 'fleet.alert_notification_channel_upserted' AND target = $1"
+        )
+        .bind(format!("fleet_alert_notification_channel:{}", channel.id))
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        1
+    );
+
+    db.cleanup().await;
+}
+
+async fn insert_terminal_reconcile_job(pool: &PgPool, job_id: Uuid, client_id: &str) {
+    insert_job_target_with_operation(
+        pool,
+        job_id,
+        client_id,
+        JobCommand::TerminalOpen {
+            session_id: Uuid::new_v4(),
+            argv: vec!["/bin/sh".to_string()],
+            cwd: None,
+            user: None,
+            user_policy: vpsman_common::TerminalUserPolicy::Fail,
+            cols: 80,
+            rows: 24,
+            replay_from_seq: None,
+            idle_timeout_secs: 3_600,
+            flow_window_bytes: 64 * 1_024,
+        },
+        "terminal_open",
+        None,
+        "running",
+        true,
+        Some(Uuid::new_v4()),
+        3_600,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_reconcile_outbox_is_exact_and_replay_safe() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-terminal-reconcile-replay";
+    let job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+
+    db.repo
+        .reconcile_terminal_job(job_id, client_id, "open")
+        .await
+        .unwrap();
+    let open_state = sqlx::query(
+        r#"
+        SELECT
+            job.status AS job_status,
+            job.completed_at::text AS job_completed_at,
+            target.status AS target_status,
+            target.completed_at::text AS target_completed_at,
+            target.exit_code,
+            target.deadline_at::text AS deadline_at,
+            target.dispatch_lease_until::text AS dispatch_lease_until
+        FROM jobs job
+        JOIN job_targets target ON target.job_id = job.id
+        WHERE job.id = $1 AND target.client_id = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        open_state.try_get::<String, _>("job_status").unwrap(),
+        "running"
+    );
+    assert_eq!(
+        open_state.try_get::<String, _>("target_status").unwrap(),
+        "running"
+    );
+    assert_eq!(
+        open_state
+            .try_get::<Option<String>, _>("job_completed_at")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        open_state
+            .try_get::<Option<String>, _>("target_completed_at")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        open_state.try_get::<Option<i32>, _>("exit_code").unwrap(),
+        None
+    );
+    assert_eq!(
+        open_state
+            .try_get::<Option<String>, _>("deadline_at")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        open_state
+            .try_get::<Option<String>, _>("dispatch_lease_until")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM job_terminal_events WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    db.repo
+        .reconcile_terminal_job(job_id, client_id, "closed")
+        .await
+        .unwrap();
+    let completed_at = sqlx::query(
+        r#"
+        SELECT
+            job.status AS job_status,
+            job.completed_at::text AS job_completed_at,
+            target.status AS target_status,
+            target.completed_at::text AS target_completed_at
+        FROM jobs job
+        JOIN job_targets target ON target.job_id = job.id
+        WHERE job.id = $1 AND target.client_id = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        completed_at.try_get::<String, _>("job_status").unwrap(),
+        JOB_STATUS_COMPLETED
+    );
+    assert_eq!(
+        completed_at.try_get::<String, _>("target_status").unwrap(),
+        TARGET_STATUS_COMPLETED
+    );
+    let first_job_completed_at = completed_at
+        .try_get::<String, _>("job_completed_at")
+        .unwrap();
+    let first_target_completed_at = completed_at
+        .try_get::<String, _>("target_completed_at")
+        .unwrap();
+
+    let events = sqlx::query(
+        r#"
+        SELECT id, event_kind, client_id, status, outcome
+        FROM job_terminal_events
+        WHERE job_id = $1
+        ORDER BY event_kind
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 2);
+    let job_event = events
+        .iter()
+        .find(|row| row.try_get::<String, _>("event_kind").unwrap() == "job_terminalized")
+        .unwrap();
+    assert_eq!(
+        job_event.try_get::<String, _>("status").unwrap(),
+        JOB_STATUS_COMPLETED
+    );
+    assert_eq!(
+        job_event.try_get::<Option<String>, _>("client_id").unwrap(),
+        None
+    );
+    assert_eq!(
+        job_event.try_get::<Option<Value>, _>("outcome").unwrap(),
+        None
+    );
+    let target_event = events
+        .iter()
+        .find(|row| row.try_get::<String, _>("event_kind").unwrap() == "target_terminalized")
+        .unwrap();
+    assert_eq!(
+        target_event.try_get::<String, _>("status").unwrap(),
+        TARGET_STATUS_COMPLETED
+    );
+    assert_eq!(
+        target_event
+            .try_get::<Option<String>, _>("client_id")
+            .unwrap()
+            .as_deref(),
+        Some(client_id)
+    );
+    let outcome = target_event.try_get::<Value, _>("outcome").unwrap();
+    assert_eq!(outcome["status"], TARGET_STATUS_COMPLETED);
+    assert_eq!(outcome["accepted"], true);
+    assert_eq!(outcome["message"], "terminal session closed");
+    let first_event_ids = events
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("id").unwrap())
+        .collect::<Vec<_>>();
+
+    db.repo
+        .reconcile_terminal_job(job_id, client_id, "closed")
+        .await
+        .unwrap();
+    let replay = sqlx::query(
+        r#"
+        SELECT
+            job.completed_at::text AS job_completed_at,
+            target.completed_at::text AS target_completed_at
+        FROM jobs job
+        JOIN job_targets target ON target.job_id = job.id
+        WHERE job.id = $1 AND target.client_id = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        replay.try_get::<String, _>("job_completed_at").unwrap(),
+        first_job_completed_at
+    );
+    assert_eq!(
+        replay.try_get::<String, _>("target_completed_at").unwrap(),
+        first_target_completed_at
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            SELECT id
+            FROM job_terminal_events
+            WHERE job_id = $1
+            ORDER BY event_kind
+            "#,
+        )
+        .bind(job_id)
+        .fetch_all(&db.pool)
+        .await
+        .unwrap(),
+        first_event_ids
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_reconcile_uses_target_then_job_lock_order() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-terminal-reconcile-lock-order";
+    let job_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+
+    let reconcile_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*db.pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let reconcile_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&reconcile_pool)
+        .await
+        .unwrap();
+    let reconcile_repo = Repository::Postgres(reconcile_pool.clone());
+
+    let mut blocker = db.pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(
+        r#"
+        SELECT client_id
+        FROM job_targets
+        WHERE job_id = $1 AND client_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .fetch_one(&mut *blocker)
+    .await
+    .unwrap();
+
+    let reconcile = tokio::spawn(async move {
+        reconcile_repo
+            .reconcile_terminal_job(job_id, client_id, "closed")
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let blocked_by_target_holder: bool =
+                sqlx::query_scalar("SELECT $2::integer = ANY(pg_blocking_pids($1::integer))")
+                    .bind(reconcile_pid)
+                    .bind(blocker_pid)
+                    .fetch_one(&db.pool)
+                    .await
+                    .unwrap();
+            if blocked_by_target_holder {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("terminal reconciliation should wait on the held target row first");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query("SELECT id FROM jobs WHERE id = $1 FOR NO KEY UPDATE")
+            .bind(job_id)
+            .fetch_one(&mut *blocker),
+    )
+    .await
+    .expect("target holder must acquire the job row without a lock cycle")
+    .expect("job row lock should succeed");
+    blocker.commit().await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), reconcile)
+        .await
+        .expect("terminal reconciliation should resume after target release")
+        .expect("terminal reconciliation task should not panic")
+        .expect("terminal reconciliation should not deadlock");
+    assert_eq!(job_status(&db.pool, job_id).await, JOB_STATUS_COMPLETED);
+    assert_eq!(
+        target_status(&db.pool, job_id, client_id).await,
+        TARGET_STATUS_COMPLETED
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM job_terminal_events WHERE job_id = $1")
+            .bind(job_id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap(),
+        2
+    );
+
+    reconcile_pool.close().await;
+    db.cleanup().await;
+}
+
+fn terminal_open_session_view(
+    session_id: Uuid,
+    job_id: Uuid,
+    client_id: &str,
+) -> TerminalSessionView {
+    TerminalSessionView {
+        session_id,
+        client_id: client_id.to_string(),
+        job_id,
+        state: "open".to_string(),
+        last_status: "opened".to_string(),
+        argv: vec!["/bin/sh".to_string()],
+        cwd: None,
+        cols: Some(80),
+        rows: Some(24),
+        idle_timeout_secs: Some(3_600),
+        flow_window_bytes: Some(64 * 1_024),
+        output_first_seq: Some(1),
+        output_next_seq: Some(1),
+        output_retained_first_seq: Some(1),
+        output_retained_bytes: Some(0),
+        output_dropped_bytes: Some(0),
+        output_dropped_chunks: Some(0),
+        output_replay_truncated: false,
+        last_input_seq: 0,
+        close_reason: None,
+        last_event: "terminal_open".to_string(),
+        opened_at: Some("2026-08-19T00:00:00Z".to_string()),
+        observed_at: "2026-08-19T00:00:00Z".to_string(),
+    }
+}
+
+async fn install_terminal_event_rejection_trigger(pool: &PgPool) {
+    sqlx::query(
+        r#"
+        CREATE FUNCTION reject_terminal_target_event()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.event_kind = 'target_terminalized' THEN
+                RAISE EXCEPTION 'forced terminal target event failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        CREATE TRIGGER reject_terminal_target_event
+        BEFORE INSERT ON job_terminal_events
+        FOR EACH ROW EXECUTE FUNCTION reject_terminal_target_event()
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn remove_terminal_event_rejection_trigger(pool: &PgPool) {
+    sqlx::query("DROP TRIGGER reject_terminal_target_event ON job_terminal_events")
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION reject_terminal_target_event()")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_terminal_control_close_is_atomic_and_exactly_replayable() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-terminal-control-atomic";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_open_session_view(session_id, job_id, client_id),
+    )
+    .await
+    .unwrap();
+    let operator = postgres_network_operator(&db.repo).await;
+    let action = TerminalControlAction::Close {
+        reason: Some("operator".to_string()),
+    };
+    let ack = TerminalControlAck {
+        request_id: Uuid::new_v4(),
+        session_id,
+        action: "close".to_string(),
+        accepted: true,
+        status: "closed".to_string(),
+        message: "closed".to_string(),
+        input_seq: None,
+        written_bytes: None,
+        cols: None,
+        rows: None,
+    };
+
+    install_terminal_event_rejection_trigger(&db.pool).await;
+    let failed = db
+        .repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &action,
+            "terminal-close-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{failed:#}").contains("forced terminal target event failure"),
+        "unexpected error: {failed:#}"
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String, i64, i64)>(
+            r#"
+            SELECT
+                session.state,
+                target.status,
+                job.status,
+                (SELECT COUNT(*) FROM audit_logs
+                    WHERE action = 'terminal.close'
+                      AND metadata->>'request_id' = $2),
+                (SELECT COUNT(*) FROM job_terminal_events event
+                    WHERE event.job_id = job.id)
+            FROM terminal_sessions session
+            JOIN job_targets target
+              ON target.job_id = session.job_id AND target.client_id = session.client_id
+            JOIN jobs job ON job.id = target.job_id
+            WHERE session.job_id = $1 AND session.session_id = $3
+            "#,
+        )
+        .bind(job_id)
+        .bind(ack.request_id.to_string())
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            "open".to_string(),
+            "running".to_string(),
+            "running".to_string(),
+            0,
+            0,
+        )
+    );
+    remove_terminal_event_rejection_trigger(&db.pool).await;
+
+    db.repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &action,
+            "terminal-close-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap();
+    let first_observed_at: String = sqlx::query_scalar(
+        "SELECT observed_at::text FROM terminal_sessions WHERE client_id = $1 AND session_id = $2",
+    )
+    .bind(client_id)
+    .bind(session_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    db.repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &action,
+            "terminal-close-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT observed_at::text FROM terminal_sessions WHERE client_id = $1 AND session_id = $2",
+        )
+        .bind(client_id)
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        first_observed_at
+    );
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String, i64, i64)>(
+            r#"
+            SELECT
+                session.state,
+                target.status,
+                job.status,
+                (SELECT COUNT(*) FROM audit_logs
+                    WHERE action = 'terminal.close'
+                      AND metadata->>'request_id' = $2),
+                (SELECT COUNT(*) FROM job_terminal_events event
+                    WHERE event.job_id = job.id)
+            FROM terminal_sessions session
+            JOIN job_targets target
+              ON target.job_id = session.job_id AND target.client_id = session.client_id
+            JOIN jobs job ON job.id = target.job_id
+            WHERE session.job_id = $1 AND session.session_id = $3
+            "#,
+        )
+        .bind(job_id)
+        .bind(ack.request_id.to_string())
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            "closed".to_string(),
+            TARGET_STATUS_COMPLETED.to_string(),
+            JOB_STATUS_COMPLETED.to_string(),
+            1,
+            2,
+        )
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_stream_status_and_outbox_commit_atomically() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-terminal-status-atomic";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+    let data = serde_json::to_vec(&json!({
+        "type": "terminal_close",
+        "status": "closed",
+        "session_id": session_id,
+        "reason": "operator",
+        "output_first_seq": 1,
+        "output_next_seq": 1,
+        "output_retained_first_seq": 1,
+        "output_retained_bytes": 0,
+        "output_dropped_bytes": 0,
+        "output_dropped_chunks": 0,
+        "output_replay_truncated": false,
+        "session_exited": true
+    }))
+    .unwrap();
+    let event = TerminalStreamOutput {
+        job_id,
+        session_id,
+        terminal_seq: None,
+        output_first_seq: Some(1),
+        output_next_seq: 1,
+        output_retained_first_seq: Some(1),
+        output_retained_bytes: 0,
+        output_dropped_bytes: 0,
+        output_dropped_chunks: 0,
+        output_replay_truncated: false,
+        output: CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data,
+            exit_code: Some(0),
+            done: true,
+        },
+    };
+
+    install_terminal_event_rejection_trigger(&db.pool).await;
+    assert!(db
+        .repo
+        .record_terminal_stream_status(client_id, &event)
+        .await
+        .is_err());
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String, String, i64)>(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM terminal_sessions
+                    WHERE client_id = $2 AND session_id = $3),
+                target.status,
+                job.status,
+                (SELECT COUNT(*) FROM job_terminal_events event
+                    WHERE event.job_id = job.id)
+            FROM job_targets target
+            JOIN jobs job ON job.id = target.job_id
+            WHERE target.job_id = $1 AND target.client_id = $2
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (0, "running".to_string(), "running".to_string(), 0)
+    );
+    remove_terminal_event_rejection_trigger(&db.pool).await;
+
+    db.repo
+        .record_terminal_stream_status(client_id, &event)
+        .await
+        .unwrap();
+    db.repo
+        .record_terminal_stream_status(client_id, &event)
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_as::<_, (String, String, String, i64)>(
+            r#"
+            SELECT
+                session.state,
+                target.status,
+                job.status,
+                (SELECT COUNT(*) FROM job_terminal_events event
+                    WHERE event.job_id = job.id)
+            FROM terminal_sessions session
+            JOIN job_targets target
+              ON target.job_id = session.job_id AND target.client_id = session.client_id
+            JOIN jobs job ON job.id = target.job_id
+            WHERE session.job_id = $1 AND session.session_id = $2
+            "#,
+        )
+        .bind(job_id)
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            "closed".to_string(),
+            TARGET_STATUS_COMPLETED.to_string(),
+            JOB_STATUS_COMPLETED.to_string(),
+            2,
+        )
+    );
+
+    db.cleanup().await;
+}
+
+#[tokio::test]
+async fn postgres_terminal_late_open_refresh_and_control_cannot_revive_canceled_job() {
+    let Some(db) = PgReliabilityTestDb::maybe_new().await else {
+        return;
+    };
+    let client_id = "pg-terminal-stale-open";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    insert_client(&db.pool, client_id, Some(Uuid::new_v4())).await;
+    insert_terminal_reconcile_job(&db.pool, job_id, client_id).await;
+    let operator = postgres_network_operator(&db.repo).await;
+    sqlx::query(
+        r#"
+        UPDATE job_targets
+        SET status = $3, completed_at = now()
+        WHERE job_id = $1 AND client_id = $2
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .bind(TARGET_STATUS_CANCELED)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE jobs
+        SET actor_id = $2, status = $3, completed_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(operator.operator.id)
+    .bind(JOB_STATUS_CANCELED)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    upsert_postgres_terminal_session(
+        &db.pool,
+        &terminal_open_session_view(session_id, job_id, client_id),
+    )
+    .await
+    .unwrap();
+
+    let authorization = db
+        .repo
+        .authorize_terminal_control(client_id, session_id, &operator)
+        .await
+        .unwrap_err();
+    assert_eq!(authorization.code, "terminal_session_job_inactive");
+    let resize = TerminalControlAction::Resize {
+        cols: 100,
+        rows: 30,
+    };
+    let ack = TerminalControlAck {
+        request_id: Uuid::new_v4(),
+        session_id,
+        action: "resize".to_string(),
+        accepted: true,
+        status: "resized".to_string(),
+        message: "resized".to_string(),
+        input_seq: None,
+        written_bytes: None,
+        cols: Some(100),
+        rows: Some(30),
+    };
+    let rejected = db
+        .repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &resize,
+            "pg-terminal-stale-resize-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{rejected:#}").contains("terminal_session_job_inactive"));
+    assert_eq!(
+        sqlx::query_as::<_, (String, i64, String, String)>(
+            r#"
+            SELECT session.state, session.cols, target.status, job.status
+            FROM terminal_sessions session
+            JOIN job_targets target
+              ON target.job_id = session.job_id AND target.client_id = session.client_id
+            JOIN jobs job ON job.id = target.job_id
+            WHERE session.client_id = $1 AND session.session_id = $2
+            "#,
+        )
+        .bind(client_id)
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            "open".to_string(),
+            80,
+            TARGET_STATUS_CANCELED.to_string(),
+            JOB_STATUS_CANCELED.to_string(),
+        )
+    );
+
+    let late_open = |session_id| TerminalStreamOutput {
+        job_id,
+        session_id,
+        terminal_seq: None,
+        output_first_seq: Some(1),
+        output_next_seq: 1,
+        output_retained_first_seq: Some(1),
+        output_retained_bytes: 0,
+        output_dropped_bytes: 0,
+        output_dropped_chunks: 0,
+        output_replay_truncated: false,
+        output: CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&json!({
+                "type": "terminal_open",
+                "status": "opened",
+                "session_id": session_id,
+                "argv": ["/bin/sh"],
+                "cols": 80,
+                "rows": 24,
+                "idle_timeout_secs": 3600,
+                "flow_window_bytes": 65536,
+                "output_first_seq": 1,
+                "output_next_seq": 1,
+                "session_exited": false
+            }))
+            .unwrap(),
+            exit_code: None,
+            done: false,
+        },
+    };
+    db.repo
+        .record_terminal_stream_status(client_id, &late_open(session_id))
+        .await
+        .unwrap();
+
+    let refresh_session_id = Uuid::new_v4();
+    let refresh_open = late_open(refresh_session_id);
+    sqlx::query(
+        r#"
+        INSERT INTO job_outputs (job_id, client_id, seq, stream, data, done)
+        VALUES ($1, $2, 0, 'status', $3, false)
+        "#,
+    )
+    .bind(job_id)
+    .bind(client_id)
+    .bind(&refresh_open.output.data)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    db.repo
+        .refresh_terminal_sessions_for_client(client_id)
+        .await
+        .unwrap();
+    db.repo
+        .record_terminal_stream_status(client_id, &refresh_open)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        sqlx::query_as::<_, (i64, String, String, String, i64)>(
+            r#"
+            SELECT
+                (SELECT COUNT(*) FROM terminal_sessions
+                    WHERE job_id = $1 AND client_id = $2),
+                session.state,
+                target.status,
+                job.status,
+                (SELECT COUNT(*) FROM job_terminal_events event
+                    WHERE event.job_id = job.id)
+            FROM terminal_sessions session
+            JOIN job_targets target
+              ON target.job_id = session.job_id AND target.client_id = session.client_id
+            JOIN jobs job ON job.id = target.job_id
+            WHERE session.client_id = $2 AND session.session_id = $3
+            "#,
+        )
+        .bind(job_id)
+        .bind(client_id)
+        .bind(session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        (
+            1,
+            "failed".to_string(),
+            TARGET_STATUS_CANCELED.to_string(),
+            JOB_STATUS_CANCELED.to_string(),
+            0,
+        )
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM terminal_sessions WHERE client_id = $1 AND session_id = $2",
+        )
+        .bind(client_id)
+        .bind(refresh_session_id)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap(),
+        0
     );
 
     db.cleanup().await;

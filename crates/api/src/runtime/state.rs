@@ -12,10 +12,14 @@ use anyhow::Result;
 use axum::http::HeaderMap;
 use futures_util::FutureExt;
 use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tracing::warn;
 use vpsman_common::{SuiteConfig, DEFAULT_MAX_JOB_TIMEOUT_SECS, MAX_CONFIGURABLE_JOB_TIMEOUT_SECS};
-use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING};
+use vpsman_server_core::{JOB_STATUS_QUEUED, JOB_STATUS_RUNNING, TARGET_STATUS_COMPLETED};
 
 use crate::{
+    backup_auto_artifacts::{
+        backup_auto_artifact_error_is_permanent, backup_auto_artifact_request_failure_reason,
+    },
     client_ip::TrustedProxyConfig,
     error::ApiError,
     gateway_client::GatewayDispatchClient,
@@ -27,6 +31,9 @@ use crate::{
     object_store::BackupObjectStore,
     repository::Repository,
     repository_jobs::TerminalizationBatch,
+    routes_ingest::{
+        record_network_routing_terminal_result, try_auto_record_backup_artifact_for_job_target,
+    },
     security::{bearer_token, constant_time_eq, operator_has_scope, role_allows},
 };
 
@@ -894,27 +901,122 @@ impl AppState {
         &self,
         limit: i64,
     ) -> Result<TerminalizationBatch> {
-        let batch = self
-            .repo
-            .process_pending_job_terminal_events(limit, 60)
-            .await?;
-        for event in &batch.targets {
-            debug_assert_ne!(event.job_id, uuid::Uuid::nil());
-            debug_assert!(!event.client_id.is_empty());
-            debug_assert!(!event.outcome.status.is_empty());
-        }
-        for event in &batch.jobs {
-            if !matches!(
-                event.status.as_str(),
-                JOB_STATUS_QUEUED | JOB_STATUS_RUNNING
-            ) {
-                self.publish(WsEvent::JobFinished {
-                    job_id: event.job_id,
-                    status: event.status.clone(),
-                });
+        let mut remaining = limit.clamp(1, 1000);
+        let mut processed = TerminalizationBatch::default();
+        loop {
+            let batch = self
+                .repo
+                .process_pending_job_terminal_events(remaining, 60)
+                .await?;
+            let handled = batch.targets.len().saturating_add(batch.jobs.len());
+            if handled == 0 {
+                break;
+            }
+            for event in &batch.targets {
+                debug_assert_ne!(event.job_id, uuid::Uuid::nil());
+                debug_assert!(!event.client_id.is_empty());
+                debug_assert!(!event.outcome.status.is_empty());
+                let enrichment_result = async {
+                    if let Err(error) = record_network_routing_terminal_result(
+                        self,
+                        event.job_id,
+                        &event.client_id,
+                        &event.outcome.status,
+                        None,
+                    )
+                    .await
+                    {
+                        if network_routing_terminal_error_is_permanent(error.code)
+                            || error
+                                .error
+                                .to_string()
+                                .starts_with("invalid_job_operation:")
+                        {
+                            warn!(
+                                code = error.code,
+                                error = ?error.error,
+                                event_id = %event.event_id,
+                                job_id = %event.job_id,
+                                client_id = %event.client_id,
+                                "discarding invalid durable network-routing terminal result"
+                            );
+                        } else {
+                            return Err(error.error);
+                        }
+                    }
+                    if event.outcome.status == TARGET_STATUS_COMPLETED {
+                        if let Err(error) = try_auto_record_backup_artifact_for_job_target(
+                            self,
+                            event.job_id,
+                            &event.client_id,
+                        )
+                        .await
+                        {
+                            if let Some(reason) =
+                                backup_auto_artifact_request_failure_reason(&error.error)
+                            {
+                                self.repo
+                                    .mark_open_backup_request_artifact_validation_failed(
+                                        event.job_id,
+                                        &event.client_id,
+                                        reason,
+                                    )
+                                    .await?;
+                            }
+                            if backup_auto_artifact_error_is_permanent(&error.error) {
+                                warn!(
+                                    error = ?error.error,
+                                    event_id = %event.event_id,
+                                    job_id = %event.job_id,
+                                    client_id = %event.client_id,
+                                    "discarding invalid durable backup-artifact enrichment"
+                                );
+                            } else {
+                                return Err(error.error);
+                            }
+                        }
+                    }
+                    Ok::<_, anyhow::Error>(())
+                }
+                .await;
+                match enrichment_result {
+                    Ok(()) => {
+                        self.repo
+                            .mark_job_terminal_event_processed(event.event_id)
+                            .await?;
+                    }
+                    Err(error) => {
+                        warn!(
+                            %error,
+                            event_id = %event.event_id,
+                            job_id = %event.job_id,
+                            client_id = %event.client_id,
+                            "durable job target enrichment deferred for retry"
+                        );
+                        self.repo
+                            .mark_job_terminal_event_failed(event.event_id, &error.to_string())
+                            .await?;
+                    }
+                }
+            }
+            for event in &batch.jobs {
+                if !matches!(
+                    event.status.as_str(),
+                    JOB_STATUS_QUEUED | JOB_STATUS_RUNNING
+                ) {
+                    self.publish(WsEvent::JobFinished {
+                        job_id: event.job_id,
+                        status: event.status.clone(),
+                    });
+                }
+            }
+            remaining = remaining.saturating_sub(i64::try_from(handled).unwrap_or(i64::MAX));
+            processed.extend(batch);
+            if remaining <= 0 {
+                break;
             }
         }
-        Ok(batch)
+        Ok(processed)
     }
 
     pub(crate) async fn process_job_terminal_events_or_publish_refresh(
@@ -924,7 +1026,9 @@ impl AppState {
         refreshed: Option<String>,
     ) -> Result<()> {
         let batch = self.process_job_terminal_events(limit).await?;
-        if !batch.jobs.iter().any(|event| event.job_id == job_id) {
+        if matches!(&self.repo, Repository::Memory(_))
+            && !batch.jobs.iter().any(|event| event.job_id == job_id)
+        {
             self.publish_job_finished_after_refresh(job_id, refreshed)
                 .await?;
         }
@@ -937,6 +1041,16 @@ impl AppState {
             agents: self.repo.list_agents().await?,
         })
     }
+}
+
+fn network_routing_terminal_error_is_permanent(code: &str) -> bool {
+    matches!(
+        code,
+        "network_routing_result_plan_id_invalid"
+            | "network_routing_result_missing"
+            | "network_routing_result_invalid"
+            | "network_routing_result_contract_mismatch"
+    )
 }
 
 fn is_safe_release_token(value: &str, max_bytes: usize) -> bool {

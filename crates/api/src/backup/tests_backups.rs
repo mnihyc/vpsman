@@ -26,13 +26,15 @@ use crate::{
     model::{
         AuthContext, BackupArtifactHandoffRequest, BackupArtifactUploadChunkRequest,
         BackupArtifactUploadCommitRequest, BackupArtifactUploadSessionCreateRequest,
-        BackupPolicyPruneRequest, BackupRequestStatus, CreateBackupPolicyRequest,
-        CreateBackupRequest, CreateJobRequest, JobHistoryView, JobOutputView, JobTargetView,
-        ListQuery, OperatorView, RecordBackupArtifactMetadataRequest, ScheduleTriggerKind,
-        UpdateBackupPolicyRequest, UpdateScheduleTargetsRequest, UploadBackupArtifactRequest,
+        BackupPolicyPruneRequest, BackupRequestStatus, BackupRequestView,
+        CreateBackupPolicyRequest, CreateBackupRequest, CreateJobRequest, JobHistoryView,
+        JobOutputView, JobTargetView, ListQuery, OperatorView, RecordBackupArtifactMetadataRequest,
+        ScheduleTriggerKind, UpdateBackupPolicyRequest, UpdateScheduleTargetsRequest,
+        UploadBackupArtifactRequest,
     },
     object_store::BackupObjectStore,
     repository::{MemoryState, Repository},
+    repository_backup_artifacts::backup_server_artifact,
     repository_backups::BackupRequestSourceLink,
     repository_ingest::upsert_memory_agent,
     repository_job_outputs,
@@ -391,6 +393,7 @@ async fn backup_job_dispatch_auto_records_request_and_object_artifact() {
         .expect("backup gateway dispatch was not attempted")
         .unwrap();
     wait_for_job_status(&repo, response.job_id, "completed").await;
+    wait_for_backup_request_status(&repo, "artifact_metadata_recorded").await;
     let backups = repo.list_backup_requests(10).await.unwrap();
     let artifacts = repo.list_backup_artifacts(10).await.unwrap();
     let outputs = repo.list_job_outputs(response.job_id).await.unwrap();
@@ -501,6 +504,77 @@ async fn backup_job_dispatch_terminal_failure_marks_backup_request_failed() {
     assert!(audits
         .iter()
         .any(|audit| audit.action == "backup.execution_failed"));
+}
+
+#[tokio::test]
+async fn permanent_auto_artifact_validation_failure_closes_linked_request_once() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_backup_agent(&repo).await;
+    let source_job_id = Uuid::new_v4();
+    let operator = backup_test_operator();
+    let backup = repo
+        .record_backup_request_with_source(
+            &CreateBackupRequest {
+                client_id: "client-a".to_string(),
+                paths: vec!["/etc/hostname".to_string()],
+                include_config: true,
+                follow_symlinks: false,
+                missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+                confirmed: true,
+                note: None,
+                privilege_assertion: None,
+            },
+            "backup-validation-payload",
+            "client:client-a",
+            &operator,
+            BackupRequestStatus::RequestedMetadataOnly,
+            BackupRequestSourceLink {
+                job_id: Some(source_job_id),
+                schedule_id: None,
+                ..BackupRequestSourceLink::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let failed = repo
+        .mark_open_backup_request_artifact_validation_failed(
+            source_job_id,
+            "client-a",
+            "backup_artifact_tar_invalid",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.status, BackupRequestStatus::ExecutionFailed.as_str());
+    assert!(repo
+        .mark_open_backup_request_artifact_validation_failed(
+            source_job_id,
+            "client-a",
+            "backup_artifact_tar_invalid",
+        )
+        .await
+        .unwrap()
+        .is_none());
+
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    let failure_audits = audits
+        .iter()
+        .filter(|audit| {
+            audit.action == "backup.execution_failed"
+                && audit.target == format!("backup_request:{}", backup.id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(failure_audits.len(), 1);
+    assert_eq!(
+        failure_audits[0].metadata["reason"],
+        "backup_artifact_tar_invalid"
+    );
+    assert_eq!(
+        failure_audits[0].metadata["failure_phase"],
+        "artifact_validation"
+    );
+    assert_eq!(failure_audits[0].metadata["origin_kind"], "control_plane");
 }
 
 #[tokio::test]
@@ -1838,6 +1912,53 @@ async fn backup_artifact_metadata_links_request_and_audits() {
         .iter()
         .any(|audit| audit.action == "backup.artifact_metadata_recorded"));
 
+    repo.reserve_server_artifact(backup_server_artifact(&backup, &artifact))
+        .await
+        .unwrap();
+    assert!(!repo
+        .active_server_artifact_matches(
+            "backup_artifact",
+            &artifact.object_key,
+            &artifact.sha256_hex,
+            artifact.size_bytes,
+        )
+        .await
+        .unwrap());
+    let exact_retry = repo
+        .record_backup_artifact_metadata(
+            &backup,
+            artifact.id,
+            &RecordBackupArtifactMetadataRequest {
+                object_key: artifact.object_key.clone(),
+                sha256_hex: artifact.sha256_hex.clone(),
+                size_bytes: artifact.size_bytes,
+                confirmed: true,
+            },
+            &backup_test_operator(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exact_retry.id, artifact.id);
+    assert!(repo
+        .active_server_artifact_matches(
+            "backup_artifact",
+            &artifact.object_key,
+            &artifact.sha256_hex,
+            artifact.size_bytes,
+        )
+        .await
+        .unwrap());
+    assert_eq!(repo.list_backup_artifacts(10).await.unwrap().len(), 1);
+    assert_eq!(
+        repo.list_audit_logs(10)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|audit| audit.action == "backup.artifact_metadata_recorded")
+            .count(),
+        1
+    );
+
     let duplicate = RecordBackupArtifactMetadataRequest {
         object_key: format!("backups/{}/{}-duplicate.tar", backup.client_id, backup.id),
         sha256_hex: "c".repeat(64),
@@ -1851,6 +1972,79 @@ async fn backup_artifact_metadata_links_request_and_audits() {
     assert_eq!(error.status, axum::http::StatusCode::CONFLICT);
     assert_eq!(error.code, "backup_artifact_already_recorded");
     let _ = tokio::fs::remove_dir_all(object_root).await;
+}
+
+#[tokio::test]
+async fn canceled_backup_artifact_metadata_cannot_commit_before_its_audit() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let backup = BackupRequestView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        client_id: "client-a".to_string(),
+        paths: vec!["/etc/hostname".to_string()],
+        include_config: true,
+        follow_symlinks: false,
+        missing_path_policy: vpsman_common::BackupMissingPathPolicy::Fail,
+        status: BackupRequestStatus::RequestedMetadataOnly
+            .as_str()
+            .to_string(),
+        payload_hash: "a".repeat(64),
+        command_scope: "client:client-a".to_string(),
+        artifact_id: None,
+        source_job_id: None,
+        source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
+        note: None,
+        created_at: unix_now().to_string(),
+    };
+    memory.backup_requests.write().await.push(backup.clone());
+    let audit_guard = memory.audits.write().await;
+    let task = tokio::spawn({
+        let repo = repo.clone();
+        let operator = backup_test_operator();
+        async move {
+            repo.record_backup_artifact_metadata(
+                &backup,
+                Uuid::new_v4(),
+                &RecordBackupArtifactMetadataRequest {
+                    object_key: format!("backups/{}/cancellation.tar", backup.client_id),
+                    sha256_hex: "b".repeat(64),
+                    size_bytes: 4096,
+                    confirmed: true,
+                },
+                &operator,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if memory.backup_requests.try_write().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("backup artifact mutation did not reach the blocked audit acquisition");
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(audit_guard);
+
+    let requests = memory.backup_requests.read().await;
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].artifact_id.is_none());
+    assert_eq!(
+        requests[0].status,
+        BackupRequestStatus::RequestedMetadataOnly.as_str()
+    );
+    drop(requests);
+    assert!(memory.backup_artifacts.read().await.is_empty());
+    assert!(memory.server_artifacts.read().await.is_empty());
+    assert!(memory.audits.read().await.is_empty());
 }
 
 #[tokio::test]
@@ -2695,6 +2889,20 @@ async fn wait_for_job_status(
     })
     .await
     .unwrap_or_else(|_| panic!("job {job_id} did not reach status {expected}"));
+}
+
+async fn wait_for_backup_request_status(repo: &crate::repository::Repository, expected: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let requests = repo.list_backup_requests(10).await.unwrap();
+            if requests.iter().any(|request| request.status == expected) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("backup request did not reach status {expected}"));
 }
 
 fn backup_test_operator() -> AuthContext {

@@ -120,6 +120,11 @@ pub(crate) struct MemoryState {
     pub(crate) command_templates: Arc<RwLock<Vec<CommandTemplateView>>>,
     pub(crate) job_targets: Arc<RwLock<Vec<JobTargetView>>>,
     pub(crate) job_outputs: Arc<RwLock<Vec<JobOutputView>>>,
+    /// Serializes the Memory fixture's replayable terminal side effects. PostgreSQL uses
+    /// durable terminal-event rows for this boundary; the in-memory repository needs one
+    /// equivalent critical section so concurrent identical replays cannot double-apply
+    /// schedule counters or lifecycle audits.
+    pub(crate) job_terminal_side_effects: Arc<Mutex<()>>,
     pub(crate) network_traffic_import_retry_not_before: Arc<RwLock<HashMap<(Uuid, String), u64>>>,
     pub(crate) capability_degraded_job_targets: Arc<RwLock<CapabilityDegradedJobTargets>>,
     pub(crate) server_artifacts: Arc<RwLock<Vec<ServerArtifactCleanupCandidate>>>,

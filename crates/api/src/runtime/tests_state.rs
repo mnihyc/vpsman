@@ -12,6 +12,21 @@ use crate::{
 };
 
 #[test]
+fn routing_terminal_retry_classification_discards_only_invalid_evidence() {
+    for code in [
+        "network_routing_result_plan_id_invalid",
+        "network_routing_result_missing",
+        "network_routing_result_invalid",
+        "network_routing_result_contract_mismatch",
+    ] {
+        assert!(super::network_routing_terminal_error_is_permanent(code));
+    }
+    assert!(!super::network_routing_terminal_error_is_permanent(
+        "internal_server_error"
+    ));
+}
+
+#[test]
 fn singleflight_auth_key_normalizes_effective_scope_order_and_duplicates() {
     let operator_id = uuid::Uuid::new_v4();
     assert_eq!(

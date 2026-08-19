@@ -23,10 +23,13 @@ use crate::model_alert_policies::{
 };
 use crate::model_webhook_rules::WebhookEventCandidate;
 use crate::repository::{Repository, TelemetryIngestWatermark, TelemetryIngestWatermarks};
+use crate::repository_agent_update_lifecycle::{
+    prevalidate_memory_agent_update_heartbeat_audit, record_agent_update_heartbeat_in_tx,
+};
 use crate::repository_alert_policies::postgres_traffic_accounting_snapshot_in_tx;
 use crate::repository_jobs::{
     append_synthetic_agent_lost_output_in_tx, append_synthetic_status_output_in_tx,
-    enqueue_target_terminal_event_in_tx,
+    enqueue_target_terminal_event_in_tx, finish_jobs_in_tx_and_reconcile_event_sources,
 };
 use crate::repository_key_lifecycle::public_key_sha256_hex;
 use crate::repository_monitoring::{accepted_postgres_ping_results, upsert_postgres_ping_results};
@@ -426,6 +429,7 @@ async fn mark_old_incarnation_targets_agent_lost_in_tx(
     }
     affected_job_ids.sort();
     affected_job_ids.dedup();
+    finish_jobs_in_tx_and_reconcile_event_sources(tx, &affected_job_ids).await?;
     Ok(affected_job_ids)
 }
 
@@ -537,6 +541,14 @@ impl Repository {
                     .is_some_and(|agent| !matches!(agent.status.as_str(), "revoked" | "deleted"));
                 let credential_accepted = current_key_matches && !key_revoked && identity_active;
                 if !hidden && credential_accepted {
+                    if let Some(heartbeat) = update_heartbeat.as_ref() {
+                        prevalidate_memory_agent_update_heartbeat_audit(
+                            memory,
+                            &event.hello.client_id,
+                            heartbeat,
+                        )
+                        .await?;
+                    }
                     let prior = {
                         let agents = memory.agents.read().await;
                         agents
@@ -658,6 +670,16 @@ impl Repository {
                             )
                             .await?;
                         }
+                    }
+                    if let Some(heartbeat) = update_heartbeat.as_ref() {
+                        debug!(
+                            client_id = %event.hello.client_id,
+                            activation_job_id = %heartbeat.activation_job_id,
+                            sha256_hex = %heartbeat.sha256_hex,
+                            "recording agent update heartbeat"
+                        );
+                        self.record_agent_update_heartbeat(&event.hello.client_id, heartbeat)
+                            .await?;
                     }
                 } else {
                     accepted_hello = false;
@@ -816,10 +838,9 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 accepted_hello = result.rows_affected() > 0;
-                let mut agent_lost_job_ids = Vec::new();
                 if accepted_hello && process_incarnation_changed {
                     if let Some(previous_process_incarnation_id) = prior_process_incarnation_id {
-                        agent_lost_job_ids = mark_old_incarnation_targets_agent_lost_in_tx(
+                        mark_old_incarnation_targets_agent_lost_in_tx(
                             &mut tx,
                             &event.hello.client_id,
                             previous_process_incarnation_id,
@@ -910,22 +931,24 @@ impl Repository {
                     .await?;
                 }
 
-                tx.commit().await?;
-                for job_id in agent_lost_job_ids {
-                    let _ = self.refresh_job_status_from_targets(job_id).await?;
+                if accepted_hello {
+                    if let Some(heartbeat) = update_heartbeat.as_ref() {
+                        debug!(
+                            client_id = %event.hello.client_id,
+                            activation_job_id = %heartbeat.activation_job_id,
+                            sha256_hex = %heartbeat.sha256_hex,
+                            "recording agent update heartbeat"
+                        );
+                        record_agent_update_heartbeat_in_tx(
+                            &mut tx,
+                            &event.hello.client_id,
+                            heartbeat,
+                        )
+                        .await?;
+                    }
                 }
-            }
-        }
-        if accepted_hello {
-            if let Some(heartbeat) = update_heartbeat.as_ref() {
-                debug!(
-                    client_id = %event.hello.client_id,
-                    activation_job_id = %heartbeat.activation_job_id,
-                    sha256_hex = %heartbeat.sha256_hex,
-                    "recording agent update heartbeat"
-                );
-                self.record_agent_update_heartbeat(&event.hello.client_id, heartbeat)
-                    .await?;
+
+                tx.commit().await?;
             }
         }
         Ok(accepted_hello)
@@ -1322,7 +1345,8 @@ impl Repository {
         }
         predicates.sort();
         predicates.dedup();
-        let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+        let disk = persistent_disk_totals(metrics);
+        let (network_rx, network_tx) = network_telemetry_totals(metrics);
         let event_id = format!(
             "telemetry:{}:{}:{}:{}",
             event.telemetry.client_id,
@@ -1348,8 +1372,9 @@ impl Repository {
                     "observed_unix": metrics.observed_unix,
                     "hostname": &metrics.hostname,
                     "uptime_secs": metrics.uptime_secs,
-                    "disk_total_bytes": disk_total,
-                    "disk_available_bytes": disk_available,
+                    "disk_collection_available": disk.is_some(),
+                    "disk_total_bytes": disk.map(|(total, _)| total),
+                    "disk_available_bytes": disk.map(|(_, available)| available),
                     "network_rx_bytes": network_rx,
                     "network_tx_bytes": network_tx,
                     "network_count": metrics.networks.len(),
@@ -1658,7 +1683,8 @@ async fn upsert_postgres_telemetry_sample(
     client_id: &str,
     metrics: &AgentMetrics,
 ) -> Result<()> {
-    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let disk = persistent_disk_totals(metrics);
+    let (network_rx, network_tx) = network_telemetry_totals(metrics);
     /*
      * The historical PostgreSQL raw projection treated a missing connection
      * snapshot as the saturated BIGINT sentinel. Retain that observable value
@@ -1731,8 +1757,8 @@ async fn upsert_postgres_telemetry_sample(
     .bind(u64_to_i64(metrics.memory.available_bytes))
     .bind(metrics.memory.swap_total_bytes.map(u64_to_i64))
     .bind(metrics.memory.swap_available_bytes.map(u64_to_i64))
-    .bind(disk_total)
-    .bind(disk_available)
+    .bind(disk.map(|(total, _)| total))
+    .bind(disk.map(|(_, available)| available))
     .bind(network_rx)
     .bind(network_tx)
     .bind(tcp_sockets)
@@ -1975,11 +2001,12 @@ async fn upsert_memory_telemetry_rollup(
 ) {
     let bucket_start = bucket_start_unix(metrics.observed_unix).to_string();
     let observed_at = metrics.observed_unix.to_string();
-    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let disk = persistent_disk_totals(metrics).filter(|(total, _)| *total > 0);
+    let (network_rx, network_tx) = network_telemetry_totals(metrics);
     let memory_total = u64_to_i64(metrics.memory.total_bytes);
     let memory_available = u64_to_i64(metrics.memory.available_bytes);
     let memory_used_ratio = resource_used_ratio_or_zero(memory_total, memory_available);
-    let disk_used_ratio = resource_used_ratio_or_zero(disk_total, disk_available);
+    let disk_used_ratio = disk.map(|(total, available)| resource_used_ratio(total, available));
     let positive_swap = swap.filter(|(total, _)| *total > 0);
     let mut rollups = rollups.write().await;
     if let Some(rollup) = rollups.iter_mut().find(|rollup| {
@@ -2070,16 +2097,36 @@ async fn upsert_memory_telemetry_rollup(
                 rollup.swap_sample_count = swap_count.saturating_add(1);
             }
         }
-        rollup.disk_total_bytes_max = rollup.disk_total_bytes_max.max(disk_total);
-        rollup.disk_available_bytes_avg = weighted_avg_i64(
-            rollup.disk_available_bytes_avg,
-            current_count,
-            disk_available,
-        );
-        rollup.disk_available_bytes_min = rollup.disk_available_bytes_min.min(disk_available);
-        rollup.disk_used_ratio_avg =
-            weighted_avg_f64(rollup.disk_used_ratio_avg, current_count, disk_used_ratio);
-        rollup.disk_used_ratio_max = rollup.disk_used_ratio_max.max(disk_used_ratio);
+        if let (Some((disk_total, disk_available)), Some(disk_used_ratio)) = (disk, disk_used_ratio)
+        {
+            let disk_count = rollup.disk_sample_count.max(0);
+            rollup.disk_total_bytes_max = if disk_count == 0 {
+                disk_total
+            } else {
+                rollup.disk_total_bytes_max.max(disk_total)
+            };
+            rollup.disk_available_bytes_avg = if disk_count == 0 {
+                disk_available
+            } else {
+                weighted_avg_i64(rollup.disk_available_bytes_avg, disk_count, disk_available)
+            };
+            rollup.disk_available_bytes_min = if disk_count == 0 {
+                disk_available
+            } else {
+                rollup.disk_available_bytes_min.min(disk_available)
+            };
+            rollup.disk_used_ratio_avg = if disk_count == 0 {
+                disk_used_ratio
+            } else {
+                weighted_avg_f64(rollup.disk_used_ratio_avg, disk_count, disk_used_ratio)
+            };
+            rollup.disk_used_ratio_max = if disk_count == 0 {
+                disk_used_ratio
+            } else {
+                rollup.disk_used_ratio_max.max(disk_used_ratio)
+            };
+            rollup.disk_sample_count = disk_count.saturating_add(1);
+        }
         rollup.network_rx_bytes_max = rollup.network_rx_bytes_max.max(network_rx);
         rollup.network_tx_bytes_max = rollup.network_tx_bytes_max.max(network_tx);
         if let Some(connections) = metrics.connections.as_ref() {
@@ -2130,11 +2177,12 @@ async fn upsert_memory_telemetry_rollup(
             .map(|(total, available)| resource_used_ratio(total, available)),
         swap_used_ratio_max: positive_swap
             .map(|(total, available)| resource_used_ratio(total, available)),
-        disk_total_bytes_max: disk_total,
-        disk_available_bytes_avg: disk_available,
-        disk_available_bytes_min: disk_available,
-        disk_used_ratio_avg: disk_used_ratio,
-        disk_used_ratio_max: disk_used_ratio,
+        disk_sample_count: i32::from(disk.is_some()),
+        disk_total_bytes_max: disk.map_or(0, |(total, _)| total),
+        disk_available_bytes_avg: disk.map_or(0, |(_, available)| available),
+        disk_available_bytes_min: disk.map_or(0, |(_, available)| available),
+        disk_used_ratio_avg: disk_used_ratio.unwrap_or(0.0),
+        disk_used_ratio_max: disk_used_ratio.unwrap_or(0.0),
         network_rx_bytes_max: network_rx,
         network_tx_bytes_max: network_tx,
         connections_sample_count: i32::from(metrics.connections.is_some()),
@@ -2331,13 +2379,17 @@ fn upsert_memory_traffic_counter(
     }
 }
 
-async fn upsert_postgres_telemetry_rollup(
+pub(crate) async fn upsert_postgres_telemetry_rollup(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     client_id: &str,
     metrics: &AgentMetrics,
     swap: Option<(i64, i64)>,
 ) -> Result<()> {
-    let (disk_total, disk_available, network_rx, network_tx) = telemetry_totals(metrics);
+    let disk = persistent_disk_totals(metrics).filter(|(total, _)| *total > 0);
+    let disk_sample_count = i32::from(disk.is_some());
+    let disk_total = disk.map_or(0, |(total, _)| total);
+    let disk_available = disk.map_or(0, |(_, available)| available);
+    let (network_rx, network_tx) = network_telemetry_totals(metrics);
     let positive_swap = swap.filter(|(total, _)| *total > 0);
     sqlx::query(
         r#"
@@ -2389,7 +2441,8 @@ async fn upsert_postgres_telemetry_rollup(
             udp_sockets_latest,
             connections_observed_at,
             latest_observed_at,
-            updated_at
+            updated_at,
+            disk_sample_count
         )
         VALUES (
             $1,
@@ -2442,7 +2495,8 @@ async fn upsert_postgres_telemetry_rollup(
                 ELSE to_timestamp($26::double precision)
             END,
             to_timestamp($27::double precision),
-            now()
+            now(),
+            $28
         )
         ON CONFLICT (client_id, bucket_secs, bucket_start) DO UPDATE SET
             sample_count = telemetry_rollups.sample_count + EXCLUDED.sample_count,
@@ -2563,29 +2617,72 @@ async fn upsert_postgres_telemetry_rollup(
                     EXCLUDED.swap_used_ratio_max
                 )
             END,
-            disk_total_bytes_max = GREATEST(
-                telemetry_rollups.disk_total_bytes_max,
-                EXCLUDED.disk_total_bytes_max
-            ),
-            disk_available_bytes_sum = telemetry_rollups.disk_available_bytes_sum
-                + EXCLUDED.disk_available_bytes_sum,
-            disk_available_bytes_avg = round((
-                telemetry_rollups.disk_available_bytes_sum
-                + EXCLUDED.disk_available_bytes_sum
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::numeric)::bigint,
-            disk_available_bytes_min = LEAST(
-                telemetry_rollups.disk_available_bytes_min,
-                EXCLUDED.disk_available_bytes_min
-            ),
-            disk_used_ratio_sum = telemetry_rollups.disk_used_ratio_sum
-                + EXCLUDED.disk_used_ratio_sum,
-            disk_used_ratio_avg = (
-                telemetry_rollups.disk_used_ratio_sum + EXCLUDED.disk_used_ratio_sum
-            ) / (telemetry_rollups.sample_count + EXCLUDED.sample_count)::double precision,
-            disk_used_ratio_max = GREATEST(
-                telemetry_rollups.disk_used_ratio_max,
-                EXCLUDED.disk_used_ratio_max
-            ),
+            disk_total_bytes_max = CASE
+                WHEN telemetry_rollups.disk_sample_count = 0
+                    THEN EXCLUDED.disk_total_bytes_max
+                WHEN EXCLUDED.disk_sample_count = 0
+                    THEN telemetry_rollups.disk_total_bytes_max
+                ELSE GREATEST(
+                    telemetry_rollups.disk_total_bytes_max,
+                    EXCLUDED.disk_total_bytes_max
+                )
+            END,
+            disk_available_bytes_sum =
+                CASE WHEN telemetry_rollups.disk_sample_count > 0
+                    THEN telemetry_rollups.disk_available_bytes_sum ELSE 0 END
+                + CASE WHEN EXCLUDED.disk_sample_count > 0
+                    THEN EXCLUDED.disk_available_bytes_sum ELSE 0 END,
+            disk_sample_count = telemetry_rollups.disk_sample_count
+                + EXCLUDED.disk_sample_count,
+            disk_available_bytes_avg = CASE
+                WHEN telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count = 0
+                    THEN 0
+                ELSE round((
+                    CASE WHEN telemetry_rollups.disk_sample_count > 0
+                        THEN telemetry_rollups.disk_available_bytes_sum ELSE 0 END
+                    + CASE WHEN EXCLUDED.disk_sample_count > 0
+                        THEN EXCLUDED.disk_available_bytes_sum ELSE 0 END
+                ) / (
+                    telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count
+                )::numeric)::bigint
+            END,
+            disk_available_bytes_min = CASE
+                WHEN telemetry_rollups.disk_sample_count = 0
+                    THEN EXCLUDED.disk_available_bytes_min
+                WHEN EXCLUDED.disk_sample_count = 0
+                    THEN telemetry_rollups.disk_available_bytes_min
+                ELSE LEAST(
+                    telemetry_rollups.disk_available_bytes_min,
+                    EXCLUDED.disk_available_bytes_min
+                )
+            END,
+            disk_used_ratio_sum =
+                CASE WHEN telemetry_rollups.disk_sample_count > 0
+                    THEN telemetry_rollups.disk_used_ratio_sum ELSE 0 END
+                + CASE WHEN EXCLUDED.disk_sample_count > 0
+                    THEN EXCLUDED.disk_used_ratio_sum ELSE 0 END,
+            disk_used_ratio_avg = CASE
+                WHEN telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count = 0
+                    THEN 0
+                ELSE (
+                    CASE WHEN telemetry_rollups.disk_sample_count > 0
+                        THEN telemetry_rollups.disk_used_ratio_sum ELSE 0 END
+                    + CASE WHEN EXCLUDED.disk_sample_count > 0
+                        THEN EXCLUDED.disk_used_ratio_sum ELSE 0 END
+                ) / (
+                    telemetry_rollups.disk_sample_count + EXCLUDED.disk_sample_count
+                )::double precision
+            END,
+            disk_used_ratio_max = CASE
+                WHEN telemetry_rollups.disk_sample_count = 0
+                    THEN EXCLUDED.disk_used_ratio_max
+                WHEN EXCLUDED.disk_sample_count = 0
+                    THEN telemetry_rollups.disk_used_ratio_max
+                ELSE GREATEST(
+                    telemetry_rollups.disk_used_ratio_max,
+                    EXCLUDED.disk_used_ratio_max
+                )
+            END,
             network_rx_bytes_max = GREATEST(
                 telemetry_rollups.network_rx_bytes_max,
                 EXCLUDED.network_rx_bytes_max
@@ -2674,6 +2771,7 @@ async fn upsert_postgres_telemetry_rollup(
             .map(|_| metrics.observed_unix as f64),
     )
     .bind(metrics.observed_unix as f64)
+    .bind(disk_sample_count)
     .execute(&mut **tx)
     .await?;
     sqlx::query(
@@ -3160,12 +3258,19 @@ fn adapter_health_view(
     }
 }
 
-fn telemetry_totals(metrics: &AgentMetrics) -> (i64, i64, i64, i64) {
+fn persistent_disk_totals(metrics: &AgentMetrics) -> Option<(i64, i64)> {
+    if !metrics.has_persistent_block_filesystem_disk_sample() {
+        return None;
+    }
     let disk_total = sum_u64(metrics.disks.iter().map(|disk| disk.total_bytes));
     let disk_available = sum_u64(metrics.disks.iter().map(|disk| disk.available_bytes));
+    Some((disk_total, disk_available))
+}
+
+fn network_telemetry_totals(metrics: &AgentMetrics) -> (i64, i64) {
     let network_rx = sum_u64(metrics.networks.iter().map(|network| network.rx_bytes));
     let network_tx = sum_u64(metrics.networks.iter().map(|network| network.tx_bytes));
-    (disk_total, disk_available, network_rx, network_tx)
+    (network_rx, network_tx)
 }
 
 async fn record_combined_telemetry_policy_evidence_in_tx(
@@ -3237,7 +3342,7 @@ fn combined_metric_evidence_payload(
     telemetry_sample_id: Uuid,
     reported_observed_unix: u64,
 ) -> Value {
-    let (disk_total, disk_available, _, _) = telemetry_totals(metrics);
+    let disk = persistent_disk_totals(metrics).filter(|(total, _)| *total > 0);
     let memory_available_ratio = (metrics.memory.total_bytes > 0).then(|| {
         (metrics
             .memory
@@ -3246,7 +3351,7 @@ fn combined_metric_evidence_payload(
             / metrics.memory.total_bytes as f64
     });
     let disk_available_ratio =
-        (disk_total > 0).then(|| disk_available.clamp(0, disk_total) as f64 / disk_total as f64);
+        disk.map(|(total, available)| available.clamp(0, total) as f64 / total as f64);
     let cpu_load_saturation = (metrics.cpu.cores > 0)
         .then(|| metrics.cpu.load.one / f64::from(metrics.cpu.cores))
         .filter(|value| value.is_finite());
@@ -3576,4 +3681,174 @@ async fn touch_memory_agent_from_telemetry(
     }
     agent.last_seen_at = Some(crate::unix_now().to_string());
     Some((agent.status.clone(), agent.status != previous_status))
+}
+
+#[cfg(test)]
+mod agent_hello_heartbeat_tests {
+    use super::*;
+    use crate::repository::MemoryState;
+    use vpsman_common::AgentCapabilitySnapshot;
+
+    #[tokio::test]
+    async fn memory_heartbeat_identity_conflict_precedes_hello_mutation_and_replay_is_exact() {
+        let memory = MemoryState::default();
+        let repo = Repository::Memory(memory.clone());
+        let client_id = "memory-heartbeat-atomic";
+        let public_key = vec![0x71; 32];
+        let prior_process_incarnation_id = Uuid::new_v4();
+        let process_incarnation_id = Uuid::new_v4();
+        memory
+            .client_public_keys
+            .write()
+            .await
+            .insert(client_id.to_string(), public_key.clone());
+        upsert_memory_agent(
+            &memory.agents,
+            &AgentHello {
+                client_id: client_id.to_string(),
+                process_incarnation_id: prior_process_incarnation_id,
+                agent_version: "before-heartbeat".to_string(),
+                internal_build_number: 1,
+                os_release: "before-os".to_string(),
+                arch: "x86_64".to_string(),
+                cpu_model: None,
+                kernel_release: None,
+                virtualization: None,
+                update_heartbeat: None,
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        )
+        .await;
+
+        let heartbeat = AgentUpdateHeartbeat {
+            activation_job_id: Uuid::new_v4(),
+            sha256_hex: "aa".repeat(32),
+            marker_unix: 100,
+            observed_unix: 101,
+        };
+        repo.record_agent_update_heartbeat(client_id, &heartbeat)
+            .await
+            .unwrap();
+        let heartbeat_audit_id = {
+            let mut audits = memory.audits.write().await;
+            let audit = audits
+                .iter_mut()
+                .find(|audit| audit.action == "agent_update.heartbeat_observed")
+                .expect("seeded heartbeat audit");
+            audit.command_hash = Some("forced-collision".to_string());
+            audit.id
+        };
+        let event = GatewayAgentHelloIngest {
+            gateway_id: "memory-heartbeat-gateway".to_string(),
+            gateway_session_id: Uuid::new_v4(),
+            remote_ip: Some("203.0.113.71".to_string()),
+            noise_public_key_hex: hex::encode(&public_key),
+            hello: AgentHello {
+                client_id: client_id.to_string(),
+                process_incarnation_id,
+                agent_version: "after-heartbeat".to_string(),
+                internal_build_number: 7,
+                os_release: "after-os".to_string(),
+                arch: "aarch64".to_string(),
+                cpu_model: Some("test-cpu".to_string()),
+                kernel_release: Some("test-kernel".to_string()),
+                virtualization: Some("test-vm".to_string()),
+                update_heartbeat: Some(heartbeat),
+                capabilities: AgentCapabilitySnapshot::default(),
+            },
+        };
+
+        let conflict = repo.upsert_agent_hello(&event).await.unwrap_err();
+        assert!(conflict
+            .to_string()
+            .contains("agent_update_heartbeat_identity_conflict"));
+        let agent = memory.agents.read().await[0].clone();
+        assert_eq!(agent.internal_build_number, 1);
+        assert_eq!(
+            agent.process_incarnation_id,
+            Some(prior_process_incarnation_id)
+        );
+        assert!(memory.client_system_facts.read().await.is_empty());
+        assert!(memory.gateway_sessions.read().await.is_empty());
+        assert!(memory.client_status_history.read().await.is_empty());
+        assert!(memory.webhook_events.read().await.is_empty());
+        assert_eq!(memory.audits.read().await.len(), 1);
+
+        memory
+            .audits
+            .write()
+            .await
+            .iter_mut()
+            .find(|audit| audit.id == heartbeat_audit_id)
+            .expect("seeded heartbeat audit")
+            .command_hash = None;
+        assert!(repo.upsert_agent_hello(&event).await.unwrap());
+        assert!(repo.upsert_agent_hello(&event).await.unwrap());
+        let agent = memory.agents.read().await[0].clone();
+        assert_eq!(agent.internal_build_number, 7);
+        assert_eq!(agent.process_incarnation_id, Some(process_incarnation_id));
+        assert_eq!(memory.client_system_facts.read().await.len(), 1);
+        assert_eq!(memory.gateway_sessions.read().await.len(), 1);
+        assert_eq!(
+            memory
+                .audits
+                .read()
+                .await
+                .iter()
+                .filter(|audit| audit.action == "agent_update.heartbeat_observed")
+                .count(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+mod disk_presence_tests {
+    use super::*;
+    use vpsman_common::{DiskStat, DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1};
+
+    #[tokio::test]
+    async fn memory_disk_rollup_replaces_uncounted_legacy_capacity() {
+        let rollups = Arc::new(RwLock::new(Vec::new()));
+        let legacy = AgentMetrics {
+            observed_unix: 60,
+            disks: vec![DiskStat {
+                mountpoint: "/legacy".to_string(),
+                total_bytes: 999,
+                available_bytes: 1,
+            }],
+            ..AgentMetrics::default()
+        };
+        upsert_memory_telemetry_rollup(&rollups, "disk-presence", &legacy, None).await;
+        {
+            let mut rows = rollups.write().await;
+            rows[0].disk_total_bytes_max = 999;
+            rows[0].disk_available_bytes_avg = 1;
+            rows[0].disk_available_bytes_min = 1;
+            rows[0].disk_used_ratio_avg = 0.999;
+            rows[0].disk_used_ratio_max = 0.999;
+        }
+
+        let valid = AgentMetrics {
+            observed_unix: 61,
+            disks: vec![DiskStat {
+                mountpoint: "/".to_string(),
+                total_bytes: 100,
+                available_bytes: 25,
+            }],
+            disk_collection_available: Some(true),
+            disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+            ..AgentMetrics::default()
+        };
+        upsert_memory_telemetry_rollup(&rollups, "disk-presence", &valid, None).await;
+
+        let rows = rollups.read().await;
+        assert_eq!(rows[0].sample_count, 2);
+        assert_eq!(rows[0].disk_sample_count, 1);
+        assert_eq!(rows[0].disk_total_bytes_max, 100);
+        assert_eq!(rows[0].disk_available_bytes_avg, 25);
+        assert_eq!(rows[0].disk_available_bytes_min, 25);
+        assert_eq!(rows[0].disk_used_ratio_avg, 0.75);
+        assert_eq!(rows[0].disk_used_ratio_max, 0.75);
+    }
 }

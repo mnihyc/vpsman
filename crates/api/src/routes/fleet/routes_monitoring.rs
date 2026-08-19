@@ -379,12 +379,12 @@ pub(crate) async fn update_ping_target(
         .await
         .map_err(monitoring_repository_error)?;
     if selector_unchanged {
-        enrich_ping_target_evidence(
+        enrich_ping_target_mutation_evidence(
             &state,
-            std::slice::from_mut(&mut target.target),
+            &mut target.target,
             operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
         )
-        .await?;
+        .await;
     } else {
         target.target.target_update_evidence_available = true;
         target.target.target_update_available = false;
@@ -508,12 +508,12 @@ pub(crate) async fn make_primary_ping_target(
         .make_primary_ping_target(target_id, &request.client_ids, &operator)
         .await
         .map_err(monitoring_repository_error)?;
-    enrich_ping_target_evidence(
+    enrich_ping_target_mutation_evidence(
         &state,
-        std::slice::from_mut(&mut target.target),
+        &mut target.target,
         operator_has_scope(&operator.operator.scopes, SCOPE_CONFIG_READ),
     )
-    .await?;
+    .await;
     Ok(Json(PingTargetMutationResponse {
         target,
         runtime_sync: Vec::new(),
@@ -2035,6 +2035,7 @@ fn public_resource_metric(row: TelemetryRollupView) -> PublicResourceMetricView 
         swap_total_bytes: row.swap_total_bytes_max,
         swap_available_bytes: row.swap_available_bytes_avg,
         swap_used_ratio_avg: row.swap_used_ratio_avg,
+        disk_sample_count: row.disk_sample_count,
         disk_total_bytes: row.disk_total_bytes_max,
         disk_available_bytes: row.disk_available_bytes_avg,
         disk_used_ratio_avg: row.disk_used_ratio_avg,
@@ -2295,6 +2296,56 @@ async fn enrich_ping_target_evidence(
         target.runtime_sync = ping_target_runtime_sync(target, &client_ids, &applies);
     }
     Ok(())
+}
+
+/// Mutation responses retain the exact committed assignment snapshot returned
+/// by the repository. Runtime/config evidence is supplemental: a transient
+/// evidence read must not turn a durable mutation into an ambiguous failure.
+async fn enrich_ping_target_mutation_evidence(
+    state: &AppState,
+    target: &mut PingTargetView,
+    allow_vps_rule_selectors: bool,
+) {
+    let client_ids = target.target_client_ids.clone();
+    let applies = match state.repo.list_runtime_config_apply_records(None).await {
+        Ok(applies) => Some(
+            applies
+                .into_iter()
+                .map(|apply| (apply.client_id.clone(), apply))
+                .collect::<HashMap<_, _>>(),
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                target_id = %target.id,
+                "Ping-target mutation runtime evidence unavailable"
+            );
+            None
+        }
+    };
+    let selectors = [target.selector_expression.clone()]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let selector_evidence = resolve_saved_selectors_batch(
+        state,
+        &selectors,
+        MAX_MONITORING_SELECTOR_BYTES,
+        allow_vps_rule_selectors,
+    )
+    .await;
+    target.target_update_evidence_available = selector_evidence
+        .evidence_available
+        .get(&target.selector_expression)
+        .copied()
+        .unwrap_or(false);
+    target.target_update_available = target.target_update_evidence_available
+        && selector_evidence
+            .resolved_client_ids
+            .get(&target.selector_expression)
+            .is_some_and(|resolved| resolved != &client_ids);
+    if let Some(applies) = applies.as_ref() {
+        target.runtime_sync = ping_target_runtime_sync(target, &client_ids, applies);
+    }
 }
 
 async fn enrich_monitoring_share_target_evidence(

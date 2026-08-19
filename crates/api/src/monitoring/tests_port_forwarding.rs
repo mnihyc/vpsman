@@ -481,6 +481,56 @@ async fn rejected_memory_bulk_mutation_rolls_back_every_rule() {
 }
 
 #[tokio::test]
+async fn successful_memory_bulk_mutation_returns_the_exact_persisted_snapshots() {
+    let repo = port_forward_repo().await;
+    let operator = port_forward_operator();
+    let first = repo
+        .create_port_forward_rule(&create_request("first", "8080", "80", true), &operator)
+        .await
+        .unwrap();
+    let second = repo
+        .create_port_forward_rule(&create_request("second", "8181", "81", true), &operator)
+        .await
+        .unwrap();
+
+    let returned = repo
+        .bulk_mutate_port_forward_rules(
+            PortForwardBulkAction::Disable,
+            &[
+                PortForwardBulkItem {
+                    id: first.id,
+                    expected_revision: first.revision,
+                },
+                PortForwardBulkItem {
+                    id: second.id,
+                    expected_revision: second.revision,
+                },
+            ],
+            None,
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!()
+    };
+    let persisted = memory.port_forward_rules.read().await;
+    assert_eq!(returned.len(), 2);
+    for returned_rule in returned {
+        let stored = persisted
+            .iter()
+            .find(|stored| stored.id == returned_rule.id)
+            .unwrap();
+        assert!(!returned_rule.enabled);
+        assert_eq!(returned_rule.revision, stored.revision);
+        assert_eq!(returned_rule.updated_at, stored.updated_at);
+        assert_eq!(returned_rule.deleted_at, stored.deleted_at);
+        assert_eq!(returned_rule.runtime_status, "pending");
+    }
+}
+
+#[tokio::test]
 async fn transient_inspection_failure_keeps_last_known_table_deletion_guard() {
     let repo = port_forward_repo().await;
     let operator = port_forward_operator();

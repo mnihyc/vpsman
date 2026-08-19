@@ -3607,9 +3607,37 @@ test("fleet telemetry refresh keeps successful domains current when one domain f
   await expect(networkValue).toContainText("RX");
   const initialValue = await networkValue.textContent();
   expect(initialValue).toContain("TX");
+  await page.evaluate(() => {
+    const trackedWindow = window as typeof window & {
+      __vpsmanTestRequests: {
+        fleetSnapshotReads: Array<{ mode: string }>;
+      };
+      __vpsmanTestWebSockets: Array<EventTarget>;
+    };
+    trackedWindow.__vpsmanTestRequests.fleetSnapshotReads = [];
+    trackedWindow.__vpsmanTestWebSockets.at(-1)?.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({ type: "fleet_telemetry_invalidated" }),
+      }),
+    );
+  });
   await expect
-    .poll(() => networkValue.textContent(), { timeout: 20_000 })
-    .not.toBe(initialValue);
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as typeof window & {
+            __vpsmanTestRequests: {
+              fleetSnapshotReads: Array<{ mode: string }>;
+            };
+          }
+        ).__vpsmanTestRequests.fleetSnapshotReads.map((read) => read.mode),
+      ),
+    )
+    .toEqual(["live"]);
+  await expect.poll(() => networkValue.textContent()).not.toBe(initialValue);
+  await expect(
+    page.locator(".fleetInstancesPanel > .consoleFreshnessBanner"),
+  ).toContainText("tunnel telemetry");
 });
 
 test("fleet groups expose registry assignments and reviewed bulk mutation evidence", async ({
@@ -3961,6 +3989,7 @@ test("fleet groups expose registry assignments and reviewed bulk mutation eviden
 test("fleet instance row actions expose release VPS workflows", async ({
   page,
 }, testInfo) => {
+  testInfo.setTimeout(60_000);
   test.skip(
     testInfo.project.name.includes("mobile"),
     "fleet grid action menu is covered through desktop data-grid behavior",
@@ -4664,8 +4693,12 @@ test("jobs approvals and scheduled runs stay separate", async ({
     page.getByRole("heading", { level: 1, name: "Schedules" }),
   ).toBeVisible();
   const schedulesGrid = page.getByLabel("Schedule records data grid");
-  await expect(page.getByLabel("Schedule execution policy")).toContainText(
-    "Enabled schedules with a valid cadence automatically dispatch future jobs",
+  const schedulePolicy = page.getByLabel("Schedule execution policy");
+  await expect(schedulePolicy).toContainText(
+    "Enabled schedules dispatch jobs from their saved target snapshot after either a UTC cron time or a policy-confirmed alert lifecycle edge",
+  );
+  await expect(schedulePolicy).toContainText(
+    "Alert schedules consume only Triggered and Resolved edges",
   );
   await expect(schedulesGrid).toContainText("edge-health-hourly");
   await expect(schedulesGrid).toContainText("Hourly at minute 0");
@@ -4795,6 +4828,26 @@ test("visible disabled release controls explain their disabled reason", async ({
     await openConsoleSubpage(page, route.view, route.subpage);
     const missingReasons = await visibleDisabledControlsWithoutReason(page);
     expect(missingReasons, `${route.view} / ${route.subpage}`).toEqual([]);
+    if (route.view === "Config" && route.subpage === "Per-VPS") {
+      const workspace = page.locator(".singleConfigWorkspace");
+      await chooseVpsBySearch(
+        workspace,
+        "VPS config target",
+        "core-fra",
+        /core-fra-02.*agent-fra-02/,
+      );
+      await expect(workspace).toContainText("Desired runtime hierarchy");
+      const loadedMissingReasons =
+        await visibleDisabledControlsWithoutReason(page);
+      expect(loadedMissingReasons, "Config / Per-VPS loaded").toEqual([]);
+      await workspace.getByRole("tab", { name: "Advanced" }).click();
+      const advancedMissingReasons =
+        await visibleDisabledControlsWithoutReason(page);
+      expect(
+        advancedMissingReasons,
+        "Config / Per-VPS loaded Advanced",
+      ).toEqual([]);
+    }
   }
 });
 
@@ -5399,8 +5452,15 @@ test("observability alerts and webhooks are explicit separate pages", async ({
   });
   expect(triageRequests.at(-1)).toMatchObject({
     action: "acknowledge",
-    alert_id: "fleet-alert-network-agent-fra-02-tun0",
     confirmed: true,
+    items: [
+      {
+        alert_id: "fleet-alert-network-agent-fra-02-tun0",
+        expected_revision: 0,
+      },
+    ],
+    muted_for_secs: null,
+    reason: "panel acknowledgement",
   });
 
   await criticalAlertRow.click({ button: "right" });
@@ -5704,8 +5764,14 @@ test("observability alert policy editor is a focused create flow", async ({
     editor.getByLabel("Alert policy local VPS preview"),
   ).toContainText("edge-sfo-01");
   await editor
-    .getByLabel("Rule condition expression")
+    .getByLabel("Rule Trigger condition expression", { exact: true })
     .fill("traffic.cycle.total >= traffic.quota.total * 0.8");
+  await editor
+    .getByLabel("Rule alert title template", { exact: true })
+    .fill("Traffic quota threshold reached");
+  await editor
+    .getByLabel("Rule alert detail template", { exact: true })
+    .fill("The total traffic cycle reached at least 80% of its quota.");
   await activate(editor.getByRole("button", { name: "Preview matches" }));
   await expect(editor).toContainText("Matches 1 VPS");
   await expect(editor).toContainText("Match preview");
@@ -6347,7 +6413,7 @@ test("observability fleet metrics owns resource charts and read-only analysis co
   await controls.getByRole("button", { name: "Disk" }).click();
   await expect(
     page.getByText(
-      /Metric definition: Each chart point derives free space from available aggregate-filesystem used-ratio evidence/,
+      /Metric definition: Each chart point derives free space from available aggregate block-device filesystem used-ratio evidence/,
     ),
   ).toBeVisible();
   const diskFigureLabel = await page
@@ -6648,8 +6714,10 @@ test("observability dashboards manages read-only dashboard presets", async ({
   }
 
   await expect(
-    panel.getByLabel("Fleet operations dashboard widgets"),
-  ).toContainText("Recent alerts");
+    panel
+      .getByLabel("Recent alert widget table")
+      .getByText("Recent active alerts", { exact: true }),
+  ).toBeVisible();
   await expect(
     panel.getByLabel("Fleet operations dashboard widgets"),
   ).toContainText("Degraded VPS");

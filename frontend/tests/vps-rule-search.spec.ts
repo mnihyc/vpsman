@@ -4,8 +4,11 @@ import { waitForConsoleShell } from "./support/consoleNavigation";
 
 test.beforeEach(async ({ page }) => {
   await installConsoleApiMock(page);
-  await page.goto("/");
+  await page.goto("/#/config/rules");
   await waitForConsoleShell(page, 15_000);
+  await expect(
+    page.getByLabel("VPS rule values data grid").getByText("4 of 4 rules"),
+  ).toBeVisible();
 });
 
 test("VPS-rule search details appear only inside the scoped completion", async ({

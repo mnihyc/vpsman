@@ -387,10 +387,14 @@ impl Repository {
     }
 
     pub(crate) async fn get_tunnel_plan(&self, id: Uuid) -> Result<Option<TunnelPlanView>> {
-        let mut plan = self.get_tunnel_plan_record(id).await?;
-        let Some(plan) = plan.as_mut() else {
+        let Some(mut plan) = self.get_tunnel_plan_record(id).await? else {
             return Ok(None);
         };
+        self.enrich_tunnel_plan_runtime_config(&mut plan).await?;
+        Ok(Some(plan))
+    }
+
+    async fn enrich_tunnel_plan_runtime_config(&self, plan: &mut TunnelPlanView) -> Result<()> {
         let left_state = self
             .list_runtime_config_apply_records(Some(&plan.left_client_id))
             .await?
@@ -416,7 +420,21 @@ impl Repository {
             plan.enabled,
             right_state.as_ref(),
         );
-        Ok(Some(plan.clone()))
+        Ok(())
+    }
+
+    async fn enrich_committed_tunnel_plan_best_effort(
+        &self,
+        mut plan: TunnelPlanView,
+    ) -> TunnelPlanView {
+        if let Err(error) = self.enrich_tunnel_plan_runtime_config(&mut plan).await {
+            warn!(
+                %error,
+                plan_id = %plan.id,
+                "tunnel runtime-config enrichment after committed mutation"
+            );
+        }
+        plan
     }
 
     pub(crate) async fn get_tunnel_plan_identity(
@@ -1152,9 +1170,7 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                self.get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
+                Ok(self.enrich_committed_tunnel_plan_best_effort(updated).await)
             }
         }
     }
@@ -1321,7 +1337,7 @@ impl Repository {
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
-                let result = sqlx::query(
+                let row = sqlx::query(
                     r#"
                     UPDATE tunnel_plans
                     SET actor_id = $2,
@@ -1334,6 +1350,19 @@ impl Repository {
                       AND deleted_at IS NULL
                       AND revision = $5
                       AND (enabled = TRUE OR $3 = 'automatic')
+                    RETURNING
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
                     "#,
                 )
                 .bind(plan_id)
@@ -1341,11 +1370,10 @@ impl Repository {
                 .bind(&assessment)
                 .bind(&note)
                 .bind(expected_revision)
-                .execute(&mut *tx)
+                .fetch_optional(&mut *tx)
                 .await?;
-                if result.rows_affected() == 0 {
-                    anyhow::bail!("tunnel_plan_snapshot_stale");
-                }
+                let row = row.ok_or_else(|| anyhow::anyhow!("tunnel_plan_snapshot_stale"))?;
+                let updated = tunnel_plan_from_row(&row)?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -1366,9 +1394,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                self.get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
+                Ok(self.enrich_committed_tunnel_plan_best_effort(updated).await)
             }
         }
     }
@@ -1637,9 +1663,7 @@ impl Repository {
                 )
                 .await?;
                 tx.commit().await?;
-                self.get_tunnel_plan(plan_id)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("tunnel_plan_not_found"))
+                Ok(self.enrich_committed_tunnel_plan_best_effort(updated).await)
             }
         }
     }
@@ -1719,29 +1743,43 @@ impl Repository {
                     row.try_get("left_current_ospf_cost")?,
                     row.try_get("right_current_ospf_cost")?,
                 );
-                sqlx::query(
-                    "UPDATE tunnel_plans SET ospf_status = $2, updated_at = clock_timestamp() WHERE id = $1",
+                let row = sqlx::query(
+                    r#"
+                    UPDATE tunnel_plans
+                    SET ospf_status = $2, updated_at = clock_timestamp()
+                    WHERE id = $1
+                    RETURNING
+                        id, name, kind, enabled, revision, left_client_id, right_client_id,
+                        input, plan, builtin_credentials, recommended_ospf_cost,
+                        ospf_status, left_ospf_status, right_ospf_status,
+                        desired_ospf_cost, left_current_ospf_cost, right_current_ospf_cost,
+                        left_ospf_job_id, right_ospf_job_id,
+                        connection_assessment, connection_assessment_note,
+                        connection_assessed_at::text AS connection_assessed_at,
+                        connection_assessed_by,
+                        created_at::text AS created_at,
+                        updated_at::text AS updated_at,
+                        deleted_at::text AS deleted_at,
+                        deleted_by, deleted_reason
+                    "#,
                 )
                 .bind(plan_id)
                 .bind(ospf_status)
-                .execute(&mut *tx)
-                .await?;
-                let endpoints = sqlx::query(
-                    "SELECT left_client_id, right_client_id FROM tunnel_plans WHERE id = $1",
-                )
-                .bind(plan_id)
                 .fetch_one(&mut *tx)
                 .await?;
+                let updated = tunnel_plan_from_row(&row)?;
                 reconcile_postgres_tunnel_alerts_for_clients_in_tx(
                     &mut tx,
                     &[
-                        endpoints.try_get("left_client_id")?,
-                        endpoints.try_get("right_client_id")?,
+                        updated.left_client_id.clone(),
+                        updated.right_client_id.clone(),
                     ],
                 )
                 .await?;
                 tx.commit().await?;
-                self.get_tunnel_plan(plan_id).await
+                Ok(Some(
+                    self.enrich_committed_tunnel_plan_best_effort(updated).await,
+                ))
             }
         }
     }

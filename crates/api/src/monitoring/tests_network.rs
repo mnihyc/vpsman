@@ -618,7 +618,9 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     let state = test_state(repo.clone());
     let headers = crate::test_auth_headers(&state).await;
     let input = test_plan_input(RuntimeTunnelManager::AgentBuiltin, false);
-    let (_, Json(created)) = crate::routes_network::create_tunnel_plan(
+    // This scenario intentionally composes several full route futures. Box each one so the
+    // debug test state machine stays within the same default stack budget as production tasks.
+    let (_, Json(created)) = Box::pin(crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         Json(CreateTunnelPlanRequest {
@@ -626,14 +628,14 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             enabled: false,
             confirmed: true,
         }),
-    )
+    ))
     .await
     .unwrap();
     let created = created.plan;
     assert_eq!(created.revision, 1);
 
     let audit_count_before_noops = repo.list_audit_logs(100).await.unwrap().len();
-    let Json(unchanged) = crate::routes_network::update_tunnel_plan(
+    let Json(unchanged) = Box::pin(crate::routes_network::update_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         axum::extract::Path(created.id),
@@ -643,7 +645,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             enabled: Some(false),
             confirmed: true,
         }),
-    )
+    ))
     .await
     .unwrap();
     let unchanged = unchanged.plan;
@@ -652,7 +654,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
         repo.list_audit_logs(100).await.unwrap().len(),
         audit_count_before_noops
     );
-    let Json(still_disabled) = crate::routes_network::disable_tunnel_plan(
+    let Json(still_disabled) = Box::pin(crate::routes_network::disable_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         axum::extract::Path(created.id),
@@ -660,7 +662,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             confirmed: true,
             expected_revision: created.revision,
         }),
-    )
+    ))
     .await
     .unwrap();
     assert_eq!(still_disabled.plan.revision, created.revision);
@@ -670,7 +672,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
         .iter()
         .all(|outcome| outcome.status == "queued"));
 
-    let duplicate = crate::routes_network::create_tunnel_plan(
+    let duplicate = Box::pin(crate::routes_network::create_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         Json(CreateTunnelPlanRequest {
@@ -678,14 +680,14 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             enabled: false,
             confirmed: true,
         }),
-    )
+    ))
     .await
     .unwrap_err();
     assert_eq!(duplicate.code, "tunnel_plan_name_conflict");
 
     let mut replacement = input.clone();
     replacement.bandwidth_mbps = 2500;
-    let Json(updated) = crate::routes_network::update_tunnel_plan(
+    let Json(updated) = Box::pin(crate::routes_network::update_tunnel_plan(
         State(state.clone()),
         headers.clone(),
         axum::extract::Path(created.id),
@@ -695,7 +697,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             enabled: Some(false),
             confirmed: true,
         }),
-    )
+    ))
     .await
     .unwrap();
     let updated = updated.plan;
@@ -703,7 +705,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
     assert_eq!(updated.revision, 2);
     assert_eq!(updated.plan.bandwidth_mbps, 2500);
 
-    let stale = crate::routes_network::update_tunnel_plan(
+    let stale = Box::pin(crate::routes_network::update_tunnel_plan(
         State(state),
         headers,
         axum::extract::Path(created.id),
@@ -713,13 +715,13 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             enabled: Some(false),
             confirmed: true,
         }),
-    )
+    ))
     .await
     .unwrap_err();
     assert_eq!(stale.code, "tunnel_plan_snapshot_stale");
     let lifecycle_state = test_state(repo.clone());
     let lifecycle_headers = crate::test_auth_headers(&lifecycle_state).await;
-    let stale_lifecycle = crate::routes_network::disable_tunnel_plan(
+    let stale_lifecycle = Box::pin(crate::routes_network::disable_tunnel_plan(
         State(lifecycle_state),
         lifecycle_headers,
         axum::extract::Path(created.id),
@@ -727,7 +729,7 @@ async fn tunnel_plan_create_rejects_duplicates_and_update_rejects_stale_revision
             confirmed: true,
             expected_revision: created.revision,
         }),
-    )
+    ))
     .await
     .unwrap_err();
     assert_eq!(stale_lifecycle.code, "tunnel_plan_snapshot_stale");

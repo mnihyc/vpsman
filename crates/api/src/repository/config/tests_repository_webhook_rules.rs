@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::{OperatorPreferences, OperatorView};
+use crate::repository::MemoryState;
 
 fn operator() -> AuthContext {
     AuthContext {
@@ -48,6 +49,96 @@ fn webhook_rule_request_validates_expression_and_target() {
     assert!(webhook_rule_from_request(&request, &operator()).is_ok());
     request.expression = "status in []".to_string();
     assert!(webhook_rule_from_request(&request, &operator()).is_err());
+}
+
+fn idless_webhook_request(target: &str) -> CreateWebhookRuleRequest {
+    CreateWebhookRuleRequest {
+        id: None,
+        name: "retry-safe webhook".to_string(),
+        enabled: true,
+        expression: "interval.1min".to_string(),
+        target: target.to_string(),
+        body_template: "{event.kind}".to_string(),
+        signing_secret: Some("retry-secret".to_string()),
+        clear_signing_secret: false,
+        cooldown_secs: Some(60),
+        notes: Some("retry fixture".to_string()),
+        confirmed: true,
+    }
+}
+
+#[tokio::test]
+async fn idless_webhook_exact_retry_reuses_identity_without_reapplying() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = operator();
+
+    let first = repo
+        .upsert_webhook_rule(
+            &idless_webhook_request("https://hooks.acme.com/vpsman"),
+            &operator,
+        )
+        .await
+        .unwrap();
+    let retried = repo
+        .upsert_webhook_rule(
+            &idless_webhook_request("https://hooks.acme.com/vpsman"),
+            &operator,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(retried.id, first.id);
+    assert_eq!(retried.created_at, first.created_at);
+    assert_eq!(retried.updated_at, first.updated_at);
+    assert_eq!(memory.webhook_rules.read().await.len(), 1);
+    assert_eq!(memory.audits.read().await.len(), 1);
+
+    let conflict = repo
+        .upsert_webhook_rule(
+            &idless_webhook_request("https://hooks.acme.com/changed"),
+            &operator,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(conflict.to_string(), "webhook_rule_name_conflict");
+    assert_eq!(memory.webhook_rules.read().await.len(), 1);
+}
+
+#[tokio::test]
+async fn canceled_webhook_upsert_cannot_commit_before_dependent_state_and_audit() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let audit_guard = memory.audits.write().await;
+    let task = tokio::spawn({
+        let repo = repo.clone();
+        let operator = operator();
+        async move {
+            repo.upsert_webhook_rule(
+                &idless_webhook_request("https://hooks.acme.com/cancellation"),
+                &operator,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if memory.webhook_rules.try_write().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("webhook upsert did not reach the blocked audit acquisition");
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(audit_guard);
+
+    assert!(memory.webhook_rules.read().await.is_empty());
+    assert!(memory.webhook_rule_deliveries.read().await.is_empty());
+    assert!(memory.audits.read().await.is_empty());
 }
 
 #[test]

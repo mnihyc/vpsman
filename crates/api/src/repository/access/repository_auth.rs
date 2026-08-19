@@ -788,39 +788,43 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let now = unix_now();
+                let operators = memory.operators.read().await;
                 let mut sessions = memory.sessions.write().await;
-                let Some(session) = sessions.iter_mut().find(|session| {
+                let Some(session_index) = sessions.iter().position(|session| {
                     session.refresh_token_hash == refresh_hash
                         && !session.revoked
                         && session.refresh_expires_unix > now
                 }) else {
                     return Ok(None);
                 };
-                session.revoked = true;
-                let operator_id = session.operator_id;
-                drop(sessions);
-                let operators = memory.operators.read().await;
-                let Some(operator) = operators.iter().find(|operator| operator.id == operator_id)
+                let operator_id = sessions[session_index].operator_id;
+                let Some(operator) = operators
+                    .iter()
+                    .find(|operator| operator.id == operator_id && operator.status == "active")
                 else {
                     return Ok(None);
                 };
-                if operator.status != "active" {
-                    return Ok(None);
-                }
-                self.issue_session(operator.view()).await.map(Some)
+                let operator = operator.view();
+                let replacement = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
+                sessions[session_index].revoked = true;
+                sessions.push(OperatorSessionRecord {
+                    session_id: replacement.session_id,
+                    access_token_hash: replacement.access_hash.clone(),
+                    refresh_token_hash: replacement.refresh_hash.clone(),
+                    operator_id: operator.id,
+                    expires_unix: replacement.expires_unix,
+                    refresh_expires_unix: replacement.refresh_expires_unix,
+                    created_unix: replacement.created_unix,
+                    revoked: false,
+                });
+                drop(sessions);
+                drop(operators);
+                Ok(Some(replacement.auth_response(operator)))
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
-                    WITH revoked AS (
-                        UPDATE operator_sessions
-                        SET revoked_at = now()
-                        WHERE refresh_token_hash = $1
-                          AND refresh_expires_at > now()
-                          AND revoked_at IS NULL
-                        RETURNING operator_id
-                    )
                     SELECT
                         o.id,
                         o.username,
@@ -833,35 +837,45 @@ impl Repository {
                         o.created_at::text AS created_at,
                         o.disabled_at::text AS disabled_at,
                         o.deleted_at::text AS deleted_at
-                    FROM revoked
-                    JOIN operators o ON o.id = revoked.operator_id
-                    WHERE o.status = 'active'
+                    FROM operator_sessions s
+                    JOIN operators o ON o.id = s.operator_id
+                    WHERE s.refresh_token_hash = $1
+                      AND s.refresh_expires_at > now()
+                      AND s.revoked_at IS NULL
+                      AND o.status = 'active'
+                    FOR UPDATE OF o
                     "#,
                 )
                 .bind(&refresh_hash)
                 .fetch_optional(&mut *tx)
                 .await?;
                 let Some(row) = row else {
+                    tx.rollback().await?;
                     return Ok(None);
                 };
+                let operator = operator_view_from_row(&row)?;
+                let revoked = sqlx::query(
+                    r#"
+                    UPDATE operator_sessions
+                    SET revoked_at = now()
+                    WHERE refresh_token_hash = $1
+                      AND operator_id = $2
+                      AND refresh_expires_at > now()
+                      AND revoked_at IS NULL
+                    "#,
+                )
+                .bind(&refresh_hash)
+                .bind(operator.id)
+                .execute(&mut *tx)
+                .await?;
+                if revoked.rows_affected() == 0 {
+                    tx.rollback().await?;
+                    return Ok(None);
+                }
+                let replacement = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
+                insert_operator_session_in_tx(&mut tx, operator.id, &replacement).await?;
                 tx.commit().await?;
-                let operator = OperatorView {
-                    id: row.try_get("id")?,
-                    username: row.try_get("username")?,
-                    status: row.try_get("status")?,
-                    role: row.try_get("role")?,
-                    scopes: parse_scopes(row.try_get("scopes")?),
-                    preferences: parse_operator_preferences(row.try_get("preferences")?),
-                    totp_enabled: row.try_get("totp_enabled")?,
-                    session_refresh_ttl_secs: row
-                        .try_get::<i64, _>("session_refresh_ttl_secs")?
-                        .try_into()
-                        .unwrap_or(DEFAULT_REFRESH_TOKEN_TTL_SECS),
-                    created_at: row.try_get("created_at")?,
-                    disabled_at: row.try_get("disabled_at")?,
-                    deleted_at: row.try_get("deleted_at")?,
-                };
-                self.issue_session(operator).await.map(Some)
+                Ok(Some(replacement.auth_response(operator)))
             }
         }
     }
@@ -1356,8 +1370,9 @@ impl Repository {
                     .bind(metadata)
                     .execute(&mut *tx)
                     .await?;
+                let operator = operator_view_from_row(&row)?;
                 tx.commit().await?;
-                Ok(Some(operator_view_from_row(&row)?))
+                Ok(Some(operator))
             }
         }
     }
@@ -1507,8 +1522,9 @@ impl Repository {
                     .bind(metadata)
                     .execute(&mut *tx)
                     .await?;
+                let operator = operator_view_from_row(&row)?;
                 tx.commit().await?;
-                Ok(Some(operator_view_from_row(&row)?))
+                Ok(Some(operator))
             }
         }
     }
@@ -1602,8 +1618,9 @@ impl Repository {
                     .bind(metadata)
                     .execute(&mut *tx)
                     .await?;
+                let operator = operator_view_from_row(&row)?;
                 tx.commit().await?;
-                Ok(Some(operator_view_from_row(&row)?))
+                Ok(Some(operator))
             }
         }
     }
@@ -1691,8 +1708,9 @@ impl Repository {
                     .bind(metadata)
                     .execute(&mut *tx)
                     .await?;
+                let operator = operator_view_from_row(&row)?;
                 tx.commit().await?;
-                Ok(Some(operator_view_from_row(&row)?))
+                Ok(Some(operator))
             }
         }
     }
@@ -1773,8 +1791,9 @@ impl Repository {
                 .bind(metadata)
                 .execute(&mut *tx)
                 .await?;
+                let operator = operator_view_from_row(&row)?;
                 tx.commit().await?;
-                Ok(operator_view_from_row(&row)?)
+                Ok(operator)
             }
         }
     }
@@ -2038,17 +2057,50 @@ impl Repository {
                 let mut tx = pool.begin().await?;
                 let row = sqlx::query(
                     r#"
-                    UPDATE operator_sessions
-                    SET revoked_at = COALESCE(revoked_at, now())
-                    WHERE id = $1
-                    RETURNING id
+                    WITH revoked AS (
+                        UPDATE operator_sessions
+                        SET revoked_at = COALESCE(revoked_at, now())
+                        WHERE id = $1
+                        RETURNING
+                            id,
+                            operator_id,
+                            created_at,
+                            expires_at,
+                            refresh_expires_at,
+                            revoked_at
+                    )
+                    SELECT
+                        revoked.id,
+                        revoked.operator_id,
+                        o.username AS operator_username,
+                        o.role AS operator_role,
+                        revoked.created_at::text AS created_at,
+                        revoked.expires_at::text AS expires_at,
+                        revoked.refresh_expires_at::text AS refresh_expires_at,
+                        revoked.revoked_at::text AS revoked_at
+                    FROM revoked
+                    JOIN operators o ON o.id = revoked.operator_id
                     "#,
                 )
                 .bind(session_id)
                 .fetch_optional(&mut *tx)
                 .await?;
-                let Some(_) = row else {
+                let Some(row) = row else {
+                    tx.rollback().await?;
                     return Ok(None);
+                };
+                let revoked_at: Option<String> = row.try_get("revoked_at")?;
+                let view = OperatorSessionView {
+                    id: row.try_get("id")?,
+                    operator_id: row.try_get("operator_id")?,
+                    operator_username: row.try_get("operator_username")?,
+                    operator_role: row.try_get("operator_role")?,
+                    current: session_id == current_session_id,
+                    created_at: row.try_get("created_at")?,
+                    expires_at: row.try_get("expires_at")?,
+                    refresh_expires_at: row.try_get("refresh_expires_at")?,
+                    revoked: revoked_at.is_some(),
+                    revoked_at,
                 };
                 sqlx::query(
                     r#"
@@ -2075,8 +2127,7 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                self.operator_session_by_id(session_id, current_session_id)
-                    .await
+                Ok(Some(view))
             }
         }
     }
@@ -2185,6 +2236,7 @@ impl Repository {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn issue_session(&self, operator: OperatorView) -> Result<AuthResponse> {
         let session = PreparedOperatorSession::new(operator.session_refresh_ttl_secs);
 
@@ -2730,6 +2782,7 @@ fn operator_auth_event_insert_sql() -> &'static str {
     "#
 }
 
+#[cfg(test)]
 async fn insert_operator_session(
     pool: &sqlx::PgPool,
     operator_id: Uuid,

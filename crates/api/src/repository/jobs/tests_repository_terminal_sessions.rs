@@ -2,8 +2,16 @@ use super::{
     build_terminal_replay_from_chunks, build_terminal_sessions, parse_terminal_event,
     upsert_memory_terminal_session, TerminalStatusOutput,
 };
-use crate::model_terminal::{TerminalOutputChunkRecord, TerminalSessionView};
+use crate::{
+    auth_model::{AuthContext, OperatorPreferences, OperatorView},
+    model::{JobHistoryView, JobTargetView},
+    model_terminal::{TerminalOutputChunkRecord, TerminalSessionView},
+    repository::{MemoryState, Repository},
+};
 use uuid::Uuid;
+use vpsman_common::{
+    CommandOutput, OutputStream, TerminalControlAck, TerminalControlAction, TerminalStreamOutput,
+};
 
 #[test]
 fn builds_latest_open_terminal_session_with_start_metadata() {
@@ -378,6 +386,219 @@ fn terminal_replay_metadata_only_omits_data_and_applies_byte_cap() {
     assert!(replay.chunks[0].data_base64.is_none());
 }
 
+#[tokio::test]
+async fn memory_terminal_control_ack_is_atomic_and_exactly_replayable() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = terminal_test_operator();
+    let client_id = "memory-terminal-control-atomic";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    memory
+        .job_targets
+        .write()
+        .await
+        .push(terminal_test_target(job_id, client_id, "running", None));
+    memory
+        .terminal_sessions
+        .write()
+        .await
+        .push(test_terminal_session(
+            client_id, session_id, job_id, 0, "open",
+        ));
+    let action = TerminalControlAction::Close {
+        reason: Some("operator".to_string()),
+    };
+    let ack = TerminalControlAck {
+        request_id: Uuid::new_v4(),
+        session_id,
+        action: "close".to_string(),
+        accepted: true,
+        status: "closed".to_string(),
+        message: "closed".to_string(),
+        input_seq: None,
+        written_bytes: None,
+        cols: None,
+        rows: None,
+    };
+
+    let failed = repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &action,
+            "memory-terminal-close-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{failed:#}").contains("terminal_open_job_not_found"));
+    assert_eq!(memory.terminal_sessions.read().await[0].state, "open");
+    assert_eq!(memory.job_targets.read().await[0].status, "running");
+    assert!(memory.job_targets.read().await[0].completed_at.is_none());
+    assert!(memory.audits.read().await.is_empty());
+
+    memory.jobs.write().await.push(terminal_test_job(
+        job_id,
+        operator.operator.id,
+        "running",
+        None,
+    ));
+    repo.record_terminal_control_ack(
+        &operator,
+        client_id,
+        job_id,
+        &action,
+        "memory-terminal-close-action-hash",
+        &ack,
+    )
+    .await
+    .unwrap();
+    let first_observed_at = memory.terminal_sessions.read().await[0].observed_at.clone();
+    assert_eq!(memory.terminal_sessions.read().await[0].state, "closed");
+    assert_eq!(memory.job_targets.read().await[0].status, "completed");
+    assert!(memory.job_targets.read().await[0].completed_at.is_some());
+    assert_eq!(memory.jobs.read().await[0].status, "completed");
+    assert!(memory.jobs.read().await[0].completed_at.is_some());
+    assert_eq!(memory.audits.read().await.len(), 1);
+
+    repo.record_terminal_control_ack(
+        &operator,
+        client_id,
+        job_id,
+        &action,
+        "memory-terminal-close-action-hash",
+        &ack,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        memory.terminal_sessions.read().await[0].observed_at,
+        first_observed_at
+    );
+    assert_eq!(memory.audits.read().await.len(), 1);
+}
+
+#[tokio::test]
+async fn memory_terminal_status_rolls_back_on_missing_target_then_replays() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = terminal_test_operator();
+    let client_id = "memory-terminal-status-atomic";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    memory.jobs.write().await.push(terminal_test_job(
+        job_id,
+        operator.operator.id,
+        "running",
+        None,
+    ));
+    let event = terminal_open_stream(job_id, session_id);
+
+    let failed = repo
+        .record_terminal_stream_status(client_id, &event)
+        .await
+        .unwrap_err();
+    assert!(format!("{failed:#}").contains("terminal_open_target_not_found"));
+    assert!(memory.terminal_sessions.read().await.is_empty());
+    assert_eq!(memory.jobs.read().await[0].status, "running");
+    assert!(memory.jobs.read().await[0].completed_at.is_none());
+
+    memory
+        .job_targets
+        .write()
+        .await
+        .push(terminal_test_target(job_id, client_id, "queued", None));
+    repo.record_terminal_stream_status(client_id, &event)
+        .await
+        .unwrap();
+    repo.record_terminal_stream_status(client_id, &event)
+        .await
+        .unwrap();
+    assert_eq!(memory.terminal_sessions.read().await.len(), 1);
+    assert_eq!(memory.terminal_sessions.read().await[0].state, "open");
+    assert_eq!(memory.jobs.read().await[0].status, "running");
+    assert_eq!(memory.job_targets.read().await[0].status, "running");
+}
+
+#[tokio::test]
+async fn memory_terminal_late_open_is_suppressed_and_stale_control_is_rejected() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let operator = terminal_test_operator();
+    let client_id = "memory-terminal-stale";
+    let job_id = Uuid::new_v4();
+    let session_id = Uuid::new_v4();
+    memory.jobs.write().await.push(terminal_test_job(
+        job_id,
+        operator.operator.id,
+        "canceled",
+        Some("2026-06-21T00:00:01Z"),
+    ));
+    memory.job_targets.write().await.push(terminal_test_target(
+        job_id,
+        client_id,
+        "canceled",
+        Some("2026-06-21T00:00:01Z"),
+    ));
+    memory
+        .terminal_sessions
+        .write()
+        .await
+        .push(test_terminal_session(
+            client_id, session_id, job_id, 0, "open",
+        ));
+
+    let authorization = repo
+        .authorize_terminal_control(client_id, session_id, &operator)
+        .await
+        .unwrap_err();
+    assert_eq!(authorization.code, "terminal_session_job_inactive");
+    let resize = TerminalControlAction::Resize {
+        cols: 100,
+        rows: 30,
+    };
+    let ack = TerminalControlAck {
+        request_id: Uuid::new_v4(),
+        session_id,
+        action: "resize".to_string(),
+        accepted: true,
+        status: "resized".to_string(),
+        message: "resized".to_string(),
+        input_seq: None,
+        written_bytes: None,
+        cols: Some(100),
+        rows: Some(30),
+    };
+    let rejected = repo
+        .record_terminal_control_ack(
+            &operator,
+            client_id,
+            job_id,
+            &resize,
+            "memory-terminal-resize-action-hash",
+            &ack,
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{rejected:#}").contains("terminal_session_job_inactive"));
+    assert_eq!(memory.terminal_sessions.read().await[0].cols, Some(120));
+
+    repo.record_terminal_stream_status(client_id, &terminal_open_stream(job_id, session_id))
+        .await
+        .unwrap();
+    assert_eq!(memory.terminal_sessions.read().await[0].state, "failed");
+    assert_eq!(memory.jobs.read().await[0].status, "canceled");
+    assert_eq!(memory.job_targets.read().await[0].status, "canceled");
+
+    repo.record_terminal_stream_status(client_id, &terminal_open_stream(job_id, Uuid::new_v4()))
+        .await
+        .unwrap();
+    assert_eq!(memory.terminal_sessions.read().await.len(), 1);
+    assert_eq!(memory.terminal_sessions.read().await[0].state, "failed");
+}
+
 fn status_output(
     job_id: Uuid,
     client_id: &str,
@@ -450,5 +671,101 @@ fn test_terminal_session(
         last_event: state.to_string(),
         opened_at: Some("2026-06-21T00:00:00Z".to_string()),
         observed_at: "2026-06-21T00:00:00Z".to_string(),
+    }
+}
+
+fn terminal_test_operator() -> AuthContext {
+    AuthContext {
+        operator: OperatorView {
+            id: Uuid::new_v4(),
+            username: "terminal-test-operator".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            scopes: vec!["*".to_string()],
+            preferences: OperatorPreferences::default(),
+            totp_enabled: false,
+            session_refresh_ttl_secs: 3600,
+            created_at: "2026-06-21T00:00:00Z".to_string(),
+            disabled_at: None,
+            deleted_at: None,
+        },
+        session_id: None,
+    }
+}
+
+fn terminal_test_job(
+    job_id: Uuid,
+    actor_id: Uuid,
+    status: &str,
+    completed_at: Option<&str>,
+) -> JobHistoryView {
+    JobHistoryView {
+        id: job_id,
+        actor_id: Some(actor_id),
+        command_type: "terminal_open".to_string(),
+        source_schedule_id: None,
+        causation_id: None,
+        schedule_lineage: Vec::new(),
+        privileged: true,
+        status: status.to_string(),
+        target_count: 1,
+        payload_hash: "terminal-test".to_string(),
+        max_timeout_secs: 60,
+        created_at: "2026-06-21T00:00:00Z".to_string(),
+        completed_at: completed_at.map(str::to_string),
+    }
+}
+
+fn terminal_test_target(
+    job_id: Uuid,
+    client_id: &str,
+    status: &str,
+    completed_at: Option<&str>,
+) -> JobTargetView {
+    JobTargetView {
+        job_id,
+        client_id: client_id.to_string(),
+        status: status.to_string(),
+        message: None,
+        exit_code: None,
+        started_at: Some("2026-06-21T00:00:00Z".to_string()),
+        deadline_at: None,
+        completed_at: completed_at.map(str::to_string),
+        process_incarnation_id: None,
+    }
+}
+
+fn terminal_open_stream(job_id: Uuid, session_id: Uuid) -> TerminalStreamOutput {
+    TerminalStreamOutput {
+        job_id,
+        session_id,
+        terminal_seq: None,
+        output_first_seq: Some(1),
+        output_next_seq: 1,
+        output_retained_first_seq: Some(1),
+        output_retained_bytes: 0,
+        output_dropped_bytes: 0,
+        output_dropped_chunks: 0,
+        output_replay_truncated: false,
+        output: CommandOutput {
+            job_id,
+            stream: OutputStream::Status,
+            data: serde_json::to_vec(&serde_json::json!({
+                "type": "terminal_open",
+                "status": "opened",
+                "session_id": session_id,
+                "argv": ["/bin/sh", "-l"],
+                "cols": 120,
+                "rows": 40,
+                "idle_timeout_secs": 3600,
+                "flow_window_bytes": 65536,
+                "output_first_seq": 1,
+                "output_next_seq": 1,
+                "session_exited": false
+            }))
+            .unwrap(),
+            exit_code: None,
+            done: false,
+        },
     }
 }

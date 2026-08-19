@@ -185,6 +185,7 @@ fn pending_runtime_config_apply(
 
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalizedTarget {
+    pub(crate) event_id: Uuid,
     pub(crate) job_id: Uuid,
     pub(crate) client_id: String,
     pub(crate) outcome: TargetDispatchOutcome,
@@ -205,11 +206,13 @@ pub(crate) struct TerminalizationBatch {
 impl TerminalizationBatch {
     pub(crate) fn push_target(
         &mut self,
+        event_id: Uuid,
         job_id: Uuid,
         client_id: impl Into<String>,
         outcome: TargetDispatchOutcome,
     ) {
         self.targets.push(TerminalizedTarget {
+            event_id,
             job_id,
             client_id: client_id.into(),
             outcome,
@@ -379,6 +382,131 @@ fn synthetic_terminal_outcome(
         received_at: None,
         outputs: Vec::new(),
     }
+}
+
+async fn insert_agent_update_lifecycle_for_target_outcome_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    operation: &JobCommand,
+    outcome: &TargetDispatchOutcome,
+) -> Result<()> {
+    let event = match operation {
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex, ..
+        } if outcome.status == TARGET_STATUS_COMPLETED => Some((
+            "agent_update.activation_completed",
+            json!({
+                "activation_job_id": job_id,
+                "client_id": client_id,
+                "artifact_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                "status": "activation_completed",
+                "result": "succeeded",
+                "origin_kind": "gateway_ingest",
+                "component": "agent-update-lifecycle",
+            }),
+        )),
+        JobCommand::AgentUpdateActivate {
+            staged_sha256_hex, ..
+        } if agent_update_activation_failure_status(&outcome.status) => Some((
+            "agent_update.activation_failed",
+            json!({
+                "activation_job_id": job_id,
+                "client_id": client_id,
+                "artifact_sha256_hex": staged_sha256_hex.to_ascii_lowercase(),
+                "activation_outcome_status": outcome.status,
+                "exit_code": outcome.exit_code,
+                "message": outcome.message,
+                "status": "activation_failed",
+                "rollback_recommended": true,
+                "result": "failed",
+                "origin_kind": "gateway_ingest",
+                "component": "agent-update-lifecycle",
+            }),
+        )),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex,
+        } if outcome.status == TARGET_STATUS_COMPLETED => Some((
+            "agent_update.rollback_completed",
+            json!({
+                "rollback_job_id": job_id,
+                "client_id": client_id,
+                "rollback_sha256_hex": rollback_sha256_hex.as_deref().map(str::to_ascii_lowercase),
+                "status": "rolled_back",
+                "result": "succeeded",
+                "origin_kind": "gateway_ingest",
+                "component": "agent-update-lifecycle",
+            }),
+        )),
+        JobCommand::AgentUpdateRollback {
+            rollback_sha256_hex,
+        } if agent_update_activation_failure_status(&outcome.status) => Some((
+            "agent_update.rollback_failed",
+            json!({
+                "rollback_job_id": job_id,
+                "client_id": client_id,
+                "rollback_sha256_hex": rollback_sha256_hex.as_deref().map(str::to_ascii_lowercase),
+                "rollback_outcome_status": outcome.status,
+                "exit_code": outcome.exit_code,
+                "message": outcome.message,
+                "status": "rollback_failed",
+                "result": "failed",
+                "origin_kind": "gateway_ingest",
+                "component": "agent-update-lifecycle",
+            }),
+        )),
+        _ => None,
+    };
+    let Some((action, metadata)) = event else {
+        return Ok(());
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
+        VALUES ($1, NULL, $2, $3, NULL, $4)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(action)
+    .bind(format!("client:{client_id}"))
+    .bind(metadata)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn insert_agent_update_lifecycle_for_stored_job_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    client_id: &str,
+    outcome: &TargetDispatchOutcome,
+) -> Result<()> {
+    if outcome.status != TARGET_STATUS_COMPLETED
+        && !agent_update_activation_failure_status(&outcome.status)
+    {
+        return Ok(());
+    }
+    let raw_operation: Option<sqlx::types::Json<Value>> =
+        sqlx::query_scalar("SELECT operation FROM jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .flatten();
+    match decode_persisted_job_operation(raw_operation) {
+        Ok(operation) => {
+            insert_agent_update_lifecycle_for_target_outcome_in_tx(
+                tx, job_id, client_id, &operation, outcome,
+            )
+            .await?;
+        }
+        Err(error) => warn!(
+            job_id = %job_id,
+            client_id,
+            %error,
+            "skipping agent-update lifecycle audit for invalid stored job operation"
+        ),
+    }
+    Ok(())
 }
 
 fn decode_persisted_job_operation(
@@ -806,6 +934,24 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     if updated.rows_affected() == 0 {
         return Ok(false);
     }
+    append_synthetic_status_output_in_tx(
+        tx,
+        target.job_id,
+        &target.client_id,
+        invalid_job_operation_status_output_value(
+            target.job_id,
+            &target.client_id,
+            status,
+            &InvalidJobOperationEvidence {
+                phase,
+                message: &target.message,
+                decode_error: &target.decode_error,
+                process_incarnation_id: target.process_incarnation_id,
+            },
+        ),
+        None,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO audit_logs (
@@ -838,12 +984,9 @@ async fn terminalize_invalid_job_operation_target_in_tx(
     .bind(target.job_id)
     .execute(&mut **tx)
     .await?;
-    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, target.job_id).await?;
-    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
-        tx,
-        target.job_id,
-    )
-    .await?;
+    let outcome = synthetic_terminal_outcome(status, target.message.clone(), None, false);
+    enqueue_target_terminal_event_in_tx(tx, target.job_id, &target.client_id, &outcome).await?;
+    finish_jobs_in_tx_and_reconcile_event_sources(tx, &[target.job_id]).await?;
     Ok(true)
 }
 
@@ -878,7 +1021,7 @@ pub(crate) async fn finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(
         SELECT completed_at::text AS completed_at
         FROM jobs
         WHERE id = $1
-        FOR UPDATE
+        FOR NO KEY UPDATE
         "#,
     )
     .bind(job_id)
@@ -934,6 +1077,23 @@ pub(crate) async fn finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(
     } else {
         Ok(None)
     }
+}
+
+pub(crate) async fn finish_jobs_in_tx_and_reconcile_event_sources(
+    tx: &mut Transaction<'_, Postgres>,
+    job_ids: &[Uuid],
+) -> Result<()> {
+    let mut job_ids = job_ids.to_vec();
+    job_ids.sort();
+    job_ids.dedup();
+    for job_id in job_ids {
+        finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(tx, job_id).await?;
+        crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
+            tx, job_id,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn skip_unstarted_queued_targets_for_client_in_tx(
@@ -1433,6 +1593,57 @@ pub(crate) struct JobCreatedWebhookEvent<'a> {
     pub(crate) operation: Option<&'a JobCommand>,
 }
 
+fn job_created_webhook_event_candidate(event: JobCreatedWebhookEvent<'_>) -> WebhookEventCandidate {
+    let event_id = format!("job:{}:created", event.job_id);
+    let predicates = job_webhook_predicates(event.command_type, event.status, true);
+    let operation = event
+        .operation
+        .map(|value| {
+            let mut value = json!(value);
+            redact_runtime_tunnel_credentials(&mut value);
+            value
+        })
+        .unwrap_or(Value::Null);
+    WebhookEventCandidate {
+        kind: "job.created".to_string(),
+        event_id: event_id.clone(),
+        event_predicates: predicates.clone(),
+        subject_client_ids: event.resolved_targets.to_vec(),
+        actor_id: event.actor_id,
+        payload: json!({
+            "event": {
+                "kind": "job.created",
+                "id": &event_id,
+                "predicates": &predicates,
+            },
+            "job": {
+                "id": event.job_id,
+                "status": event.status,
+                "type": event.command_type,
+                "privileged": event.privileged,
+                "payload_hash": event.command_hash,
+                "source_schedule_id": event.source_schedule_id,
+                "target_count": event.resolved_targets.len(),
+                "target_ids": event.resolved_targets,
+                "operation": operation,
+            },
+        }),
+    }
+}
+
+pub(crate) async fn record_job_created_webhook_event_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event: JobCreatedWebhookEvent<'_>,
+) -> Result<()> {
+    crate::repository_webhook_rules::record_webhook_event_in_tx(
+        tx,
+        job_created_webhook_event_candidate(event),
+        Utc::now(),
+    )
+    .await?;
+    Ok(())
+}
+
 struct ScheduleJobOutcome {
     schedule_id: Uuid,
     schedule_name: String,
@@ -1694,11 +1905,13 @@ impl Repository {
                 else {
                     return Ok(None);
                 };
-                let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
+                let operation: Option<sqlx::types::Json<Value>> = row.try_get("operation")?;
+                let operation = decode_persisted_job_operation(operation)
+                    .map_err(|error| anyhow::anyhow!("invalid_job_operation: {error}"))?;
                 Ok(Some(JobCompletionContext {
                     actor_id: row.try_get("actor_id")?,
                     payload_hash: row.try_get("payload_hash")?,
-                    operation: operation.0,
+                    operation,
                 }))
             }
         }
@@ -2835,24 +3048,39 @@ impl Repository {
                     &mut tx, job_id,
                 )
                 .await?;
+                record_job_created_webhook_event_in_tx(
+                    &mut tx,
+                    JobCreatedWebhookEvent {
+                        job_id,
+                        command_type: "api_job_request",
+                        status,
+                        privileged: request.privileged,
+                        command_hash,
+                        resolved_targets: &resolved_targets,
+                        actor_id,
+                        source_schedule_id: None,
+                        operation: operation.as_ref(),
+                    },
+                )
+                .await?;
                 tx.commit().await?;
             }
         }
         if matches!(self, Self::Memory(_)) {
             self.reconcile_memory_job_event_sources(job_id).await?;
+            self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+                job_id,
+                command_type: "api_job_request",
+                status,
+                privileged: request.privileged,
+                command_hash,
+                resolved_targets: &resolved_targets,
+                actor_id,
+                source_schedule_id: None,
+                operation: operation.as_ref(),
+            })
+            .await?;
         }
-        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-            job_id,
-            command_type: "api_job_request",
-            status,
-            privileged: request.privileged,
-            command_hash,
-            resolved_targets: &resolved_targets,
-            actor_id,
-            source_schedule_id: None,
-            operation: operation.as_ref(),
-        })
-        .await?;
         Ok(job_id)
     }
 
@@ -3460,22 +3688,37 @@ impl Repository {
                     &mut tx, job_id,
                 )
                 .await?;
+                record_job_created_webhook_event_in_tx(
+                    &mut tx,
+                    JobCreatedWebhookEvent {
+                        job_id,
+                        command_type: &command_type,
+                        status: finished_status.as_deref().unwrap_or(JOB_STATUS_QUEUED),
+                        privileged: request.privileged,
+                        command_hash,
+                        resolved_targets,
+                        actor_id,
+                        source_schedule_id,
+                        operation: Some(&operation),
+                    },
+                )
+                .await?;
                 tx.commit().await?;
             }
         }
-        self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-            job_id,
-            command_type: &command_type,
-            status: finished_status.as_deref().unwrap_or(JOB_STATUS_QUEUED),
-            privileged: request.privileged,
-            command_hash,
-            resolved_targets,
-            actor_id,
-            source_schedule_id,
-            operation: Some(&operation),
-        })
-        .await?;
         if matches!(self, Self::Memory(_)) {
+            self.record_job_created_webhook_event(JobCreatedWebhookEvent {
+                job_id,
+                command_type: &command_type,
+                status: finished_status.as_deref().unwrap_or(JOB_STATUS_QUEUED),
+                privileged: request.privileged,
+                command_hash,
+                resolved_targets,
+                actor_id,
+                source_schedule_id,
+                operation: Some(&operation),
+            })
+            .await?;
             self.reconcile_memory_job_event_sources(job_id).await?;
             for target in precompleted_targets {
                 self.record_runtime_config_apply_terminal_for_target_status(
@@ -4029,7 +4272,7 @@ impl Repository {
                               )
                         ORDER BY job.created_at ASC, target.client_id ASC
                         LIMIT $1
-                        FOR UPDATE SKIP LOCKED
+                        FOR UPDATE OF target, job SKIP LOCKED
                     ),
                     updated_targets AS (
                         UPDATE job_targets target
@@ -4324,8 +4567,9 @@ impl Repository {
                     message,
                 )
                 .await?;
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;
                 tx.commit().await?;
-                job_ids
+                return Ok(job_ids);
             }
         };
         let mut unique_job_ids = job_ids;
@@ -4462,8 +4706,9 @@ impl Repository {
                     message,
                 )
                 .await?;
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &job_ids).await?;
                 tx.commit().await?;
-                job_ids
+                return Ok(job_ids);
             }
         };
         let mut unique_job_ids = job_ids;
@@ -4781,37 +5026,35 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, &outcome).await?;
-                finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id).await?;
+                let completed_status =
+                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
+                        .await?;
                 crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
                     &mut tx, job_id,
                 )
                 .await?;
                 tx.commit().await?;
+                return Ok(completed_status);
             }
         }
-        match self {
-            Self::Memory(_) => {
-                let status = self.refresh_job_status_from_targets(job_id).await?;
-                self.record_backup_request_terminal_for_target_status(
-                    job_id,
-                    client_id,
-                    TARGET_STATUS_AGENT_LOST,
-                    None,
-                )
-                .await?;
-                self.record_runtime_config_apply_terminal_for_target_status(
-                    job_id,
-                    client_id,
-                    TARGET_STATUS_AGENT_LOST,
-                    Some(outcome.message.as_str()),
-                )
-                .await?;
-                self.record_job_target_webhook_event(job_id, client_id, &outcome)
-                    .await?;
-                Ok(status)
-            }
-            Self::Postgres(_) => Ok(self.refresh_job_status_from_targets(job_id).await?),
-        }
+        let status = self.refresh_job_status_from_targets(job_id).await?;
+        self.record_backup_request_terminal_for_target_status(
+            job_id,
+            client_id,
+            TARGET_STATUS_AGENT_LOST,
+            None,
+        )
+        .await?;
+        self.record_runtime_config_apply_terminal_for_target_status(
+            job_id,
+            client_id,
+            TARGET_STATUS_AGENT_LOST,
+            Some(outcome.message.as_str()),
+        )
+        .await?;
+        self.record_job_target_webhook_event(job_id, client_id, &outcome)
+            .await?;
+        Ok(status)
     }
 
     pub(crate) async fn expire_control_timeout_targets(
@@ -5288,26 +5531,17 @@ impl Repository {
                     let outcome = synthetic_terminal_outcome(status, &message, None, false);
                     enqueue_target_terminal_event_in_tx(&mut tx, job_id, &client_id, &outcome)
                         .await?;
-                    finish_job_in_tx_if_all_targets_terminal_and_enqueue_event(&mut tx, job_id)
-                        .await?;
                     expired.push(DeadlineExpiredJobTarget {
                         job_id,
                         client_id,
                         status: status.to_string(),
                     });
                 }
-                let mut changed_job_ids = expired
+                let changed_job_ids = expired
                     .iter()
                     .map(|target| target.job_id)
                     .collect::<Vec<_>>();
-                changed_job_ids.sort();
-                changed_job_ids.dedup();
-                for job_id in changed_job_ids {
-                    crate::repository_operational_alerts::reconcile_postgres_job_event_sources_in_tx(
-                        &mut tx, job_id,
-                    )
-                    .await?;
-                }
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &changed_job_ids).await?;
                 tx.commit().await?;
                 let control_deadline_extra_secs =
                     control_deadline_extra_secs.min(i32::MAX as u64) as i32;
@@ -5935,69 +6169,12 @@ impl Repository {
                     .await?;
                 }
                 enqueue_target_terminal_event_in_tx(&mut tx, job_id, client_id, outcome).await?;
+                insert_agent_update_lifecycle_for_stored_job_in_tx(
+                    &mut tx, job_id, client_id, outcome,
+                )
+                .await?;
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &[job_id]).await?;
                 tx.commit().await?;
-                let update_lifecycle_operation = if outcome.status == TARGET_STATUS_COMPLETED
-                    || agent_update_activation_failure_status(&outcome.status)
-                {
-                    match self.job_operation(job_id).await? {
-                        Some(
-                            operation @ (JobCommand::AgentUpdateActivate { .. }
-                            | JobCommand::AgentUpdateRollback { .. }),
-                        ) => Some(operation),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                match update_lifecycle_operation {
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_activation_completed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateActivate {
-                        staged_sha256_hex, ..
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_activation_failed(
-                            client_id,
-                            job_id,
-                            &staged_sha256_hex,
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if outcome.status == TARGET_STATUS_COMPLETED => {
-                        self.record_agent_update_rollback_completed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                        )
-                        .await?;
-                    }
-                    Some(JobCommand::AgentUpdateRollback {
-                        rollback_sha256_hex,
-                    }) if agent_update_activation_failure_status(&outcome.status) => {
-                        self.record_agent_update_rollback_failed(
-                            client_id,
-                            job_id,
-                            rollback_sha256_hex.as_deref(),
-                            &outcome.status,
-                            outcome.exit_code,
-                            &outcome.message,
-                        )
-                        .await?;
-                    }
-                    _ => {}
-                }
                 Ok(true)
             }
         }
@@ -6165,7 +6342,12 @@ impl Repository {
             let result = self.process_claimed_job_terminal_event(&event).await;
             match result {
                 Ok(Some(processed)) => {
-                    self.mark_job_terminal_event_processed(event.id).await?;
+                    if event.event_kind == "target_terminalized" {
+                        self.mark_job_terminal_event_repository_side_effects_processed(event.id)
+                            .await?;
+                    } else {
+                        self.mark_job_terminal_event_processed(event.id).await?;
+                    }
                     batch.extend(processed);
                 }
                 Ok(None) => {
@@ -6200,23 +6382,34 @@ impl Repository {
                 };
                 let outcome =
                     target_outcome_from_event_payload(&event.status, event.outcome.clone());
-                self.record_backup_request_terminal_for_target_status(
-                    event.job_id,
-                    client_id,
-                    &event.status,
-                    None,
-                )
-                .await?;
-                self.record_runtime_config_apply_terminal_for_target_status(
-                    event.job_id,
-                    client_id,
-                    &event.status,
-                    Some(outcome.message.as_str()),
-                )
-                .await?;
-                self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
+                let repository_side_effects_processed =
+                    event.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.get("repository_side_effects_processed") == Some(&Value::Bool(true))
+                    });
+                if !repository_side_effects_processed {
+                    self.repair_persisted_job_output_derivations_for_target(
+                        event.job_id,
+                        client_id,
+                    )
                     .await?;
-                batch.push_target(event.job_id, client_id, outcome);
+                    self.record_backup_request_terminal_for_target_status(
+                        event.job_id,
+                        client_id,
+                        &event.status,
+                        None,
+                    )
+                    .await?;
+                    self.record_runtime_config_apply_terminal_for_target_status(
+                        event.job_id,
+                        client_id,
+                        &event.status,
+                        Some(outcome.message.as_str()),
+                    )
+                    .await?;
+                    self.record_job_target_webhook_event(event.job_id, client_id, &outcome)
+                        .await?;
+                }
+                batch.push_target(event.id, event.job_id, client_id, outcome);
                 Ok(Some(batch))
             }
             "job_terminalized" => {
@@ -6229,7 +6422,35 @@ impl Repository {
         }
     }
 
-    async fn mark_job_terminal_event_processed(&self, event_id: Uuid) -> Result<()> {
+    async fn mark_job_terminal_event_repository_side_effects_processed(
+        &self,
+        event_id: Uuid,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(_) => {}
+            Self::Postgres(pool) => {
+                sqlx::query(
+                    r#"
+                    UPDATE job_terminal_events
+                    SET outcome = jsonb_set(
+                        outcome,
+                        '{repository_side_effects_processed}',
+                        'true'::jsonb,
+                        TRUE
+                    )
+                    WHERE id = $1
+                      AND event_kind = 'target_terminalized'
+                    "#,
+                )
+                .bind(event_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn mark_job_terminal_event_processed(&self, event_id: Uuid) -> Result<()> {
         match self {
             Self::Memory(_) => {}
             Self::Postgres(pool) => {
@@ -6254,7 +6475,11 @@ impl Repository {
         Ok(())
     }
 
-    async fn mark_job_terminal_event_failed(&self, event_id: Uuid, error: &str) -> Result<()> {
+    pub(crate) async fn mark_job_terminal_event_failed(
+        &self,
+        event_id: Uuid,
+        error: &str,
+    ) -> Result<()> {
         let error = error.chars().take(4096).collect::<String>();
         match self {
             Self::Memory(_) => {}
@@ -6288,6 +6513,10 @@ impl Repository {
         job_id: Uuid,
         status: &str,
     ) -> Result<()> {
+        let _memory_side_effect_guard = match self {
+            Self::Memory(memory) => Some(memory.job_terminal_side_effects.lock().await),
+            Self::Postgres(_) => None,
+        };
         if matches!(self, Self::Memory(_)) {
             self.reconcile_memory_job_event_sources(job_id).await?;
         }
@@ -6317,29 +6546,6 @@ impl Repository {
         )
         .await?;
         Ok(())
-    }
-
-    pub(crate) async fn job_operation(&self, job_id: Uuid) -> Result<Option<JobCommand>> {
-        match self {
-            Self::Memory(memory) => Ok(memory.job_operations.read().await.get(&job_id).cloned()),
-            Self::Postgres(pool) => {
-                let Some(row) = sqlx::query(
-                    r#"
-                    SELECT operation
-                    FROM jobs
-                    WHERE id = $1
-                    "#,
-                )
-                .bind(job_id)
-                .fetch_optional(pool)
-                .await?
-                else {
-                    return Ok(None);
-                };
-                let operation: sqlx::types::Json<JobCommand> = row.try_get("operation")?;
-                Ok(Some(operation.0))
-            }
-        }
     }
 
     pub(crate) async fn active_agent_update_check_target_matches(
@@ -6800,42 +7006,8 @@ impl Repository {
         &self,
         event: JobCreatedWebhookEvent<'_>,
     ) -> Result<()> {
-        let event_id = format!("job:{}:created", event.job_id);
-        let predicates = job_webhook_predicates(event.command_type, event.status, true);
-        let operation = event
-            .operation
-            .map(|value| {
-                let mut value = json!(value);
-                redact_runtime_tunnel_credentials(&mut value);
-                value
-            })
-            .unwrap_or(Value::Null);
-        self.record_webhook_event(WebhookEventCandidate {
-            kind: "job.created".to_string(),
-            event_id: event_id.clone(),
-            event_predicates: predicates.clone(),
-            subject_client_ids: event.resolved_targets.to_vec(),
-            actor_id: event.actor_id,
-            payload: json!({
-                "event": {
-                    "kind": "job.created",
-                    "id": &event_id,
-                    "predicates": &predicates,
-                },
-                "job": {
-                    "id": event.job_id,
-                    "status": event.status,
-                    "type": event.command_type,
-                    "privileged": event.privileged,
-                    "payload_hash": event.command_hash,
-                    "source_schedule_id": event.source_schedule_id,
-                    "target_count": event.resolved_targets.len(),
-                    "target_ids": event.resolved_targets,
-                    "operation": operation,
-                },
-            }),
-        })
-        .await?;
+        self.record_webhook_event(job_created_webhook_event_candidate(event))
+            .await?;
         Ok(())
     }
 

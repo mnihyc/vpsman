@@ -202,6 +202,10 @@ async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
 
     assert_eq!(status, axum::http::StatusCode::CREATED);
     assert_eq!(response.migration_link.id, existing_link.id);
+    assert_eq!(response.restore_job.status, "queued");
+    assert_eq!(response.restore_job.target_count, 1);
+    assert_eq!(response.restore_job.target_counts.total, 1);
+    assert_eq!(response.restore_job.target_counts.queued, 1);
     assert_eq!(repo.list_migration_links(10).await.unwrap().len(), 1);
     assert_eq!(
         repo.list_jobs(10)
@@ -224,6 +228,18 @@ async fn migration_run_reuses_matching_existing_link_and_records_restore_job() {
         serde_json::json!(["rebuilt-client"])
     );
     assert!(dispatch_audit.metadata.get("resolved_targets").is_none());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let expected_event_id = format!("job:{}:created", response.restore_job.job_id);
+    let job_created_events = memory
+        .webhook_events
+        .read()
+        .await
+        .iter()
+        .filter(|event| event.kind == "job.created" && event.event_id == expected_event_id)
+        .count();
+    assert_eq!(job_created_events, 1);
 }
 
 #[tokio::test]

@@ -729,6 +729,7 @@ impl Repository {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_network_observations_starting_at(
         &self,
         job_id: Uuid,
@@ -745,20 +746,46 @@ impl Repository {
                 parse_network_observation(job_id, client_id, seq, output, &now)
             })
             .collect::<Vec<_>>();
+        self.record_bound_manual_network_observations(job_id, &mut observations)
+            .await
+    }
+
+    pub(crate) async fn record_persisted_network_observations(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        outputs: &[(i32, CommandOutput, String)],
+    ) -> Result<()> {
+        let mut observations = outputs
+            .iter()
+            .filter_map(|(seq, output, received_at)| {
+                parse_network_observation(job_id, client_id, *seq, output, received_at)
+            })
+            .collect::<Vec<_>>();
+        self.record_bound_manual_network_observations(job_id, &mut observations)
+            .await
+    }
+
+    async fn record_bound_manual_network_observations(
+        &self,
+        job_id: Uuid,
+        observations: &mut Vec<NetworkObservationView>,
+    ) -> Result<()> {
         if observations.is_empty() {
             return Ok(());
         }
         if !self
-            .bind_network_observations_to_job_snapshot(job_id, &mut observations)
+            .bind_network_observations_to_job_snapshot(job_id, observations)
             .await?
         {
             #[cfg(not(test))]
             return Ok(());
             #[cfg(test)]
-            self.bind_network_observations_to_current_topology(&mut observations)
+            self.bind_network_observations_to_current_topology(observations)
                 .await?;
         }
-        self.upsert_manual_observations(observations).await
+        self.upsert_manual_observations(std::mem::take(observations))
+            .await
     }
 
     #[cfg(test)]

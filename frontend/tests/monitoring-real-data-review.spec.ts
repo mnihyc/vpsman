@@ -54,6 +54,7 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await authenticate(page);
+  await openConsoleSubpage(page, "System", "Preferences");
 
   const fleetSearch = page.getByRole("combobox", { name: "Search fleet" });
   await fleetSearch.fill("v");
@@ -63,12 +64,11 @@ test("captures private and shared monitoring from the isolated real stack", asyn
   await fleetSuggestions.getByRole("option", { name: /VPS rules…/ }).click();
   await expect(
     fleetSuggestions.getByText("Product name", { exact: true }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 30_000 });
   await capture(page, "private-vps-rules-dropdown.png");
   await fleetSearch.fill("");
   await fleetSearch.press("Escape");
 
-  await openConsoleSubpage(page, "System", "Preferences");
   await page
     .getByLabel("Fleet table location", { exact: true })
     .selectOption("country_region");

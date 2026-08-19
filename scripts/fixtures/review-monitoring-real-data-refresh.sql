@@ -125,6 +125,8 @@ SELECT
                     64000000000::bigint - (15 - points.sample_index) * 10000000::bigint
             )
         ),
+        'disk_collection_available', true,
+        'disk_semantics', 'persistent_block_filesystems_v1',
         'networks', CASE
             WHEN points.network_enabled THEN jsonb_build_array(
                 jsonb_build_object(
@@ -342,7 +344,8 @@ INSERT INTO telemetry_rollups (
     udp_sockets_latest,
     connections_observed_at,
     latest_observed_at,
-    updated_at
+    updated_at,
+    disk_sample_count
 )
 SELECT
     points.client_id,
@@ -401,7 +404,8 @@ SELECT
     28,
     points.bucket_start,
     points.bucket_start,
-    now()
+    now(),
+    1
 FROM points;
 
 INSERT INTO telemetry_resource_latest

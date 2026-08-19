@@ -345,53 +345,262 @@ fn host_fact_parsing_does_not_invent_cpu_or_virtualization_labels() {
     );
 }
 
+fn write_telemetry_mountinfo(proc_root: &Path, contents: impl AsRef<[u8]>) {
+    std::fs::create_dir_all(proc_root.join("self")).unwrap();
+    std::fs::write(proc_root.join("self/mountinfo"), contents).unwrap();
+}
+
+fn register_telemetry_block_device(sys_dev_block_dir: &Path, id: &str, name: &str) {
+    let device_dir = sys_dev_block_dir.join(id);
+    std::fs::create_dir_all(&device_dir).unwrap();
+    std::fs::write(device_dir.join("uevent"), format!("DEVNAME={name}\n")).unwrap();
+}
+
 #[test]
 fn malformed_mount_row_does_not_discard_available_storage() {
     let root = std::env::temp_dir().join(format!("vpsman-mounts-{}", uuid::Uuid::new_v4()));
     let storage = root.join("storage");
+    let sys_dev_block_dir = root.join("sys/dev/block");
     std::fs::create_dir_all(&storage).unwrap();
-    std::fs::write(
-        root.join("mounts"),
+    register_telemetry_block_device(&sys_dev_block_dir, "252:1", "vda1");
+    write_telemetry_mountinfo(
+        &root,
         format!(
-            "incomplete-row\n/dev/root {} ext4 rw 0 0\n",
+            "incomplete-row\n36 25 252:1 / {} rw,relatime - ext4 /dev/vda1 rw\n",
             storage.display()
         ),
-    )
-    .unwrap();
+    );
 
-    let collection = disk_stats(&root).unwrap();
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
     assert_eq!(collection.disks.len(), 1);
     assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
     assert_eq!(collection.failure_count, 1);
     assert!(collection
         .first_error
         .as_deref()
-        .is_some_and(|error| error.contains("row 1 is incomplete")));
+        .is_some_and(|error| error.contains("mountinfo row 1 is invalid")));
     std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
-fn container_namespace_and_overlay_mounts_are_not_storage() {
+fn only_persistent_block_filesystems_are_counted_once() {
     let root = std::env::temp_dir().join(format!("vpsman-nsfs-{}", uuid::Uuid::new_v4()));
     let storage = root.join("storage");
+    let storage_alias = root.join("storage-alias");
+    let fuse_block = root.join("fuse-block");
+    let sys_dev_block_dir = root.join("sys/dev/block");
     std::fs::create_dir_all(&storage).unwrap();
-    std::fs::write(
-        root.join("mounts"),
+    std::fs::create_dir_all(&storage_alias).unwrap();
+    std::fs::create_dir_all(&fuse_block).unwrap();
+    register_telemetry_block_device(&sys_dev_block_dir, "7:0", "loop0");
+    register_telemetry_block_device(&sys_dev_block_dir, "7:1", "loop0p1");
+    register_telemetry_block_device(&sys_dev_block_dir, "1:0", "ram0");
+    register_telemetry_block_device(&sys_dev_block_dir, "254:0", "zram0");
+    register_telemetry_block_device(&sys_dev_block_dir, "252:1", "vda1");
+    register_telemetry_block_device(&sys_dev_block_dir, "252:2", "vda2");
+    write_telemetry_mountinfo(
+        &root,
         format!(
-            "nsfs /run/docker/netns/808d0d1218c8 nsfs rw 0 0\n\
-             fuse-overlayfs /var/lib/docker/fuse-overlayfs/layer fuse-overlayfs rw 0 0\n\
-             /dev/fuse /var/lib/docker/fuse-overlayfs/other fuse.fuse-overlayfs rw 0 0\n\
-             /dev/root {} ext4 rw 0 0\n",
+            "30 25 0:31 / /dev/shm rw,nosuid,nodev - tmpfs tmpfs rw,size=1024k\n\
+             31 25 0:40 / /var/lib/docker/overlay rw - overlay overlay rw\n\
+             32 25 0:41 / /mnt/network rw - nfs server:/volume rw\n\
+             39 25 0:42 / /run/dev rw - devtmpfs devtmpfs rw\n\
+             40 25 0:43 / /mnt/cifs rw - cifs //server/share rw\n\
+             41 25 0:44 / /mnt/fuse rw - fuse.sshfs host:/volume rw\n\
+             42 25 252:2 / {} rw - fuseblk /dev/vda2 rw\n\
+             33 25 7:0 / /mnt/loop rw - ext4 /dev/loop0 rw\n\
+             38 25 7:1 / /mnt/loop-partition rw - ext4 /dev/loop0p1 rw\n\
+             34 25 1:0 / /mnt/ram rw - ext2 /dev/ram0 rw\n\
+             35 25 254:0 / /mnt/zram rw - ext4 /dev/zram0 rw\n\
+             36 25 252:1 /srv/data {} rw - ext4 /dev/vda1 rw\n\
+             37 25 252:1 / {} rw - ext4 /dev/vda1 rw\n",
+            fuse_block.display(),
+            storage_alias.display(),
+            storage.display(),
+        ),
+    );
+
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
+    assert_eq!(collection.disks.len(), 1);
+    assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
+    assert!(collection.disks[0].total_bytes > 0);
+    assert!(collection.disks[0].available_bytes <= collection.disks[0].total_bytes);
+    assert_eq!(collection.failure_count, 0);
+    assert_eq!(collection.first_error, None);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn distinct_persistent_partitions_remain_additive() {
+    let root = std::env::temp_dir().join(format!("vpsman-partitions-{}", uuid::Uuid::new_v4()));
+    let first = root.join("first");
+    let second = root.join("second");
+    let sys_dev_block_dir = root.join("sys/dev/block");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    register_telemetry_block_device(&sys_dev_block_dir, "252:1", "vda1");
+    register_telemetry_block_device(&sys_dev_block_dir, "252:2", "vda2");
+    write_telemetry_mountinfo(
+        &root,
+        format!(
+            "36 25 252:1 / {} rw - ext4 /dev/vda1 rw\n\
+             37 25 252:2 / {} rw - xfs /dev/vda2 rw\n",
+            first.display(),
+            second.display(),
+        ),
+    );
+
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
+    assert_eq!(collection.disks.len(), 2);
+    assert_eq!(collection.failure_count, 0);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn failed_preferred_mount_uses_an_accessible_alias_of_the_same_filesystem() {
+    let root = std::env::temp_dir().join(format!("vpsman-mount-alias-{}", uuid::Uuid::new_v4()));
+    let missing_preferred = root.join("missing");
+    let alias = root.join("nested/alias");
+    let sys_dev_block_dir = root.join("sys/dev/block");
+    std::fs::create_dir_all(&alias).unwrap();
+    register_telemetry_block_device(&sys_dev_block_dir, "252:1", "vda1");
+    write_telemetry_mountinfo(
+        &root,
+        format!(
+            "36 25 252:1 / {} rw - ext4 /dev/vda1 rw\n\
+             37 25 252:1 /srv/data {} rw - ext4 /dev/vda1 rw\n",
+            missing_preferred.display(),
+            alias.display(),
+        ),
+    );
+
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
+    assert_eq!(collection.disks.len(), 1);
+    assert_eq!(collection.disks[0].mountpoint, alias.to_string_lossy());
+    assert_eq!(collection.failure_count, 0);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn unavailable_block_device_evidence_fails_closed() {
+    let root = std::env::temp_dir().join(format!(
+        "vpsman-missing-block-sysfs-{}",
+        uuid::Uuid::new_v4()
+    ));
+    write_telemetry_mountinfo(&root, "36 25 252:1 / / rw - ext4 /dev/vda1 rw\n");
+
+    let missing_sys_dev_block_dir = root.join("missing-sys/dev/block");
+    let error = disk_stats(&root, &missing_sys_dev_block_dir).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("failed to inspect telemetry block-device evidence directory"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn vanished_per_device_block_evidence_marks_the_inventory_unavailable() {
+    let root = std::env::temp_dir().join(format!(
+        "vpsman-vanished-block-device-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let storage = root.join("storage");
+    let sys_dev_block_dir = root.join("sys/dev/block");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::create_dir_all(&sys_dev_block_dir).unwrap();
+    write_telemetry_mountinfo(
+        &root,
+        format!(
+            "36 25 252:1 / {} rw - ext4 /dev/vda1 rw\n",
             storage.display()
         ),
-    )
+    );
+
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
+    assert!(collection.disks.is_empty());
+    assert_eq!(collection.failure_count, 1);
+    assert!(collection
+        .first_error
+        .as_deref()
+        .is_some_and(|error| error.contains("block-device evidence disappeared for 252:1")));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn oversized_block_inventory_is_not_published_as_complete() {
+    let root = std::env::temp_dir().join(format!(
+        "vpsman-oversized-block-inventory-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let sys_dev_block_dir = root.join("sys/dev/block");
+    let mut mountinfo = String::new();
+    for index in 0..=MAX_TELEMETRY_DISKS {
+        let storage = root.join(format!("storage-{index}"));
+        std::fs::create_dir_all(&storage).unwrap();
+        register_telemetry_block_device(
+            &sys_dev_block_dir,
+            &format!("252:{}", index + 1),
+            &format!("vda{}", index + 1),
+        );
+        mountinfo.push_str(&format!(
+            "{} 25 252:{} / {} rw - ext4 /dev/vda{} rw\n",
+            100 + index,
+            index + 1,
+            storage.display(),
+            index + 1,
+        ));
+    }
+    write_telemetry_mountinfo(&root, mountinfo);
+
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
+    assert_eq!(collection.disks.len(), MAX_TELEMETRY_DISKS);
+    assert_eq!(collection.failure_count, 1);
+    assert!(collection
+        .first_error
+        .as_deref()
+        .is_some_and(|error| error.contains("exceeding the telemetry limit")));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn btrfs_requires_a_verified_persistent_block_source() {
+    let root = std::env::temp_dir().join(format!(
+        "vpsman-btrfs-block-source-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let storage = root.join("storage");
+    let storage_alias = root.join("storage-alias");
+    let sys_dev_block_dir = root.join("sys/dev/block");
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::create_dir_all(&storage_alias).unwrap();
+    register_telemetry_block_device(&sys_dev_block_dir, "252:17", "vdb1");
+    register_telemetry_block_device(&sys_dev_block_dir, "7:0", "loop0");
+    write_telemetry_mountinfo(
+        &root,
+        format!(
+            "40 25 0:70 /@ {} rw - btrfs /dev/vdb1 rw,subvol=/@\n\
+             41 25 0:70 / {} rw - btrfs /dev/vdb1 rw\n\
+             42 25 0:71 / /dev/shm rw - tmpfs /dev/vdb1 rw\n\
+             43 25 0:72 / /mnt/loop-btrfs rw - btrfs /dev/loop0 rw\n",
+            storage_alias.display(),
+            storage.display(),
+        ),
+    );
+
+    let collection = disk_stats_with_block_source_resolver(&root, &sys_dev_block_dir, |source| {
+        match source.to_str() {
+            Some("/dev/vdb1") => Ok(Some(BlockDeviceId {
+                major: 252,
+                minor: 17,
+            })),
+            Some("/dev/loop0") => Ok(Some(BlockDeviceId { major: 7, minor: 0 })),
+            _ => Ok(None),
+        }
+    })
     .unwrap();
 
-    let collection = disk_stats(&root).unwrap();
     assert_eq!(collection.disks.len(), 1);
     assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
     assert_eq!(collection.failure_count, 0);
-    assert_eq!(collection.first_error, None);
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -400,18 +609,21 @@ fn inaccessible_storage_mount_does_not_discard_available_storage() {
     let root = std::env::temp_dir().join(format!("vpsman-partial-disks-{}", uuid::Uuid::new_v4()));
     let storage = root.join("storage");
     let missing = root.join("missing");
+    let sys_dev_block_dir = root.join("sys/dev/block");
     std::fs::create_dir_all(&storage).unwrap();
-    std::fs::write(
-        root.join("mounts"),
+    register_telemetry_block_device(&sys_dev_block_dir, "252:1", "vda1");
+    register_telemetry_block_device(&sys_dev_block_dir, "252:2", "vda2");
+    write_telemetry_mountinfo(
+        &root,
         format!(
-            "/dev/root {} ext4 rw 0 0\n/dev/root {} ext4 rw 0 0\n",
+            "36 25 252:1 / {} rw - ext4 /dev/vda1 rw\n\
+             37 25 252:2 / {} rw - ext4 /dev/vda2 rw\n",
             missing.display(),
             storage.display()
         ),
-    )
-    .unwrap();
+    );
 
-    let collection = disk_stats(&root).unwrap();
+    let collection = disk_stats(&root, &sys_dev_block_dir).unwrap();
     assert_eq!(collection.disks.len(), 1);
     assert_eq!(collection.disks[0].mountpoint, storage.to_string_lossy());
     assert_eq!(collection.failure_count, 1);
@@ -449,8 +661,10 @@ fn unavailable_disk_inventory_keeps_other_linux_telemetry_available() {
     let root =
         std::env::temp_dir().join(format!("vpsman-partial-telemetry-{}", uuid::Uuid::new_v4()));
     let proc_root = root.join("proc");
+    let sys_root = root.join("sys");
     let hostname_path = root.join("hostname");
     std::fs::create_dir_all(proc_root.join("net")).unwrap();
+    std::fs::create_dir_all(sys_root.join("class/net")).unwrap();
     std::fs::write(&hostname_path, "partial-host\n").unwrap();
     std::fs::write(proc_root.join("uptime"), "123.50 50.00\n").unwrap();
     std::fs::write(proc_root.join("loadavg"), "0.25 0.50 0.75 1/10 1\n").unwrap();
@@ -469,6 +683,7 @@ fn unavailable_disk_inventory_keeps_other_linux_telemetry_available() {
 
     let mut config = AgentConfig::default();
     config.telemetry.proc_root = proc_root.to_string_lossy().into_owned();
+    config.telemetry.sys_class_net_dir = sys_root.join("class/net").to_string_lossy().into_owned();
     config.telemetry.hostname_file = Some(hostname_path.to_string_lossy().into_owned());
     let mut runtime_state = TelemetryRuntimeState::default();
 
@@ -479,17 +694,27 @@ fn unavailable_disk_inventory_keeps_other_linux_telemetry_available() {
     assert_eq!(metrics.memory.total_bytes, 4096 * 1024);
     assert_eq!(metrics.networks.len(), 1);
     assert!(metrics.disks.is_empty());
+    assert_eq!(metrics.disk_collection_available, Some(false));
+    assert_eq!(
+        metrics.disk_semantics.as_deref(),
+        Some(vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1)
+    );
     assert!(runtime_state.disk_collection_failed);
 
     let storage = root.join("storage");
     std::fs::create_dir_all(&storage).unwrap();
-    std::fs::write(
-        proc_root.join("mounts"),
-        format!("/dev/root {} ext4 rw 0 0\n", storage.display()),
-    )
-    .unwrap();
+    register_telemetry_block_device(&sys_root.join("dev/block"), "252:1", "vda1");
+    write_telemetry_mountinfo(
+        &proc_root,
+        format!(
+            "36 25 252:1 / {} rw - ext4 /dev/vda1 rw\n",
+            storage.display()
+        ),
+    );
     let recovered = collect_linux_metrics(&config, &mut runtime_state).unwrap();
     assert_eq!(recovered.disks.len(), 1);
+    assert_eq!(recovered.disk_collection_available, Some(true));
+    assert!(recovered.has_persistent_block_filesystem_disk_sample());
     assert!(!runtime_state.disk_collection_failed);
     std::fs::remove_dir_all(root).ok();
 }

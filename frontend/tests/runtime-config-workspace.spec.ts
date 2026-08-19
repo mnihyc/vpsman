@@ -66,7 +66,30 @@ test("edits the sparse VPS override hierarchy without confusing empty and inheri
   await unlockPrivilegeFromTop(page);
   await openConsoleSubpage(page, "Config", "Per-VPS");
   const workspace = page.locator(".singleConfigWorkspace");
+  const refreshDesired = workspace.getByRole("button", {
+    name: "Refresh desired",
+  });
+  await expect(refreshDesired).toBeDisabled();
+  await expect(refreshDesired).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "Select one VPS before refreshing its desired configuration.",
+  );
+  const refreshLive = workspace.getByRole("button", { name: "Refresh live" });
+  await expect(refreshLive).toBeDisabled();
+  await expect(refreshLive).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "Load one VPS configuration before refreshing its live state.",
+  );
   await chooseVps(workspace, "edge-sfo", /edge-sfo-01.*agent-sfo-01/);
+
+  const cleanReview = workspace.getByRole("button", {
+    name: "Review changes",
+  });
+  await expect(cleanReview).toBeDisabled();
+  await expect(cleanReview).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "Edit the VPS configuration before reviewing changes.",
+  );
 
   await expect(
     page.getByRole("heading", { name: "Per-VPS desired config" }),
@@ -77,17 +100,40 @@ test("edits the sparse VPS override hierarchy without confusing empty and inheri
     workspace.getByLabel("Telemetry interval", { exact: true }),
   ).toHaveValue("45");
   await expect(workspace).toContainText("Configuration Preset");
-  await expect(workspace.getByLabel("Process inventory source")).toBeDisabled();
+  const lockedProcessSource = workspace.getByLabel("Process inventory source");
+  await expect(lockedProcessSource).toBeDisabled();
+  await expect(lockedProcessSource).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "This value is read-only because its configuration source does not allow a VPS override.",
+  );
 
   const runtimeIp = configBranch(workspace, "Runtime IP arguments");
   await runtimeIp
     .getByRole("button", { name: "Expand Runtime IP arguments" })
     .click();
   await expect(runtimeIp).toContainText("Explicit empty list []");
+  const setEmpty = runtimeIp.getByRole("button", { name: "Set []" });
+  await expect(setEmpty).toBeDisabled();
+  await expect(setEmpty).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "The array is already explicitly empty.",
+  );
   await runtimeIp.getByLabel("New array item").fill("/usr/local/sbin/ip");
   await runtimeIp.getByRole("button", { name: "Add item" }).click();
   await expect(runtimeIp.getByLabel("Array item 1")).toHaveValue(
     "/usr/local/sbin/ip",
+  );
+  const moveFirstUp = runtimeIp.getByLabel("Move item 1 up");
+  const moveFirstDown = runtimeIp.getByLabel("Move item 1 down");
+  await expect(moveFirstUp).toBeDisabled();
+  await expect(moveFirstUp).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "This item is already first.",
+  );
+  await expect(moveFirstDown).toBeDisabled();
+  await expect(moveFirstDown).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "This item is already last.",
   );
   await runtimeIp.getByLabel("Array item 1").fill("");
   await runtimeIp.getByLabel("Array item 1").pressSequentially("/usr/bin/ip");
@@ -186,7 +232,7 @@ test("reviews deleting the complete sparse override as an explicit reset", async
   await workspace.getByRole("button", { name: "Review changes" }).click();
   await expect(
     workspace.getByLabel("Reviewed VPS config changes"),
-  ).toContainText("Server-reviewed runtime changes");
+  ).toContainText("Saved override deletion");
 
   const previewRequest = await page.evaluate(() => {
     const requests = (
@@ -397,6 +443,12 @@ test("preserves invalid Advanced TOML exactly and reviews storage-only replaceme
   await expect(
     workspace.getByRole("button", { name: "Review changes" }),
   ).toBeDisabled();
+  await expect(
+    workspace.getByRole("button", { name: "Review changes" }),
+  ).toHaveAttribute(
+    "data-tooltip-disabled-reason",
+    "Repair the replacement TOML before reviewing changes.",
+  );
 
   const unknown = "made_up_runtime_field = true\n";
   await editor.fill(unknown);

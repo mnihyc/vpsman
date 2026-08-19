@@ -1,4 +1,7 @@
-use super::{AgentMetrics, ConnectionStat, CpuStat, MemoryStat};
+use super::{
+    AgentMetrics, ConnectionStat, CpuStat, DiskStat, MemoryStat,
+    DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1,
+};
 
 #[test]
 fn cpu_utilization_is_an_optional_additive_wire_field() {
@@ -57,4 +60,37 @@ fn swap_capacity_is_optional_and_atomic_on_the_wire() {
     .unwrap();
     assert_eq!(with_swap.swap_total_bytes, Some(1024));
     assert_eq!(with_swap.swap_available_bytes, Some(768));
+}
+
+#[test]
+fn disk_collection_presence_requires_explicit_versioned_semantics() {
+    let legacy_with_disks: AgentMetrics = serde_json::from_value(serde_json::json!({
+        "observed_unix": 1,
+        "hostname": "legacy",
+        "uptime_secs": 1,
+        "cpu": {"load": {"one": 0.0, "five": 0.0, "fifteen": 0.0}, "cores": 1},
+        "memory": {"total_bytes": 1, "available_bytes": 1},
+        "disks": [{"mountpoint": "/", "total_bytes": 1, "available_bytes": 1}],
+        "networks": []
+    }))
+    .unwrap();
+    assert!(!legacy_with_disks.has_persistent_block_filesystem_disk_sample());
+
+    let mut current = AgentMetrics {
+        disks: vec![DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 1,
+            available_bytes: 1,
+        }],
+        disk_collection_available: Some(true),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+        ..AgentMetrics::default()
+    };
+    assert!(current.has_persistent_block_filesystem_disk_sample());
+
+    current.disk_collection_available = Some(false);
+    assert!(!current.has_persistent_block_filesystem_disk_sample());
+    current.disk_collection_available = Some(true);
+    current.disk_semantics = Some("future_semantics".to_string());
+    assert!(!current.has_persistent_block_filesystem_disk_sample());
 }

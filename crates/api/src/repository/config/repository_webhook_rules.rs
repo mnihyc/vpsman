@@ -247,7 +247,21 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
+                // Match the rule -> delivery order used by deletion and acquire audit state
+                // before mutating either collection.
                 let mut rules = memory.webhook_rules.write().await;
+                let mut deliveries = memory.webhook_rule_deliveries.write().await;
+                let mut audits = memory.audits.write().await;
+                if request.id.is_none() {
+                    if let Some(stored) = rules.iter().find(|stored| stored.name == candidate.name)
+                    {
+                        anyhow::ensure!(
+                            webhook_rule_material_matches(stored, &candidate),
+                            "webhook_rule_name_conflict"
+                        );
+                        return Ok(stored.clone());
+                    }
+                }
                 anyhow::ensure!(
                     !rules.iter().any(|stored| {
                         stored.name == candidate.name && Some(stored.id) != request.id
@@ -281,24 +295,57 @@ impl Repository {
                     rules.push(candidate.clone());
                     candidate
                 };
-                drop(rules);
                 if !rule.enabled {
-                    let mut deliveries = memory.webhook_rule_deliveries.write().await;
                     cancel_memory_webhook_rule_deliveries(
                         &mut deliveries,
                         rule.id,
                         "webhook rule disabled",
                     );
                 }
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(webhook_rule_audit(&rule, operator, now));
+                audits.push(webhook_rule_audit(&rule, operator, now));
                 Ok(rule)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                if request.id.is_none() {
+                    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+                        .bind("vpsman.webhook_rule.idless_upsert")
+                        .execute(&mut *tx)
+                        .await?;
+                    let existing = sqlx::query(
+                        r#"
+                        SELECT
+                            id,
+                            name,
+                            enabled,
+                            expression,
+                            target,
+                            body_template,
+                            signing_secret,
+                            cooldown_secs,
+                            notes,
+                            actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        FROM webhook_rules
+                        WHERE name = $1
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&candidate.name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(webhook_rule_from_row)
+                    .transpose()?;
+                    if let Some(existing) = existing {
+                        anyhow::ensure!(
+                            webhook_rule_material_matches(&existing, &candidate),
+                            "webhook_rule_name_conflict"
+                        );
+                        tx.commit().await?;
+                        return Ok(existing);
+                    }
+                }
                 let row = sqlx::query(
                     r#"
                     INSERT INTO webhook_rules (
@@ -1347,6 +1394,17 @@ fn webhook_rule_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleView> 
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn webhook_rule_material_matches(existing: &WebhookRuleView, candidate: &WebhookRuleView) -> bool {
+    existing.name == candidate.name
+        && existing.enabled == candidate.enabled
+        && existing.expression == candidate.expression
+        && existing.target == candidate.target
+        && existing.body_template == candidate.body_template
+        && existing.signing_secret == candidate.signing_secret
+        && existing.cooldown_secs == candidate.cooldown_secs
+        && existing.notes == candidate.notes
 }
 
 fn webhook_delivery_from_row(row: sqlx::postgres::PgRow) -> Result<WebhookRuleDeliveryView> {

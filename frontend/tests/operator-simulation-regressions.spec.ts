@@ -137,7 +137,13 @@ test("uses role-aware operator defaults and reports successful creation", async 
   await expect(
     page.getByText("Created operator release-operator"),
   ).toBeVisible();
-  await expect(page.getByText("3 operator records")).toBeVisible();
+  const operatorGrid = page.getByLabel("Operator accounts data grid");
+  await operatorGrid
+    .getByRole("combobox", { name: "Operator accounts search" })
+    .fill("release-operator");
+  await expect(
+    operatorGrid.getByText("release-operator", { exact: true }),
+  ).toBeVisible();
 });
 
 test("submits the privilege unlock form with Enter", async ({
@@ -527,10 +533,24 @@ test("privilege unlock reaches refreshable session actions while Audit evidence 
   await expect(
     page.getByRole("button", { name: "Revoke session for console-admin" }),
   ).toHaveCount(0);
-  await expect(
-    page.getByLabel("Operator session evidence").getByText("Refreshable"),
-  ).toHaveCount(2);
-  await expect(page.getByText("2 expired bearer sessions")).toHaveCount(0);
+  const sessionGrid = page
+    .getByLabel("Operator session evidence")
+    .getByLabel("Operator bearer sessions data grid");
+  const sessionSearch = sessionGrid.getByRole("combobox", {
+    name: "Operator bearer sessions search",
+  });
+  for (const sessionId of [
+    "88888888-aaaa-4bbb-8ccc-000000000001",
+    "88888888-aaaa-4bbb-8ccc-000000000002",
+  ]) {
+    await sessionSearch.fill(sessionId);
+    const sessionRow = sessionGrid.locator(".gridBody [role=row]");
+    await expect(sessionRow).toHaveCount(1);
+    await expect(sessionRow.getByTitle(sessionId)).toBeVisible();
+    await expect(
+      sessionRow.getByText("Refreshable", { exact: true }),
+    ).toBeVisible();
+  }
 });
 
 test("keeps unlocked vault management out of operational workflows", async ({
@@ -1109,10 +1129,19 @@ test("deleting a webhook rule retains its delivery evidence", async ({
 
   await activate(page.getByRole("tab", { name: /Deliveries/ }));
   const deliveryGrid = page.getByLabel("Webhook delivery history data grid");
-  await expect(deliveryGrid.locator(".gridBody [role=row]")).toHaveCount(3);
-  await expect(deliveryGrid).toContainText("edge-interval-webhook");
-  await expect(deliveryGrid).toContainText("canceled disabled");
-  await expect(deliveryGrid).toContainText("webhook rule deleted");
+  await deliveryGrid
+    .getByRole("combobox", { name: "Webhook delivery history search" })
+    .fill("edge-interval-webhook");
+  const retainedRows = deliveryGrid.locator(".gridBody [role=row]");
+  await expect(retainedRows).toHaveCount(3);
+  await expect(
+    retainedRows.filter({ hasText: "q2-edge-capacity" }),
+  ).toContainText("delivered");
+  for (const eventId of ["q2-edge-failed", "q2-edge-queued"]) {
+    const canceledRow = retainedRows.filter({ hasText: eventId });
+    await expect(canceledRow).toContainText("canceled disabled");
+    await expect(canceledRow).toContainText("webhook rule deleted");
+  }
 });
 
 async function suiteConfigReadCount(page: Page): Promise<number> {

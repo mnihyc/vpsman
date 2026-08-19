@@ -471,7 +471,7 @@ function ResourceHistory({ data }: { data: ClientMonitoringResponse }) {
         />
         <MonitoringChart
           data={resources.disk}
-          detail="Aggregate reported-filesystem semantics"
+          detail="Aggregate block-device filesystem semantics"
           emptyLabel="Aggregate disk history is unavailable for this range"
           exportFileName={`${safeFilePart(data.client.id)}-disk-${data.range.window}`}
           title="Disk used"
@@ -956,7 +956,9 @@ function resourceCharts(
           timeline,
           bucketed,
           (row) =>
-            row.disk_total_bytes_max > 0 ? row.disk_used_ratio_avg * 100 : null,
+            (row.disk_sample_count ?? 0) > 0 && row.disk_total_bytes_max > 0
+              ? row.disk_used_ratio_avg * 100
+              : null,
         ),
       ],
     },

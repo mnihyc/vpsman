@@ -183,7 +183,22 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let now = unix_now().to_string();
+                // Match the channel -> delivery order used by deletion and acquire audit state
+                // before mutating either collection.
                 let mut channels = memory.fleet_alert_notification_channels.write().await;
+                let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
+                let mut audits = memory.audits.write().await;
+                if request.id.is_none() {
+                    if let Some(stored) =
+                        channels.iter().find(|stored| stored.name == candidate.name)
+                    {
+                        anyhow::ensure!(
+                            fleet_alert_notification_channel_material_matches(stored, &candidate),
+                            "fleet_alert_notification_channel_name_conflict"
+                        );
+                        return Ok(stored.clone());
+                    }
+                }
                 anyhow::ensure!(
                     !channels.iter().any(|stored| {
                         stored.name == candidate.name && Some(stored.id) != request.id
@@ -212,24 +227,62 @@ impl Repository {
                     channels.push(candidate.clone());
                     candidate
                 };
-                drop(channels);
                 if !channel.enabled {
-                    let mut deliveries = memory.fleet_alert_notification_deliveries.write().await;
                     cancel_memory_fleet_alert_notification_deliveries(
                         &mut deliveries,
                         channel.id,
                         "fleet alert notification channel disabled",
                     );
                 }
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(notification_channel_audit(&channel, operator, now));
+                audits.push(notification_channel_audit(&channel, operator, now));
                 Ok(channel)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                if request.id.is_none() {
+                    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
+                        .bind("vpsman.fleet_alert_notification_channel.idless_upsert")
+                        .execute(&mut *tx)
+                        .await?;
+                    let existing = sqlx::query(
+                        r#"
+                        SELECT
+                            id,
+                            name,
+                            scope_kind,
+                            scope_value,
+                            min_severity,
+                            categories,
+                            operator_states,
+                            delivery_kind,
+                            target,
+                            cooldown_secs,
+                            enabled,
+                            notes,
+                            actor_id,
+                            created_at::text AS created_at,
+                            updated_at::text AS updated_at
+                        FROM fleet_alert_notification_channels
+                        WHERE name = $1
+                        FOR UPDATE
+                        "#,
+                    )
+                    .bind(&candidate.name)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .map(channel_from_row)
+                    .transpose()?;
+                    if let Some(existing) = existing {
+                        anyhow::ensure!(
+                            fleet_alert_notification_channel_material_matches(
+                                &existing, &candidate
+                            ),
+                            "fleet_alert_notification_channel_name_conflict"
+                        );
+                        tx.commit().await?;
+                        return Ok(existing);
+                    }
+                }
                 let row = sqlx::query(
                     r#"
                     INSERT INTO fleet_alert_notification_channels (
@@ -1148,6 +1201,24 @@ fn channel_from_row(row: sqlx::postgres::PgRow) -> Result<FleetAlertNotification
     })
 }
 
+fn fleet_alert_notification_channel_material_matches(
+    existing: &FleetAlertNotificationChannelView,
+    candidate: &FleetAlertNotificationChannelView,
+) -> bool {
+    existing.configuration_error.is_none()
+        && existing.name == candidate.name
+        && existing.scope_kind == candidate.scope_kind
+        && existing.scope_value == candidate.scope_value
+        && existing.min_severity == candidate.min_severity
+        && existing.categories == candidate.categories
+        && existing.operator_states == candidate.operator_states
+        && existing.delivery_kind == candidate.delivery_kind
+        && existing.target == candidate.target
+        && existing.cooldown_secs == candidate.cooldown_secs
+        && existing.enabled == candidate.enabled
+        && existing.notes == candidate.notes
+}
+
 fn persisted_channel_tokens(value: Value, operator_states: bool) -> (Vec<String>, bool) {
     let Ok(stored) = serde_json::from_value::<Vec<String>>(value) else {
         return (Vec::new(), false);
@@ -1553,4 +1624,145 @@ fn notification_process_metadata(
         "origin_kind": "operator_request",
         "component": "alert-notification-controller",
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{OperatorPreferences, OperatorView},
+        repository::MemoryState,
+    };
+
+    fn operator() -> AuthContext {
+        AuthContext {
+            operator: OperatorView {
+                id: Uuid::nil(),
+                username: "test".to_string(),
+                role: "admin".to_string(),
+                scopes: Vec::new(),
+                preferences: OperatorPreferences::default(),
+                totp_enabled: false,
+                status: "active".to_string(),
+                session_refresh_ttl_secs: crate::DEFAULT_REFRESH_TOKEN_TTL_SECS,
+                created_at: unix_now().to_string(),
+                disabled_at: None,
+                deleted_at: None,
+            },
+            session_id: None,
+        }
+    }
+
+    fn request(target: &str) -> CreateFleetAlertNotificationChannelRequest {
+        CreateFleetAlertNotificationChannelRequest {
+            id: None,
+            name: "Retry-safe alert channel".to_string(),
+            scope_kind: "global".to_string(),
+            scope_value: None,
+            min_severity: Some("warning".to_string()),
+            categories: Some(vec!["agent_status".to_string()]),
+            operator_states: Some(vec!["open".to_string()]),
+            delivery_kind: "webhook".to_string(),
+            target: target.to_string(),
+            cooldown_secs: Some(60),
+            enabled: Some(true),
+            notes: Some("retry fixture".to_string()),
+            confirmed: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn idless_notification_channel_exact_retry_reuses_identity_without_reapplying() {
+        let memory = MemoryState::default();
+        let repo = Repository::Memory(memory.clone());
+        let operator = operator();
+
+        let first = repo
+            .upsert_fleet_alert_notification_channel(
+                &request("https://hooks.acme.com/vpsman"),
+                &operator,
+            )
+            .await
+            .unwrap();
+        let retried = repo
+            .upsert_fleet_alert_notification_channel(
+                &request("https://hooks.acme.com/vpsman"),
+                &operator,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(retried.id, first.id);
+        assert_eq!(retried.created_at, first.created_at);
+        assert_eq!(retried.updated_at, first.updated_at);
+        assert_eq!(
+            memory.fleet_alert_notification_channels.read().await.len(),
+            1
+        );
+        assert_eq!(memory.audits.read().await.len(), 1);
+
+        let conflict = repo
+            .upsert_fleet_alert_notification_channel(
+                &request("https://hooks.acme.com/changed"),
+                &operator,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            conflict.to_string(),
+            "fleet_alert_notification_channel_name_conflict"
+        );
+        assert_eq!(
+            memory.fleet_alert_notification_channels.read().await.len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn canceled_notification_channel_upsert_cannot_commit_before_dependents_and_audit() {
+        let memory = MemoryState::default();
+        let repo = Repository::Memory(memory.clone());
+        let audit_guard = memory.audits.write().await;
+        let task = tokio::spawn({
+            let repo = repo.clone();
+            let operator = operator();
+            async move {
+                repo.upsert_fleet_alert_notification_channel(
+                    &request("https://hooks.acme.com/cancellation"),
+                    &operator,
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if memory
+                    .fleet_alert_notification_channels
+                    .try_write()
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("notification upsert did not reach the blocked audit acquisition");
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        drop(audit_guard);
+
+        assert!(memory
+            .fleet_alert_notification_channels
+            .read()
+            .await
+            .is_empty());
+        assert!(memory
+            .fleet_alert_notification_deliveries
+            .read()
+            .await
+            .is_empty());
+        assert!(memory.audits.read().await.is_empty());
+    }
 }

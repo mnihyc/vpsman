@@ -36,6 +36,40 @@ fn agent_metric_validation_distinguishes_unknown_zero_and_invalid_swap() {
 }
 
 #[test]
+fn unavailable_disk_collection_cannot_carry_disk_rows() {
+    let mut metrics = vpsman_common::AgentMetrics {
+        observed_unix: 1,
+        hostname: "vps".to_string(),
+        disks: vec![vpsman_common::DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 1,
+            available_bytes: 1,
+        }],
+        disk_collection_available: Some(false),
+        disk_semantics: Some(
+            vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string(),
+        ),
+        ..Default::default()
+    };
+    assert!(!valid_agent_metrics(&metrics));
+
+    metrics.disk_collection_available = Some(true);
+    metrics.disks.push(metrics.disks[0].clone());
+    assert!(!valid_agent_metrics(&metrics));
+
+    metrics.disks.pop();
+    metrics.disk_collection_available = None;
+    metrics.disk_semantics = None;
+    assert!(valid_agent_metrics(&metrics));
+    assert!(!metrics.has_persistent_block_filesystem_disk_sample());
+
+    metrics.disk_collection_available = Some(true);
+    metrics.disk_semantics = Some("future_disk_semantics".to_string());
+    assert!(valid_agent_metrics(&metrics));
+    assert!(!metrics.has_persistent_block_filesystem_disk_sample());
+}
+
+#[test]
 fn automatic_reachability_timestamp_uses_the_existing_ping_clock_window() {
     let observed_unix = 10_000;
     let mut metrics = vpsman_common::AgentMetrics {

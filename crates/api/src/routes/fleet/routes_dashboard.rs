@@ -192,7 +192,7 @@ impl DashboardResourceMetric {
             Self::CpuLoad => Some(rollup.cpu_load_1_avg.max(0.0)),
             Self::MemoryUsed => (rollup.memory_total_bytes_max > 0)
                 .then_some(rollup.memory_used_ratio_avg.clamp(0.0, 1.0)),
-            Self::DiskFree => (rollup.disk_total_bytes_max > 0)
+            Self::DiskFree => (rollup.disk_sample_count > 0 && rollup.disk_total_bytes_max > 0)
                 .then_some((1.0 - rollup.disk_used_ratio_avg).clamp(0.0, 1.0)),
         }
     }
@@ -202,7 +202,7 @@ impl DashboardResourceMetric {
             Self::CpuLoad => Some(rollup.cpu_load_1_max.max(rollup.cpu_load_1_avg).max(0.0)),
             Self::MemoryUsed => (rollup.memory_total_bytes_max > 0)
                 .then_some(rollup.memory_used_ratio_max.clamp(0.0, 1.0)),
-            Self::DiskFree => (rollup.disk_total_bytes_max > 0)
+            Self::DiskFree => (rollup.disk_sample_count > 0 && rollup.disk_total_bytes_max > 0)
                 .then_some((1.0 - rollup.disk_used_ratio_max).clamp(0.0, 1.0)),
         }
     }
@@ -1210,9 +1210,11 @@ fn build_resources<'a>(
         memory_total += rollup.memory_total_bytes_max.max(0) as i128;
         memory_used_weighted += rollup.memory_used_ratio_avg.clamp(0.0, 1.0)
             * rollup.memory_total_bytes_max.max(0) as f64;
-        disk_total += rollup.disk_total_bytes_max.max(0) as i128;
-        disk_used_weighted +=
-            rollup.disk_used_ratio_avg.clamp(0.0, 1.0) * rollup.disk_total_bytes_max.max(0) as f64;
+        if rollup.disk_sample_count > 0 {
+            disk_total += rollup.disk_total_bytes_max.max(0) as i128;
+            disk_used_weighted += rollup.disk_used_ratio_avg.clamp(0.0, 1.0)
+                * rollup.disk_total_bytes_max.max(0) as f64;
+        }
     }
 
     DashboardResourcesView {

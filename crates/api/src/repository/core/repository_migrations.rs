@@ -13,7 +13,7 @@ use crate::{
         RestorePlanView,
     },
     repository::Repository,
-    repository_jobs::JobCreatedWebhookEvent,
+    repository_jobs::{record_job_created_webhook_event_in_tx, JobCreatedWebhookEvent},
     repository_key_lifecycle::{
         require_visible_memory_clients, require_visible_postgres_clients_in_tx,
     },
@@ -733,19 +733,22 @@ impl Repository {
                 ))
                 .execute(&mut *tx)
                 .await?;
-                tx.commit().await?;
-                self.record_job_created_webhook_event(JobCreatedWebhookEvent {
-                    job_id,
-                    command_type: &command_type,
-                    status: JOB_STATUS_QUEUED,
-                    privileged: job_request.privileged,
-                    command_hash,
-                    resolved_targets,
-                    actor_id: Some(operator.operator.id),
-                    source_schedule_id: None,
-                    operation: Some(&operation),
-                })
+                record_job_created_webhook_event_in_tx(
+                    &mut tx,
+                    JobCreatedWebhookEvent {
+                        job_id,
+                        command_type: &command_type,
+                        status: JOB_STATUS_QUEUED,
+                        privileged: job_request.privileged,
+                        command_hash,
+                        resolved_targets,
+                        actor_id: Some(operator.operator.id),
+                        source_schedule_id: None,
+                        operation: Some(&operation),
+                    },
+                )
                 .await?;
+                tx.commit().await?;
                 return Ok(persisted_link);
             }
         };

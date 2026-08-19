@@ -279,6 +279,7 @@ pub(crate) struct TelemetryRollupView {
     pub(crate) swap_available_bytes_min: Option<i64>,
     pub(crate) swap_used_ratio_avg: Option<f64>,
     pub(crate) swap_used_ratio_max: Option<f64>,
+    pub(crate) disk_sample_count: i32,
     pub(crate) disk_total_bytes_max: i64,
     pub(crate) disk_available_bytes_avg: i64,
     pub(crate) disk_available_bytes_min: i64,

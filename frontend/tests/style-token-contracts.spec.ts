@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 
 const RUNTIME_OR_FALLBACK_TOKENS = new Set([
+  "--capacity-factor-columns",
   "--console-sticky-offset",
   "--radix-context-menu-content-available-height",
   "--radix-dropdown-menu-content-available-height",

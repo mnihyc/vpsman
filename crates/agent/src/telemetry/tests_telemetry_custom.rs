@@ -113,6 +113,8 @@ fn custom_patch_rejects_empty_and_invalid_overlay_values() {
 fn custom_patch_rejects_over_cardinality_arrays() {
     let disks_error = validate_custom_metrics_patch(&CustomMetricsPatch {
         disks: Some(vec![DiskStat::default(); MAX_TELEMETRY_DISKS + 1]),
+        disk_collection_available: Some(true),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
         ..CustomMetricsPatch::default()
     })
     .unwrap_err()
@@ -140,6 +142,27 @@ fn custom_patch_rejects_over_cardinality_arrays() {
 }
 
 #[test]
+fn custom_disk_replacement_marks_the_trusted_persistent_filesystem_contract() {
+    let mut metrics = AgentMetrics::default();
+    apply_patch(
+        &mut metrics,
+        CustomMetricsPatch {
+            disks: Some(Vec::new()),
+            disk_collection_available: Some(true),
+            disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+            ..CustomMetricsPatch::default()
+        },
+    );
+
+    assert_eq!(metrics.disk_collection_available, Some(true));
+    assert_eq!(
+        metrics.disk_semantics.as_deref(),
+        Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1)
+    );
+    assert!(metrics.has_persistent_block_filesystem_disk_sample());
+}
+
+#[test]
 fn custom_patch_rejects_invalid_collection_rows() {
     let disk_error = validate_custom_metrics_patch(&CustomMetricsPatch {
         disks: Some(vec![DiskStat {
@@ -147,11 +170,34 @@ fn custom_patch_rejects_invalid_collection_rows() {
             total_bytes: 100,
             available_bytes: 101,
         }]),
+        disk_collection_available: Some(true),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
         ..CustomMetricsPatch::default()
     })
     .unwrap_err()
     .to_string();
     assert!(disk_error.contains("invalid disk"));
+
+    let duplicate_disk_error = validate_custom_metrics_patch(&CustomMetricsPatch {
+        disks: Some(vec![
+            DiskStat {
+                mountpoint: "/data".to_string(),
+                total_bytes: 100,
+                available_bytes: 50,
+            },
+            DiskStat {
+                mountpoint: "/data".to_string(),
+                total_bytes: 200,
+                available_bytes: 100,
+            },
+        ]),
+        disk_collection_available: Some(true),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+        ..CustomMetricsPatch::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(duplicate_disk_error.contains("duplicate disk"));
 
     let network = NetworkStat {
         interface: "eth0".to_string(),
@@ -177,6 +223,65 @@ fn custom_patch_rejects_invalid_collection_rows() {
     .unwrap_err()
     .to_string();
     assert!(tunnel_error.contains("invalid tunnel"));
+}
+
+#[test]
+fn custom_disk_contract_requires_explicit_versioned_presence() {
+    let legacy = CustomMetricsPatch {
+        disks: Some(vec![DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 100,
+            available_bytes: 50,
+        }]),
+        ..CustomMetricsPatch::default()
+    };
+    validate_custom_metrics_patch(&legacy).unwrap();
+    let mut legacy_metrics = AgentMetrics::default();
+    apply_patch(&mut legacy_metrics, legacy);
+    assert_eq!(legacy_metrics.disk_collection_available, None);
+    assert_eq!(legacy_metrics.disk_semantics, None);
+    assert!(!legacy_metrics.has_persistent_block_filesystem_disk_sample());
+
+    let unsupported = validate_custom_metrics_patch(&CustomMetricsPatch {
+        disks: Some(Vec::new()),
+        disk_collection_available: Some(true),
+        disk_semantics: Some("legacy_mount_scan".to_string()),
+        ..CustomMetricsPatch::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(unsupported.contains("unsupported disk_semantics"));
+
+    let incoherent = validate_custom_metrics_patch(&CustomMetricsPatch {
+        disks: Some(vec![DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 100,
+            available_bytes: 50,
+        }]),
+        disk_collection_available: Some(false),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+        ..CustomMetricsPatch::default()
+    })
+    .unwrap_err()
+    .to_string();
+    assert!(incoherent.contains("cannot contain disks"));
+
+    let mut metrics = AgentMetrics::default();
+    apply_patch(
+        &mut metrics,
+        CustomMetricsPatch {
+            disks: Some(Vec::new()),
+            disk_collection_available: Some(false),
+            disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
+            ..CustomMetricsPatch::default()
+        },
+    );
+    assert!(metrics.disks.is_empty());
+    assert_eq!(metrics.disk_collection_available, Some(false));
+    assert_eq!(
+        metrics.disk_semantics.as_deref(),
+        Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1)
+    );
 }
 
 #[test]

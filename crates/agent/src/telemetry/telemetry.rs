@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::CString,
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
@@ -22,9 +23,9 @@ use vpsman_common::{
     AgentRuntimeStatusTelemetryPlan, ConnectionStat, CpuStat, DiskStat, LoadAverage, MemoryStat,
     NetworkStat, PingTargetResult, RuntimeTunnelAdapterHealthStat, RuntimeTunnelManager,
     RuntimeTunnelStat, TunnelAddressFamily, TunnelEndpointSide, TunnelKind,
-    TunnelReachabilityObservation, TunnelReachabilitySource, MAX_TELEMETRY_DISKS,
-    MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
-    MAX_TUNNEL_REACHABILITY_OBSERVATIONS,
+    TunnelReachabilityObservation, TunnelReachabilitySource,
+    DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1, MAX_TELEMETRY_DISKS, MAX_TELEMETRY_NETWORKS,
+    MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS, MAX_TUNNEL_REACHABILITY_OBSERVATIONS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
@@ -275,8 +276,14 @@ fn collect_linux_metrics(
     let proc_root = Path::new(&config.telemetry.proc_root);
     let effective_uid = unsafe { libc::geteuid() } as u32;
     let networks = network_stats(proc_root)?;
-    let disks = match disk_stats(proc_root) {
+    let (disks, disk_collection_available) = match sys_root_from_class_net_dir(Path::new(
+        &config.telemetry.sys_class_net_dir,
+    ))
+    .context("configured telemetry sys class net path has no sys root")
+    .and_then(|sys_root| disk_stats(proc_root, &sys_root.join("dev/block")))
+    {
         Ok(collection) => {
+            let disk_collection_available = collection.failure_count == 0;
             if let Some((failure_count, first_error)) = collection.warning_summary(effective_uid) {
                 if !runtime_state.disk_collection_failed {
                     tracing::warn!(
@@ -292,7 +299,14 @@ fn collect_linux_metrics(
                 }
                 runtime_state.disk_collection_failed = false;
             }
-            collection.disks
+            (
+                if disk_collection_available {
+                    collection.disks
+                } else {
+                    Vec::new()
+                },
+                disk_collection_available,
+            )
         }
         Err(error) => {
             if effective_uid != 0 && error_is_permission_denied(&error) {
@@ -309,7 +323,7 @@ fn collect_linux_metrics(
                 }
                 runtime_state.disk_collection_failed = true;
             }
-            Vec::new()
+            (Vec::new(), false)
         }
     };
     let connections = match connection_stats(proc_root) {
@@ -343,6 +357,8 @@ fn collect_linux_metrics(
         },
         memory: memory_stat(proc_root)?,
         disks,
+        disk_collection_available: Some(disk_collection_available),
+        disk_semantics: Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string()),
         networks,
         connections,
         tunnels: Vec::new(),
@@ -1920,68 +1936,309 @@ fn error_is_permission_denied(error: &anyhow::Error) -> bool {
     })
 }
 
-fn disk_stats(proc_root: &Path) -> Result<DiskCollection> {
-    let contents = read_proc_file(proc_root, "mounts")?;
-    let ignored = HashSet::from([
-        "proc",
-        "sysfs",
-        "devtmpfs",
-        "devpts",
-        "tmpfs",
-        "securityfs",
-        "cgroup",
-        "cgroup2",
-        "pstore",
-        "efivarfs",
-        "bpf",
-        "tracefs",
-        "debugfs",
-        "overlay",
-        // Linux exposes network namespaces as nsfs mounts under paths such as
-        // /run/docker/netns/*. They are namespace handles, not storage.
-        "nsfs",
-        // Docker/rootless Docker overlay layers are container implementation
-        // detail rather than independently reportable host filesystems.
-        "fuse-overlayfs",
-        "fuse.fuse-overlayfs",
-    ]);
-    let mut seen_sources = HashSet::new();
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct BlockDeviceId {
+    major: u32,
+    minor: u32,
+}
+
+impl BlockDeviceId {
+    fn sysfs_name(self) -> String {
+        format!("{}:{}", self.major, self.minor)
+    }
+}
+
+#[derive(Debug)]
+struct BlockFilesystemMount {
+    filesystem_type: String,
+    root: String,
+    mountpoint: String,
+    source: String,
+}
+
+#[derive(Debug)]
+struct BlockFilesystemMounts {
+    device: BlockDeviceId,
+    mounts: Vec<BlockFilesystemMount>,
+}
+
+fn disk_stats(proc_root: &Path, sys_dev_block_dir: &Path) -> Result<DiskCollection> {
+    disk_stats_with_block_source_resolver(proc_root, sys_dev_block_dir, block_source_device_id)
+}
+
+fn disk_stats_with_block_source_resolver<F>(
+    proc_root: &Path,
+    sys_dev_block_dir: &Path,
+    block_source_device_id: F,
+) -> Result<DiskCollection>
+where
+    F: Fn(&Path) -> Result<Option<BlockDeviceId>>,
+{
+    let sys_dev_block_metadata = std::fs::metadata(sys_dev_block_dir).with_context(|| {
+        format!(
+            "failed to inspect telemetry block-device evidence directory {}",
+            sys_dev_block_dir.display()
+        )
+    })?;
+    ensure!(
+        sys_dev_block_metadata.is_dir(),
+        "telemetry block-device evidence path is not a directory: {}",
+        sys_dev_block_dir.display()
+    );
+    let contents = read_proc_file(proc_root, "self/mountinfo")?;
     let mut collection = DiskCollection::default();
+    let mut eligibility = HashMap::<BlockDeviceId, bool>::new();
+    let mut group_indexes = HashMap::<BlockDeviceId, usize>::new();
+    let mut groups = Vec::<BlockFilesystemMounts>::new();
 
     for (index, line) in contents.lines().enumerate() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 3 {
-            collection.record_failure(
-                format!("telemetry mounts row {} is incomplete", index + 1),
-                false,
-            );
+        let (device, mount) = match parse_block_filesystem_mount(line) {
+            Ok(value) => value,
+            Err(error) => {
+                collection.record_failure(
+                    format!(
+                        "telemetry mountinfo row {} is invalid: {error:#}",
+                        index + 1
+                    ),
+                    false,
+                );
+                continue;
+            }
+        };
+        if excluded_disk_filesystem_type(&mount.filesystem_type) {
             continue;
         }
-        let source_key = (fields[0].to_string(), fields[2].to_string());
-        if ignored.contains(fields[2]) || seen_sources.contains(&source_key) {
+        let is_eligible = if let Some(is_eligible) = eligibility.get(&device) {
+            *is_eligible
+        } else {
+            let is_eligible = match persistent_mount_backing_device_name(
+                sys_dev_block_dir,
+                device,
+                &mount,
+                &block_source_device_id,
+            ) {
+                Ok(Some(name)) => !is_ephemeral_block_device(&name),
+                Ok(None) => false,
+                Err(error) => {
+                    let permission_denied = error_is_permission_denied(&error);
+                    collection.record_failure(format!("{error:#}"), permission_denied);
+                    false
+                }
+            };
+            eligibility.insert(device, is_eligible);
+            is_eligible
+        };
+        if !is_eligible {
             continue;
         }
-        let mountpoint = decode_proc_mount_field(fields[1]);
-        match statvfs(&mountpoint) {
-            Ok(stat) => {
-                seen_sources.insert(source_key);
-                collection.disks.push(DiskStat {
-                    mountpoint,
-                    total_bytes: stat.0,
-                    available_bytes: stat.1,
-                });
-                if collection.disks.len() == MAX_TELEMETRY_DISKS {
+
+        if let Some(group_index) = group_indexes.get(&device).copied() {
+            groups[group_index].mounts.push(mount);
+        } else {
+            group_indexes.insert(device, groups.len());
+            groups.push(BlockFilesystemMounts {
+                device,
+                mounts: vec![mount],
+            });
+        }
+    }
+
+    if groups.len() > MAX_TELEMETRY_DISKS {
+        collection.record_failure(
+            format!(
+                "persistent block filesystem inventory has {} devices, exceeding the telemetry limit of {MAX_TELEMETRY_DISKS}",
+                groups.len()
+            ),
+            false,
+        );
+    }
+    for mut group in groups.into_iter().take(MAX_TELEMETRY_DISKS) {
+        group
+            .mounts
+            .sort_by(|left, right| block_mount_priority(left).cmp(&block_mount_priority(right)));
+        let mut failures = Vec::new();
+        let mut collected = false;
+        for mount in &group.mounts {
+            match statvfs(&mount.mountpoint) {
+                Ok(stat) => {
+                    collection.disks.push(DiskStat {
+                        mountpoint: mount.mountpoint.clone(),
+                        total_bytes: stat.0,
+                        available_bytes: stat.1,
+                    });
+                    collected = true;
                     break;
                 }
+                Err(error) => failures.push(error),
             }
-            Err(error) => {
-                let permission_denied = error_is_permission_denied(&error);
-                collection.record_failure(format!("{error:#}"), permission_denied);
-            }
+        }
+        if !collected && !failures.is_empty() {
+            let first_non_permission_error = failures
+                .iter()
+                .find(|error| !error_is_permission_denied(error));
+            let error = first_non_permission_error.unwrap_or(&failures[0]);
+            collection.record_failure(
+                format!(
+                    "failed to inspect telemetry block device {}: {error:#}",
+                    group.device.sysfs_name()
+                ),
+                first_non_permission_error.is_none(),
+            );
         }
     }
 
     Ok(collection)
+}
+
+fn excluded_disk_filesystem_type(filesystem_type: &str) -> bool {
+    matches!(
+        filesystem_type,
+        "tmpfs" | "devtmpfs" | "overlay" | "fuse" | "fuseblk" | "nfs" | "nfs4" | "cifs" | "smb3"
+    ) || filesystem_type.starts_with("fuse.")
+}
+
+fn parse_block_filesystem_mount(line: &str) -> Result<(BlockDeviceId, BlockFilesystemMount)> {
+    let (mount_fields, filesystem_fields) = line
+        .split_once(" - ")
+        .context("row is missing the field separator")?;
+    let mount_fields = mount_fields.split_whitespace().collect::<Vec<_>>();
+    let filesystem_fields = filesystem_fields.split_whitespace().collect::<Vec<_>>();
+    ensure!(
+        mount_fields.len() >= 6 && filesystem_fields.len() >= 3,
+        "row is missing required fields"
+    );
+    let (major, minor) = mount_fields[2]
+        .split_once(':')
+        .context("block device ID is missing its separator")?;
+    Ok((
+        BlockDeviceId {
+            major: major.parse().context("block device major is invalid")?,
+            minor: minor.parse().context("block device minor is invalid")?,
+        },
+        BlockFilesystemMount {
+            filesystem_type: filesystem_fields[0].to_string(),
+            root: decode_proc_mount_field(mount_fields[3]),
+            mountpoint: decode_proc_mount_field(mount_fields[4]),
+            source: decode_proc_mount_field(filesystem_fields[1]),
+        },
+    ))
+}
+
+fn persistent_mount_backing_device_name<F>(
+    sys_dev_block_dir: &Path,
+    mount_device: BlockDeviceId,
+    mount: &BlockFilesystemMount,
+    block_source_device_id: &F,
+) -> Result<Option<String>>
+where
+    F: Fn(&Path) -> Result<Option<BlockDeviceId>>,
+{
+    if let Some(name) = persistent_block_device_name(sys_dev_block_dir, mount_device)? {
+        return Ok(Some(name));
+    }
+    // Btrfs assigns an anonymous st_dev to a mounted filesystem because one
+    // filesystem can span devices. Its mount source still has to be an actual
+    // block-special file; validating that rdev keeps this exception positive
+    // and does not admit arbitrary major-zero mounts.
+    if mount.filesystem_type != "btrfs" {
+        return Ok(None);
+    }
+    let Some(source_device) = block_source_device_id(Path::new(&mount.source))? else {
+        return Ok(None);
+    };
+    persistent_block_device_name(sys_dev_block_dir, source_device)
+}
+
+fn block_source_device_id(path: &Path) -> Result<Option<BlockDeviceId>> {
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| {
+                format!(
+                    "telemetry block mount source disappeared: {}",
+                    path.display()
+                )
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to inspect block mount source {}", path.display())
+            })
+        }
+    };
+    if !metadata.file_type().is_block_device() {
+        return Ok(None);
+    }
+    let device = metadata.rdev();
+    Ok(Some(BlockDeviceId {
+        major: libc::major(device),
+        minor: libc::minor(device),
+    }))
+}
+
+fn persistent_block_device_name(
+    sys_dev_block_dir: &Path,
+    device: BlockDeviceId,
+) -> Result<Option<String>> {
+    // Linux assigns anonymous/pseudo/network filesystems major zero. Reject
+    // those without touching their mountpoints, including tmpfs at /dev/shm.
+    if device.major == 0 {
+        return Ok(None);
+    }
+    let device_dir = sys_dev_block_dir.join(device.sysfs_name());
+    match std::fs::metadata(&device_dir) {
+        Ok(metadata) => ensure!(
+            metadata.is_dir(),
+            "telemetry block-device evidence path is not a directory: {}",
+            device_dir.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(error).with_context(|| {
+                format!(
+                    "telemetry block-device evidence disappeared for {}",
+                    device.sysfs_name()
+                )
+            });
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect telemetry block-device evidence {}",
+                    device_dir.display()
+                )
+            });
+        }
+    }
+    let uevent_path = device_dir.join("uevent");
+    let uevent = std::fs::read_to_string(&uevent_path)
+        .with_context(|| format!("failed to read {}", uevent_path.display()))?;
+    let name = uevent
+        .lines()
+        .find_map(|line| line.strip_prefix("DEVNAME="))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .context("block device uevent has no DEVNAME")?;
+    Ok(Some(name.to_string()))
+}
+
+fn is_ephemeral_block_device(name: &str) -> bool {
+    let name = name.rsplit('/').next().unwrap_or(name);
+    ["loop", "ram", "zram"].into_iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .and_then(|suffix| suffix.bytes().next())
+            .is_some_and(|first_suffix_byte| first_suffix_byte.is_ascii_digit())
+    })
+}
+
+fn block_mount_priority(mount: &BlockFilesystemMount) -> (bool, usize, &str) {
+    (
+        mount.root != "/",
+        Path::new(&mount.mountpoint).components().count(),
+        mount.mountpoint.as_str(),
+    )
 }
 
 fn decode_proc_mount_field(value: &str) -> String {

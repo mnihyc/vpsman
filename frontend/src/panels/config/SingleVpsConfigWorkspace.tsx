@@ -142,6 +142,8 @@ export function SingleVpsConfigWorkspace({
     () => agents.find((agent) => agent.id === clientId) ?? null,
     [agents, clientId],
   );
+  const pendingOperationDisabledReason =
+    "Wait for the current VPS configuration operation to finish.";
   const selectedAgentId = selectedAgent?.id ?? "";
   const savedParsed = asObject(workspace?.saved_override.parsed) ?? {};
   const draftDirty = useMemo(() => {
@@ -576,6 +578,13 @@ export function SingleVpsConfigWorkspace({
         <div className="singleConfigToolbarActions">
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? pendingOperationDisabledReason
+                : !selectedAgent
+                  ? "Select one VPS before refreshing its desired configuration."
+                  : undefined
+            }
             disabled={pending || !selectedAgent}
             onClick={() => void reloadWorkspace("Workspace refreshed")}
             type="button"
@@ -585,6 +594,13 @@ export function SingleVpsConfigWorkspace({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              pending
+                ? pendingOperationDisabledReason
+                : !workspace
+                  ? "Load one VPS configuration before refreshing its live state."
+                  : undefined
+            }
             disabled={pending || !workspace}
             onClick={() => void refreshLiveConfig()}
             type="button"
@@ -626,7 +642,7 @@ export function SingleVpsConfigWorkspace({
         </section>
       ) : !workspace ? (
         <section className="singleConfigWelcome" aria-live="polite">
-          <RefreshCw className="spin" size={22} />
+          <RefreshCw className="isSpinning" size={22} />
           <div>
             <strong>Loading desired runtime config</strong>
             <span>
@@ -770,6 +786,15 @@ export function SingleVpsConfigWorkspace({
               {!preview ? (
                 <button
                   className="primaryAction compactAction"
+                  data-tooltip-disabled-reason={
+                    pending
+                      ? pendingOperationDisabledReason
+                      : advancedError
+                        ? "Repair the replacement TOML before reviewing changes."
+                        : !draftDirty
+                          ? "Edit the VPS configuration before reviewing changes."
+                          : undefined
+                  }
                   disabled={pending || !draftDirty || Boolean(advancedError)}
                   onClick={() => void reviewChanges()}
                   type="button"
@@ -789,6 +814,9 @@ export function SingleVpsConfigWorkspace({
               ) : (
                 <button
                   className="primaryAction compactAction"
+                  data-tooltip-disabled-reason={
+                    pending ? pendingOperationDisabledReason : undefined
+                  }
                   disabled={pending}
                   onClick={() => void prepareApply()}
                   type="button"
@@ -928,6 +956,11 @@ export function SingleVpsConfigWorkspace({
                   </div>
                   <button
                     className="secondaryAction compactAction"
+                    data-tooltip-disabled-reason={
+                      !workspace.saved_override.exists
+                        ? "No saved VPS override exists to delete."
+                        : undefined
+                    }
                     disabled={!workspace.saved_override.exists}
                     onClick={requestOverrideReset}
                     type="button"
@@ -1599,6 +1632,11 @@ function ScalarControl({
         <input
           aria-label={label}
           checked={value === true}
+          data-tooltip-disabled-reason={
+            disabled
+              ? "This value is read-only because its configuration source does not allow a VPS override."
+              : undefined
+          }
           disabled={disabled}
           onChange={(event) => onChange(event.target.checked)}
           type="checkbox"
@@ -1611,6 +1649,11 @@ function ScalarControl({
     return (
       <select
         aria-label={label}
+        data-tooltip-disabled-reason={
+          disabled
+            ? "This value is read-only because its configuration source does not allow a VPS override."
+            : undefined
+        }
         disabled={disabled}
         onChange={(event) =>
           onChange(parseScalarForField(event.target.value, field))
@@ -1628,6 +1671,11 @@ function ScalarControl({
   return (
     <input
       aria-label={label}
+      data-tooltip-disabled-reason={
+        disabled
+          ? "This value is read-only because its configuration source does not allow a VPS override."
+          : undefined
+      }
       disabled={disabled}
       onChange={(event) =>
         onChange(parseScalarForField(event.target.value, field))
@@ -1699,6 +1747,11 @@ function ArrayEditor({
           {isObject(entry) || Array.isArray(entry) ? (
             <textarea
               aria-label={`Array item ${index + 1}`}
+              data-tooltip-disabled-reason={
+                disabled
+                  ? "This value is read-only because its configuration source does not allow a VPS override."
+                  : undefined
+              }
               disabled={disabled}
               onChange={(event) => {
                 try {
@@ -1727,6 +1780,9 @@ function ArrayEditor({
               <button
                 aria-label={`Move item ${index + 1} up`}
                 className="iconButton"
+                data-tooltip-disabled-reason={
+                  index === 0 ? "This item is already first." : undefined
+                }
                 disabled={index === 0}
                 onClick={() => move(index, -1)}
                 type="button"
@@ -1736,6 +1792,11 @@ function ArrayEditor({
               <button
                 aria-label={`Move item ${index + 1} down`}
                 className="iconButton"
+                data-tooltip-disabled-reason={
+                  index === value.length - 1
+                    ? "This item is already last."
+                    : undefined
+                }
                 disabled={index === value.length - 1}
                 onClick={() => move(index, 1)}
                 type="button"
@@ -1775,6 +1836,11 @@ function ArrayEditor({
           </button>
           <button
             className="secondaryAction compactAction"
+            data-tooltip-disabled-reason={
+              value.length === 0
+                ? "The array is already explicitly empty."
+                : undefined
+            }
             disabled={value.length === 0}
             onClick={() => onChange([])}
             type="button"

@@ -2829,6 +2829,11 @@ impl Repository {
                     &retained_rule_ids,
                 )
                 .await?;
+                group = policy_groups_for_identity_in_tx(&mut tx, Some(group.id), &group.name)
+                    .await?
+                    .into_iter()
+                    .find(|persisted| persisted.id == group.id)
+                    .context("fleet_alert_policy_not_found_after_upsert")?;
                 sqlx::query(
                     r#"
                     INSERT INTO audit_logs (id, actor_id, action, target, command_hash, metadata)
@@ -2846,12 +2851,36 @@ impl Repository {
                 group
             }
         };
+        let policy_id = group.id;
         if let Self::Postgres(pool) = self {
-            crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200).await?;
+            if let Err(error) =
+                crate::repository_policy_lifecycle::evaluate_due_policy_transitions(pool, 200).await
+            {
+                tracing::warn!(
+                    %error,
+                    %policy_id,
+                    "deferred policy evaluation after policy update"
+                );
+            }
         } else if let Err(error) = self.evaluate_policy_rules().await {
-            tracing::warn!(%error, "deferred policy evaluation after policy update");
+            tracing::warn!(
+                %error,
+                %policy_id,
+                "deferred policy evaluation after policy update"
+            );
         }
-        self.get_fleet_alert_policy(group.id, true).await
+        let mut group = group;
+        if let Err(error) = self
+            .enrich_policy_group_summaries(std::slice::from_mut(&mut group))
+            .await
+        {
+            tracing::warn!(
+                %error,
+                %policy_id,
+                "policy summary enrichment after policy update"
+            );
+        }
+        Ok(group)
     }
 
     pub(crate) async fn delete_fleet_alert_policy(
@@ -7100,10 +7129,11 @@ fn policy_rule_from_request(
     now: &str,
     existing_group: Option<&PolicyGroupRecord>,
 ) -> PolicyRuleRecord {
-    let existing_rule = existing_group.and_then(|group| {
-        request
-            .id
-            .and_then(|id| group.rules.iter().find(|rule| rule.id == id))
+    let existing_rule = existing_group.and_then(|group| match request.id {
+        Some(id) => group.rules.iter().find(|rule| rule.id == id),
+        None => group.rules.iter().find(|rule| {
+            rule.sort_order == sort_order && policy_rule_material_matches(rule, request)
+        }),
     });
     let rule_version = existing_rule
         .map(|existing| {
@@ -8018,7 +8048,7 @@ fn policy_identifier_value(
                 .then(|| (1.0 - rollup.memory_used_ratio_max).clamp(0.0, 1.0))
         }),
         "disk.available_ratio" => rollup.and_then(|rollup| {
-            (rollup.disk_total_bytes_max > 0)
+            (rollup.disk_sample_count > 0 && rollup.disk_total_bytes_max > 0)
                 .then(|| (1.0 - rollup.disk_used_ratio_max).clamp(0.0, 1.0))
         }),
         _ => None,

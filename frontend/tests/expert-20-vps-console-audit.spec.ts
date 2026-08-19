@@ -539,6 +539,7 @@ async function installTwentyFourVpsExpertMock(page: Page) {
           cpu_load_1_max: 0.75 + (index % 6) * 0.22 + point * 0.04,
           disk_available_bytes_avg: diskAvailableGiB * gib,
           disk_available_bytes_min: (diskAvailableGiB - 1) * gib,
+          disk_sample_count: 12 + point,
           disk_total_bytes_max: 80 * gib,
           disk_used_ratio_avg: 1 - diskAvailableGiB / 80,
           disk_used_ratio_max: 1 - (diskAvailableGiB - 1) / 80,

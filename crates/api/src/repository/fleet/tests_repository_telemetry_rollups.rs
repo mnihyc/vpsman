@@ -471,6 +471,10 @@ fn dynamic_resource_capacities_keep_snapshot_ratios_when_aggregated() {
                 total_bytes: disk.0,
                 available_bytes: disk.1,
             }],
+            disk_collection_available: Some(true),
+            disk_semantics: Some(
+                vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string(),
+            ),
             ..AgentMetrics::default()
         };
         TelemetrySampleView {
@@ -498,6 +502,7 @@ fn dynamic_resource_capacities_keep_snapshot_ratios_when_aggregated() {
     // aggregation while retaining the ratios frozen at each source snapshot.
     later.sample_count = 3;
     later.swap_sample_count = 3;
+    later.disk_sample_count = 3;
     let aggregated = aggregate_memory_telemetry_rollups(vec![first, later], 300);
 
     assert_eq!(aggregated.len(), 1);
@@ -521,6 +526,60 @@ fn dynamic_resource_capacities_keep_snapshot_ratios_when_aggregated() {
     assert_eq!(row.disk_available_bytes_min, 40);
     assert!((row.disk_used_ratio_avg - 0.7375).abs() < f64::EPSILON);
     assert!((row.disk_used_ratio_max - 0.9).abs() < f64::EPSILON);
+}
+
+#[test]
+fn disk_rollups_require_versioned_available_positive_capacity_evidence() {
+    let sample = |observed_at: u64,
+                  disks: Vec<vpsman_common::DiskStat>,
+                  available: Option<bool>,
+                  semantics: Option<&str>| {
+        let metrics = AgentMetrics {
+            observed_unix: observed_at,
+            hostname: "v-1".to_string(),
+            disks,
+            disk_collection_available: available,
+            disk_semantics: semantics.map(str::to_string),
+            ..AgentMetrics::default()
+        };
+        TelemetrySampleView {
+            id: uuid::Uuid::new_v4(),
+            client_id: "v-1".to_string(),
+            observed_at: observed_at.to_string(),
+            cpu_load_1: 0.0,
+            memory_total_bytes: 0,
+            memory_available_bytes: 0,
+            payload: serde_json::to_value(metrics).unwrap(),
+        }
+    };
+    let disk = || {
+        vec![vpsman_common::DiskStat {
+            mountpoint: "/".to_string(),
+            total_bytes: 100,
+            available_bytes: 25,
+        }]
+    };
+    let canonical = vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1;
+    let legacy = raw_sample_rollup(sample(60, disk(), None, None)).unwrap();
+    let failed = raw_sample_rollup(sample(120, Vec::new(), Some(false), Some(canonical))).unwrap();
+    let explicit_zero =
+        raw_sample_rollup(sample(180, Vec::new(), Some(true), Some(canonical))).unwrap();
+    let valid = raw_sample_rollup(sample(240, disk(), Some(true), Some(canonical))).unwrap();
+
+    for unavailable in [&legacy, &failed, &explicit_zero] {
+        assert_eq!(unavailable.disk_sample_count, 0);
+        assert_eq!(unavailable.disk_total_bytes_max, 0);
+        assert_eq!(unavailable.disk_used_ratio_avg, 0.0);
+    }
+    assert_eq!(valid.disk_sample_count, 1);
+    assert_eq!(valid.disk_used_ratio_avg, 0.75);
+
+    let aggregated =
+        aggregate_memory_telemetry_rollups(vec![legacy, failed, explicit_zero, valid], 300);
+    assert_eq!(aggregated[0].sample_count, 4);
+    assert_eq!(aggregated[0].disk_sample_count, 1);
+    assert_eq!(aggregated[0].disk_available_bytes_avg, 25);
+    assert_eq!(aggregated[0].disk_used_ratio_avg, 0.75);
 }
 
 #[test]
@@ -574,6 +633,7 @@ fn rollup(client_id: &str, bucket_start: u64) -> TelemetryRollupView {
         swap_available_bytes_min: None,
         swap_used_ratio_avg: None,
         swap_used_ratio_max: None,
+        disk_sample_count: 0,
         disk_total_bytes_max: 0,
         disk_available_bytes_avg: 0,
         disk_available_bytes_min: 0,

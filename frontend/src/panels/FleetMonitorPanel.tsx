@@ -1053,9 +1053,15 @@ export function VpsMonitorCard({
       ? finiteRatio(rollup.memory_used_ratio_avg)
       : null;
   const diskUsed =
-    rollup && rollup.disk_total_bytes_max > 0
+    rollup &&
+    (rollup.disk_sample_count ?? 0) > 0 &&
+    rollup.disk_total_bytes_max > 0
       ? finiteRatio(rollup.disk_used_ratio_avg)
       : null;
+  const diskTotal =
+    rollup && (rollup.disk_sample_count ?? 0) > 0
+      ? rollup.disk_total_bytes_max
+      : undefined;
   const memoryUsedPercent = memoryUsed === null ? null : memoryUsed * 100;
   const diskUsedPercent = diskUsed === null ? null : diskUsed * 100;
   const loadPressure =
@@ -1284,16 +1290,10 @@ export function VpsMonitorCard({
           value={formatPercent(memoryUsedPercent)}
         />
         <MonitorMetric
-          context={formatMaximumCapacity(
-            rollup?.disk_total_bytes_max,
-            formatBytes,
-          )}
+          context={formatMaximumCapacity(diskTotal, formatBytes)}
           icon={<Server size={15} />}
           label="Disk"
-          meterCaption={formatMaximumCapacityCaption(
-            rollup?.disk_total_bytes_max,
-            formatBytes,
-          )}
+          meterCaption={formatMaximumCapacityCaption(diskTotal, formatBytes)}
           meterMax={100}
           meterValue={diskUsedPercent}
           stale={resourceTelemetryState.kind === "stale"}

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{postgres::PgRow, Postgres, Row, Transaction};
 use uuid::Uuid;
 use vpsman_common::{
     expression_references_vps_rules, insert_tags_into_last_namespace_blocks,
@@ -12,7 +12,8 @@ use vpsman_common::{
 use crate::model::*;
 use crate::repository::Repository;
 use crate::repository_jobs::{
-    mark_active_targets_agent_lost_for_client_in_tx, skip_unstarted_queued_targets_for_client_in_tx,
+    finish_jobs_in_tx_and_reconcile_event_sources, mark_active_targets_agent_lost_for_client_in_tx,
+    skip_unstarted_queued_targets_for_client_in_tx,
 };
 use crate::repository_key_lifecycle::{
     lock_postgres_agent_identity_lifecycle, public_key_sha256_hex, require_visible_memory_clients,
@@ -478,16 +479,9 @@ impl Repository {
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
                 ensure_postgres_tags_in_order(&mut tx, std::slice::from_ref(&name)).await?;
+                let view = postgres_tag_view_in_tx(&mut tx, &name).await?;
                 tx.commit().await?;
-                let row = sqlx::query("SELECT display_order FROM tags WHERE name = $1")
-                    .bind(&name)
-                    .fetch_one(pool)
-                    .await?;
-                Ok(TagView {
-                    clients: self.clients_for_tag(&name).await?,
-                    display_order: row.try_get("display_order")?,
-                    name,
-                })
+                Ok(view)
             }
         }
     }
@@ -558,15 +552,102 @@ impl Repository {
                 .bind(updated_by)
                 .execute(&mut *tx)
                 .await?;
+                let state = Self::postgres_tag_order_state_in_tx(&mut tx).await?;
                 tx.commit().await?;
-                Ok(TagOrderState {
-                    tags: self
-                        .tag_views_for_ordered_tags(&ordered_tag_metadata(&ordered))
-                        .await?,
-                    namespace_natural_sort_enabled: request.namespace_natural_sort_enabled,
-                })
+                Ok(state)
             }
         }
+    }
+
+    async fn postgres_tag_order_state_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> Result<TagOrderState> {
+        let namespace_natural_sort_enabled = read_postgres_tag_order_setting(tx).await?;
+        let tag_rows = sqlx::query(
+            r#"
+            SELECT name, display_order
+            FROM tags
+            ORDER BY display_order, created_at, name
+            "#,
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+        let tag_metadata = tag_rows
+            .into_iter()
+            .map(|row| Ok((row.try_get("name")?, row.try_get("display_order")?)))
+            .collect::<Result<Vec<(String, i64)>, sqlx::Error>>()?;
+        let agent_rows = sqlx::query(
+            r#"
+            SELECT
+                c.id,
+                c.display_name,
+                c.status,
+                host(c.registration_ip) AS registration_ip,
+                host(c.last_ip) AS last_ip,
+                c.last_seen_at::text AS last_seen_at,
+                c.arch,
+                c.internal_build_number,
+                c.process_incarnation_id,
+                c.stale_since::text AS stale_since,
+                c.stale_reason,
+                c.capabilities,
+                COALESCE(
+                    array_remove(
+                        array_agg(t.name ORDER BY t.display_order, t.created_at, t.name),
+                        NULL
+                    ),
+                    ARRAY[]::TEXT[]
+                ) AS tags
+            FROM visible_clients c
+            LEFT JOIN client_tags ct ON ct.client_id = c.id
+            LEFT JOIN tags t ON t.id = ct.tag_id
+            WHERE EXISTS (
+                SELECT 1
+                FROM client_tags assigned
+                WHERE assigned.client_id = c.id
+            )
+            GROUP BY
+                c.id,
+                c.display_name,
+                c.status,
+                c.registration_ip,
+                c.last_ip,
+                c.last_seen_at,
+                c.arch,
+                c.internal_build_number,
+                c.process_incarnation_id,
+                c.stale_since,
+                c.stale_reason,
+                c.capabilities
+            ORDER BY c.display_name, c.id
+            "#,
+        )
+        .fetch_all(&mut **tx)
+        .await?;
+        let agents = agent_rows
+            .into_iter()
+            .map(agent_view_from_inventory_row)
+            .collect::<Result<Vec<_>>>()?;
+        let mut clients_by_tag = HashMap::<String, Vec<AgentView>>::new();
+        for agent in agents {
+            for tag in &agent.tags {
+                clients_by_tag
+                    .entry(tag.clone())
+                    .or_default()
+                    .push(agent.clone());
+            }
+        }
+        Ok(TagOrderState {
+            tags: tag_metadata
+                .into_iter()
+                .map(|(name, display_order)| TagView {
+                    clients: clients_by_tag.remove(&name).unwrap_or_default(),
+                    display_order,
+                    name,
+                })
+                .collect(),
+            namespace_natural_sort_enabled,
+        })
     }
 
     pub(crate) async fn assign_agent_tag(&self, client_id: &str, tag: &str) -> Result<TagView> {
@@ -641,17 +722,9 @@ impl Repository {
                     &[client_id.to_string()],
                 )
                 .await?;
+                let view = postgres_tag_view_in_tx(&mut tx, tag).await?;
                 tx.commit().await?;
-                let display_order: i64 =
-                    sqlx::query_scalar("SELECT display_order FROM tags WHERE name = $1")
-                        .bind(tag)
-                        .fetch_one(pool)
-                        .await?;
-                Ok(TagView {
-                    name: tag.to_string(),
-                    display_order,
-                    clients: self.clients_for_tag(tag).await?,
-                })
+                Ok(view)
             }
         }
     }
@@ -811,17 +884,16 @@ impl Repository {
                         &target_client_ids,
                     )
                     .await?;
-                }
-                tx.commit().await?;
-                let changed = changed as usize;
-                if changed > 0 {
-                    self.record_tag_mutation_event(
+                    Self::record_postgres_tag_mutation_event_in_tx(
+                        &mut tx,
                         tag_action_label(&request.action),
                         &request.tag,
                         &targets,
                     )
                     .await?;
                 }
+                tx.commit().await?;
+                let changed = changed as usize;
                 Ok(tag_mutation_response(
                     &request.tag,
                     tag_action_label(&request.action),
@@ -918,16 +990,18 @@ impl Repository {
                     )
                     .await?;
                 }
-                tx.commit().await?;
                 let changed = if result.rows_affected() > 0 {
                     affected.len()
                 } else {
                     0
                 };
                 if changed > 0 {
-                    self.record_tag_mutation_event("delete", tag, &affected)
-                        .await?;
+                    Self::record_postgres_tag_mutation_event_in_tx(
+                        &mut tx, "delete", tag, &affected,
+                    )
+                    .await?;
                 }
+                tx.commit().await?;
                 Ok(tag_mutation_response(
                     tag,
                     "delete",
@@ -975,20 +1049,68 @@ impl Repository {
                 true,
             ));
         }
-        self.assign_agent_tag(client_id, tag).await?;
-        if preview_changed > 0 {
-            self.record_tag_mutation_event("assign", tag, &affected)
+        match self {
+            Self::Memory(_) => {
+                self.assign_agent_tag(client_id, tag).await?;
+                if preview_changed > 0 {
+                    self.record_tag_mutation_event("assign", tag, &affected)
+                        .await?;
+                }
+                Ok(tag_mutation_response(
+                    tag,
+                    "assign",
+                    None,
+                    affected,
+                    preview_changed,
+                    schedule_impacts,
+                    false,
+                ))
+            }
+            Self::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                lock_postgres_agent_identity_lifecycle(&mut tx).await?;
+                require_visible_postgres_clients_in_tx(
+                    &mut tx,
+                    &[client_id.to_string()],
+                    "agent_not_found",
+                )
                 .await?;
+                ensure_postgres_tags_in_order(&mut tx, &[tag.to_string()]).await?;
+                let changed = sqlx::query(
+                    r#"
+                    INSERT INTO client_tags (client_id, tag_id)
+                    SELECT $1, id FROM tags WHERE name = $2
+                    ON CONFLICT DO NOTHING
+                    "#,
+                )
+                .bind(client_id)
+                .bind(tag)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected() as usize;
+                if changed > 0 {
+                    crate::repository_policy_lifecycle::record_policy_scope_revision_evidence_for_clients_in_tx(
+                        &mut tx,
+                        &[client_id.to_string()],
+                    )
+                    .await?;
+                    Self::record_postgres_tag_mutation_event_in_tx(
+                        &mut tx, "assign", tag, &affected,
+                    )
+                    .await?;
+                }
+                tx.commit().await?;
+                Ok(tag_mutation_response(
+                    tag,
+                    "assign",
+                    None,
+                    affected,
+                    changed,
+                    schedule_impacts,
+                    false,
+                ))
+            }
         }
-        Ok(tag_mutation_response(
-            tag,
-            "assign",
-            None,
-            affected,
-            preview_changed,
-            schedule_impacts,
-            false,
-        ))
     }
 
     async fn schedule_impacts_for_agent_sets(
@@ -1112,18 +1234,40 @@ impl Repository {
         tag: &str,
         affected: &[AgentView],
     ) -> Result<()> {
+        self.record_webhook_event(Self::tag_mutation_event(action, tag, affected))
+            .await?;
+        Ok(())
+    }
+
+    async fn record_postgres_tag_mutation_event_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        action: &str,
+        tag: &str,
+        affected: &[AgentView],
+    ) -> Result<()> {
+        crate::repository_webhook_rules::record_webhook_event_in_tx(
+            tx,
+            Self::tag_mutation_event(action, tag, affected),
+            chrono::Utc::now(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn tag_mutation_event(
+        action: &str,
+        tag: &str,
+        affected: &[AgentView],
+    ) -> crate::model_webhook_rules::WebhookEventCandidate {
         let direction_predicate = match action {
             "add" | "assign" => format!("vps.tag_event.added:{tag}"),
             "remove" | "delete" => format!("vps.tag_event.removed:{tag}"),
             _ => format!("vps.tag_event:{tag}"),
         };
-        self.record_webhook_event(crate::model_webhook_rules::WebhookEventCandidate {
+        crate::model_webhook_rules::WebhookEventCandidate {
             kind: "vps.tag_changed".to_string(),
             event_id: format!("vps.tag_changed:{}:{}", Uuid::new_v4(), unix_now()),
-            event_predicates: vec![
-                format!("vps.tag_event:{tag}"),
-                direction_predicate,
-            ],
+            event_predicates: vec![format!("vps.tag_event:{tag}"), direction_predicate],
             subject_client_ids: affected.iter().map(|agent| agent.id.clone()).collect(),
             payload: json!({
                 "event": {
@@ -1140,9 +1284,7 @@ impl Repository {
                 }
             }),
             actor_id: None,
-        })
-        .await?;
-        Ok(())
+        }
     }
 
     pub(crate) async fn delete_agent(
@@ -1525,6 +1667,9 @@ impl Repository {
                     "vps_deleted: target skipped before dispatch",
                 )
                 .await?;
+                let mut affected_job_ids = agent_lost_job_ids.clone();
+                affected_job_ids.extend(skipped_job_ids.iter().copied());
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &affected_job_ids).await?;
                 crate::repository_operational_alerts::reconcile_postgres_agent_alert_transition_in_tx(
                     &mut tx,
                     client_id,
@@ -1566,13 +1711,6 @@ impl Repository {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await?;
-                let mut job_ids = agent_lost_job_ids;
-                job_ids.extend(skipped_job_ids);
-                job_ids.sort();
-                job_ids.dedup();
-                for job_id in job_ids {
-                    self.refresh_job_status_from_targets(job_id).await?;
-                }
                 Ok(DeleteAgentResult {
                     client_id: client_id.to_string(),
                     deleted_at,
@@ -1687,8 +1825,9 @@ impl Repository {
                 })))
                 .execute(&mut *tx)
                 .await?;
+                let updated = postgres_agent_by_id_in_tx(&mut tx, client_id).await?;
                 tx.commit().await?;
-                self.agent_by_id(client_id).await
+                Ok(updated)
             }
         }
     }
@@ -1739,26 +1878,7 @@ impl Repository {
                 .bind(client_id)
                 .fetch_one(pool)
                 .await?;
-                Ok(AgentView {
-                    id: row.try_get("id")?,
-                    display_name: row.try_get("display_name")?,
-                    status: row.try_get("status")?,
-                    tags: row.try_get("tags")?,
-                    registration_ip: row.try_get("registration_ip")?,
-                    last_ip: row.try_get("last_ip")?,
-                    last_seen_at: row.try_get("last_seen_at")?,
-                    arch: row.try_get("arch")?,
-                    internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1)
-                        as u64,
-                    process_incarnation_id: row.try_get("process_incarnation_id")?,
-                    stale_since: row.try_get("stale_since")?,
-                    stale_reason: row.try_get("stale_reason")?,
-                    capabilities: row
-                        .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
-                            "capabilities",
-                        )?
-                        .0,
-                })
+                agent_view_from_inventory_row(row)
             }
         }
     }
@@ -1968,33 +2088,116 @@ impl Repository {
                 .fetch_all(pool)
                 .await?;
                 rows.into_iter()
-                    .map(|row| {
-                        Ok(AgentView {
-                            id: row.try_get("id")?,
-                            display_name: row.try_get("display_name")?,
-                            status: row.try_get("status")?,
-                            tags: row.try_get("tags")?,
-                            registration_ip: row.try_get("registration_ip")?,
-                            last_ip: row.try_get("last_ip")?,
-                            last_seen_at: row.try_get("last_seen_at")?,
-                            arch: row.try_get("arch")?,
-                            internal_build_number: row
-                                .try_get::<i64, _>("internal_build_number")?
-                                .max(1) as u64,
-                            process_incarnation_id: row.try_get("process_incarnation_id")?,
-                            stale_since: row.try_get("stale_since")?,
-                            stale_reason: row.try_get("stale_reason")?,
-                            capabilities: row
-                                .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
-                                    "capabilities",
-                                )?
-                                .0,
-                        })
-                    })
+                    .map(agent_view_from_inventory_row)
                     .collect()
             }
         }
     }
+}
+
+async fn postgres_agent_by_id_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    client_id: &str,
+) -> Result<AgentView> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            c.id,
+            c.display_name,
+            c.status,
+            host(c.registration_ip) AS registration_ip,
+            host(c.last_ip) AS last_ip,
+            c.last_seen_at::text AS last_seen_at,
+            c.arch,
+            c.internal_build_number,
+            c.process_incarnation_id,
+            c.stale_since::text AS stale_since,
+            c.stale_reason,
+            c.capabilities,
+            COALESCE(
+                array_remove(array_agg(t.name ORDER BY t.display_order, t.created_at, t.name), NULL),
+                ARRAY[]::TEXT[]
+            ) AS tags
+        FROM visible_clients c
+        LEFT JOIN client_tags ct ON ct.client_id = c.id
+        LEFT JOIN tags t ON t.id = ct.tag_id
+        WHERE c.id = $1
+        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
+        "#,
+    )
+    .bind(client_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    agent_view_from_inventory_row(row)
+}
+
+async fn postgres_tag_view_in_tx(tx: &mut Transaction<'_, Postgres>, tag: &str) -> Result<TagView> {
+    let display_order: i64 = sqlx::query_scalar("SELECT display_order FROM tags WHERE name = $1")
+        .bind(tag)
+        .fetch_one(&mut **tx)
+        .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            c.id,
+            c.display_name,
+            c.status,
+            host(c.registration_ip) AS registration_ip,
+            host(c.last_ip) AS last_ip,
+            c.last_seen_at::text AS last_seen_at,
+            c.arch,
+            c.internal_build_number,
+            c.process_incarnation_id,
+            c.stale_since::text AS stale_since,
+            c.stale_reason,
+            c.capabilities,
+            COALESCE(
+                array_remove(array_agg(all_tags.name ORDER BY all_tags.display_order, all_tags.created_at, all_tags.name), NULL),
+                ARRAY[]::TEXT[]
+            ) AS tags
+        FROM visible_clients c
+        JOIN client_tags matching_ct ON matching_ct.client_id = c.id
+        JOIN tags matching_tag ON matching_tag.id = matching_ct.tag_id
+        LEFT JOIN client_tags all_ct ON all_ct.client_id = c.id
+        LEFT JOIN tags all_tags ON all_tags.id = all_ct.tag_id
+        WHERE matching_tag.name = $1
+        GROUP BY c.id, c.display_name, c.status, c.registration_ip, c.last_ip, c.last_seen_at, c.arch, c.internal_build_number, c.process_incarnation_id, c.stale_since, c.stale_reason, c.capabilities
+        ORDER BY c.display_name, c.id
+        "#,
+    )
+    .bind(tag)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(TagView {
+        name: tag.to_string(),
+        display_order,
+        clients: rows
+            .into_iter()
+            .map(agent_view_from_inventory_row)
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn agent_view_from_inventory_row(row: PgRow) -> Result<AgentView> {
+    Ok(AgentView {
+        id: row.try_get("id")?,
+        display_name: row.try_get("display_name")?,
+        status: row.try_get("status")?,
+        tags: row.try_get("tags")?,
+        registration_ip: row.try_get("registration_ip")?,
+        last_ip: row.try_get("last_ip")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        arch: row.try_get("arch")?,
+        internal_build_number: row.try_get::<i64, _>("internal_build_number")?.max(1) as u64,
+        process_incarnation_id: row.try_get("process_incarnation_id")?,
+        stale_since: row.try_get("stale_since")?,
+        stale_reason: row.try_get("stale_reason")?,
+        capabilities: row
+            .try_get::<sqlx::types::Json<vpsman_common::AgentCapabilitySnapshot>, _>(
+                "capabilities",
+            )?
+            .0,
+    })
 }
 
 fn tag_action_label(action: &BulkTagMutationAction) -> &'static str {

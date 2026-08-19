@@ -34,6 +34,14 @@ const AUTHORITATIVE_PORT_FORWARDING_SYNC_REASON: &str =
 const PORT_FORWARDING_RECONNECT_SYNC_REASON: &str = "agent_reconnect_port_forwarding_sync";
 const RUNTIME_TUNNELS_RECONNECT_SYNC_REASON: &str = "agent_reconnect_runtime_tunnels_sync";
 
+struct AbortTaskOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortTaskOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(crate) async fn dispatch_runtime_config_for_clients(
     state: &AppState,
     operator: &AuthContext,
@@ -72,8 +80,32 @@ pub(crate) async fn dispatch_runtime_config_for_clients(
             });
             continue;
         }
-        match push_runtime_config_for_known_client(state, operator, client_id.clone(), reason).await
-        {
+        // Runtime composition and internal job creation each have bounded state machines, but
+        // polling their debug-build frames beneath a network mutation handler can exhaust the
+        // standard worker stack before the first yield. A task root bounds that composition;
+        // abort-on-drop preserves cancellation and prevents a detached config mutation.
+        let task_state = state.clone();
+        let task_operator = operator.clone();
+        let task_client_id = client_id.clone();
+        let task_reason = reason.to_string();
+        let mut push_task = AbortTaskOnDrop(tokio::spawn(async move {
+            push_runtime_config_for_known_client(
+                &task_state,
+                &task_operator,
+                task_client_id,
+                &task_reason,
+            )
+            .await
+        }));
+        let push_result = match (&mut push_task.0).await {
+            Ok(result) => result,
+            Err(error) => Err(ApiError::internal(
+                "runtime_config_dispatch_task_failed",
+                "The runtime configuration could not be queued.",
+                error.into(),
+            )),
+        };
+        match push_result {
             Ok(job) => outcomes.push(RuntimeConfigDispatchView {
                 client_id,
                 status: "queued".to_string(),

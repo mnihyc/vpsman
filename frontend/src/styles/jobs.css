@@ -5011,7 +5011,7 @@
   align-items: start;
   gap: 3px 10px;
   min-width: 0;
-  border-left: 2px solid var(--ok);
+  border-left: 2px solid var(--success);
   border-radius: 3px;
   background: var(--surface);
   padding: 7px 8px;

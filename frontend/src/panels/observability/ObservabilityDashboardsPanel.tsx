@@ -91,7 +91,11 @@ const dashboardPresets: DashboardPreset[] = [
     id: "fleet_operations",
     label: "Fleet operations",
     source: "Dashboard overview summary and operations API",
-    widgets: ["summary cards", "recent alerts table", "degraded VPS table"],
+    widgets: [
+      "summary cards",
+      "recent active alerts table",
+      "degraded VPS table",
+    ],
   },
   {
     description:

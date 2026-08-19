@@ -1061,6 +1061,7 @@ async fn deleted_memory_agent_is_hidden_from_live_observability_but_retained_in_
             swap_available_bytes_min: None,
             swap_used_ratio_avg: None,
             swap_used_ratio_max: None,
+            disk_sample_count: 1,
             disk_total_bytes_max: 2048,
             disk_available_bytes_avg: 1024,
             disk_available_bytes_min: 1024,
@@ -2191,10 +2192,38 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
     assert_eq!(outputs[0].stream, "status");
     assert_eq!(outputs[0].exit_code, Some(0));
     assert!(outputs[0].done);
-    let audit = repo
-        .list_audit_logs(20)
+    let replay = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            Some("1700000000".to_string()),
+            repository_job_outputs::JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+            &outcome,
+        )
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(
+        replay.write_result,
+        repository_job_outputs::JobOutputWriteResult::DuplicateIdentical
+    );
+    assert!(!replay.target_terminalized);
+    let audits = repo.list_audit_logs(20).await.unwrap();
+    assert_eq!(
+        audits
+            .iter()
+            .filter(|audit| {
+                audit.action == "job.target_result"
+                    && audit.metadata["job_id"] == job_id.to_string()
+            })
+            .count(),
+        1
+    );
+    let audit = audits
         .into_iter()
         .find(|audit| {
             audit.action == "job.target_result" && audit.metadata["job_id"] == job_id.to_string()
@@ -2203,6 +2232,148 @@ async fn memory_final_output_insert_terminalizes_target_atomically() {
     assert_eq!(audit.command_hash.as_deref(), Some(command_hash.as_str()));
     assert_eq!(audit.metadata["component"], "gateway-command-output-ingest");
     assert!(audit.metadata.get("payload_hash_verified").is_none());
+}
+
+#[tokio::test]
+async fn concurrent_memory_final_replays_apply_schedule_outcome_once() {
+    let repo = Repository::Memory(MemoryState::default());
+    seed_never_connected_memory_agent(&repo, "client-a").await;
+    let operator = test_operator();
+    let schedule = repo
+        .create_schedule(
+            CreateScheduleRequest {
+                name: "final-replay-once".to_string(),
+                operation: Some(JobCommand::Shell {
+                    argv: vec!["/bin/false".to_string()],
+                    pty: false,
+                }),
+                event_argv_template: None,
+                selector_expression: String::new(),
+                target_client_ids: vec!["client-a".to_string()],
+                trigger_kind: ScheduleTriggerKind::Cron,
+                cron_expr: Some("0 * * * *".to_string()),
+                timezone: Some("UTC".to_string()),
+                event_expression: None,
+                enabled: true,
+                catch_up_policy: Some("skip_missed".to_string()),
+                catch_up_limit: Some(1),
+                retry_delay_secs: Some(60),
+                max_failures: 3,
+                privilege_assertion: None,
+                confirmed: true,
+            },
+            &operator,
+        )
+        .await
+        .unwrap();
+    let request = test_job_request(&["client-a"]);
+    let command = request.job_command().unwrap();
+    let command_hash = payload_hash(&encode_json(&command).unwrap());
+    let job_id = repo
+        .record_dispatching_job_from_schedule(
+            Uuid::new_v4(),
+            &request,
+            &command_hash,
+            "concurrent_final_replay",
+            &operator,
+            &["client-a".to_string()],
+            schedule.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repo.claim_due_job_targets(10, 30, 0).await.unwrap().len(),
+        1
+    );
+    let output = CommandOutput {
+        job_id,
+        stream: OutputStream::Status,
+        data: br#"{"type":"failed"}"#.to_vec(),
+        exit_code: Some(1),
+        done: true,
+    };
+    let outcome = TargetDispatchOutcome {
+        status: "failed".to_string(),
+        exit_code: Some(1),
+        command_version: Some(1),
+        accepted: true,
+        message: "failed".to_string(),
+        received_at: None,
+        outputs: vec![output.clone()],
+    };
+    let persist = repository_job_outputs::JobOutputPersistConfig {
+        object_store: None,
+        artifact_min_bytes: usize::MAX,
+    };
+    repo.record_active_final_job_output_and_target_result_with_config(
+        job_id,
+        "client-a",
+        0,
+        &output,
+        Some("1700000000".to_string()),
+        persist,
+        &outcome,
+    )
+    .await
+    .unwrap();
+
+    let replay = || {
+        repo.record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            Some("1700000000".to_string()),
+            persist,
+            &outcome,
+        )
+    };
+    let (first, second, third, fourth) = tokio::join!(replay(), replay(), replay(), replay());
+    for result in [first, second, third, fourth] {
+        let result = result.unwrap();
+        assert_eq!(
+            result.write_result,
+            repository_job_outputs::JobOutputWriteResult::DuplicateIdentical
+        );
+        assert!(result.terminal_reconciliation_ready);
+    }
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let schedule = memory
+        .schedules
+        .read()
+        .await
+        .iter()
+        .find(|item| item.id == schedule.id)
+        .cloned()
+        .unwrap();
+    assert_eq!(schedule.failure_count, 1);
+    let event_id = format!("schedule:{}:job:{}:finished", schedule.id, job_id);
+    assert_eq!(
+        memory
+            .webhook_events
+            .read()
+            .await
+            .iter()
+            .filter(|event| event.kind == "schedule.job_finished" && event.event_id == event_id)
+            .count(),
+        1
+    );
+    assert_eq!(
+        memory
+            .audits
+            .read()
+            .await
+            .iter()
+            .filter(|audit| {
+                audit.action == "schedule.job_failed"
+                    && audit.metadata["job_id"] == job_id.to_string()
+            })
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2277,6 +2448,41 @@ async fn final_network_status_output_records_observation() {
     assert_eq!(observations[0].kind, "network_status");
     assert_eq!(observations[0].plan_name.as_deref(), Some("edge-a-edge-b"));
     assert_eq!(observations[0].healthy, Some(false));
+    let original_observed_at = observations[0].observed_at.clone();
+    let original_received_at = observations[0].received_at.clone();
+
+    let Repository::Memory(memory) = &repo else {
+        unreachable!("test repository is memory-backed")
+    };
+    memory.network_observations.write().await.clear();
+    let replay = repo
+        .record_active_final_job_output_and_target_result_with_config(
+            job_id,
+            "client-a",
+            0,
+            &output,
+            Some("1700000000".to_string()),
+            repository_job_outputs::JobOutputPersistConfig {
+                object_store: None,
+                artifact_min_bytes: usize::MAX,
+            },
+            &outcome,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.write_result,
+        repository_job_outputs::JobOutputWriteResult::DuplicateIdentical
+    );
+    assert!(!replay.target_terminalized);
+    let repaired = repo.list_network_observations(10, false).await.unwrap();
+    assert_eq!(
+        repaired.len(),
+        1,
+        "an identical final-output replay repairs missing derived observations"
+    );
+    assert_eq!(repaired[0].observed_at, original_observed_at);
+    assert_eq!(repaired[0].received_at, original_received_at);
 }
 
 #[tokio::test]
@@ -2313,16 +2519,6 @@ async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
         exit_code: Some(0),
         done: true,
     };
-    let outcome = TargetDispatchOutcome {
-        status: "completed".to_string(),
-        exit_code: Some(0),
-        command_version: Some(1),
-        accepted: true,
-        message: "ok".to_string(),
-        received_at: None,
-        outputs: vec![final_output.clone()],
-    };
-
     let early_final = repo
         .record_active_final_job_output_and_target_result_with_config(
             job_id,
@@ -2331,7 +2527,15 @@ async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
             &final_output,
             Some("1700000000".to_string()),
             persist,
-            &outcome,
+            &TargetDispatchOutcome {
+                status: "completed".to_string(),
+                exit_code: Some(0),
+                command_version: Some(1),
+                accepted: true,
+                message: "ok".to_string(),
+                received_at: None,
+                outputs: vec![final_output.clone()],
+            },
         )
         .await
         .unwrap();
@@ -2352,40 +2556,23 @@ async fn memory_final_output_waits_for_lower_sequences_before_terminalizing() {
         exit_code: None,
         done: false,
     };
-    repo.record_active_job_output_chunk_checked_with_config(
-        job_id,
-        "client-a",
-        0,
-        &stdout,
-        Some("1700000001".to_string()),
-        persist,
-    )
-    .await
-    .unwrap();
-    let candidate = repo
-        .contiguous_final_job_output_candidate(job_id, "client-a")
-        .await
-        .unwrap()
-        .expect("stored final should become contiguous");
-    assert_eq!(candidate.seq, 1);
-
-    let finalized = repo
-        .record_active_final_job_output_and_target_result_with_config(
+    let repaired = repo
+        .record_active_job_output_chunk_and_finalize_if_ready_with_config(
             job_id,
             "client-a",
-            candidate.seq,
-            &candidate.output,
-            candidate.received_at,
+            0,
+            &stdout,
+            Some("1700000001".to_string()),
             persist,
-            &outcome,
         )
         .await
         .unwrap();
     assert_eq!(
-        finalized.write_result,
-        repository_job_outputs::JobOutputWriteResult::DuplicateIdentical
+        repaired.write_result,
+        repository_job_outputs::JobOutputWriteResult::Inserted
     );
-    assert!(finalized.target_terminalized);
+    assert!(repaired.terminal_reconciliation_ready);
+    assert_eq!(repaired.contiguous_final.unwrap().seq, 1);
     assert_eq!(
         repo.list_job_targets(job_id).await.unwrap()[0].status,
         "completed"
@@ -3561,6 +3748,7 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
     let Repository::Memory(memory) = repo else {
         panic!("seed_terminal_memory_job supports only memory repository tests");
     };
+    let terminal = !matches!(status, "queued" | "running");
     upsert_memory_agent(
         &memory.agents,
         &AgentHello {
@@ -3608,17 +3796,17 @@ async fn seed_terminal_memory_job(repo: &Repository, job_id: Uuid, client_id: &s
         payload_hash: "terminal-test".to_string(),
         max_timeout_secs: 30,
         created_at: "2026-06-20T00:00:00Z".to_string(),
-        completed_at: Some("2026-06-20T00:00:01Z".to_string()),
+        completed_at: terminal.then(|| "2026-06-20T00:00:01Z".to_string()),
     });
     memory.job_targets.write().await.push(JobTargetView {
         job_id,
         client_id: client_id.to_string(),
         status: status.to_string(),
         message: None,
-        exit_code: Some(0),
+        exit_code: terminal.then_some(0),
         started_at: Some("2026-06-20T00:00:00Z".to_string()),
         deadline_at: None,
-        completed_at: Some("2026-06-20T00:00:01Z".to_string()),
+        completed_at: terminal.then(|| "2026-06-20T00:00:01Z".to_string()),
         process_incarnation_id: Some(terminal_gateway_process_incarnation_id()),
     });
 }

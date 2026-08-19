@@ -7,7 +7,6 @@ use vpsman_common::{
 
 use super::*;
 use crate::job_request::validate_job_command;
-use crate::repository_jobs::aggregate_job_status_from_statuses;
 
 #[test]
 fn gateway_timeout_output_maps_to_timed_out_target_status() {
@@ -319,6 +318,49 @@ fn aggregate_job_status_uses_terminal_target_states() {
         aggregate_job_status_from_statuses(&["completed".to_string(), "skipped".to_string()], 2,),
         "partial_success"
     );
+}
+
+#[test]
+fn committed_job_creation_state_uses_the_persisted_target_snapshot() {
+    let resolved_targets = vec!["edge-a".to_string(), "edge-b".to_string()];
+    let completed = PrecompletedJobTarget {
+        client_id: "edge-a".to_string(),
+        outcome: TargetDispatchOutcome {
+            status: TARGET_STATUS_COMPLETED.to_string(),
+            exit_code: Some(0),
+            command_version: None,
+            accepted: true,
+            message: "completed before dispatch".to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        },
+    };
+
+    let (active_status, active_counts) =
+        committed_job_creation_state(&resolved_targets, std::slice::from_ref(&completed));
+    assert_eq!(active_status, JOB_STATUS_QUEUED);
+    assert_eq!(active_counts.total, 2);
+    assert_eq!(active_counts.queued, 1);
+    assert_eq!(active_counts.completed, 1);
+
+    let failed = PrecompletedJobTarget {
+        client_id: "edge-b".to_string(),
+        outcome: TargetDispatchOutcome {
+            status: TARGET_STATUS_FAILED.to_string(),
+            exit_code: Some(1),
+            command_version: None,
+            accepted: false,
+            message: "failed before dispatch".to_string(),
+            received_at: None,
+            outputs: Vec::new(),
+        },
+    };
+    let (terminal_status, terminal_counts) =
+        committed_job_creation_state(&resolved_targets, &[completed, failed]);
+    assert_eq!(terminal_status, "partial_success");
+    assert_eq!(terminal_counts.total, 2);
+    assert_eq!(terminal_counts.completed, 1);
+    assert_eq!(terminal_counts.failed, 1);
 }
 
 #[test]

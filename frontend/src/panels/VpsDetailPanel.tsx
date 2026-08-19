@@ -832,7 +832,9 @@ function SummaryTab({
         <VpsFact
           label="Disk used"
           value={
-            related.rollup && related.rollup.disk_total_bytes_max > 0
+            related.rollup &&
+            (related.rollup.disk_sample_count ?? 0) > 0 &&
+            related.rollup.disk_total_bytes_max > 0
               ? `${Math.round(related.rollup.disk_used_ratio_avg * 100)}% (${formatBytes(related.rollup.disk_total_bytes_max)})`
               : "No resource rollup"
           }

@@ -904,6 +904,7 @@ async fn dashboard_rollup_aggregation_is_weighted_and_fair_per_client() {
     if let Repository::Memory(memory) = &repo {
         let mut a_latest_first = dashboard_test_rollup("edge-a", "610", 1.0, 1.2, 900, 1900);
         a_latest_first.sample_count = 1;
+        a_latest_first.disk_sample_count = 1;
         let mut a_latest_second = dashboard_test_rollup("edge-a", "670", 3.0, 3.4, 500, 1100);
         a_latest_second.sample_count = 3;
         memory.telemetry_rollups.write().await.extend([
@@ -1137,6 +1138,7 @@ fn dashboard_test_rollup(
         swap_available_bytes_min: None,
         swap_used_ratio_avg: None,
         swap_used_ratio_max: None,
+        disk_sample_count: 3,
         disk_total_bytes_max: 2000,
         disk_available_bytes_avg: disk_available,
         disk_available_bytes_min: disk_available,

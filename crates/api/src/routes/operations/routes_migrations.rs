@@ -5,7 +5,7 @@ use axum::{
 };
 use uuid::Uuid;
 use vpsman_common::{encode_json, payload_hash, JobCommand, DEFAULT_MAX_JOB_TIMEOUT_SECS};
-use vpsman_server_core::JOB_STATUS_RUNNING;
+use vpsman_server_core::{JOB_STATUS_QUEUED, TARGET_STATUS_QUEUED};
 
 use crate::{
     error::ApiError,
@@ -18,8 +18,9 @@ use crate::{
         verify_privilege_intent, DbPrivilegeIntent, JobPrivilegeIntent, JobPrivilegeIntentInput,
     },
     routes_jobs::{
-        create_job_target_counts, effective_job_max_timeout_secs, request_fingerprint_for_job,
-        target_capabilities_from_agents, validate_restore_archive_binding,
+        create_job_target_counts_from_statuses, effective_job_max_timeout_secs,
+        request_fingerprint_for_job, target_capabilities_from_agents,
+        validate_restore_archive_binding,
     },
     security::{operator_has_scope, SCOPE_BACKUPS_READ},
     state::AppState,
@@ -141,7 +142,7 @@ pub(crate) async fn create_migration_run(
             }
         })?;
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
-    let restore_job = migration_restore_job_response(&state, &plan).await?;
+    let restore_job = migration_restore_job_response(&state, &plan);
     Ok((
         StatusCode::CREATED,
         Json(CreateMigrationRunResponse {
@@ -291,15 +292,17 @@ async fn preflight_migration_restore_job(
     })
 }
 
-async fn migration_restore_job_response(
+fn migration_restore_job_response(
     state: &AppState,
     plan: &MigrationRestoreJobPlan,
-) -> Result<CreateJobResponse, ApiError> {
-    let target_counts = create_job_target_counts(state, plan.job_id).await?;
-    Ok(CreateJobResponse {
+) -> CreateJobResponse {
+    let target_counts = create_job_target_counts_from_statuses(
+        plan.resolved_targets.iter().map(|_| TARGET_STATUS_QUEUED),
+    );
+    CreateJobResponse {
         job_id: plan.job_id,
         target_count: plan.resolved_targets.len(),
-        status: JOB_STATUS_RUNNING.to_string(),
+        status: JOB_STATUS_QUEUED.to_string(),
         max_timeout_secs: plan.max_timeout_secs,
         max_job_timeout_secs: state.max_job_timeout_secs(),
         control_deadline_extra_secs: state
@@ -309,7 +312,7 @@ async fn migration_restore_job_response(
         error: None,
         message: None,
         recovery: None,
-    })
+    }
 }
 
 pub(crate) fn validate_create_migration_link(

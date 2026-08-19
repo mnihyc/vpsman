@@ -47,6 +47,14 @@ struct DispatcherWakeState {
     gateway_dispatch_errors: AtomicU64,
 }
 
+struct AbortTaskOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortTaskOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl Default for DispatcherWakeState {
     fn default() -> Self {
         Self {
@@ -205,8 +213,17 @@ pub(crate) async fn dispatch_due_job_targets(state: &AppState) -> Result<usize> 
         .for_each_concurrent(dispatcher_config.in_flight, |claimed| {
             let state = state.clone();
             async move {
-                if let Err(error) = dispatch_claimed_target(&state, claimed).await {
-                    warn!(%error, "durable job target dispatch failed");
+                // Poll each claimed target as a runtime task root. The command-output,
+                // terminalization, and backup-handoff state machines are independently bounded,
+                // but nesting all of their debug-build poll frames under FuturesUnordered can
+                // exhaust the standard worker stack before any operation yields.
+                let mut dispatch_task = AbortTaskOnDrop(tokio::spawn(async move {
+                    dispatch_claimed_target(&state, claimed).await
+                }));
+                match (&mut dispatch_task.0).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => warn!(%error, "durable job target dispatch failed"),
+                    Err(error) => warn!(%error, "durable job target dispatch task failed"),
                 }
             }
         })
@@ -222,7 +239,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             .gateway_dispatch_errors
             .fetch_add(1, Ordering::Relaxed);
         let outcome = dispatch_error_outcome(claimed.job_id, "gateway control URL missing");
-        return finish_claimed_target(state, &claimed, outcome).await;
+        return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
 
     if let Err(error) = record_backup_request_for_claim(state, &claimed).await {
@@ -233,7 +250,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             "backup request pre-record failed"
         );
         let outcome = dispatch_error_outcome(claimed.job_id, "backup request pre-record failed");
-        return finish_claimed_target(state, &claimed, outcome).await;
+        return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
     if auth_context_for_claim(state, &claimed).await?.is_none() {
         warn!(
@@ -242,7 +259,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
             "job actor authority revoked before dispatch"
         );
         let outcome = dispatch_rejected_outcome(claimed.job_id, "actor_authority_revoked");
-        return finish_claimed_target(state, &claimed, outcome).await;
+        return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
 
     let command_version =
@@ -305,7 +322,7 @@ async fn dispatch_claimed_target(state: &AppState, claimed: ClaimedJobTarget) ->
     };
     if outcome.status == TARGET_STATUS_REJECTED || outcome.outputs.iter().any(|output| output.done)
     {
-        return finish_claimed_target(state, &claimed, outcome).await;
+        return Box::pin(finish_claimed_target(state, &claimed, outcome)).await;
     }
     state
         .repo
@@ -420,21 +437,23 @@ async fn expire_control_timeout_targets(state: &AppState) -> Result<()> {
                 }
             }
         }
-        if let Err(error) = record_network_routing_terminal_result(
-            state,
-            target.job_id,
-            &target.client_id,
-            &target.status,
-            None,
-        )
-        .await
-        {
-            warn!(
-                ?error,
-                job_id = %target.job_id,
-                client_id = %target.client_id,
-                "network routing state update failed after deadline expiry"
-            );
+        if matches!(&state.repo, Repository::Memory(_)) {
+            if let Err(error) = record_network_routing_terminal_result(
+                state,
+                target.job_id,
+                &target.client_id,
+                &target.status,
+                None,
+            )
+            .await
+            {
+                warn!(
+                    ?error,
+                    job_id = %target.job_id,
+                    client_id = %target.client_id,
+                    "network routing state update failed after deadline expiry"
+                );
+            }
         }
         let refreshed = state
             .repo
@@ -452,38 +471,28 @@ async fn finish_claimed_target(
     claimed: &ClaimedJobTarget,
     outcome: TargetDispatchOutcome,
 ) -> Result<()> {
-    let write_results = state
-        .repo
-        .record_job_outputs_checked_with_config(
-            claimed.job_id,
-            &claimed.client_id,
-            &outcome.outputs,
-            JobOutputPersistConfig {
-                object_store: state.backup_object_store.as_ref(),
-                artifact_min_bytes: state.job_output_artifact_min_bytes(),
-            },
-        )
-        .await?;
-    if write_results.contains(&JobOutputWriteResult::DuplicateConflict) {
-        // A conflicting duplicate sequence means the gateway/agent replay stream is corrupt.
-        // Retrying this event forever could terminalize from evidence we did not store, so keep
-        // the target active for normal lifecycle handling and record the protocol error.
-        state
-            .repo
-            .record_job_target_delivery_error(
-                claimed.job_id,
-                &claimed.client_id,
-                "job_output_sequence_conflict",
-            )
-            .await?;
-        return Ok(());
-    }
+    let persist_config = JobOutputPersistConfig {
+        object_store: state.backup_object_store.as_ref(),
+        artifact_min_bytes: state.job_output_artifact_min_bytes(),
+    };
     if outcome.status == TARGET_STATUS_COMPLETED
         && matches!(
             &claimed.operation,
             JobCommand::NetworkTrafficImportVnstat { .. }
         )
     {
+        let write_results = state
+            .repo
+            .record_active_job_outputs_checked_with_config(
+                claimed.job_id,
+                &claimed.client_id,
+                &outcome.outputs,
+                persist_config,
+            )
+            .await?;
+        if reject_conflicting_dispatch_outputs(state, claimed, &write_results).await? {
+            return Ok(());
+        }
         state
             .repo
             .mark_job_target_running(
@@ -498,26 +507,78 @@ async fn finish_claimed_target(
         wake_network_traffic_import_finalizer(state.clone());
         return Ok(());
     }
-    let target_terminalized = state
+    let final_output_index = outcome.outputs.iter().position(|output| output.done);
+    if final_output_index.is_some_and(|index| index + 1 != outcome.outputs.len()) {
+        state
+            .repo
+            .record_job_target_delivery_error(
+                claimed.job_id,
+                &claimed.client_id,
+                "job_output_after_final_marker",
+            )
+            .await?;
+        return Ok(());
+    }
+    let prefix_end = final_output_index.unwrap_or(outcome.outputs.len());
+    let prefix_results = state
         .repo
-        .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
+        .record_active_job_outputs_checked_with_config(
+            claimed.job_id,
+            &claimed.client_id,
+            &outcome.outputs[..prefix_end],
+            persist_config,
+        )
         .await?;
+    if reject_conflicting_dispatch_outputs(state, claimed, &prefix_results).await? {
+        return Ok(());
+    }
+    let target_terminalized = if let Some(final_index) = final_output_index {
+        let final_output = &outcome.outputs[final_index];
+        let received_at = outcome
+            .received_at
+            .clone()
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let mut final_outcome = outcome.clone();
+        final_outcome.received_at = Some(received_at.clone());
+        let record = state
+            .repo
+            .record_active_final_job_output_and_target_result_with_config(
+                claimed.job_id,
+                &claimed.client_id,
+                i32::try_from(final_index)?,
+                final_output,
+                Some(received_at),
+                persist_config,
+                &final_outcome,
+            )
+            .await?;
+        if reject_conflicting_dispatch_outputs(state, claimed, &[record.write_result]).await? {
+            return Ok(());
+        }
+        record.target_terminalized
+    } else {
+        state
+            .repo
+            .update_job_target_result(claimed.job_id, &claimed.client_id, &outcome)
+            .await?
+    };
     if !outcome.outputs.is_empty() {
         state.invalidate_job_details(claimed.job_id);
     }
     if target_terminalized
+        && matches!(&state.repo, Repository::Memory(_))
         && matches!(&claimed.operation, JobCommand::Backup { .. })
         && outcome.status == TARGET_STATUS_COMPLETED
     {
         if let Some(operator) = auth_context_for_claim(state, claimed).await? {
-            if let Err(error) = try_auto_record_backup_artifact(
+            if let Err(error) = Box::pin(try_auto_record_backup_artifact(
                 state,
                 &operator,
                 &claimed.client_id,
                 &claimed.payload_hash,
                 claimed.job_id,
                 &outcome.outputs,
-            )
+            ))
             .await
             {
                 warn!(%error, job_id = %claimed.job_id, client_id = %claimed.client_id, "backup artifact auto-record failed");
@@ -548,7 +609,7 @@ async fn finish_claimed_target(
             warn!(%error, job_id = %claimed.job_id, client_id = %claimed.client_id, "backup request terminal status update failed");
         }
     }
-    if target_terminalized {
+    if target_terminalized && matches!(&state.repo, Repository::Memory(_)) {
         let output = outcome.outputs.iter().rev().find(|output| output.done);
         if let Err(error) = record_network_routing_terminal_result(
             state,
@@ -575,6 +636,28 @@ async fn finish_claimed_target(
             .await?;
     }
     Ok(())
+}
+
+async fn reject_conflicting_dispatch_outputs(
+    state: &AppState,
+    claimed: &ClaimedJobTarget,
+    write_results: &[JobOutputWriteResult],
+) -> Result<bool> {
+    if !write_results.contains(&JobOutputWriteResult::DuplicateConflict) {
+        return Ok(false);
+    }
+    // A conflicting duplicate sequence means the gateway/agent replay stream is corrupt.
+    // Retrying this event forever could terminalize from evidence we did not store, so keep
+    // the target active for normal lifecycle handling and record the protocol error.
+    state
+        .repo
+        .record_job_target_delivery_error(
+            claimed.job_id,
+            &claimed.client_id,
+            "job_output_sequence_conflict",
+        )
+        .await?;
+    Ok(true)
 }
 
 async fn record_backup_request_for_claim(
@@ -719,5 +802,40 @@ fn dispatch_error_outcome(job_id: Uuid, message: &str) -> TargetDispatchOutcome 
             exit_code: None,
             done: true,
         }],
+    }
+}
+
+#[cfg(test)]
+mod task_boundary_tests {
+    use super::AbortTaskOnDrop;
+
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_dispatch_task_guard_aborts_in_flight_work() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let guard = AbortTaskOnDrop(task);
+        started_rx.await.unwrap();
+
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("aborted dispatch task was not dropped")
+            .expect("dispatch task drop signal was lost");
     }
 }

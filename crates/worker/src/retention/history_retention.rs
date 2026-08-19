@@ -243,6 +243,7 @@ async fn promote_resource_tier(
                 swap_sample_count, swap_total_bytes_max, swap_available_bytes_avg,
                 swap_available_bytes_sum, swap_available_bytes_min,
                 swap_used_ratio_avg, swap_used_ratio_sum, swap_used_ratio_max,
+                disk_sample_count,
                 disk_total_bytes_max, disk_available_bytes_avg,
                 disk_available_bytes_sum, disk_available_bytes_min,
                 disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
@@ -278,11 +279,24 @@ async fn promote_resource_tier(
                 CASE WHEN sum(swap_sample_count) > 0 THEN
                     sum(swap_used_ratio_sum) / sum(swap_sample_count) ELSE NULL END,
                 sum(swap_used_ratio_sum), max(swap_used_ratio_max),
-                max(disk_total_bytes_max),
-                round(sum(disk_available_bytes_sum) / sum(sample_count))::bigint,
-                sum(disk_available_bytes_sum), min(disk_available_bytes_min),
-                sum(disk_used_ratio_sum) / sum(sample_count), sum(disk_used_ratio_sum),
-                max(disk_used_ratio_max), max(network_rx_bytes_max),
+                LEAST(sum(disk_sample_count)::bigint, 2147483647)::integer,
+                COALESCE(max(disk_total_bytes_max)
+                    FILTER (WHERE disk_sample_count > 0), 0),
+                COALESCE(round((sum(disk_available_bytes_sum)
+                    FILTER (WHERE disk_sample_count > 0))
+                    / NULLIF(sum(disk_sample_count), 0)), 0)::bigint,
+                COALESCE(sum(disk_available_bytes_sum)
+                    FILTER (WHERE disk_sample_count > 0), 0),
+                COALESCE(min(disk_available_bytes_min)
+                    FILTER (WHERE disk_sample_count > 0), 0),
+                COALESCE((sum(disk_used_ratio_sum)
+                    FILTER (WHERE disk_sample_count > 0))
+                    / NULLIF(sum(disk_sample_count), 0), 0),
+                COALESCE(sum(disk_used_ratio_sum)
+                    FILTER (WHERE disk_sample_count > 0), 0),
+                COALESCE(max(disk_used_ratio_max)
+                    FILTER (WHERE disk_sample_count > 0), 0),
+                max(network_rx_bytes_max),
                 max(network_tx_bytes_max),
                 LEAST(sum(connections_sample_count)::bigint, 2147483647)::integer,
                 (array_agg(tcp_sockets_latest ORDER BY connections_observed_at DESC)

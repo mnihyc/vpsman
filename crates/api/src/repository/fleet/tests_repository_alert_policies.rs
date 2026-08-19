@@ -1685,6 +1685,7 @@ fn policy_resource_rollup() -> TelemetryRollupView {
         swap_available_bytes_min: None,
         swap_used_ratio_avg: None,
         swap_used_ratio_max: None,
+        disk_sample_count: 3,
         disk_total_bytes_max: 2000,
         disk_available_bytes_avg: 1000,
         disk_available_bytes_min: 800,

@@ -950,9 +950,15 @@ function PublicMonitoringCardView({
       ? ratioToPercent(resource.memory_used_ratio_avg)
       : null;
   const diskUsed =
-    resource && resource.disk_total_bytes > 0
+    resource &&
+    (resource.disk_sample_count ?? 0) > 0 &&
+    resource.disk_total_bytes > 0
       ? ratioToPercent(resource.disk_used_ratio_avg)
       : null;
+  const diskTotal =
+    resource && (resource.disk_sample_count ?? 0) > 0
+      ? resource.disk_total_bytes
+      : undefined;
   const loadPressure =
     resource && resource.cpu_cores > 0
       ? (resource.load_1 / resource.cpu_cores) * 100
@@ -1091,14 +1097,14 @@ function PublicMonitoringCardView({
             value={formatOptionalPercent(memoryUsed)}
           />
           <PublicMetric
-            caption={maximumCapacityCaption(resource?.disk_total_bytes)}
+            caption={maximumCapacityCaption(diskTotal)}
             icon={<Server size={15} />}
             label="Disk"
-            context={maximumCapacity(resource?.disk_total_bytes)}
+            context={maximumCapacity(diskTotal)}
             percent={diskUsed}
             showCaption={false}
             stale={Boolean(resourceProblem)}
-            title="Used disk space as a percentage of the maximum reported disk capacity; - means disk evidence was not shared"
+            title="Used space across reported block-device filesystems as a percentage of their maximum aggregate capacity; - means disk evidence was not shared"
             value={formatOptionalPercent(diskUsed)}
           />
           <PublicMetric
@@ -1581,7 +1587,8 @@ function PublicMonitoringDetailPanel({
   );
   const diskCapacityMaximum = maximumResourceCapacity(
     resourceTimeline.records,
-    (point) => point.disk_total_bytes,
+    (point) =>
+      (point.disk_sample_count ?? 0) > 0 ? point.disk_total_bytes : undefined,
   );
   const hasTrafficHistory = traffic.some((point) =>
     [point.rx_bytes, point.tx_bytes, point.total_bytes].some(
@@ -1905,13 +1912,15 @@ function PublicMonitoringDetailPanel({
                     <PublicChart
                       emptyLabel="Disk history is unavailable for this range"
                       exportFileName={`${exportPrefix}-disk`}
-                      label="Aggregate reported disk used"
+                      label="Aggregate disk used"
                       lines={[
                         {
                           color: consolePalette.chart.orange,
                           label: "Disk used",
                           values: resourceTimeline.records.map((point) =>
-                            point && point.disk_total_bytes > 0
+                            point &&
+                            (point.disk_sample_count ?? 0) > 0 &&
+                            point.disk_total_bytes > 0
                               ? point.disk_used_ratio_avg * 100
                               : null,
                           ),
@@ -2493,13 +2502,18 @@ function PublicMonitoringInformationGroups({
   }
   if (system.length) groups.push({ facts: system, label: "System" });
 
-  if (visibility?.resources && resource && resource.disk_total_bytes > 0) {
+  if (
+    visibility?.resources &&
+    resource &&
+    (resource.disk_sample_count ?? 0) > 0 &&
+    resource.disk_total_bytes > 0
+  ) {
     groups.push({
       facts: [
         {
-          label: "Reported filesystems",
+          label: "Disk filesystems",
           title:
-            "Average used-disk percentage and maximum aggregate filesystem capacity",
+            "Average used-disk percentage and maximum aggregate block-device filesystem capacity",
           value: resourceUsageSummary(
             resource.disk_used_ratio_avg,
             resource.disk_total_bytes,

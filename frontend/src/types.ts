@@ -1021,6 +1021,7 @@ export type TelemetryRollupRecord = {
   swap_available_bytes_min: number | null;
   swap_used_ratio_avg: number | null;
   swap_used_ratio_max: number | null;
+  disk_sample_count?: number;
   disk_total_bytes_max: number;
   disk_available_bytes_avg: number;
   disk_available_bytes_min: number;
@@ -1192,6 +1193,7 @@ export type PublicResourceMetricView = {
   swap_total_bytes?: number;
   swap_available_bytes?: number;
   swap_used_ratio_avg?: number;
+  disk_sample_count?: number;
   disk_total_bytes: number;
   disk_available_bytes: number;
   disk_used_ratio_avg: number;

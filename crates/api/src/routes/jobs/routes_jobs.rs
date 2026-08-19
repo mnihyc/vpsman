@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::anyhow;
 use axum::{
@@ -14,11 +14,11 @@ use vpsman_common::{
     OutputStream, RuntimeTunnelManager, TunnelEndpointSide, DEFAULT_MAX_JOB_TIMEOUT_SECS,
 };
 use vpsman_server_core::{
-    CapabilitySkip, TargetCapability, JOB_STATUS_FAILED, JOB_STATUS_REJECTED, JOB_STATUS_RUNNING,
-    JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
-    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
-    TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED, TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED,
-    TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
+    target_status_is_active, CapabilitySkip, TargetCapability, JOB_STATUS_FAILED,
+    JOB_STATUS_QUEUED, JOB_STATUS_REJECTED, JOB_STATUS_SKIPPED, TARGET_STATUS_AGENT_LOST,
+    TARGET_STATUS_AGENT_TIMEOUT, TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED,
+    TARGET_STATUS_CONTROL_TIMEOUT, TARGET_STATUS_DISPATCHING, TARGET_STATUS_FAILED,
+    TARGET_STATUS_QUEUED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING, TARGET_STATUS_SKIPPED,
 };
 
 use crate::{
@@ -30,7 +30,8 @@ use crate::{
         DecideJobApprovalRequest, JobApprovalDecisionResponse, JobApprovalView, ListQuery, WsEvent,
     },
     privilege::{verify_privilege_intent, JobPrivilegeIntent, JobPrivilegeIntentInput},
-    repository_jobs::PrecompletedJobTarget,
+    repository::Repository,
+    repository_jobs::{aggregate_job_status_from_statuses, PrecompletedJobTarget},
     routes_ingest::{record_network_routing_terminal_result, status_output_message},
     security::SCOPE_JOBS_READ,
     state::AppState,
@@ -78,7 +79,7 @@ pub(crate) async fn cancel_job(
             "job_cancel_request_failed",
             "The job cancellation could not be requested.",
         ))?;
-    if plan.pending_canceled > 0 {
+    if plan.pending_canceled > 0 && matches!(&state.repo, Repository::Memory(_)) {
         if let Err(error) =
             record_network_routing_terminal_result(&state, job_id, "", TARGET_STATUS_CANCELED, None)
                 .await
@@ -734,6 +735,8 @@ async fn create_job_inner(
         )
         .await;
     }
+    let (committed_status, target_counts) =
+        committed_job_creation_state(&resolved_targets, &precompleted_targets);
 
     if let Some(schedule_id) = source_schedule_id {
         state
@@ -769,17 +772,6 @@ async fn create_job_inner(
     if !precompleted_targets.is_empty() {
         state.invalidate_job_details(job_id);
     }
-    let refreshed = state
-        .repo
-        .refresh_job_status_from_targets(job_id)
-        .await
-        .map_err(job_status_refresh_failed)?;
-    let terminal_status = state
-        .terminal_job_status_after_refresh(job_id, refreshed.clone())
-        .await?;
-    let status = refreshed
-        .or(terminal_status)
-        .unwrap_or_else(|| JOB_STATUS_RUNNING.to_string());
     if let Err(error) = state.process_job_terminal_events(500).await {
         warn!(
             ?error,
@@ -788,7 +780,6 @@ async fn create_job_inner(
         );
     }
     crate::job_dispatcher::wake_job_dispatcher(state.clone());
-    let target_counts = create_job_target_counts(state, job_id).await?;
     let control_deadline_extra_secs = state
         .dispatcher_runtime_config()
         .control_deadline_extra_secs();
@@ -797,7 +788,7 @@ async fn create_job_inner(
         Json(CreateJobResponse {
             job_id,
             target_count: resolved_targets.len(),
-            status,
+            status: committed_status,
             max_timeout_secs: request
                 .max_timeout_secs
                 .unwrap_or(DEFAULT_MAX_JOB_TIMEOUT_SECS),
@@ -1386,8 +1377,16 @@ pub(crate) async fn create_job_target_counts(
             "job_targets_unavailable",
             "Job targets could not be loaded.",
         ))?;
+    Ok(create_job_target_counts_from_statuses(
+        targets.iter().map(|target| target.status.as_str()),
+    ))
+}
+
+pub(crate) fn create_job_target_counts_from_statuses<'a>(
+    statuses: impl IntoIterator<Item = &'a str>,
+) -> CreateJobTargetCounts {
     let mut counts = CreateJobTargetCounts {
-        total: targets.len(),
+        total: 0,
         queued: 0,
         dispatching: 0,
         running: 0,
@@ -1400,8 +1399,9 @@ pub(crate) async fn create_job_target_counts(
         control_timeout: 0,
         canceled: 0,
     };
-    for target in targets {
-        match target.status.as_str() {
+    for status in statuses {
+        counts.total += 1;
+        match status {
             TARGET_STATUS_QUEUED => counts.queued += 1,
             TARGET_STATUS_DISPATCHING => counts.dispatching += 1,
             TARGET_STATUS_RUNNING => counts.running += 1,
@@ -1416,7 +1416,37 @@ pub(crate) async fn create_job_target_counts(
             _ => counts.failed += 1,
         }
     }
-    Ok(counts)
+    counts
+}
+
+fn committed_job_creation_state(
+    resolved_targets: &[String],
+    precompleted_targets: &[PrecompletedJobTarget],
+) -> (String, CreateJobTargetCounts) {
+    let precompleted_by_client = precompleted_targets
+        .iter()
+        .map(|target| (target.client_id.as_str(), target.outcome.status.as_str()))
+        .collect::<HashMap<_, _>>();
+    let statuses = resolved_targets
+        .iter()
+        .map(|client_id| {
+            precompleted_by_client
+                .get(client_id.as_str())
+                .copied()
+                .unwrap_or(TARGET_STATUS_QUEUED)
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let status = if statuses
+        .iter()
+        .any(|status| target_status_is_active(status))
+    {
+        JOB_STATUS_QUEUED.to_string()
+    } else {
+        aggregate_job_status_from_statuses(&statuses, statuses.len()).to_string()
+    };
+    let counts = create_job_target_counts_from_statuses(statuses.iter().map(String::as_str));
+    (status, counts)
 }
 
 async fn agent_update_release_policy_allows(
@@ -1770,6 +1800,10 @@ async fn reject_job(
     reason: &'static str,
     response_status: StatusCode,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), ApiError> {
+    let committed_targets = request.fixed_target_ids()?;
+    let target_count = committed_targets.len();
+    let target_counts =
+        create_job_target_counts_from_statuses(committed_targets.iter().map(|_| status));
     let job_id = state
         .repo
         .record_rejected_job(
@@ -1787,16 +1821,6 @@ async fn reject_job(
             "The rejected job could not be recorded.",
         ))?;
     let status = status.to_string();
-    let target_count = state
-        .repo
-        .get_job(job_id)
-        .await
-        .map_err(ApiError::internal_mapper(
-            "job_unavailable",
-            "The job could not be loaded.",
-        ))?
-        .map(|job| job.target_count.max(0) as usize)
-        .unwrap_or_default();
     warn!(
         selector_expression = %request.selector_expression,
         privileged = request.privileged,
@@ -1808,7 +1832,6 @@ async fn reject_job(
         job_id,
         status: status.clone(),
     });
-    let target_counts = create_job_target_counts(state, job_id).await?;
     Ok((
         response_status,
         Json(CreateJobResponse {

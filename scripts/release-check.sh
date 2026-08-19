@@ -9,6 +9,7 @@ smoke_require_tools bash cargo cp date docker tee
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 log_dir="${VPSMAN_RELEASE_LOG_DIR:-target/release-check/$stamp}"
+ci_test_postgres_url="${VPSMAN_TEST_POSTGRES_URL:-postgres://vpsman:vpsman@127.0.0.1:5432/vpsman}"
 mkdir -p "$log_dir"
 if [[ -z "${VPSMAN_BUILD_NUMBER_DIR:-}" ]]; then
   release_build_number_dir="$(cd "$log_dir" && pwd)/build-numbers"
@@ -95,7 +96,8 @@ else
   run_step cargo-test-worker-leases cargo test -p vpsman-worker worker_leases
   run_step cargo-test-worker-schedules cargo test -p vpsman-worker schedule
   run_step cargo-test-worker-alert-notifications cargo test -p vpsman-worker alert_notifications
-  run_step cargo-test-workspace cargo test --workspace
+  run_step cargo-test-workspace \
+    env VPSMAN_TEST_POSTGRES_URL="$ci_test_postgres_url" cargo test --workspace
 fi
 
 if [[ "${VPSMAN_RELEASE_SKIP_CLIPPY:-0}" == "1" ]]; then

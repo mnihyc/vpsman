@@ -1077,7 +1077,7 @@ function FleetAlertList({
         title="Confirm incident resolution"
         tone="warning"
       >
-        <label className="confirmationReasonField">
+        <label className="confirmationTypedInput">
           <span>Resolution reason</span>
           <textarea
             aria-label="Incident resolution reason"

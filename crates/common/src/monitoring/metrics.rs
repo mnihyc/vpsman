@@ -35,6 +35,7 @@ impl HistoryTier {
 // strictly behind the active cycle boundary.
 pub const MIN_TRAFFIC_COUNTER_RETENTION_DAYS: i32 = 32;
 pub const MAX_TELEMETRY_DISKS: usize = 256;
+pub const DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1: &str = "persistent_block_filesystems_v1";
 pub const MAX_TELEMETRY_NETWORKS: usize = 512;
 pub const MAX_TELEMETRY_TUNNELS: usize = 512;
 pub const MAX_TELEMETRY_PING_RESULTS: usize = 16;
@@ -278,6 +279,10 @@ pub struct AgentMetrics {
     pub cpu: CpuStat,
     pub memory: MemoryStat,
     pub disks: Vec<DiskStat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_collection_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_semantics: Option<String>,
     pub networks: Vec<NetworkStat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connections: Option<ConnectionStat>,
@@ -289,6 +294,14 @@ pub struct AgentMetrics {
     pub tunnel_reachability: Vec<TunnelReachabilityObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_forwarding: Option<crate::PortForwardRuntimeSnapshot>,
+}
+
+impl AgentMetrics {
+    pub fn has_persistent_block_filesystem_disk_sample(&self) -> bool {
+        self.disk_collection_available == Some(true)
+            && self.disk_semantics.as_deref()
+                == Some(DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1)
+    }
 }
 
 #[cfg(test)]

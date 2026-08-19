@@ -36,6 +36,51 @@ fn generated_operator_tokens_are_hashed_for_storage() {
     assert_eq!(token_hash(&token), hash);
 }
 
+#[test]
+fn postgres_operator_mutations_decode_returning_rows_before_commit() {
+    let source = include_str!("../repository/access/repository_auth.rs");
+
+    for function_name in [
+        "update_operator",
+        "set_operator_status",
+        "reset_operator_password",
+        "clear_operator_totp",
+        "update_operator_preferences",
+    ] {
+        let signature = format!("    pub(crate) async fn {function_name}(");
+        let after_signature = source
+            .split_once(signature.as_str())
+            .map(|(_, after_signature)| after_signature)
+            .unwrap_or_else(|| panic!("missing {function_name} implementation"));
+        let function_source = after_signature
+            .split("\n    pub(crate) async fn ")
+            .next()
+            .expect("function source");
+        let postgres_source = function_source
+            .split_once("Self::Postgres(pool) => {")
+            .map(|(_, postgres_source)| postgres_source)
+            .unwrap_or_else(|| panic!("missing {function_name} Postgres branch"));
+        let decode = "operator_view_from_row(&row)?";
+        let commit = "tx.commit().await?;";
+
+        assert_eq!(
+            postgres_source.matches(decode).count(),
+            1,
+            "{function_name} must decode its RETURNING row exactly once"
+        );
+        assert_eq!(
+            postgres_source.matches(commit).count(),
+            1,
+            "{function_name} must commit exactly once"
+        );
+        assert!(
+            postgres_source.find(decode).expect("checked decode")
+                < postgres_source.find(commit).expect("checked commit"),
+            "{function_name} must finish fallible RETURNING-row decoding before commit"
+        );
+    }
+}
+
 #[tokio::test]
 async fn bootstrap_operator_rejects_second_admin_in_repository() {
     let repo = Repository::Memory(MemoryState::default());
@@ -204,6 +249,35 @@ async fn refresh_operator_session_rotates_refresh_token_once() {
         .unwrap();
 
     assert!(replay.is_none());
+}
+
+#[tokio::test]
+async fn refresh_inactive_memory_operator_does_not_consume_the_refresh_token() {
+    let memory = MemoryState::default();
+    let repo = Repository::Memory(memory.clone());
+    let auth = repo
+        .bootstrap_operator(&BootstrapOperatorRequest {
+            username: "admin".to_string(),
+            password: "admin-password-123".to_string(),
+        })
+        .await
+        .unwrap();
+    memory.operators.write().await[0].status = "disabled".to_string();
+
+    assert!(repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(memory.sessions.read().await.len(), 1);
+    assert!(!memory.sessions.read().await[0].revoked);
+
+    memory.operators.write().await[0].status = "active".to_string();
+    assert!(repo
+        .refresh_operator_session(&auth.refresh_token)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

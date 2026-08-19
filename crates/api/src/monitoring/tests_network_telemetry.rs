@@ -300,6 +300,10 @@ async fn telemetry_sequence_is_idempotent_per_gateway_session() {
                     total_bytes: 200,
                     available_bytes: 50,
                 }],
+                disk_collection_available: Some(true),
+                disk_semantics: Some(
+                    vpsman_common::DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1.to_string(),
+                ),
                 port_forwarding: Some(PortForwardRuntimeSnapshot {
                     status: PortForwardRuntimeStatus::Absent,
                     observed_unix: 1_800_000_000,

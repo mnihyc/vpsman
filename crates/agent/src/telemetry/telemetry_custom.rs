@@ -6,7 +6,8 @@ use tokio::process::Command;
 use vpsman_common::{
     AgentConfig, AgentMetrics, AgentTelemetrySource, ConnectionStat, CpuStat, DiskStat,
     LoadAverage, MemoryStat, NetworkStat, RuntimeTunnelCommand, RuntimeTunnelStat,
-    MAX_TELEMETRY_DISKS, MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_TUNNELS,
+    DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1, MAX_TELEMETRY_DISKS, MAX_TELEMETRY_NETWORKS,
+    MAX_TELEMETRY_TUNNELS,
 };
 
 use crate::child_process::{run_child_with_bounded_output, ChildCleanupPolicy, ChildRunResult};
@@ -24,6 +25,8 @@ struct CustomMetricsPatch {
     cpu: Option<CpuPatch>,
     memory: Option<MemoryStat>,
     disks: Option<Vec<DiskStat>>,
+    disk_collection_available: Option<bool>,
+    disk_semantics: Option<String>,
     networks: Option<Vec<NetworkStat>>,
     connections: Option<ConnectionStat>,
     tunnels: Option<Vec<RuntimeTunnelStat>>,
@@ -146,6 +149,8 @@ fn apply_patch(metrics: &mut AgentMetrics, patch: CustomMetricsPatch) {
     }
     if let Some(disks) = patch.disks {
         metrics.disks = disks;
+        metrics.disk_collection_available = patch.disk_collection_available;
+        metrics.disk_semantics = patch.disk_semantics;
     }
     if let Some(networks) = patch.networks {
         metrics.networks = networks;
@@ -165,6 +170,8 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
             || patch.cpu.is_some()
             || patch.memory.is_some()
             || patch.disks.is_some()
+            || patch.disk_collection_available.is_some()
+            || patch.disk_semantics.is_some()
             || patch.networks.is_some()
             || patch.connections.is_some()
             || patch.tunnels.is_some(),
@@ -216,7 +223,30 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
             "custom telemetry patch has invalid memory"
         );
     }
+    if patch.disk_collection_available.is_some() || patch.disk_semantics.is_some() {
+        ensure!(
+            patch.disks.is_some(),
+            "custom telemetry disk contract is missing disks"
+        );
+        ensure!(
+            patch.disk_collection_available.is_some() && patch.disk_semantics.is_some(),
+            "custom telemetry disk contract must provide availability and semantics together"
+        );
+    }
     if let Some(disks) = patch.disks.as_ref() {
+        if let (Some(available), Some(semantics)) = (
+            patch.disk_collection_available,
+            patch.disk_semantics.as_deref(),
+        ) {
+            ensure!(
+                semantics == DISK_SEMANTICS_PERSISTENT_BLOCK_FILESYSTEMS_V1,
+                "custom telemetry disk contract has unsupported disk_semantics"
+            );
+            ensure!(
+                available || disks.is_empty(),
+                "unavailable custom telemetry disk collection cannot contain disks"
+            );
+        }
         ensure!(
             disks.len() <= MAX_TELEMETRY_DISKS,
             "custom telemetry patch has too many disks"
@@ -229,6 +259,13 @@ fn validate_custom_metrics_patch(patch: &CustomMetricsPatch) -> Result<()> {
                     && disk.available_bytes <= disk.total_bytes
             }),
             "custom telemetry patch has an invalid disk"
+        );
+        let mut mountpoints = HashSet::new();
+        ensure!(
+            disks
+                .iter()
+                .all(|disk| mountpoints.insert(disk.mountpoint.as_str())),
+            "custom telemetry patch has a duplicate disk"
         );
     }
     if let Some(networks) = patch.networks.as_ref() {
@@ -324,6 +361,8 @@ pub(crate) fn empty_custom_metrics_snapshot(observed_unix: u64) -> AgentMetrics 
         },
         memory: MemoryStat::default(),
         disks: Vec::new(),
+        disk_collection_available: None,
+        disk_semantics: None,
         networks: Vec::new(),
         connections: None,
         tunnels: Vec::new(),

@@ -663,8 +663,8 @@ export function ConsoleShell({
     if (!activeButton || activeButton.offsetParent === null) {
       return;
     }
-    handledSidebarFocusRequestRef.current = sidebarFocusRequest;
     const frame = window.requestAnimationFrame(() => {
+      handledSidebarFocusRequestRef.current = sidebarFocusRequest;
       const sidebarBounds = sidebar.getBoundingClientRect();
       const buttonBounds = activeButton.getBoundingClientRect();
       const nextScrollTop =

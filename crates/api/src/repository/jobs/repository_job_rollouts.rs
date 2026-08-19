@@ -147,10 +147,11 @@ impl Repository {
                     &reason,
                 )
                 .await?;
-                tx.commit().await?;
-                self.get_job_rollout(job_id)
+                let view = postgres_rollout_view_in_tx(&mut tx, job_id)
                     .await?
-                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))
+                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))?;
+                tx.commit().await?;
+                Ok(view)
             }
         }
     }
@@ -252,10 +253,11 @@ impl Repository {
                     &reason,
                 )
                 .await?;
-                tx.commit().await?;
-                self.get_job_rollout(job_id)
+                let view = postgres_rollout_view_in_tx(&mut tx, job_id)
                     .await?
-                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))
+                    .ok_or_else(|| anyhow::anyhow!("job_rollout_not_found"))?;
+                tx.commit().await?;
+                Ok(view)
             }
         }
     }
@@ -632,6 +634,46 @@ async fn postgres_rollout_view(pool: &sqlx::PgPool, row: PgRow) -> Result<JobRol
     .bind(job_id)
     .fetch_all(pool)
     .await?;
+    postgres_rollout_view_from_rows(row, target_rows)
+}
+
+async fn postgres_rollout_view_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    job_id: Uuid,
+) -> Result<Option<JobRolloutView>> {
+    let row = sqlx::query(&format!(
+        "{} WHERE rollout.job_id = $1",
+        postgres_rollout_select()
+    ))
+    .bind(job_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let target_rows = sqlx::query(
+        r#"
+        SELECT
+            assignment.client_id,
+            assignment.batch_index,
+            target.status,
+            target.message
+        FROM job_rollout_targets assignment
+        JOIN job_targets target
+          ON target.job_id = assignment.job_id
+         AND target.client_id = assignment.client_id
+        WHERE assignment.job_id = $1
+        ORDER BY assignment.batch_index, assignment.client_id
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    postgres_rollout_view_from_rows(row, target_rows).map(Some)
+}
+
+fn postgres_rollout_view_from_rows(row: PgRow, target_rows: Vec<PgRow>) -> Result<JobRolloutView> {
+    let job_id: Uuid = row.try_get("job_id")?;
     let targets = target_rows
         .into_iter()
         .map(|target| {

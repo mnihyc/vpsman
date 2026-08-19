@@ -1060,8 +1060,13 @@ test("renders an operational cloud-console fleet workspace", async ({
     await expect(
       page.getByLabel("Fleet alerts", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("Tunnel adapter status failed")).toBeVisible();
-    await expect(page.getByText("Agent is not online")).toBeVisible();
+    const currentAlerts = page.getByLabel("Current alert episodes data grid");
+    await expect(
+      currentAlerts.getByText("Tunnel adapter status failed", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      currentAlerts.getByText("Agent is not online", { exact: true }),
+    ).toBeVisible();
     await openConsoleSubpage(page, "Fleet", "Instances");
   }
 
@@ -3245,14 +3250,27 @@ test("keeps fleet alert policy actions selection-scoped", async ({
 
   const lifecycle = page.getByLabel("Policy alert lifecycle");
   await expect(lifecycle).toContainText(
-    "traffic-quota starter is an ordinary disabled policy",
+    "Every raw metric, status, and occurrence is typed policy evidence",
   );
-  await expect(lifecycle).toContainText("Triggered");
-  await expect(lifecycle).toContainText("Persisting on confirmation");
-  await expect(lifecycle).toContainText("Resolved");
-  await expect(lifecycle).toContainText("Unknown");
-  await expect(lifecycle).toContainText("Unknown neither resolves nor re-arms");
-  await expect(lifecycle).toContainText("new generation");
+  await expect(lifecycle).toContainText(
+    "A rule emits Triggered only after its Trigger condition and optional Trigger meta condition pass",
+  );
+  await expect(lifecycle).toContainText(
+    "confirming evidence is Persisting without another edge",
+  );
+  await expect(lifecycle).toContainText("Incomplete evidence is Unknown");
+  await expect(lifecycle).toContainText(
+    "Conditions resolve through the inverse Trigger or a separate hysteresis expression plus their Resolve meta condition",
+  );
+  await expect(lifecycle).toContainText(
+    "Occurrences resolve after their configured elapsed duration and may be reviewed earlier",
+  );
+  await expect(lifecycle).toContainText(
+    "Only Triggered and Resolved are durable automation edges",
+  );
+  await expect(lifecycle).toContainText(
+    "resetting triage to Open never resolves the lifecycle",
+  );
 
   const grid = page.getByLabel("Policy groups data grid");
   await expect(grid.getByText("2 of 2 policies")).toBeVisible();
@@ -3265,7 +3283,9 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   });
   await policySearch.click();
   await page.keyboard.type("enabled");
-  await expect(page.getByRole("option", { name: /^enabled$/ })).toBeVisible();
+  const enabledOption = page.getByRole("option", { name: /^enabled$/ });
+  await expect(enabledOption).toBeVisible();
+  await expect(enabledOption).toHaveAttribute("aria-selected", "true");
   await page.keyboard.press("Enter");
   await expect(policySearch).toHaveValue("enabled");
   await policySearch.fill("");
@@ -3351,12 +3371,12 @@ test("keeps fleet alert policy actions selection-scoped", async ({
   ).toHaveValue("traffic.cycle.total >= traffic.quota.total * 0.8");
   await expect(editor).toContainText("Trigger condition");
   await expect(editor).toContainText("Resolve condition");
-  await expect(editor.getByLabel("Trigger meta condition")).toHaveValue(
-    "immediate",
-  );
-  await expect(editor.getByLabel("Resolve meta condition")).toHaveValue(
-    "immediate",
-  );
+  await expect(
+    editor.getByLabel("Trigger meta condition", { exact: true }),
+  ).toHaveValue("immediate");
+  await expect(
+    editor.getByLabel("Resolve meta condition", { exact: true }),
+  ).toHaveValue("immediate");
   await editor.getByRole("button", { name: "Preview matches" }).click();
   await expect(editor.getByText("Match preview")).toBeVisible();
   await expect(editor).toContainText("80% total quota");

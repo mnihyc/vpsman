@@ -5,9 +5,10 @@ database. The supported in-place paths are applying
 `0010_disabled_resource_alert_policies.sql` and then
 `0011_operational_alert_lifecycle.sql` and
 `0012_policy_owned_alerts_event_schedules.sql` and
-`0013_revisioned_fleet_alert_state_bulk.sql` to the exact v0.4.4
+`0013_revisioned_fleet_alert_state_bulk.sql` and
+`0014_disk_telemetry_presence.sql` to the exact v0.4.4
 `0001`–`0009` files and checksums, or applying
-`0009_fleet_tag_settings.sql` through `0013` to the exact
+`0009_fleet_tag_settings.sql` through `0014` to the exact
 v0.3.5 `0001`–`0008` baseline. Earlier or different canonical baselines are
 not supported in place.
 
@@ -17,7 +18,7 @@ delivery body is immutable evidence of the rule version that produced it, so
 the lifecycle-expression rewrite deliberately refuses to reinterpret a queued
 body under the new generic alert vocabulary. After the queue is empty, stop
 API/application and worker writers for the entire migration sequence. Start
-only the new binaries after the full sequence through `0013` commits; startup performs the guarded
+only the new binaries after the full sequence through `0014` commits; startup performs the guarded
 expression rewrite and waits for policy evidence reconciliation before
 accepting ingress. Concurrent old-version writers and rolling binaries are not
 a supported migration mode.
@@ -56,15 +57,16 @@ export/import into a fresh database.
 | `0011_operational_alert_lifecycle.sql`         | The pre-unification operational condition/occurrence episode foundation with causal lifecycle and operator-resolution provenance constraints, a guarded application backfill fence, current/history and unresolved-occurrence cursor indexes, separate tunnel topology and runtime-evidence identities, and removal of the invalid webhook-delivery triage namespace without pruning legitimate triage or alert history.                                                                                                                                                                             |
 | `0012_policy_owned_alerts_event_schedules.sql` | One policy-owned alert episode model for state, metric, and occurrence evidence; typed Trigger and Resolve meta conditions; deterministic enabled operational defaults; monotonic evidence receipts and lifecycle outbox; generic `alert.triggered`/`alert.resolved` vocabulary; and prospective, exactly deduplicated Alert-event schedules with frozen actors, targets, argv templates, and bounded causal lineage.                                                                                                                                                                                |
 | `0013_revisioned_fleet_alert_state_bulk.sql`   | Monotonic fleet-alert triage revisions for compare-and-swap bulk mutations, with revision `0` reserved for an absent state row and existing persisted states upgraded to revision `1`; deterministic backfill and transactionally maintained coverage revisions for the exact hourly current-cycle traffic transition ledger, with raw-oracle fallback on incomplete coverage.                                                                                                                                                                                                                       |
+| `0014_disk_telemetry_presence.sql`             | Versioned persistent-block-filesystem disk evidence with nullable raw failure state and an independent positive-capacity disk utilization sample count. Existing unversioned rollup numerics remain intact for forensics but receive count `0`, so every authoritative current/history consumer ignores them without a full-table rewrite.                                                                                                                                                                                                                                                            |
 
 `scripts/audit-migrations.sh` verifies sequential filenames, a documented role
 for every migration, unique active index names (or an explicit drop/recreate),
 trailing newlines, and unsafe DDL patterns. Its destructive-DDL allowlist is
 limited to the three reviewed retired-store statements in `0012`; any other
 destructive statement still fails. That structural audit does not establish
-upgrade compatibility; the checksum-pinned v0.3.5 regression through `0013`,
+upgrade compatibility; the checksum-pinned v0.3.5 regression through `0014`,
 the exact v0.4.4
-`0001`–`0009` through `0013` regression, and this explicit declaration are the
+`0001`–`0009` through `0014` regression, and this explicit declaration are the
 compatibility evidence for the supported in-place steps.
 
 Except for the explicit checksum-pinned paths above, these migrations support

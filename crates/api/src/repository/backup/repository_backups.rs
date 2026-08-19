@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
 use chrono::Utc;
 use serde_json::json;
 use sqlx::Row;
@@ -757,6 +756,36 @@ impl Repository {
         status: BackupRequestStatus,
         operator: Option<&AuthContext>,
     ) -> Result<Option<BackupRequestView>> {
+        self.mark_open_backup_request_execution_terminal_with_reason(
+            job_id, client_id, status, operator, None,
+        )
+        .await
+    }
+
+    pub(crate) async fn mark_open_backup_request_artifact_validation_failed(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        reason: &str,
+    ) -> Result<Option<BackupRequestView>> {
+        self.mark_open_backup_request_execution_terminal_with_reason(
+            job_id,
+            client_id,
+            BackupRequestStatus::ExecutionFailed,
+            None,
+            Some(reason),
+        )
+        .await
+    }
+
+    async fn mark_open_backup_request_execution_terminal_with_reason(
+        &self,
+        job_id: Uuid,
+        client_id: &str,
+        status: BackupRequestStatus,
+        operator: Option<&AuthContext>,
+        reason: Option<&str>,
+    ) -> Result<Option<BackupRequestView>> {
         if !matches!(
             status,
             BackupRequestStatus::ExecutionFailed | BackupRequestStatus::ExecutionCanceled
@@ -766,32 +795,51 @@ impl Repository {
         match self {
             Self::Memory(memory) => {
                 let mut requests = memory.backup_requests.write().await;
+                let mut audits = memory.audits.write().await;
                 let Some(request) = requests.iter_mut().rev().find(|request| {
                     request.client_id == client_id
                         && request.source_job_id == Some(job_id)
                         && request.artifact_id.is_none()
-                        && request.status == BackupRequestStatus::RequestedMetadataOnly.as_str()
+                        && matches!(
+                            request.status.as_str(),
+                            "requested_metadata_only" | "execution_failed" | "execution_canceled"
+                        )
                 }) else {
                     return Ok(None);
                 };
-                request.status = status.as_str().to_string();
+                if request.status != BackupRequestStatus::RequestedMetadataOnly.as_str()
+                    && request.status != status.as_str()
+                {
+                    return Ok(None);
+                }
+                let changed = request.status == BackupRequestStatus::RequestedMetadataOnly.as_str();
+                if changed {
+                    request.status = status.as_str().to_string();
+                }
                 let view = request.clone();
-                drop(requests);
-                let terminal_at = Utc::now().to_rfc3339();
-                memory
-                    .audits
-                    .write()
-                    .await
-                    .push(backup_request_execution_audit(
+                let target = format!("backup_request:{}", view.id);
+                let action = backup_request_execution_action(&view.status);
+                let terminal_at = audits
+                    .iter()
+                    .rev()
+                    .find(|audit| audit.action == action && audit.target == target)
+                    .map(|audit| audit.created_at.clone())
+                    .unwrap_or_else(|| Utc::now().to_rfc3339());
+                if changed {
+                    audits.push(backup_request_execution_audit(
                         &view,
                         operator,
+                        reason,
                         terminal_at.clone(),
                     ));
+                }
+                drop(audits);
+                drop(requests);
                 if status == BackupRequestStatus::ExecutionFailed {
                     self.reconcile_memory_backup_event_source(view.id, &terminal_at)
                         .await?;
                 }
-                Ok(Some(view))
+                Ok(changed.then_some(view))
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -846,7 +894,7 @@ impl Repository {
                 .bind(backup_request_execution_action(&view.status))
                 .bind(format!("backup_request:{}", view.id))
                 .bind(&view.payload_hash)
-                .bind(backup_request_execution_metadata(&view, operator))
+                .bind(backup_request_execution_metadata(&view, operator, reason))
                 .execute(&mut *tx)
                 .await?;
                 if status == BackupRequestStatus::ExecutionFailed {
@@ -867,7 +915,7 @@ impl Repository {
         backup_request: &BackupRequestView,
         selected_job_id: Option<Uuid>,
     ) -> Result<Option<BackupArtifactOutputCandidate>> {
-        match self {
+        let job_id = match self {
             Self::Memory(memory) => {
                 let jobs = memory.jobs.read().await;
                 let operations = memory.job_operations.read().await;
@@ -885,32 +933,18 @@ impl Repository {
                                     && target.status == "completed"
                             })
                     })
-                    .map(|job| {
-                        let mut stdout = outputs
-                            .iter()
-                            .filter(|output| {
-                                output.job_id == job.id
-                                    && output.client_id == backup_request.client_id
-                                    && output.stream == "stdout"
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        stdout.sort_by_key(|output| output.seq);
-                        (job.id, job.created_at.clone(), stdout)
+                    .filter(|job| {
+                        outputs.iter().any(|output| {
+                            output.job_id == job.id
+                                && output.client_id == backup_request.client_id
+                                && output.stream == "stdout"
+                        })
                     })
-                    .filter(|(_, _, outputs)| !outputs.is_empty())
+                    .map(|job| (job.id, job.created_at.clone()))
                     .collect::<Vec<_>>();
                 candidates
                     .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
-                Ok(candidates
-                    .into_iter()
-                    .next()
-                    .map(
-                        |(job_id, _created_at, outputs)| BackupArtifactOutputCandidate {
-                            job_id,
-                            outputs,
-                        },
-                    ))
+                candidates.into_iter().next().map(|(job_id, _)| job_id)
             }
             Self::Postgres(pool) => {
                 let row = sqlx::query(
@@ -941,60 +975,19 @@ impl Repository {
                 .bind(selected_job_id)
                 .fetch_optional(pool)
                 .await?;
-                let Some(row) = row else {
-                    return Ok(None);
-                };
-                let job_id: Uuid = row.try_get("id")?;
-                let output_rows = sqlx::query(
-                    r#"
-                    SELECT
-                        job_id,
-                        client_id,
-                        seq,
-                        stream,
-                        data,
-                        storage,
-                        object_key,
-                        data_sha256_hex,
-                        data_size_bytes,
-                        exit_code,
-                        done,
-                        created_at::text AS created_at
-                    FROM job_outputs
-                    WHERE job_id = $1
-                      AND client_id = $2
-                      AND stream = 'stdout'
-                    ORDER BY seq
-                    "#,
-                )
-                .bind(job_id)
-                .bind(&backup_request.client_id)
-                .fetch_all(pool)
-                .await?;
-                let outputs = output_rows
-                    .into_iter()
-                    .map(|row| {
-                        let data: Vec<u8> = row.try_get("data")?;
-                        Ok(JobOutputView {
-                            job_id: row.try_get("job_id")?,
-                            client_id: row.try_get("client_id")?,
-                            seq: row.try_get("seq")?,
-                            stream: row.try_get("stream")?,
-                            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
-                            storage: row.try_get("storage")?,
-                            artifact_object_key: row.try_get("object_key")?,
-                            artifact_sha256_hex: row.try_get("data_sha256_hex")?,
-                            artifact_size_bytes: row.try_get("data_size_bytes")?,
-                            exit_code: row.try_get("exit_code")?,
-                            done: row.try_get("done")?,
-                            received_at: None,
-                            created_at: row.try_get("created_at")?,
-                        })
-                    })
-                    .collect::<std::result::Result<Vec<_>, sqlx::Error>>()?;
-                Ok(Some(BackupArtifactOutputCandidate { job_id, outputs }))
+                row.map(|row| row.try_get("id")).transpose()?
             }
-        }
+        };
+        let Some(job_id) = job_id else {
+            return Ok(None);
+        };
+        let outputs = self
+            .list_job_outputs_for_target(job_id, &backup_request.client_id)
+            .await?
+            .into_iter()
+            .filter(|output| output.stream == "stdout")
+            .collect::<Vec<_>>();
+        Ok((!outputs.is_empty()).then_some(BackupArtifactOutputCandidate { job_id, outputs }))
     }
 }
 
@@ -1083,6 +1076,7 @@ fn backup_request_metadata(
 fn backup_request_execution_audit(
     view: &BackupRequestView,
     operator: Option<&AuthContext>,
+    reason: Option<&str>,
     created_at: String,
 ) -> AuditLogView {
     AuditLogView {
@@ -1091,7 +1085,7 @@ fn backup_request_execution_audit(
         action: backup_request_execution_action(&view.status).to_string(),
         target: format!("backup_request:{}", view.id),
         command_hash: Some(view.payload_hash.clone()),
-        metadata: backup_request_execution_metadata(view, operator),
+        metadata: backup_request_execution_metadata(view, operator, reason),
         created_at,
     }
 }
@@ -1106,8 +1100,9 @@ fn backup_request_execution_action(status: &str) -> &'static str {
 fn backup_request_execution_metadata(
     view: &BackupRequestView,
     operator: Option<&AuthContext>,
+    reason: Option<&str>,
 ) -> serde_json::Value {
-    json!({
+    let mut metadata = json!({
         "client_id": &view.client_id,
         "paths": &view.paths,
         "include_config": view.include_config,
@@ -1129,7 +1124,12 @@ fn backup_request_execution_metadata(
         "origin_kind": if operator.is_some() { "operator_request" } else { "control_plane" },
         "component": "backup-controller",
         "metadata_only": true,
-    })
+    });
+    if let Some(reason) = reason {
+        metadata["reason"] = serde_json::Value::String(reason.to_string());
+        metadata["failure_phase"] = serde_json::Value::String("artifact_validation".to_string());
+    }
+    metadata
 }
 
 fn backup_rejection_metadata(

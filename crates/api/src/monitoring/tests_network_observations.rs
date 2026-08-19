@@ -4,12 +4,16 @@ use axum::{
     extract::{Query, State},
     Json,
 };
+use base64::Engine as _;
 use vpsman_common::{
     observed_ospf_cost, plan_tunnel, CommandOutput, OspfCostPolicy, OutputStream, TunnelKind,
     TunnelPlan, TunnelPlanInput,
 };
 
-use crate::gateway_client::GatewayDispatchClient;
+use crate::{
+    gateway_client::GatewayDispatchClient,
+    model::{AuditLogView, JobOutputView},
+};
 
 #[tokio::test]
 async fn records_network_observation_summaries_from_status_outputs() {
@@ -49,6 +53,114 @@ async fn records_network_observation_summaries_from_status_outputs() {
     assert_eq!(observations[0].latency_avg_ms, Some(17.25));
     assert_eq!(observations[0].packet_loss_ratio, Some(0.02));
     assert_eq!(observations[0].healthy, Some(true));
+}
+
+#[tokio::test]
+async fn terminal_repair_preserves_persisted_output_timestamp_and_targets_directly() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let job_id = Uuid::new_v4();
+    let received_at = "2025-01-02T03:04:05Z";
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "type": "tunnel_reachability",
+        "plan": "repair-plan",
+        "interface": "tun-repair",
+        "peer_client_id": "right-b",
+        "target": "192.0.2.10",
+        "healthy": true
+    }))
+    .unwrap();
+    memory.job_outputs.write().await.extend([
+        JobOutputView {
+            job_id,
+            client_id: "left-a".to_string(),
+            seq: 0,
+            stream: "status".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(payload),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            artifact_sha256_hex: None,
+            artifact_size_bytes: None,
+            exit_code: Some(0),
+            done: true,
+            received_at: Some(received_at.to_string()),
+            created_at: "2026-08-19T00:00:00Z".to_string(),
+        },
+        JobOutputView {
+            job_id,
+            client_id: "unrelated-client".to_string(),
+            seq: 0,
+            stream: "status".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"not json"),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            artifact_sha256_hex: None,
+            artifact_size_bytes: None,
+            exit_code: Some(1),
+            done: true,
+            received_at: None,
+            created_at: "2026-08-19T00:00:00Z".to_string(),
+        },
+    ]);
+
+    repo.repair_persisted_job_output_derivations_for_target(job_id, "left-a")
+        .await
+        .unwrap();
+
+    let observations = memory.network_observations.read().await;
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].client_id, "left-a");
+    assert_eq!(observations[0].observed_at, received_at);
+    assert_eq!(observations[0].received_at, received_at);
+}
+
+#[tokio::test]
+async fn terminal_result_output_uses_canonical_audited_sequence_not_latest_done() {
+    let repo = Repository::Memory(MemoryState::default());
+    let Repository::Memory(memory) = &repo else {
+        unreachable!();
+    };
+    let job_id = Uuid::new_v4();
+    for (seq, data) in [(4, b"canonical".as_slice()), (9, b"later".as_slice())] {
+        memory.job_outputs.write().await.push(JobOutputView {
+            job_id,
+            client_id: "left-a".to_string(),
+            seq,
+            stream: "status".to_string(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+            storage: "inline".to_string(),
+            artifact_object_key: None,
+            artifact_sha256_hex: None,
+            artifact_size_bytes: None,
+            exit_code: Some(0),
+            done: true,
+            received_at: None,
+            created_at: format!("2026-08-19T00:00:0{seq}Z"),
+        });
+    }
+    memory.audits.write().await.push(AuditLogView {
+        id: Uuid::new_v4(),
+        actor_id: None,
+        action: "job.target_result".to_string(),
+        target: "client:left-a".to_string(),
+        command_hash: None,
+        metadata: serde_json::json!({
+            "job_id": job_id,
+            "status": "completed",
+            "output_seq": 4,
+            "component": "gateway-command-output-ingest"
+        }),
+        created_at: "2026-08-19T00:00:10Z".to_string(),
+    });
+
+    let output = repo
+        .terminal_result_status_output_for_target(job_id, "left-a", "completed")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.data, b"canonical");
 }
 
 #[tokio::test]

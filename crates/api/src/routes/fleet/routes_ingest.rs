@@ -13,11 +13,7 @@ use vpsman_common::{
     MAX_TELEMETRY_NETWORKS, MAX_TELEMETRY_PING_RESULTS, MAX_TELEMETRY_TUNNELS,
     MAX_TUNNEL_REACHABILITY_OBSERVATIONS,
 };
-use vpsman_server_core::{
-    target_status_is_active, TARGET_STATUS_AGENT_LOST, TARGET_STATUS_AGENT_TIMEOUT,
-    TARGET_STATUS_CANCELED, TARGET_STATUS_COMPLETED, TARGET_STATUS_CONTROL_TIMEOUT,
-    TARGET_STATUS_FAILED, TARGET_STATUS_REJECTED, TARGET_STATUS_RUNNING,
-};
+use vpsman_server_core::{target_status_is_active, TARGET_STATUS_COMPLETED, TARGET_STATUS_RUNNING};
 
 use crate::{
     backup_auto_artifacts::try_auto_record_backup_artifact,
@@ -30,7 +26,6 @@ use crate::{
     repository_job_outputs::{JobOutputPersistConfig, JobOutputWriteResult},
     runtime_config::request_runtime_config_reload_for_agent,
     state::AppState,
-    TargetDispatchOutcome,
 };
 
 pub(crate) async fn validate_agent_identity(
@@ -252,7 +247,9 @@ pub(crate) async fn ingest_command_output(
         object_store: state.backup_object_store.as_ref(),
         artifact_min_bytes: state.job_output_artifact_min_bytes(),
     };
-    if target.completed_at.is_some() || !target_status_is_active(&target.status) {
+    let target_was_terminal =
+        target.completed_at.is_some() || !target_status_is_active(&target.status);
+    if target_was_terminal {
         match state
             .repo
             .classify_existing_job_output_chunk_with_config(
@@ -264,12 +261,9 @@ pub(crate) async fn ingest_command_output(
             )
             .await?
         {
-            Some(JobOutputWriteResult::DuplicateIdentical) => {
-                return Ok(Json(IngestResponse {
-                    accepted: true,
-                    message: "duplicate command output already recorded".to_string(),
-                }));
-            }
+            // Continue through the normal recorder so an exact replay repairs any idempotent
+            // derived state whose first post-commit attempt failed.
+            Some(JobOutputWriteResult::DuplicateIdentical) => {}
             Some(JobOutputWriteResult::DuplicateConflict) => {
                 state
                     .repo
@@ -353,7 +347,7 @@ pub(crate) async fn ingest_command_output(
             return Err(ApiError::conflict("job_output_sequence_conflict"));
         }
         state.invalidate_job_details(event.job_id);
-        if record_result.target_terminalized {
+        if record_result.terminal_reconciliation_ready {
             let refreshed = state
                 .repo
                 .refresh_job_status_from_targets(event.job_id)
@@ -361,103 +355,89 @@ pub(crate) async fn ingest_command_output(
             state
                 .process_job_terminal_events_or_publish_refresh(500, event.job_id, refreshed)
                 .await?;
-            if let Err(error) = try_record_agent_update_lifecycle_for_job_target(
-                &state,
-                event.job_id,
-                &event.client_id,
-                &outcome,
-            )
-            .await
-            {
-                warn!(
-                    ?error,
-                    job_id = %event.job_id,
-                    client_id = %event.client_id,
-                    "agent update lifecycle audit failed after command output ingest"
-                );
-            }
-            if let Err(error) = record_network_routing_terminal_result(
-                &state,
-                event.job_id,
-                &event.client_id,
-                &outcome.status,
-                Some(&event.output),
-            )
-            .await
-            {
-                warn!(
-                    ?error,
-                    job_id = %event.job_id,
-                    client_id = %event.client_id,
-                    "network routing result validation failed after command output ingest"
-                );
-            }
-            if outcome.status == TARGET_STATUS_COMPLETED {
-                if let Err(error) = try_auto_record_backup_artifact_for_job_target(
-                    &state,
-                    event.job_id,
-                    &event.client_id,
-                )
-                .await
-                {
-                    warn!(
-                        ?error,
-                        job_id = %event.job_id,
-                        client_id = %event.client_id,
-                        "backup artifact auto-record failed after command output ingest"
-                    );
-                }
-            }
         }
     } else {
-        let write_result = match state
-            .repo
-            .record_active_job_output_chunk_checked_with_config(
-                event.job_id,
-                &event.client_id,
-                event.seq,
-                &event.output,
-                Some(received_at.clone()),
-                persist_config,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(error) if error.to_string().contains("job_target_not_active") => {
-                return Err(ApiError::conflict("job_target_not_active"));
-            }
-            Err(error) if error.to_string().contains("job_target_not_found") => {
-                return Err(ApiError::not_found("job_target_not_found"));
-            }
-            Err(error) => return Err(ApiError::from(error)),
-        };
-        if write_result == JobOutputWriteResult::DuplicateConflict {
-            return Err(ApiError::conflict("job_output_sequence_conflict"));
-        }
         let is_network_traffic_import = job.command_type == "network_traffic_import_vnstat";
-        if !is_network_traffic_import
-            || network_traffic_import_output_advances_finalization(write_result)
-        {
-            let message = status_output_message(&event.output)
-                .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
-            state
-                .repo
-                .mark_job_target_running(event.job_id, &event.client_id, &message)
-                .await?;
-            state.invalidate_job_details(event.job_id);
-        }
         if is_network_traffic_import {
+            let write_result = match state
+                .repo
+                .record_active_job_output_chunk_checked_with_config(
+                    event.job_id,
+                    &event.client_id,
+                    event.seq,
+                    &event.output,
+                    Some(received_at.clone()),
+                    persist_config,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) if error.to_string().contains("job_target_not_active") => {
+                    return Err(ApiError::conflict("job_target_not_active"));
+                }
+                Err(error) if error.to_string().contains("job_target_not_found") => {
+                    return Err(ApiError::not_found("job_target_not_found"));
+                }
+                Err(error) => return Err(ApiError::from(error)),
+            };
+            if write_result == JobOutputWriteResult::DuplicateConflict {
+                return Err(ApiError::conflict("job_output_sequence_conflict"));
+            }
             if network_traffic_import_output_advances_finalization(write_result) {
+                let message = status_output_message(&event.output)
+                    .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
+                state
+                    .repo
+                    .mark_job_target_running(event.job_id, &event.client_id, &message)
+                    .await?;
+                state.invalidate_job_details(event.job_id);
                 wake_network_traffic_import_finalizer(state.clone());
             }
         } else {
-            finalize_contiguous_final_job_output_if_ready(
-                &state,
-                event.job_id,
-                &event.client_id,
-                persist_config,
-            )
-            .await?;
+            let record = match state
+                .repo
+                .record_active_job_output_chunk_and_finalize_if_ready_with_config(
+                    event.job_id,
+                    &event.client_id,
+                    event.seq,
+                    &event.output,
+                    Some(received_at.clone()),
+                    persist_config,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) if error.to_string().contains("job_target_not_active") => {
+                    return Err(ApiError::conflict("job_target_not_active"));
+                }
+                Err(error) if error.to_string().contains("job_target_not_found") => {
+                    return Err(ApiError::not_found("job_target_not_found"));
+                }
+                Err(error) => return Err(ApiError::from(error)),
+            };
+            if record.write_result == JobOutputWriteResult::DuplicateConflict {
+                return Err(ApiError::conflict("job_output_sequence_conflict"));
+            }
+            state.invalidate_job_details(event.job_id);
+            if record.terminal_reconciliation_ready {
+                let _candidate = record
+                    .contiguous_final
+                    .ok_or_else(|| ApiError::conflict("job_terminal_output_evidence_missing"))?;
+                let refreshed = state
+                    .repo
+                    .refresh_job_status_from_targets(event.job_id)
+                    .await?;
+                state
+                    .process_job_terminal_events_or_publish_refresh(500, event.job_id, refreshed)
+                    .await?;
+            } else {
+                let message = status_output_message(&event.output)
+                    .unwrap_or_else(|| TARGET_STATUS_RUNNING.to_string());
+                state
+                    .repo
+                    .mark_job_target_running(event.job_id, &event.client_id, &message)
+                    .await?;
+            }
         }
     }
     if event.output.stream == OutputStream::Status && is_terminal_command_type(&job.command_type) {
@@ -474,174 +454,6 @@ pub(crate) async fn ingest_command_output(
 
 fn network_traffic_import_output_advances_finalization(write_result: JobOutputWriteResult) -> bool {
     write_result == JobOutputWriteResult::Inserted
-}
-
-async fn finalize_contiguous_final_job_output_if_ready(
-    state: &AppState,
-    job_id: uuid::Uuid,
-    client_id: &str,
-    persist_config: JobOutputPersistConfig<'_>,
-) -> Result<(), ApiError> {
-    let Some(candidate) = state
-        .repo
-        .contiguous_final_job_output_candidate(job_id, client_id)
-        .await?
-    else {
-        return Ok(());
-    };
-    let received_at = candidate
-        .received_at
-        .clone()
-        .unwrap_or_else(|| Utc::now().to_rfc3339());
-    let outcome = target_outcome_from_done_output(job_id, &candidate.output, received_at);
-    let record_result = match state
-        .repo
-        .record_active_final_job_output_and_target_result_with_config(
-            job_id,
-            client_id,
-            candidate.seq,
-            &candidate.output,
-            outcome.received_at.clone(),
-            persist_config,
-            &outcome,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) if error.to_string().contains("job_target_not_active") => {
-            return Ok(());
-        }
-        Err(error) if error.to_string().contains("job_target_not_found") => {
-            return Err(ApiError::not_found("job_target_not_found"));
-        }
-        Err(error) => return Err(ApiError::from(error)),
-    };
-    if record_result.write_result == JobOutputWriteResult::DuplicateConflict {
-        return Err(ApiError::conflict("job_output_sequence_conflict"));
-    }
-    if record_result.target_terminalized {
-        let refreshed = state.repo.refresh_job_status_from_targets(job_id).await?;
-        state
-            .process_job_terminal_events_or_publish_refresh(500, job_id, refreshed)
-            .await?;
-        if let Err(error) =
-            try_record_agent_update_lifecycle_for_job_target(state, job_id, client_id, &outcome)
-                .await
-        {
-            warn!(
-                ?error,
-                job_id = %job_id,
-                client_id,
-                "agent update lifecycle audit failed after deferred command output finalization"
-            );
-        }
-        if let Err(error) = record_network_routing_terminal_result(
-            state,
-            job_id,
-            client_id,
-            &outcome.status,
-            Some(&candidate.output),
-        )
-        .await
-        {
-            warn!(
-                ?error,
-                job_id = %job_id,
-                client_id,
-                "network routing result validation failed after deferred output finalization"
-            );
-        }
-        if outcome.status == TARGET_STATUS_COMPLETED {
-            if let Err(error) =
-                try_auto_record_backup_artifact_for_job_target(state, job_id, client_id).await
-            {
-                warn!(
-                    ?error,
-                    job_id = %job_id,
-                    client_id,
-                    "backup artifact auto-record failed after deferred command output finalization"
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-async fn try_record_agent_update_lifecycle_for_job_target(
-    state: &AppState,
-    job_id: uuid::Uuid,
-    client_id: &str,
-    outcome: &TargetDispatchOutcome,
-) -> Result<(), ApiError> {
-    let Some(context) = state.repo.get_job_completion_context(job_id).await? else {
-        return Ok(());
-    };
-    match context.operation {
-        JobCommand::AgentUpdateActivate {
-            staged_sha256_hex, ..
-        } if outcome.status == TARGET_STATUS_COMPLETED => {
-            state
-                .repo
-                .record_agent_update_activation_completed(client_id, job_id, &staged_sha256_hex)
-                .await?;
-        }
-        JobCommand::AgentUpdateActivate {
-            staged_sha256_hex, ..
-        } if agent_update_lifecycle_failure_status(&outcome.status) => {
-            state
-                .repo
-                .record_agent_update_activation_failed(
-                    client_id,
-                    job_id,
-                    &staged_sha256_hex,
-                    &outcome.status,
-                    outcome.exit_code,
-                    &outcome.message,
-                )
-                .await?;
-        }
-        JobCommand::AgentUpdateRollback {
-            rollback_sha256_hex,
-        } if outcome.status == TARGET_STATUS_COMPLETED => {
-            state
-                .repo
-                .record_agent_update_rollback_completed(
-                    client_id,
-                    job_id,
-                    rollback_sha256_hex.as_deref(),
-                )
-                .await?;
-        }
-        JobCommand::AgentUpdateRollback {
-            rollback_sha256_hex,
-        } if agent_update_lifecycle_failure_status(&outcome.status) => {
-            state
-                .repo
-                .record_agent_update_rollback_failed(
-                    client_id,
-                    job_id,
-                    rollback_sha256_hex.as_deref(),
-                    &outcome.status,
-                    outcome.exit_code,
-                    &outcome.message,
-                )
-                .await?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn agent_update_lifecycle_failure_status(status: &str) -> bool {
-    matches!(
-        status,
-        TARGET_STATUS_FAILED
-            | TARGET_STATUS_REJECTED
-            | TARGET_STATUS_AGENT_TIMEOUT
-            | TARGET_STATUS_CONTROL_TIMEOUT
-            | TARGET_STATUS_AGENT_LOST
-            | TARGET_STATUS_CANCELED
-    )
 }
 
 pub(crate) async fn record_network_routing_terminal_result(
@@ -695,6 +507,16 @@ pub(crate) async fn record_network_routing_terminal_result(
             .await?;
         return Ok(());
     }
+    let stored_output;
+    let output = if let Some(output) = output {
+        Some(output)
+    } else {
+        stored_output = state
+            .repo
+            .terminal_result_status_output_for_target(job_id, client_id, outcome_status)
+            .await?;
+        stored_output.as_ref()
+    };
     let Some(output) = output else {
         state
             .repo
@@ -750,7 +572,7 @@ pub(crate) async fn record_network_routing_terminal_result(
     Ok(())
 }
 
-async fn try_auto_record_backup_artifact_for_job_target(
+pub(crate) async fn try_auto_record_backup_artifact_for_job_target(
     state: &AppState,
     job_id: uuid::Uuid,
     client_id: &str,
@@ -1061,14 +883,17 @@ fn valid_agent_metrics(metrics: &vpsman_common::AgentMetrics) -> bool {
             .swap_total_bytes
             .zip(metrics.memory.swap_available_bytes)
             .is_some_and(|(total, available)| available > total)
+        || metrics.disk_collection_available == Some(false) && !metrics.disks.is_empty()
     {
         return false;
     }
+    let mut mountpoints = std::collections::HashSet::new();
     if metrics.disks.iter().any(|disk| {
         disk.mountpoint.is_empty()
             || disk.mountpoint.len() > 4096
             || disk.mountpoint.chars().any(char::is_control)
             || disk.available_bytes > disk.total_bytes
+            || !mountpoints.insert(disk.mountpoint.as_str())
     }) {
         return false;
     }

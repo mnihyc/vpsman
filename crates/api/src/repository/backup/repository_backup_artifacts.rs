@@ -9,9 +9,9 @@ use crate::{
     model::{
         AuditLogView, AuthContext, BackupArtifactView, BackupRequestStatus, BackupRequestView,
         ListQuery, NewServerArtifact, RecordBackupArtifactMetadataRequest,
+        ServerArtifactCleanupCandidate,
     },
     repository::Repository,
-    repository_server_jobs::upsert_memory_server_artifact,
     unix_now,
     util::{limit_or_default, offset_or_default, search_pattern, sort_descending},
 };
@@ -247,38 +247,130 @@ impl Repository {
         };
         match self {
             Self::Memory(memory) => {
-                {
-                    let mut backup_requests = memory.backup_requests.write().await;
-                    let stored = backup_requests
-                        .iter_mut()
-                        .find(|stored| stored.id == backup_request.id)
-                        .ok_or_else(|| anyhow::anyhow!("backup_request_not_found"))?;
+                // Keep the same request -> artifact -> server artifact order as cleanup reads,
+                // then acquire the audit guard before making the retry-visible mutation.
+                let mut backup_requests = memory.backup_requests.write().await;
+                let mut backup_artifacts = memory.backup_artifacts.write().await;
+                let mut server_artifacts = memory.server_artifacts.write().await;
+                let mut audits = memory.audits.write().await;
+                let stored_index = backup_requests
+                    .iter()
+                    .position(|stored| stored.id == backup_request.id)
+                    .ok_or_else(|| anyhow::anyhow!("backup_request_not_found"))?;
+                let linked_artifact_id = backup_requests[stored_index].artifact_id;
+                let existing_artifact = linked_artifact_id
+                    .and_then(|existing_id| {
+                        backup_artifacts
+                            .iter()
+                            .find(|existing| existing.id == existing_id)
+                    })
+                    .or_else(|| {
+                        linked_artifact_id
+                            .is_none()
+                            .then(|| {
+                                backup_artifacts
+                                    .iter()
+                                    .find(|existing| existing.id == artifact.id)
+                            })
+                            .flatten()
+                    })
+                    .cloned();
+                ensure!(
+                    linked_artifact_id.is_none() || existing_artifact.is_some(),
+                    "backup_artifact_already_recorded"
+                );
+                let persisted = existing_artifact.as_ref().unwrap_or(&artifact);
+                if existing_artifact.is_some() {
                     ensure!(
-                        stored.artifact_id.is_none(),
+                        backup_artifact_matches(persisted, &artifact),
                         "backup_artifact_already_recorded"
                     );
-                    upsert_memory_server_artifact(
-                        memory,
-                        backup_server_artifact(backup_request, &artifact),
-                        "active",
+                }
+                let server_artifact = backup_server_artifact(backup_request, persisted);
+                let existing_server_artifact =
+                    validate_memory_server_artifact_upsert(&server_artifacts, &server_artifact)?;
+                let audit = linked_artifact_id.is_none().then(|| {
+                    backup_artifact_audit(
+                        backup_request,
+                        &artifact,
+                        request.confirmed,
+                        operator,
+                        unix_now().to_string(),
                     )
-                    .await?;
-                    stored.artifact_id = Some(artifact.id);
-                    stored.status = BackupRequestStatus::ArtifactMetadataRecorded
+                });
+
+                apply_memory_server_artifact_upsert(
+                    &mut server_artifacts,
+                    server_artifact,
+                    "active",
+                    existing_server_artifact,
+                );
+                if linked_artifact_id.is_some() {
+                    let existing = existing_artifact
+                        .expect("linked backup artifact must be prevalidated before mutation");
+                    return Ok(existing);
+                }
+                if existing_artifact.is_none() {
+                    backup_artifacts.push(artifact.clone());
+                }
+                backup_requests[stored_index].artifact_id = Some(artifact.id);
+                backup_requests[stored_index].status =
+                    BackupRequestStatus::ArtifactMetadataRecorded
                         .as_str()
                         .to_string();
-                }
-                memory.backup_artifacts.write().await.push(artifact.clone());
-                memory.audits.write().await.push(backup_artifact_audit(
-                    backup_request,
-                    &artifact,
-                    request.confirmed,
-                    operator,
-                    unix_now().to_string(),
-                ));
+                audits.push(audit.expect("new backup artifact audit must be prepared"));
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
+                let linked_artifact_id: Option<Option<Uuid>> = sqlx::query_scalar(
+                    r#"
+                    SELECT artifact_id
+                    FROM backup_requests
+                    WHERE id = $1
+                    FOR UPDATE
+                    "#,
+                )
+                .bind(backup_request.id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let linked_artifact_id = linked_artifact_id
+                    .ok_or_else(|| anyhow::anyhow!("backup_request_not_found"))?;
+                if let Some(linked_artifact_id) = linked_artifact_id {
+                    let row = sqlx::query(
+                        r#"
+                        SELECT
+                            id,
+                            client_id,
+                            object_key,
+                            sha256_hex,
+                            size_bytes,
+                            'active'::text AS status,
+                            TRUE AS content_available,
+                            created_at::text AS created_at
+                        FROM backup_artifacts
+                        WHERE id = $1
+                        "#,
+                    )
+                    .bind(linked_artifact_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
+                    let existing = row
+                        .map(backup_artifact_from_row)
+                        .transpose()?
+                        .ok_or_else(|| anyhow::anyhow!("backup_artifact_already_recorded"))?;
+                    ensure!(
+                        backup_artifact_matches(&existing, &artifact),
+                        "backup_artifact_already_recorded"
+                    );
+                    Repository::upsert_server_artifact_in_tx(
+                        &mut tx,
+                        &backup_server_artifact(backup_request, &existing),
+                        "active",
+                    )
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(existing);
+                }
                 let row = sqlx::query(
                     r#"
                     INSERT INTO backup_artifacts (
@@ -354,6 +446,65 @@ impl Repository {
     }
 }
 
+fn validate_memory_server_artifact_upsert(
+    artifacts: &[ServerArtifactCleanupCandidate],
+    artifact: &NewServerArtifact,
+) -> Result<Option<usize>> {
+    ensure!(
+        artifact.size_bytes >= 0,
+        "server_artifact_size_bytes_invalid"
+    );
+    let existing = artifacts
+        .iter()
+        .position(|existing| existing.object_key == artifact.object_key);
+    if let Some(index) = existing {
+        let existing = &artifacts[index];
+        ensure!(
+            existing.domain == artifact.domain
+                && existing.sha256_hex == artifact.sha256_hex
+                && existing.size_bytes == artifact.size_bytes
+                && existing.job_id == artifact.job_id
+                && existing.client_id == artifact.client_id
+                && existing.stream == artifact.stream
+                && existing.seq == artifact.seq
+                && existing.backup_artifact_id == artifact.backup_artifact_id
+                && matches!(
+                    existing.status.as_str(),
+                    "creating" | "active" | "delete_failed"
+                ),
+            "server_artifact_object_key_conflict"
+        );
+    }
+    Ok(existing)
+}
+
+fn apply_memory_server_artifact_upsert(
+    artifacts: &mut Vec<ServerArtifactCleanupCandidate>,
+    artifact: NewServerArtifact,
+    status: &str,
+    existing: Option<usize>,
+) {
+    if let Some(index) = existing {
+        artifacts[index].status = status.to_string();
+        return;
+    }
+    artifacts.push(ServerArtifactCleanupCandidate {
+        id: Uuid::new_v4(),
+        domain: artifact.domain,
+        object_key: artifact.object_key,
+        sha256_hex: artifact.sha256_hex,
+        size_bytes: artifact.size_bytes,
+        status: status.to_string(),
+        job_id: artifact.job_id,
+        client_id: artifact.client_id,
+        stream: artifact.stream,
+        seq: artifact.seq,
+        backup_artifact_id: artifact.backup_artifact_id,
+        created_at: unix_now().to_string(),
+        reference_protected: false,
+    });
+}
+
 pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<BackupArtifactView> {
     Ok(BackupArtifactView {
         id: row.try_get("id")?,
@@ -365,6 +516,14 @@ pub(crate) fn backup_artifact_from_row(row: sqlx::postgres::PgRow) -> Result<Bac
         content_available: row.try_get("content_available")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn backup_artifact_matches(existing: &BackupArtifactView, expected: &BackupArtifactView) -> bool {
+    existing.id == expected.id
+        && existing.client_id == expected.client_id
+        && existing.object_key == expected.object_key
+        && existing.sha256_hex == expected.sha256_hex
+        && existing.size_bytes == expected.size_bytes
 }
 
 fn backup_artifact_with_storage_status(

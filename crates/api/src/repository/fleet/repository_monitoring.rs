@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
-use sqlx::Row;
+use sqlx::{types::Json as SqlJson, Row};
 use uuid::Uuid;
 use vpsman_common::{
     AgentPingProbeKind, AgentPingTarget, PingTargetResult, MAX_AGENT_PING_TARGETS,
@@ -9,7 +9,7 @@ use vpsman_common::{
 
 use crate::{
     model::{
-        AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareTargetRecord,
+        AgentView, AuditLogView, AuthContext, MonitoringShareRecord, MonitoringShareTargetRecord,
         MonitoringShareTargetReplacement, MonitoringShareView, MonitoringShareVisibilityView,
         MonitoringShareVisitorRecord, PingRollupView, PingTargetAssignmentRecord,
         PingTargetAssignmentReplacement, PingTargetAssignmentView, PingTargetDetailView,
@@ -251,6 +251,10 @@ impl Repository {
         &self,
         target_id: Uuid,
     ) -> Result<Option<PingTargetDetailView>> {
+        if let Self::Postgres(pool) = self {
+            let mut connection = pool.acquire().await?;
+            return postgres_ping_target_detail(&mut connection, target_id).await;
+        }
         let Some(record) = self
             .list_ping_target_records()
             .await?
@@ -495,6 +499,7 @@ impl Repository {
                     record.id,
                     &target_ids,
                 )?;
+                let persisted = memory_ping_target_detail(&record, &next_assignments, &agents);
                 *targets = next_targets;
                 *assignments = next_assignments;
                 drop(assignments);
@@ -509,6 +514,7 @@ impl Repository {
                     ping_target_audit_metadata(&record, &target_ids, operator),
                 )
                 .await;
+                Ok(persisted)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -588,12 +594,13 @@ impl Repository {
                     ping_target_audit_metadata(&record, &target_ids, operator),
                 )
                 .await?;
+                let persisted = postgres_ping_target_detail(&mut tx, record.id)
+                    .await?
+                    .context("persisted ping target missing")?;
                 tx.commit().await?;
+                Ok(persisted)
             }
         }
-        self.get_ping_target_detail(record.id)
-            .await?
-            .context("persisted ping target missing")
     }
 
     pub(crate) async fn make_primary_ping_target(
@@ -611,10 +618,19 @@ impl Repository {
                 let _lifecycle_guard = memory.agent_key_lifecycle.lock().await;
                 require_visible_memory_clients(memory, &client_ids, "ping_target_resolution_stale")
                     .await?;
+                let hidden_clients = memory.hidden_clients.read().await;
+                let agents = memory.agents.read().await;
+                let visible_agents = agents
+                    .iter()
+                    .filter(|agent| !hidden_clients.contains(&agent.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 let targets = memory.ping_targets.read().await;
-                if !targets.iter().any(|target| target.id == target_id) {
-                    bail!("ping_target_not_found");
-                }
+                let target = targets
+                    .iter()
+                    .find(|target| target.id == target_id)
+                    .cloned()
+                    .context("ping_target_not_found")?;
                 let mut assignments = memory.ping_target_assignments.write().await;
                 if client_ids.iter().any(|client_id| {
                     !assignments.iter().any(|assignment| {
@@ -628,8 +644,11 @@ impl Repository {
                         assignment.is_primary = assignment.target_id == target_id;
                     }
                 }
+                let persisted = memory_ping_target_detail(&target, &assignments, &visible_agents);
                 drop(assignments);
                 drop(targets);
+                drop(agents);
+                drop(hidden_clients);
                 record_memory_monitoring_audit(
                     memory,
                     operator,
@@ -641,6 +660,7 @@ impl Repository {
                     ),
                 )
                 .await;
+                Ok(persisted)
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -696,12 +716,13 @@ impl Repository {
                     ),
                 )
                 .await?;
+                let persisted = postgres_ping_target_detail(&mut tx, target_id)
+                    .await?
+                    .context("ping_target_not_found")?;
                 tx.commit().await?;
+                Ok(persisted)
             }
         }
-        self.get_ping_target_detail(target_id)
-            .await?
-            .context("ping_target_not_found")
     }
 
     pub(crate) async fn replace_ping_target_assignments_bulk(
@@ -2144,44 +2165,6 @@ impl Repository {
             .collect())
     }
 
-    async fn monitoring_share_views_for_ids(
-        &self,
-        ids: &BTreeSet<Uuid>,
-    ) -> Result<Vec<MonitoringShareView>> {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        if let Self::Postgres(pool) = self {
-            return postgres_monitoring_share_views(
-                pool,
-                None,
-                Some(ids.iter().copied().collect()),
-                ids.len().min(1_000) as i64,
-                0,
-            )
-            .await;
-        }
-        let records = self.list_monitoring_share_records().await?;
-        let visitors = self.list_monitoring_share_visitor_records().await?;
-        let creators = self
-            .list_operators()
-            .await?
-            .into_iter()
-            .map(|operator| (operator.id, operator.username))
-            .collect::<HashMap<_, _>>();
-        Ok(records
-            .iter()
-            .filter(|record| ids.contains(&record.id))
-            .map(|record| {
-                monitoring_share_view(
-                    record,
-                    &visitors,
-                    record.created_by.and_then(|id| creators.get(&id).cloned()),
-                )
-            })
-            .collect())
-    }
-
     pub(crate) async fn monitoring_share_record(
         &self,
         share_id: Uuid,
@@ -2809,6 +2792,11 @@ impl Repository {
                         .to_string();
                     record.updated_at = now.to_string();
                 }
+                let persisted_records = records
+                    .iter()
+                    .filter(|record| ids.contains(&record.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 drop(records);
                 record_memory_monitoring_audit(
                     memory,
@@ -2824,6 +2812,24 @@ impl Repository {
                     ),
                 )
                 .await;
+                let visitors = memory.monitoring_share_visitors.read().await.clone();
+                let creators = memory
+                    .operators
+                    .read()
+                    .await
+                    .iter()
+                    .map(|operator| (operator.id, operator.username.clone()))
+                    .collect::<HashMap<_, _>>();
+                Ok(persisted_records
+                    .iter()
+                    .map(|record| {
+                        monitoring_share_view(
+                            record,
+                            &visitors,
+                            record.created_by.and_then(|id| creators.get(&id).cloned()),
+                        )
+                    })
+                    .collect())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -2877,10 +2883,22 @@ impl Repository {
                     ),
                 )
                 .await?;
+                let persisted = postgres_monitoring_share_views(
+                    &mut *tx,
+                    None,
+                    Some(ids.iter().copied().collect()),
+                    ids.len() as i64,
+                    0,
+                )
+                .await?;
+                anyhow::ensure!(
+                    persisted.len() == ids.len(),
+                    "persisted monitoring shares missing"
+                );
                 tx.commit().await?;
+                Ok(persisted)
             }
         }
-        self.monitoring_share_views_for_ids(&ids).await
     }
 
     pub(crate) async fn revoke_monitoring_shares(
@@ -2918,6 +2936,11 @@ impl Repository {
                     record.revoked_by = Some(operator.operator.id);
                     record.updated_at = now.clone();
                 }
+                let persisted_records = records
+                    .iter()
+                    .filter(|record| ids.contains(&record.id))
+                    .cloned()
+                    .collect::<Vec<_>>();
                 drop(records);
                 record_memory_monitoring_audit(
                     memory,
@@ -2927,6 +2950,24 @@ impl Repository {
                     base_monitoring_audit_metadata(operator, serde_json::json!({"share_ids": ids})),
                 )
                 .await;
+                let visitors = memory.monitoring_share_visitors.read().await.clone();
+                let creators = memory
+                    .operators
+                    .read()
+                    .await
+                    .iter()
+                    .map(|operator| (operator.id, operator.username.clone()))
+                    .collect::<HashMap<_, _>>();
+                Ok(persisted_records
+                    .iter()
+                    .map(|record| {
+                        monitoring_share_view(
+                            record,
+                            &visitors,
+                            record.created_by.and_then(|id| creators.get(&id).cloned()),
+                        )
+                    })
+                    .collect())
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -2978,10 +3019,22 @@ impl Repository {
                     base_monitoring_audit_metadata(operator, serde_json::json!({"share_ids": ids})),
                 )
                 .await?;
+                let persisted = postgres_monitoring_share_views(
+                    &mut *tx,
+                    None,
+                    Some(ids.iter().copied().collect()),
+                    ids.len() as i64,
+                    0,
+                )
+                .await?;
+                anyhow::ensure!(
+                    persisted.len() == ids.len(),
+                    "persisted monitoring shares missing"
+                );
                 tx.commit().await?;
+                Ok(persisted)
             }
         }
-        self.monitoring_share_views_for_ids(&ids).await
     }
 
     pub(crate) async fn authenticate_monitoring_share(
@@ -3391,6 +3444,59 @@ fn ping_target_view(
     }
 }
 
+fn memory_ping_target_detail(
+    record: &PingTargetRecord,
+    assignment_records: &[PingTargetAssignmentRecord],
+    agents: &[AgentView],
+) -> PingTargetDetailView {
+    let agents = agents
+        .iter()
+        .map(|agent| (agent.id.as_str(), agent))
+        .collect::<HashMap<_, _>>();
+    let assignments = assignment_records
+        .iter()
+        .filter(|assignment| assignment.target_id == record.id)
+        .filter_map(|assignment| {
+            agents
+                .get(assignment.client_id.as_str())
+                .map(|client| PingTargetAssignmentView {
+                    target_id: record.id,
+                    client: (*client).clone(),
+                    is_primary: assignment.is_primary,
+                    assigned_at: assignment.assigned_at.clone(),
+                })
+        })
+        .collect();
+    ping_target_detail_from_assignments(record, assignments)
+}
+
+fn ping_target_detail_from_assignments(
+    record: &PingTargetRecord,
+    mut assignments: Vec<PingTargetAssignmentView>,
+) -> PingTargetDetailView {
+    assignments.sort_by(|left, right| left.client.id.cmp(&right.client.id));
+    let mut assigned = HashMap::new();
+    assigned.insert(
+        record.id,
+        assignments
+            .iter()
+            .map(|assignment| assignment.client.id.clone())
+            .collect(),
+    );
+    let mut primary = HashMap::new();
+    primary.insert(
+        record.id,
+        assignments
+            .iter()
+            .filter(|assignment| assignment.is_primary)
+            .count(),
+    );
+    PingTargetDetailView {
+        target: ping_target_view(record, &assigned, &primary),
+        assignments,
+    }
+}
+
 fn current_ping_view(
     target: &PingTargetRecord,
     latest: Option<&PingRollupView>,
@@ -3456,6 +3562,10 @@ fn current_ping_loss_ratio<'a>(
 }
 
 fn ping_target_record_from_row(row: sqlx::postgres::PgRow) -> Result<PingTargetRecord> {
+    ping_target_record_from_row_ref(&row)
+}
+
+fn ping_target_record_from_row_ref(row: &sqlx::postgres::PgRow) -> Result<PingTargetRecord> {
     Ok(PingTargetRecord {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -3469,6 +3579,121 @@ fn ping_target_record_from_row(row: sqlx::postgres::PgRow) -> Result<PingTargetR
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+async fn postgres_ping_target_detail(
+    connection: &mut sqlx::PgConnection,
+    target_id: Uuid,
+) -> Result<Option<PingTargetDetailView>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            target.id,
+            target.name,
+            target.host,
+            target.probe_kind,
+            target.port,
+            target.enabled,
+            target.selector_expression,
+            target.generation,
+            target.created_by,
+            target.created_at::text AS created_at,
+            target.updated_at::text AS updated_at,
+            client.id AS client_id,
+            assignment.is_primary,
+            assignment.assigned_at::text AS assigned_at,
+            client.display_name AS client_display_name,
+            client.status AS client_status,
+            host(client.registration_ip) AS client_registration_ip,
+            host(client.last_ip) AS client_last_ip,
+            client.last_seen_at::text AS client_last_seen_at,
+            client.arch AS client_arch,
+            client.internal_build_number AS client_internal_build_number,
+            client.process_incarnation_id AS client_process_incarnation_id,
+            client.stale_since::text AS client_stale_since,
+            client.stale_reason AS client_stale_reason,
+            client.capabilities AS client_capabilities,
+            COALESCE(
+                array_remove(
+                    array_agg(tag.name ORDER BY tag.display_order, tag.created_at, tag.name),
+                    NULL
+                ),
+                ARRAY[]::TEXT[]
+            ) AS client_tags
+        FROM ping_targets target
+        LEFT JOIN ping_target_assignments assignment
+            ON assignment.target_id = target.id
+        LEFT JOIN visible_clients client
+            ON client.id = assignment.client_id
+        LEFT JOIN client_tags client_tag
+            ON client_tag.client_id = client.id
+        LEFT JOIN tags tag
+            ON tag.id = client_tag.tag_id
+        WHERE target.id = $1
+        GROUP BY
+            target.id,
+            assignment.client_id,
+            assignment.is_primary,
+            assignment.assigned_at,
+            client.id,
+            client.display_name,
+            client.status,
+            client.registration_ip,
+            client.last_ip,
+            client.last_seen_at,
+            client.arch,
+            client.internal_build_number,
+            client.process_incarnation_id,
+            client.stale_since,
+            client.stale_reason,
+            client.capabilities
+        ORDER BY assignment.client_id
+        "#,
+    )
+    .bind(target_id)
+    .fetch_all(connection)
+    .await?;
+    let Some(first) = rows.first() else {
+        return Ok(None);
+    };
+    let record = ping_target_record_from_row_ref(first)?;
+    let mut assignments = Vec::new();
+    for row in rows {
+        let Some(client_id) = row.try_get::<Option<String>, _>("client_id")? else {
+            continue;
+        };
+        let client = AgentView {
+            id: client_id,
+            display_name: row.try_get("client_display_name")?,
+            status: row.try_get("client_status")?,
+            tags: row.try_get("client_tags")?,
+            registration_ip: row.try_get("client_registration_ip")?,
+            last_ip: row.try_get("client_last_ip")?,
+            last_seen_at: row.try_get("client_last_seen_at")?,
+            arch: row.try_get("client_arch")?,
+            internal_build_number: row
+                .try_get::<i64, _>("client_internal_build_number")?
+                .max(1) as u64,
+            process_incarnation_id: row.try_get("client_process_incarnation_id")?,
+            stale_since: row.try_get("client_stale_since")?,
+            stale_reason: row.try_get("client_stale_reason")?,
+            capabilities: row
+                .try_get::<SqlJson<vpsman_common::AgentCapabilitySnapshot>, _>(
+                    "client_capabilities",
+                )?
+                .0,
+        };
+        assignments.push(PingTargetAssignmentView {
+            target_id,
+            client,
+            is_primary: row.try_get("is_primary")?,
+            assigned_at: row.try_get("assigned_at")?,
+        });
+    }
+    Ok(Some(ping_target_detail_from_assignments(
+        &record,
+        assignments,
+    )))
 }
 
 fn next_memory_ping_assignments(
@@ -4117,13 +4342,16 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-async fn postgres_monitoring_share_views(
-    pool: &sqlx::PgPool,
+async fn postgres_monitoring_share_views<'e, E>(
+    executor: E,
     status: Option<&str>,
     ids: Option<Vec<Uuid>>,
     limit: i64,
     offset: i64,
-) -> Result<Vec<MonitoringShareView>> {
+) -> Result<Vec<MonitoringShareView>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let rows = sqlx::query(
         r#"
         SELECT
@@ -4190,7 +4418,7 @@ async fn postgres_monitoring_share_views(
     .bind(ids)
     .bind(limit.clamp(1, 1_000))
     .bind(offset.clamp(0, 1_000_000))
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
     rows.into_iter()
         .map(|row| {

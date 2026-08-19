@@ -129,6 +129,7 @@ async fn tier_promotion_reaches_old_rows_and_preserves_counts() {
             swap_available_bytes_avg, swap_available_bytes_sum,
             swap_available_bytes_min, swap_used_ratio_avg,
             swap_used_ratio_sum, swap_used_ratio_max,
+            disk_sample_count,
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
@@ -154,10 +155,33 @@ async fn tier_promotion_reaches_old_rows_and_preserves_counts() {
             END,
             0, 0, 0, 0, 0, 0, 1024, 512, 512, 512, 0.5, 0.5, 0.5,
             1, 1024, 512, 512, 512, 0.5, 0.5, 0.5,
-            2048, 1024, 1024, 1024, 0.5, 0.5, 0.5, 0, 0,
+            1, 2048, 1024, 1024, 1024, 0.5, 0.5, 0.5, 0, 0,
             date_trunc('minute', now()) - interval '96 hours'
                 + series.minute_index * interval '1 minute'
         FROM generate_series(0, 2003) AS series(minute_index)
+        "#,
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        UPDATE telemetry_rollups
+        SET
+            disk_sample_count = 0,
+            disk_total_bytes_max = 999999,
+            disk_available_bytes_avg = 999999,
+            disk_available_bytes_sum = 999999,
+            disk_available_bytes_min = 999999,
+            disk_used_ratio_avg = 0.99,
+            disk_used_ratio_sum = 0.99,
+            disk_used_ratio_max = 0.99
+        WHERE ctid = (
+            SELECT ctid FROM telemetry_rollups
+            WHERE client_id = 'compaction-fairness'
+            ORDER BY bucket_start
+            LIMIT 1
+        )
         "#,
     )
     .execute(&db.pool)
@@ -174,6 +198,7 @@ async fn tier_promotion_reaches_old_rows_and_preserves_counts() {
             memory_available_bytes_avg, memory_available_bytes_sum,
             memory_available_bytes_min, memory_used_ratio_avg,
             memory_used_ratio_sum, memory_used_ratio_max,
+            disk_sample_count,
             disk_total_bytes_max, disk_available_bytes_avg,
             disk_available_bytes_sum, disk_available_bytes_min,
             disk_used_ratio_avg, disk_used_ratio_sum, disk_used_ratio_max,
@@ -186,7 +211,7 @@ async fn tier_promotion_reaches_old_rows_and_preserves_counts() {
                 + series.minute_index * interval '1 minute',
             60, 1, 0, NULL, NULL, 1, 4, 4, 4, 0, 0, 0, 0, 0, 0,
             1024, 512, 512, 512, 0.5, 0.5, 0.5,
-            2048, 1024, 1024, 1024, 0.5, 0.5, 0.5, 0, 0,
+            1, 2048, 1024, 1024, 1024, 0.5, 0.5, 0.5, 0, 0,
             date_trunc('minute', now()) - interval '40 hours'
                 + series.minute_index * interval '1 minute'
                 + CASE series.minute_index WHEN 0 THEN interval '5 seconds'
@@ -243,6 +268,13 @@ async fn tier_promotion_reaches_old_rows_and_preserves_counts() {
     .await
     .unwrap();
     assert_eq!(retained_swap_samples, 2004);
+    let retained_disk: (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(sum(disk_sample_count), 0)::bigint, max(disk_total_bytes_max) FILTER (WHERE disk_sample_count > 0)::bigint FROM telemetry_rollups WHERE client_id = 'compaction-fairness'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(retained_disk, (2003, 2048));
     let incomplete_swap_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM telemetry_rollups WHERE client_id = 'compaction-fairness' AND (swap_sample_count = 0 OR swap_total_bytes_max IS NULL OR swap_available_bytes_avg IS NULL OR swap_available_bytes_min IS NULL OR swap_used_ratio_avg IS NULL OR swap_used_ratio_max IS NULL)",
     )

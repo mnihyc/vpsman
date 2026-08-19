@@ -4433,7 +4433,12 @@ function memoryUsedRatio(
 function diskUsedRatio(
   rollup: TelemetryRollupRecord | null | undefined,
 ): number | null {
-  if (!rollup || rollup.disk_total_bytes_max <= 0) return null;
+  if (
+    !rollup ||
+    (rollup.disk_sample_count ?? 0) <= 0 ||
+    rollup.disk_total_bytes_max <= 0
+  )
+    return null;
   return rollup.disk_used_ratio_avg * 100;
 }
 function networkRateTotal(rates: TelemetryNetworkRateRecord[]) {
@@ -11540,7 +11545,11 @@ function formatDiskUsed(
   rollup: TelemetryRollupRecord | null | undefined,
   formatBytes: ByteCountFormatter,
 ) {
-  if (!rollup || rollup.disk_total_bytes_max <= 0) {
+  if (
+    !rollup ||
+    (rollup.disk_sample_count ?? 0) <= 0 ||
+    rollup.disk_total_bytes_max <= 0
+  ) {
     return "Awaiting rollup";
   }
   const percent = Math.round(rollup.disk_used_ratio_avg * 100);

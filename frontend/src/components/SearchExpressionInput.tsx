@@ -839,17 +839,36 @@ function buildCompletion(
       staticCompletionOption(suggestion),
     ),
   ]);
+  const matchingSuggestions = normalized
+    ? allSuggestions.filter((suggestion) =>
+        suggestionMatchesFragment(suggestion, normalized, namespaceSeparator),
+      )
+    : allSuggestions.slice(0, 8);
   return {
     end: boundedCaret,
     filtered: normalized
-      ? allSuggestions.filter((suggestion) =>
-          suggestionMatchesFragment(suggestion, normalized, namespaceSeparator),
-        )
-      : allSuggestions.slice(0, 8),
+      ? exactCompletionValuesFirst(matchingSuggestions, normalized)
+      : matchingSuggestions,
     fragment,
     ruleScoped: false,
     start,
   };
+}
+
+function exactCompletionValuesFirst(
+  suggestions: CompletionOption[],
+  normalizedFragment: string,
+): CompletionOption[] {
+  const exact: CompletionOption[] = [];
+  const remaining: CompletionOption[] = [];
+  for (const suggestion of suggestions) {
+    if (suggestion.value.toLocaleLowerCase() === normalizedFragment) {
+      exact.push(suggestion);
+    } else {
+      remaining.push(suggestion);
+    }
+  }
+  return exact.concat(remaining);
 }
 
 export function genericCallerSuggestions(suggestions: string[]): string[] {

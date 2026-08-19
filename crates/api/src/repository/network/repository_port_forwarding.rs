@@ -834,7 +834,7 @@ impl Repository {
                 .collect());
         }
 
-        match self {
+        let mut persisted = match self {
             Self::Memory(memory) => {
                 let _desired_state_guard = memory.agent_key_lifecycle.lock().await;
                 let _lifecycle_guard = memory.port_forward_lifecycle.lock().await;
@@ -876,6 +876,7 @@ impl Repository {
                         .iter()
                         .map(|record| port_forward_audit_view(audit_action, record, operator)),
                 );
+                changed
             }
             Self::Postgres(pool) => {
                 let mut tx = pool.begin().await?;
@@ -940,8 +941,9 @@ impl Repository {
                     }
                     validate_all_enabled_records(&all)?;
                 }
+                let mut persisted = Vec::with_capacity(candidates.len());
                 for candidate in &candidates {
-                    let result = sqlx::query(
+                    let row = sqlx::query(
                         r#"
                         UPDATE port_forward_rules
                         SET actor_id = $3,
@@ -953,6 +955,13 @@ impl Repository {
                             removal_confirmed_at = CASE WHEN $8 THEN now() ELSE NULL END,
                             updated_at = now()
                         WHERE id = $1 AND revision = $2
+                        RETURNING id, actor_id, client_id, name, protocol,
+                            host(target_ip) AS target_ip, target_hostname, mappings,
+                            masquerade, enabled, revision,
+                            created_at::text AS created_at, updated_at::text AS updated_at,
+                            deleted_at::text AS deleted_at, deleted_by, deleted_reason,
+                            removal_confirmed_at::text AS removal_confirmed_at,
+                            forgotten_at::text AS forgotten_at, forgotten_by, forget_reason
                         "#,
                     )
                     .bind(candidate.id)
@@ -963,27 +972,32 @@ impl Repository {
                     .bind(candidate.deleted_by)
                     .bind(&candidate.deleted_reason)
                     .bind(candidate.removal_confirmed_at.is_some())
-                    .execute(&mut *tx)
-                    .await?;
-                    anyhow::ensure!(
-                        result.rows_affected() == 1,
-                        "port_forward_rule_snapshot_stale"
-                    );
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .context("port_forward_rule_snapshot_stale")?;
+                    let record = port_forward_record_from_row(&row)?;
                     insert_port_forward_audit(
                         &mut tx,
                         bulk_audit_action(action),
-                        candidate,
+                        &record,
                         operator,
                     )
                     .await?;
+                    persisted.push(record);
                 }
                 tx.commit().await?;
+                persisted
             }
-        }
-        let all = self.list_port_forward_rules().await?;
-        Ok(all
+        };
+        persisted.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        Ok(persisted
             .into_iter()
-            .filter(|rule| ids.contains(&rule.id))
+            .map(|record| record_to_view(record, None, None))
             .collect())
     }
 

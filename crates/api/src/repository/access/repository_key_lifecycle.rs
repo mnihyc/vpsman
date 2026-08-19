@@ -17,6 +17,7 @@ use crate::{
         ensure_postgres_tags_in_order, memory_tag_order_map, sort_agent_tags_by_order,
     },
     repository_jobs::{
+        finish_jobs_in_tx_and_reconcile_event_sources,
         mark_active_targets_agent_lost_for_client_in_tx,
         skip_unstarted_queued_targets_for_client_in_tx,
     },
@@ -663,6 +664,7 @@ impl Repository {
                     )
                     .await?;
                 }
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &agent_lost_job_ids).await?;
 
                 sqlx::query(
                     r#"
@@ -693,9 +695,6 @@ impl Repository {
                 .await?;
                 let view = fetch_postgres_agent_identity(&mut tx, &client_id).await?;
                 tx.commit().await?;
-                for job_id in agent_lost_job_ids {
-                    self.refresh_job_status_from_targets(job_id).await?;
-                }
                 Ok(view)
             }
         }
@@ -974,6 +973,10 @@ impl Repository {
                         "client_key_revoked: target skipped before dispatch",
                     )
                     .await?;
+                    let mut affected_job_ids = agent_lost_job_ids.clone();
+                    affected_job_ids.extend(skipped_job_ids.iter().copied());
+                    finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &affected_job_ids)
+                        .await?;
                     mark_postgres_agent_revoked(
                         &mut tx,
                         client_id,
@@ -1009,14 +1012,7 @@ impl Repository {
                     }))
                     .execute(&mut *tx)
                     .await?;
-                    let mut job_ids = agent_lost_job_ids;
-                    job_ids.extend(skipped_job_ids);
                     tx.commit().await?;
-                    job_ids.sort();
-                    job_ids.dedup();
-                    for job_id in job_ids {
-                        self.refresh_job_status_from_targets(job_id).await?;
-                    }
                     return Ok(existing);
                 }
 
@@ -1057,6 +1053,9 @@ impl Repository {
                     "client_key_revoked: target skipped before dispatch",
                 )
                 .await?;
+                let mut affected_job_ids = agent_lost_job_ids.clone();
+                affected_job_ids.extend(skipped_job_ids.iter().copied());
+                finish_jobs_in_tx_and_reconcile_event_sources(&mut tx, &affected_job_ids).await?;
                 mark_postgres_agent_revoked(&mut tx, client_id, reason.as_deref(), &prior_status)
                     .await?;
                 sqlx::query(
@@ -1090,13 +1089,6 @@ impl Repository {
                     .await?
                     .context("inserted client key revocation was not readable")?;
                 tx.commit().await?;
-                let mut job_ids = agent_lost_job_ids;
-                job_ids.extend(skipped_job_ids);
-                job_ids.sort();
-                job_ids.dedup();
-                for job_id in job_ids {
-                    self.refresh_job_status_from_targets(job_id).await?;
-                }
                 Ok(record)
             }
         }

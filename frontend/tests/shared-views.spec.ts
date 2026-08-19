@@ -1025,10 +1025,10 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     "Average used-memory percentage and maximum reported RAM capacity",
   );
   await expect(
-    detail.getByText("Reported filesystems", { exact: true }).locator(".."),
+    detail.getByText("Disk filesystems", { exact: true }).locator(".."),
   ).toHaveAttribute(
     "title",
-    "Average used-disk percentage and maximum aggregate filesystem capacity",
+    "Average used-disk percentage and maximum aggregate block-device filesystem capacity",
   );
   await expect(detail.locator(".publicMonitoringDetailHeader")).toContainText(
     "Online · Warning · Updated just now · Read-only history",
@@ -1113,7 +1113,7 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
     memoryChart.locator("table.srOnly tbody tr").last().locator("td").nth(1),
   ).toHaveText("-");
   const diskChart = detail.getByRole("region", {
-    name: "Aggregate reported disk used chart",
+    name: "Aggregate disk used chart",
   });
   await expect(diskChart.locator(".dashboardWidgetHeader > small")).toHaveText(
     "100 GB maximum",
@@ -1160,6 +1160,37 @@ test("public monitoring presents warnings, disabled Ping, unlimited quotas, reso
       ),
     )
     .toBe(true);
+});
+
+test("public monitoring never presents uncounted disk telemetry as zero usage", async ({
+  page,
+}) => {
+  await installPublicMonitoringApiMock(page, {
+    diskUnavailable: true,
+    edgeCases: true,
+  });
+  await page.goto(`/#/share/${publicShareId}/${publicShareSecret}`);
+
+  const card = page.getByRole("link", {
+    name: /Shared edge · Online · Warning shared monitoring card/,
+  });
+  const diskMetric = card.locator(".vpsMonitorMetric").filter({
+    hasText: "Disk",
+  });
+  await expect(diskMetric.locator("strong")).toHaveText("-");
+  await expect(diskMetric).not.toContainText("GB");
+
+  await card.press("Enter");
+  const detail = page.getByRole("region", {
+    name: "Read-only history for Shared edge",
+  });
+  await expect(detail).toBeVisible();
+  await expect(
+    detail.getByText("Disk filesystems", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    detail.getByRole("region", { name: "Aggregate disk used chart" }),
+  ).toContainText("Disk history is unavailable for this range");
 });
 
 test("public monitoring does not present an unconfigured traffic cycle as authoritative", async ({
@@ -1829,6 +1860,7 @@ async function installPublicMonitoringApiMock(
     annualBilling = false,
     cardCount = 1,
     detailAllowed = true,
+    diskUnavailable = false,
     directionalUnlimited = false,
     duplicateSortNames = false,
     edgeCases = false,
@@ -1850,6 +1882,7 @@ async function installPublicMonitoringApiMock(
     annualBilling?: boolean;
     cardCount?: number;
     detailAllowed?: boolean;
+    diskUnavailable?: boolean;
     directionalUnlimited?: boolean;
     duplicateSortNames?: boolean;
     edgeCases?: boolean;
@@ -2003,6 +2036,7 @@ async function installPublicMonitoringApiMock(
       cpu_cores: 4,
       cpu_usage_avg: 0.24,
       disk_available_bytes: 60_000_000_000,
+      disk_sample_count: diskUnavailable ? 0 : 1,
       disk_total_bytes: 100_000_000_000,
       disk_used_ratio_avg: 0.4,
       load_1: 0.8,

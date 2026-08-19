@@ -85,7 +85,7 @@ export function resourceMetricDefinition(
     case "memory_used":
       return "Each chart point averages available used-memory ratio evidence computed from MemTotal and MemAvailable snapshots in the displayed interval; peak is the largest represented snapshot ratio.";
     case "disk_free":
-      return "Each chart point derives free space from available aggregate-filesystem used-ratio evidence in the displayed interval; lowest corresponds to the largest represented used ratio.";
+      return "Each chart point derives free space from available aggregate block-device filesystem used-ratio evidence in the displayed interval; lowest corresponds to the largest represented used ratio.";
   }
 }
 

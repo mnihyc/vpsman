@@ -373,8 +373,8 @@ Compose deployments keep durable state under their `runtime/` directory:
 
 The current canonical database is intentionally fresh-first. Supported
 in-place steps are checksum-pinned: the exact v0.4.4 `0001`–`0009` baseline
-may apply `0010` through `0013`, while the exact v0.3.5 `0001`–`0008`
-baseline may apply `0009` through `0013`.
+may apply `0010` through `0014`, while the exact v0.3.5 `0001`–`0008`
+baseline may apply `0009` through `0014`.
 Drain all nonterminal webhook deliveries, then stop API/application and worker
 writers for the full migration sequence. Review
 [migration compatibility](docs/migration-compatibility.md) before updating any

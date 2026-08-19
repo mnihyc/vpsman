@@ -100,31 +100,56 @@ depth and coalescing counters continue to describe pending pressure.
 
 ## Resource Metrics
 
-| Display metric                          | Retained meaning                                                                                                                                                                                                                                                                                                                                                      | Important unavailable state                                                                                                                                                                         |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| CPU utilization                         | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and maximum reported core count.                                                                                                                                                                                 | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted.                                                                 |
-| Load 1/5/15                             | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track.                                                                                                                                                                                             | Missing load evidence remains unavailable; it is not CPU utilization.                                                                                                                               |
-| Memory used                             | `(MemTotal - MemAvailable) / MemTotal` per accepted snapshot; interval history retains the sample-weighted average and maximum of those ratios. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                           | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero.                                                                                                |
-| Swap used                               | `(SwapTotal - SwapAvailable) / SwapTotal` per complete, positive-capacity snapshot; interval history retains the swap-sample-weighted average and maximum. `swap_sample_count` counts only those positive-capacity utilization samples. A complete `(0, 0)` report is retained as explicit “no swap” current evidence but contributes no utilization point or weight. | Missing, one-sided, invalid, and zero-capacity swap evidence remain chart gaps. Swap has its own sample count instead of borrowing memory coverage or fabricating 0%.                               |
-| Aggregate reported-filesystem disk used | `(summed total - summed available) / summed total` per accepted snapshot, then sample-weighted average and maximum across the interval. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                                   | This is an aggregate of reported filesystems, not a root-volume or quota claim.                                                                                                                     |
-| TCP/UDP sockets                         | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry.                                                                                                                                                                             | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
+| Display metric                              | Retained meaning                                                                                                                                                                                                                                                                                                                                                      | Important unavailable state                                                                                                                                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CPU utilization                             | Busy CPU time divided by total CPU time between two valid aggregate `/proc/stat` reads. Minute history retains average, maximum, valid-sample count, and maximum reported core count.                                                                                                                                                                                 | The first read, a counter reset, a zero delta, or an invalid `/proc/stat` read has no utilization value. Load is never substituted.                                                                 |
+| Load 1/5/15                                 | Sample-count-weighted arithmetic mean of the corresponding Linux load-average readings. Load pressure is normalized by the reported core count only for its visual track.                                                                                                                                                                                             | Missing load evidence remains unavailable; it is not CPU utilization.                                                                                                                               |
+| Memory used                                 | `(MemTotal - MemAvailable) / MemTotal` per accepted snapshot; interval history retains the sample-weighted average and maximum of those ratios. Capacity maximum and availability average/minimum remain separate evidence.                                                                                                                                           | A missing or invalid memory snapshot rejects the core Linux collection instead of synthesizing zero.                                                                                                |
+| Swap used                                   | `(SwapTotal - SwapAvailable) / SwapTotal` per complete, positive-capacity snapshot; interval history retains the swap-sample-weighted average and maximum. `swap_sample_count` counts only those positive-capacity utilization samples. A complete `(0, 0)` report is retained as explicit “no swap” current evidence but contributes no utilization point or weight. | Missing, one-sided, invalid, and zero-capacity swap evidence remain chart gaps. Swap has its own sample count instead of borrowing memory coverage or fabricating 0%.                               |
+| Aggregate block-device filesystem disk used | `(summed total - summed available) / summed total` per accepted, positive-capacity `persistent_block_filesystems_v1` snapshot, then disk-sample-weighted average and maximum across the interval. `disk_sample_count` is independent of the overall telemetry sample count. Capacity maximum and availability average/minimum remain separate evidence. | A missing/failed collection, unknown/legacy disk semantics, or explicit available zero-capacity inventory contributes no utilization value or weight. This is not a root-volume, raw-device-size, or quota claim. |
+| TCP/UDP sockets                             | Agent-observed entries in the Linux network namespace's available IPv4 and IPv6 kernel socket tables. TCP includes every state and listening socket; UDP counts every reported UDP entry.                                                                                                                                                                             | If neither address family supplies a protocol table, or a present table is malformed, both socket counts remain unavailable for that sample. Missing evidence is a chart gap, never a healthy zero. |
 
-The Linux disk collector ignores non-storage pseudo filesystems, including
-`nsfs` network-namespace handles and Docker `overlay`/`fuse-overlayfs` layers,
-before filesystem inspection. It deduplicates repeated source/filesystem pairs
-and inspects each remaining mount independently.
-A malformed, vanished, or inaccessible mount is reported by the agent but does
-not discard successfully inspected filesystems or the CPU, memory, network, and
-uptime evidence in that sample. No placeholder disk capacity is fabricated; if
-the inventory itself is unavailable, the sample carries no reported disk.
+The Linux disk collector positively identifies mounted filesystems through
+`/proc/self/mountinfo` and `/sys/dev/block`; it does not treat an arbitrary
+mount as disk capacity. Major-zero pseudo and network filesystems are rejected
+before filesystem inspection, including `tmpfs` and `/dev/shm`, `devtmpfs`,
+container overlays, FUSE mounts, and ordinary NFS/CIFS mounts. Loop, RAM, and
+zram block devices are also excluded. Repeated bind mounts, aliases, and
+subvolume mounts with the same Linux major:minor device identity contribute
+once; distinct mounted partitions remain additive because they are distinct
+filesystems. Btrfs is the narrow anonymous-device exception: its mount source
+must itself be a block-special file whose `rdev` has accepted sysfs evidence.
+A malformed, vanished, or inaccessible eligible filesystem is reported by the
+agent without discarding CPU, memory, network, and uptime evidence. Disk
+capacity is published only when the inventory completed; no placeholder disk
+capacity is fabricated. The wire payload carries both
+`disk_collection_available` and the versioned `disk_semantics` marker. Only an
+available `persistent_block_filesystems_v1` payload is authoritative. Missing
+or unknown markers remain unavailable for compatibility, even when an older
+payload contains mount entries. An available empty inventory is retained as an
+explicit zero-capacity fact but, like zero swap, has no utilization ratio.
+
+The contract follows the filesystem's immediate kernel block-device identity.
+Device-mapper and MD filesystems are counted at that mounted logical-device
+level; the collector does not traverse their transitive physical members.
+Mount replacement between the mountinfo read and filesystem inspection can
+make that one collection unavailable; the next telemetry cycle retries it.
 
 A custom metrics provider can replace or augment the Linux snapshot under the
 configured agent contract. A replacement must provide the required load, core,
-memory, disk, and network fields; CPU utilization remains optional. Other core
-procfs or custom-source failures still reject their atomic source collection so
-previous evidence ages naturally. A failure limited to optional `/proc/stat`
-utilization resets its delta baseline and leaves that field unavailable without
-discarding otherwise valid telemetry.
+memory, disk, and network fields; CPU utilization remains optional. Its
+operator-authored disk entries must preserve the same persistent-filesystem and
+one-entry-per-device semantics because an external provider has no agent-side
+mount/device evidence to verify. To make that assertion authoritative, the
+same JSON patch must provide `disk_collection_available` and
+`disk_semantics: "persistent_block_filesystems_v1"` with `disks`; false
+availability requires an empty list. A legacy custom patch that supplies
+`disks` without both markers remains accepted for its other metrics, but its
+disk values stay deliberately unavailable. Other core procfs or custom-source
+failures still reject their atomic source collection so previous evidence ages
+naturally. A failure limited to optional `/proc/stat` utilization resets its
+delta baseline and leaves that field unavailable without discarding otherwise
+valid telemetry.
 
 Cards pair exact CPU, RAM, disk, and load values with proportional tracks or
 small histories. Neutral colors stay stable; warning and danger states come from
