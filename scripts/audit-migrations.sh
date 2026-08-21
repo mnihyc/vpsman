@@ -68,6 +68,10 @@ for file in "${files[@]}"; do
     fail "ADD COLUMN NOT NULL must include DEFAULT for existing rows: $file"
   fi
 
+  # PostgreSQL permits CONCURRENTLY and IF NOT EXISTS between INDEX and the
+  # name. Keep those clauses in the match so the captured final field is the
+  # actual index identifier (rather than the word CONCURRENTLY).
+  index_create_pattern='CREATE[[:space:]]+(UNIQUE[[:space:]]+)?INDEX([[:space:]]+CONCURRENTLY)?[[:space:]]+(IF[[:space:]]+NOT[[:space:]]+EXISTS[[:space:]]+)?([A-Za-z0-9_]+)'
   while IFS= read -r index_name; do
     [[ -n "$index_name" ]] || continue
     if [[ -n "${index_names[$index_name]:-}" ]]; then
@@ -77,7 +81,7 @@ for file in "${files[@]}"; do
     fi
     index_names[$index_name]="$file"
   done < <(
-    grep -Eio 'CREATE[[:space:]]+(UNIQUE[[:space:]]+)?INDEX[[:space:]]+([A-Za-z0-9_]+)' "$path" |
+    grep -Eio "$index_create_pattern" "$path" |
       awk '{print $NF}'
   )
 

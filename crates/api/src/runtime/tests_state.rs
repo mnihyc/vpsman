@@ -212,7 +212,7 @@ async fn identical_singleflight_callers_share_one_zero_ttl_computation() {
     assert_eq!(computations.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn completed_singleflight_result_is_reused_only_within_bounded_ttl() {
     let singleflight = super::Singleflight::<usize>::with_ttl(std::time::Duration::from_millis(30));
     let computations = Arc::new(AtomicUsize::new(0));
@@ -240,7 +240,7 @@ async fn completed_singleflight_result_is_reused_only_within_bounded_ttl() {
     );
     assert_eq!(computations.load(Ordering::SeqCst), 1);
 
-    tokio::time::sleep(std::time::Duration::from_millis(45)).await;
+    tokio::time::advance(std::time::Duration::from_millis(45)).await;
     let expired_computations = Arc::clone(&computations);
     assert_eq!(
         singleflight

@@ -2751,7 +2751,7 @@ impl Repository {
                         .await?;
                     }
                     sqlx::query(
-                        "UPDATE monitoring_share_links SET updated_at = now() WHERE id = $1",
+                        "UPDATE monitoring_share_links SET updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = $1",
                     )
                     .bind(replacement.expected_share.id)
                     .execute(&mut *tx)
@@ -3121,7 +3121,7 @@ impl Repository {
                         .saturating_add(extend_by_secs)
                         .min(maximum);
                     sqlx::query(
-                        "UPDATE monitoring_share_links SET expires_at = to_timestamp($2), updated_at = now() WHERE id = $1",
+                        "UPDATE monitoring_share_links SET expires_at = to_timestamp($2), updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond') WHERE id = $1",
                     )
                     .bind(id)
                     .bind(next as f64)
@@ -3259,7 +3259,7 @@ impl Repository {
                     UPDATE monitoring_share_links
                     SET revoked_at = now(),
                         revoked_by = $2,
-                        updated_at = now()
+                        updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
                     WHERE id = ANY($1::UUID[])
                     "#,
                 )

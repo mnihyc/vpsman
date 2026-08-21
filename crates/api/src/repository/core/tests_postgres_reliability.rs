@@ -12985,14 +12985,20 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             None,
             true,
             false,
+            false,
         ),
         (
             "dirty owned cap",
             format!("vnstat_owned_cap('{target_client_id}', 'dirty-owned', 47521, true)"),
-            47_521.0,
+            // A custom plan sees that this probe consumes 95% of the dirty
+            // stream and may correctly scan the 56,480-row disposable table.
+            // The generic cached plan remains pinned to the exact
+            // class/stream index.
+            56_480.0,
             None,
             true,
             false,
+            true,
         ),
         (
             "previous locked",
@@ -13001,6 +13007,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             None,
             true,
             true,
+            false,
         ),
         (
             "previous nonlocking",
@@ -13011,6 +13018,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             None,
             true,
             false,
+            false,
         ),
         (
             "live raw branch",
@@ -13018,6 +13026,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             1.0,
             Some(16.0),
             true,
+            false,
             false,
         ),
         (
@@ -13027,6 +13036,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             None,
             true,
             true,
+            false,
         ),
         (
             "mutation successor",
@@ -13035,6 +13045,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             None,
             true,
             true,
+            false,
         ),
     ];
 
@@ -13064,6 +13075,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             maximum_rollup_rows,
             require_observed_at,
             require_lock_rows,
+            allow_custom_sequential_scan,
         ) in &executions
         {
             let explain_sql =
@@ -13079,6 +13091,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
                 *maximum_rollup_rows,
                 *require_observed_at,
                 *require_lock_rows,
+                *allow_custom_sequential_scan,
             ));
         }
         for &(name, _, _) in &preparations {
@@ -13096,6 +13109,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
             maximum_rollup_rows,
             require_observed_at,
             require_lock_rows,
+            allow_custom_sequential_scan,
         ) in plans
         {
             let plan_root = &plan[0]["Plan"];
@@ -13106,7 +13120,7 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
                 "traffic_counter_samples_import_class_stream_idx",
                 &mut import_class_stream_conditions,
             );
-            assert!(
+            let has_exact_class_stream_index =
                 import_class_stream_conditions.iter().any(|condition| {
                     !condition.is_empty()
                         && condition.contains("client_id =")
@@ -13114,17 +13128,32 @@ async fn postgres_vnstat_exact_stream_probes_pin_full_primary_key_for_cached_pla
                         && condition.contains("interface =")
                         && condition.contains("sample_source")
                         && (!require_observed_at || condition.contains("observed_at"))
-                }),
-                "{mode} {label} lost its exact class+stream+time Index Cond: {plan_text}"
-            );
+                });
+            let sample_sequential_scan =
+                explain_relation_uses_sequential_scan(plan_root, "traffic_counter_samples");
+            if allow_custom_sequential_scan && mode == "force_custom_plan" {
+                assert!(
+                    has_exact_class_stream_index || sample_sequential_scan,
+                    "{mode} {label} lost both bounded sample access paths: {plan_text}"
+                );
+                assert!(
+                    !plan_uses_node_type(plan_root, "Sort"),
+                    "{mode} {label} introduced a sort for its near-full guard: {plan_text}"
+                );
+            } else {
+                assert!(
+                    has_exact_class_stream_index,
+                    "{mode} {label} lost its exact class+stream+time Index Cond: {plan_text}"
+                );
+                assert!(
+                    !sample_sequential_scan,
+                    "{mode} {label} selected a sample sequential scan: {plan_text}"
+                );
+            }
             assert!(
                 !plan_text.contains("traffic_counter_samples_observed_idx")
                     && !plan_text.contains("traffic_counter_samples_lookup_idx"),
                 "{mode} {label} selected a non-classified sample index: {plan_text}"
-            );
-            assert!(
-                !explain_relation_uses_sequential_scan(plan_root, "traffic_counter_samples"),
-                "{mode} {label} selected a sample sequential scan: {plan_text}"
             );
             assert!(
                 !relation_uses_bitmap_scan(plan_root, "traffic_counter_samples"),
@@ -22363,7 +22392,9 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         return;
     };
     let client_id = "mutation-snapshot-edge";
+    let replacement_client_id = "mutation-snapshot-replacement-edge";
     insert_client(&db.pool, client_id, None).await;
+    insert_client(&db.pool, replacement_client_id, None).await;
     let operator = postgres_network_operator(&db.repo).await;
 
     let target_id = Uuid::new_v4();
@@ -22450,12 +22481,49 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         .create_monitoring_share(share.clone(), &operator)
         .await
         .unwrap();
+    // Model a revision already ahead of the current wall clock. This is the
+    // deterministic form of a queued transaction whose `now()` snapshot was
+    // taken before the writer it waited for. Every share mutation must advance
+    // from the stored revision rather than overwrite it with transaction time.
+    let target_revision_floor: String = sqlx::query_scalar(
+        "UPDATE monitoring_share_links SET updated_at = clock_timestamp() + interval '1 second' WHERE id = $1 RETURNING updated_at::text",
+    )
+    .bind(share_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    let target_refresh_expected = db
+        .repo
+        .monitoring_share_record(share_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(target_refresh_expected.updated_at, target_revision_floor);
+    db.repo
+        .replace_monitoring_share_targets_bulk(
+            &[crate::model_monitoring::MonitoringShareTargetReplacement {
+                expected_share: target_refresh_expected,
+                next_client_ids: vec![client_id.to_string(), replacement_client_id.to_string()],
+            }],
+            &operator,
+        )
+        .await
+        .unwrap();
     let expected_share = db
         .repo
         .monitoring_share_record(share_id)
         .await
         .unwrap()
         .unwrap();
+    let target_revision_is_newer: bool = sqlx::query_scalar(
+        "SELECT updated_at > $2::timestamptz FROM monitoring_share_links WHERE id = $1",
+    )
+    .bind(share_id)
+    .bind(&target_revision_floor)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(target_revision_is_newer);
     db.repo
         .record_monitoring_share_visitor(
             &expected_share,
@@ -22542,6 +22610,13 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
         .to_string()
         .contains("monitoring_share_preview_stale"));
 
+    let extend_revision_floor: String = sqlx::query_scalar(
+        "UPDATE monitoring_share_links SET updated_at = clock_timestamp() + interval '1 second' WHERE id = $1 RETURNING updated_at::text",
+    )
+    .bind(share_id)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
     let extended = db
         .repo
         .extend_monitoring_shares(&[share_id], 60, &operator)
@@ -22558,6 +22633,15 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
     assert_eq!(extended[0].status, "active");
     assert_eq!(extended[0].expires_at, persisted_extended.0);
     assert_eq!(extended[0].updated_at, persisted_extended.1);
+    let extended_revision_is_newer: bool = sqlx::query_scalar(
+        "SELECT updated_at > $2::timestamptz FROM monitoring_share_links WHERE id = $1",
+    )
+    .bind(share_id)
+    .bind(&extend_revision_floor)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(extended_revision_is_newer);
 
     let revoked = db
         .repo
@@ -22575,6 +22659,15 @@ async fn postgres_monitoring_and_port_forward_mutations_return_locked_writer_sna
     assert_eq!(revoked[0].status, "revoked");
     assert_eq!(revoked[0].revoked_at, persisted_revoked.0);
     assert_eq!(revoked[0].updated_at, persisted_revoked.1);
+    let revoked_revision_is_newer: bool = sqlx::query_scalar(
+        "SELECT updated_at > $2::timestamptz FROM monitoring_share_links WHERE id = $1",
+    )
+    .bind(share_id)
+    .bind(&persisted_extended.1)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(revoked_revision_is_newer);
 
     let create_rule = |name: &str, listen: &str, target: &str| CreatePortForwardRuleRequest {
         client_id: client_id.to_string(),
